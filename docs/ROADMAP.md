@@ -26,7 +26,7 @@ Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 
-Standards: OWASP ACS adapter (code), OpenTelemetry export (code), MCP gateway. First use of "ACS-compatible", and only once the adapter exists.
+Standards: OpenTelemetry export (code), MCP gateway. The OWASP ACS adapter shipped in v0.2 (see `docs/ACS.md`); "ACS-compatible" is still unearned and waits on an ACS conformance suite to measure against.
 
 ## v0.3 — Authority
 

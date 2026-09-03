@@ -34,6 +34,10 @@ SCENARIOS: dict[str, str] = {
     "approval-replay": "single-use approval already consumed",
 }
 
+#: Directories under `examples/` that are not one of §1.1's failure scenarios: the sector
+#: templates, and item 8's ACS integration example (SPEC-v0.2 §9, `docs/ACS.md`).
+NOT_A_SCENARIO = ("policies", "acs", "__pycache__")
+
 #: The nine sectors of SPEC-v0.2 §1.1.
 SECTORS = (
     "devops",
@@ -143,7 +147,7 @@ def test_T31_the_four_scenarios_of_the_spec_are_the_ones_on_disk():
     found = sorted(
         path.name
         for path in EXAMPLES.iterdir()
-        if path.is_dir() and path.name not in ("policies", "__pycache__")
+        if path.is_dir() and path.name not in NOT_A_SCENARIO
     )
     assert found == sorted(SCENARIOS)
 

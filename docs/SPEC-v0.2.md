@@ -1130,9 +1130,23 @@ A retry is a new action and therefore a new span; the two are correlated by
 
 ---
 
-## 9. ACS: design note only
+## 9. ACS: the design note, and the adapter it earned
 
-Item 7 writes `docs/ACS-NOTE.md`. **No code, no adapter, no claim.**
+**Amended.** This section said `docs/ACS-NOTE.md`, no code, no adapter, no claim — on the
+reading that ACS had no stable interface to build against. Reading the v0.1.0 schemas at
+commit `c7ad162` (2026-08-11) settled that differently: the hook payloads, the envelope and
+the five decisions are specified precisely enough to write against, and `steps/toolCallResult`
+gives a post-execution checkpoint the earlier draft assumed did not exist.
+
+So: `docs/ACS.md` (renamed from `ACS-NOTE.md`), **and** an adapter in `ctrlrun[gateway]` —
+`ctrlrun.acs.AcsControlHook` — with acceptance tests T51-T55. `ROADMAP.md`'s "OWASP ACS
+adapter (code)" line moves from v0.3 into this release.
+
+**The no-claim rule is untouched and is the reason the adapter is safe to ship.** There is no
+ACS reference implementation and no conformance suite at that commit, so there is nothing to
+be conformant *with*. The words "ACS-compatible" MUST NOT appear in the README, in docstrings,
+or in CLI output. `docs/ACS.md` states what was read, what maps, and — at length — where ACS
+is silent.
 
 The Agent Control Standard is an open specification for runtime agent governance, published at
 v0.1.0 on 27 May 2026 as a project of the OWASP GenAI Security Project
@@ -1140,7 +1154,7 @@ v0.1.0 on 27 May 2026 as a project of the OWASP GenAI Security Project
 lifecycle, expresses policy as YAML, and extends OpenTelemetry with agent-specific semantic
 conventions while mapping security events to OCSF.
 
-The note states, and does no more than state:
+`docs/ACS.md` states:
 
 - where CTRLRun would sit in that model — the tool-call checkpoint, and only that one;
 - what an adapter would carry across, and what has no counterpart on the ACS side: effect
@@ -1150,8 +1164,8 @@ The note states, and does no more than state:
   conventions, and the cost of doing that to receipts already written.
 
 `ROADMAP.md`'s standards rule governs: integrate first, map second, never claim compliance.
-The words "ACS-compatible" MUST NOT appear in the README, in docstrings, or in CLI output in
-v0.2. They are earned by an adapter with tests, which is not in this release.
+The adapter is the "integrate" step. "ACS-compatible" is the "claim" step, and it is not
+earned by an adapter alone — it needs something on the ACS side to be measured against.
 
 ---
 
@@ -1304,6 +1318,18 @@ An intercepted `tools/call` answered with an SSE stream carrying `id:` fields re
 client with those fields stripped, so it cannot request a resume of a stream whose outcome the
 gateway owns. A non-intercepted stream reaches the client with its `id:` fields intact.
 
+### T51-T55 — The ACS control hook
+Against a minimal fake ACS runtime, per §9 and `docs/ACS.md`. **T51**: a hooked
+`steps/toolCallRequest` becomes an Action with the name, arguments and principal the envelope
+names, arguments unwrapped from their provenance envelopes and the resource from the policy
+template. **T52**: `ALLOW`/`DENY`/`APPROVE` map to `allow`/`deny`/`ask`, each carrying what
+`response-envelope.json` requires of it. **T53**: an approval is re-presented by re-sending the
+identical call, and a mutated call gets a fresh question rather than the granted one; a second
+call on a committed or held effect is denied. **T54**: `exit_status` maps by v0.1 §5.5's
+asymmetry — `success` committed, `blocked` failed, `failure` and `timeout` ambiguous unless
+`not_executed_on_error` says otherwise. **T55**: an unanswered method is a JSON-RPC error in
+ACS's reserved range, and `import ctrlrun` does not import the adapter.
+
 ### T31 — Every example runs and every template loads
 Each script under `examples/` exits 0 with no network, against its own state directory, and
 prints the refusal it exists to demonstrate. Every `examples/policies/<sector>.yaml` loads
@@ -1401,6 +1427,6 @@ and OTLP/HTTP exporter). Neither is in `dependencies`.
 Everything in v0.1 §9 that v0.2 does not deliver, and specifically: the deprecated
 `2024-11-05` HTTP+SSE transport; relaying SSE resumption for an intercepted call (§6.2);
 binding an approval across an elicitation round trip (§6.9.5); more than one upstream per
-gateway; multi-host reservation; an ACS adapter or any ACS claim;
+gateway; multi-host reservation; any ACS compliance claim;
 authenticating the principal or the approver; signed receipts; MCP `tasks`, `apps` or any other
 extension; `ctrlrun verify`; framework adapters; Postgres; anything in `VISION.md`.

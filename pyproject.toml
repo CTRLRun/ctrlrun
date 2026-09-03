@@ -92,6 +92,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # does. N818: the error names follow this codebase's convention (DuplicateEffect,
 # AmbiguousEffect), not the suffix rule.
 "src/ctrlrun/gateway/*.py" = ["ANN401", "N818"]
+# Same reasoning for the ACS adapter: its subject matter is an untyped JSON-RPC envelope off
+# somebody else's wire, and `_Unknown` follows this codebase's error naming.
+"src/ctrlrun/acs.py" = ["ANN401", "N818"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]
