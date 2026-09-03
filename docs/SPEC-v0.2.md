@@ -20,19 +20,40 @@ cites the page. §6.2 states exactly which revisions the gateway accepts and why
 
 ## 1. Scope
 
-v0.2 delivers seven things, one build-list item each, plus a release.
+v0.2 delivers eight things, one build-list item each, plus a release. The `#` column is the
+build-list position.
 
 | # | Deliverable | Ships in | Section |
 |---|---|---|---|
 | 1 | Reconciliation hook | core | §2 |
-| 2 | Per-action `effect:` / `resource:` in policy | core | §3 |
-| 3 | `EventSink` protocol; JSONL becomes a sink | core | §4 |
-| 4 | `ctrlrun inspect <action_id>` | core | §5 |
-| 5 | MCP gateway | `ctrlrun[gateway]` | §6 |
-| 6 | Webhook approval provider | core (outbound), gateway (inbound) | §7 |
-| 7 | OpenTelemetry sink, and the ACS design note | `ctrlrun[otel]` | §8, §9 |
+| 2 | `examples/` scripts and sector policy templates | core | §1.1 |
+| 3 | Per-action `effect:` / `resource:` in policy | core | §3 |
+| 4 | `EventSink` protocol; JSONL becomes a sink | core | §4 |
+| 5 | `ctrlrun inspect <action_id>` | core | §5 |
+| 6 | MCP gateway | `ctrlrun[gateway]` | §6 |
+| 7 | Webhook approval provider | core (outbound), gateway (inbound) | §7 |
+| 8 | OpenTelemetry sink, and the ACS design note | `ctrlrun[otel]` | §8, §9 |
 
-Item 8 is the release: version, changelog, `docs/CLAIMS.md` regeneration, README.
+Item 9 is the release: version, changelog, `docs/CLAIMS.md` regeneration, README.
+
+### 1.1 Examples and sector policy templates
+
+Item 2 sits early because it needs nothing this release adds. `ROADMAP.md` specifies both:
+
+- `examples/` — standalone scripts, one per failure scenario: `double-refund/`,
+  `approval-mutation/`, `agent-race/`, `approval-replay/`. In v0.1 `ctrlrun demo` was the
+  example; separate scripts earn their keep now there is more than one way to wire CTRLRun in.
+- `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare,
+  legal, security, government and hr. Each carries the header comment *"Starting point on the
+  v0.1 kernel. Adapt before use."*
+
+Both use **v0.1 primitives only**, which is what lets them land before §3 changes the policy
+schema. A template MUST therefore declare `schema: ctrlrun.policy/v1` and MUST NOT use
+`effect:`, `resource:` or `mcp:`. Templates are starting points; `ROADMAP.md`'s sector rule
+holds, so no template describes itself as compliant with anything, and the depth-first sector
+packs with their `REVIEW.md` files remain a v0.6 item.
+
+Running every example, and loading every template, is T31.
 
 **The dependency rule.** `pip install ctrlrun` MUST continue to install nothing but `pyyaml`
 and `click`. Anything needing an HTTP server or a third-party SDK ships as an optional extra.
@@ -43,11 +64,6 @@ install command, never `ImportError` or `ModuleNotFoundError`.
 The outbound half of the webhook provider (§7) is core because it needs neither: it is one
 signed POST over stdlib `urllib.request`. Only the inbound endpoint needs a server, and that
 is the gateway's.
-
-**Carried out of v0.2.** `ROADMAP.md` lists two further v0.2 items — an `examples/` directory
-and sector policy templates — that are not among the seven above and are not specified here.
-Item 8 MUST either deliver them or move them in `ROADMAP.md`; it MUST NOT leave the roadmap
-claiming them for a shipped release.
 
 **Network code is kernel code.** The gateway sits in the execution path of consequential
 actions. Every rule of v0.1 §3.4, §5.4 and §5.5 applies to it unchanged: it fails closed on
@@ -178,7 +194,6 @@ actions:
     resource: "payment:{payment_id}"
     mcp:
       not_executed_on_error: true
-      mrtr: deny
     rules:
       - when: { amount_gte: 0, amount_lte: 50000 }
         decision: allow
@@ -187,8 +202,8 @@ actions:
 
 The gateway (§6) has no decorator to carry an effect template, so the policy file has to. The
 closed key set of v0.1 §3.1 grows: an action entry now accepts `decision`, `rules`, `effect`,
-`resource` and `mcp`; the `mcp` mapping accepts `not_executed_on_error` and `mrtr` and nothing
-else. Any other key at either level is still a load-time `PolicyError`.
+`resource` and `mcp`; the `mcp` mapping accepts `not_executed_on_error` and nothing else. Any
+other key at either level is still a load-time `PolicyError`.
 
 **`schema: ctrlrun.policy/v2`.** v0.2 loads both `ctrlrun.policy/v1` and `ctrlrun.policy/v2`.
 Using `effect`, `resource` or `mcp` in a document declaring `v1` is a `PolicyError` naming the
@@ -199,9 +214,10 @@ outcomes, so it is not optional and not inferred.
 
 `effect` and `resource` are templates under the grammar and the placeholder rules of v0.1 §5.1,
 validated **at load time**: a malformed template is a `PolicyError`, not a runtime
-`EffectKeyError`. `mcp.not_executed_on_error` MUST be a `bool`; `mcp.mrtr` MUST be the string
-`"deny"` or `"allow"`. Anything else → `PolicyError`. Both are optional and default to the
-fail-closed value (`false`, `"deny"`).
+`EffectKeyError`. `mcp.not_executed_on_error` MUST be a `bool`; anything else →
+`PolicyError`. It is optional and defaults to the fail-closed value, `false`. There is no
+policy knob for multi round-trip calls: §6.9 handles them uniformly, and a tool whose
+elicitation an operator will not accept is denied outright.
 
 ### 3.2 Precedence
 
@@ -378,36 +394,70 @@ present and invalid, servers **MUST** respond with HTTP 403 Forbidden."* The all
 client — is permitted. An empty allowlist that accepted every origin would be validation in
 name only.
 
-`GET` and `DELETE` on the MCP endpoint MUST return `405 Method Not Allowed`, per the
-revision's instruction for traffic from older clients. The gateway MUST NOT mint or echo an
-`Mcp-Session-Id` and MUST ignore `Last-Event-ID`.
+`GET` and `DELETE` on the MCP endpoint are relayed to the upstream (§6.2, passthrough mode),
+which answers them — with `405 Method Not Allowed` if it implements only `2026-07-28`, exactly
+as that revision instructs. The gateway MUST NOT mint, echo, or interpret an `Mcp-Session-Id`
+of its own; it has no sessions to keep.
 
 ### 6.2 Protocol revisions the gateway accepts
 
-**Only revisions that require header–body validation: `2026-07-28` and later.** A request
-whose `MCP-Protocol-Version` header is absent, or names an earlier revision, MUST be refused
-with HTTP 400 and `UnsupportedProtocolVersion` (`-32022`), `data.supported = ["2026-07-28"]`.
+**Accepted: `2026-07-28`, and `2025-03-26` through `2025-11-25` in passthrough mode.** The
+deprecated two-endpoint HTTP+SSE transport of `2024-11-05` is not accepted, on either side.
 
-Half of that is the revision's own instruction to intermediaries: *"Intermediaries that enforce
-policy based on mirrored headers (e.g., routing or rate-limiting by tenant) **SHOULD** verify
-that the `MCP-Protocol-Version` header indicates a version that requires header–body
-validation. If the version is older or the header is absent, the intermediary **SHOULD**
-reject the request rather than trusting unvalidated header values."* CTRLRun is that
-intermediary, and its decision is worth more than a rate limit.
+An earlier draft of this section refused everything before `2026-07-28`, resting on the
+revision's note that *"Intermediaries that enforce policy based on mirrored headers … **SHOULD**
+reject the request rather than trusting unvalidated header values."* That note does not bind
+this gateway, and reading it as though it did was a mistake worth naming. It governs
+intermediaries whose enforcement *is* the header — a load balancer routing by tenant, a rate
+limiter counting by method. CTRLRun decides from the parsed body (§6.4) and never from a
+header, so an unvalidated header value cannot influence a decision here. **Header trust is
+never the guarantee**, and a rule that refuses every client in existence today would contradict
+the whole claim of this release: an existing MCP server plus one gateway.
 
-The other half is scope, and is stated rather than dressed up as safety. Because the gateway
-parses every body anyway (§6.4), it does not actually *need* the mirrored headers, and could
-in principle decide a legacy request correctly. What it would also need is the legacy
-transport: connection-scoped sessions with `Mcp-Session-Id` and DELETE, a standalone GET
-stream, server-initiated JSON-RPC requests arriving on SSE, and `Last-Event-ID` resumption —
-a second proxy to build and a second set of failure modes to map onto §6.8. v0.2 does not
-build it. **This means clients that have not moved to `2026-07-28` cannot use the gateway**,
-which as of this writing is most of them; that cost is real and is the reason this paragraph
-exists rather than a footnote.
+So header–body validation is **conditional on the headers existing**. For `2026-07-28` the
+mirrored headers are required and §6.4 applies in full. For `2025-03-26` through `2025-11-25`
+they are not part of the protocol; the gateway validates `Mcp-Method` and `Mcp-Name` only when
+they are present, and their absence is not a refusal. Everything else — body parsing, principal
+derivation, policy, effect identity, the outcome mapping of §6.8 — is identical across
+revisions, because none of it ever depended on a header.
 
-It also disposes of three things the item-0 brief assumed and the current revision has removed:
-there is no `initialize` handshake, no protocol-level session, and no `Mcp-Session-Id`.
-"Missing session" is not a refusal condition in v0.2 because sessions do not exist.
+A request whose `MCP-Protocol-Version` names something outside the accepted set is refused with
+HTTP 400 and `UnsupportedProtocolVersion` (`-32022`) listing them. An **absent** header is
+treated as `2025-03-26`, which is that era's own backwards-compatibility rule; it costs
+nothing, because a modern upstream will reject the forwarded request itself and §6.8 maps that
+to `FAILED`.
+
+**Passthrough mode** means the gateway relays the legacy transport's mechanics without
+interpreting them:
+
+| Legacy mechanic | Gateway |
+|---|---|
+| `initialize` / `notifications/initialized` | relayed like any other non-intercepted method (§6.3) |
+| `Mcp-Session-Id` | relayed in both directions, never minted, never interpreted |
+| `DELETE` on the MCP endpoint | relayed |
+| `GET` opening a standalone SSE stream | relayed, and the stream proxied until either side closes |
+| Server-initiated JSON-RPC requests on an SSE stream | relayed opaquely; the gateway does not intercept them |
+| A JSON-RPC *response* in a POST body | relayed with the upstream's `202`; permitted only on legacy revisions, refused on `2026-07-28` |
+
+Legacy elicitation needs no MRTR machinery (§6.9): in that era the server asks for input on the
+same in-flight request, so an intercepted `tools/call` stays one request/response pair, the
+reservation is held in `EXECUTING` by the ordinary path, and the final response arrives on the
+stream the gateway is already reading.
+
+**Resumption is not relayed, and this is the one real cost.** A legacy stream may be resumed
+by a `GET` carrying `Last-Event-ID`, which would let the final response to an intercepted
+`tools/call` arrive on a connection the gateway is not attributing to that action — the outcome
+would land somewhere the gateway cannot see, and the reservation would lease-expire into
+`AMBIGUOUS` despite a perfectly good answer having been delivered. So for **intercepted**
+`tools/call` responses the gateway MUST strip SSE `id:` fields from the relayed stream, making
+that stream non-resumable for the client as it already is for the gateway. Non-intercepted
+streams are relayed verbatim, `id:` fields included. `Last-Event-ID` on a `GET` is relayed
+unchanged, because those streams carry no intercepted outcome.
+
+`--principal-from-client-info` (§6.5) is unavailable on legacy revisions: `clientInfo` arrives
+once at `initialize`, and this gateway holds no session to remember it in. Legacy deployments
+use `--principal` or `--principal-header`. The gateway MUST refuse to start on the combination
+rather than discover it per request.
 
 ### 6.3 What is intercepted
 
@@ -490,8 +540,9 @@ It is nonetheless offerable in v0.2 because of a fact about v0.1 that will stop 
 other reserved name at load). The principal is attribution on a receipt, not an input to a
 decision, so an unauthenticated one misattributes evidence and cannot widen an outcome. The
 flag MUST log a warning at startup saying so. `# SPEC: v0.2 §6.5` — the authority model
-(v0.3) makes the principal an authorization input, and this flag MUST be revisited in the same
-release that makes that change.
+(v0.3) makes the principal an authorization input, at which point a self-reported name cannot
+be one. **`--principal-from-client-info` is removed in v0.3**, not re-litigated; it exists in
+v0.2 only for the window in which a principal is evidence and nothing else.
 
 The same limit applies to `--principal-header`, one step removed: the header is worth whatever
 the thing that sets it is worth. Set it in a trusted proxy that authenticates the caller. If
@@ -587,18 +638,35 @@ use a fresh connection for every intercepted `tools/call` and MUST NOT reuse one
 handshake per consequential action, and it buys the only `FAILED` in the table that comes from
 the transport.
 
-**Why those seven error codes are `FAILED`.** Each is, by the definition of JSON-RPC 2.0 or of
-this MCP revision, determined from the request before the method runs: parse error, invalid
-request, method not found, invalid params, and the three header/metadata validation errors the
-revision requires servers to raise before processing (*"Servers **MUST** reject requests with
-a `400 Bad Request` HTTP status and JSON-RPC error code `-32020` … if any validation fails"*).
-`-32603 Internal error` is not in that class and never will be. This is the one judgement in
-the table that rests on a peer obeying a contract rather than on something CTRLRun observed;
-an upstream that returns `-32602` after doing work violates JSON-RPC 2.0, and CTRLRun will
-permit a retry it should not have. It is a limit to state, not to design around; item 5 MUST
-carry it into `THREAT_MODEL.md`, along with the gateway's other three — `not_executed_on_error`
-and `mrtr: allow` are unverifiable operator assertions (v0.1 §5.5's asymmetry, delegated to YAML),
-and a principal from a header or from `clientInfo` is not authenticated (§6.5).
+**The principle behind the `FAILED` codes.** A protocol-level error that the specification
+defines as emitted *before dispatch* is the closest thing MCP offers to v0.1's `NotExecuted`:
+the peer is telling you, in band, that it rejected the request rather than running the method.
+Those map to `FAILED`. Everything a peer says *after* dispatch — including a tool-level
+`isError` — is an outcome, and outcomes it does not describe are `AMBIGUOUS`.
+
+The pre-dispatch set is closed and small:
+
+| Code | Why it is pre-dispatch |
+|---|---|
+| `-32700` Parse error | the body never became a request |
+| `-32600` Invalid Request | rejected as a JSON-RPC message |
+| `-32601` Method not found | there is no method to run |
+| `-32602` Invalid params | JSON-RPC defines it as parameter validation, which precedes invocation |
+| `-32020` `HeaderMismatch` | *"Servers **MUST** reject requests with a `400 Bad Request` HTTP status and JSON-RPC error code `-32020` … if any validation fails"* |
+| `-32021` `MissingRequiredClientCapability` | raised from `_meta` before the method is reached |
+| `-32022` `UnsupportedProtocolVersion` | the request is refused for its version, not executed |
+| HTTP `401`, or `403` with a `WWW-Authenticate` challenge | the resource server validates the token before dispatch |
+
+`-32603 Internal error` is not in that class and never will be. Nor is any code the gateway
+does not recognize.
+
+This is the one row-group in the table resting on a peer obeying a contract rather than on
+something CTRLRun observed. An upstream that validates lazily — doing work and *then* returning
+`-32602` — will get a retry it should not have. That residual is recorded in
+`THREAT_MODEL.md`, alongside the gateway's other unverifiable assertions:
+`not_executed_on_error` is an operator's claim about their upstream (v0.1 §5.5's asymmetry,
+delegated to YAML), and a principal from a header or from `clientInfo` is not authenticated
+(§6.5).
 
 **An authorization rejection is `FAILED`, and it matters more than it looks.** An expired or
 insufficiently scoped token is the most common thing that goes wrong between a gateway and an
@@ -656,56 +724,154 @@ NOT record it as failed and MUST NOT cancel-and-retry.
 
 ### 6.9 Multi round-trip tool calls (MRTR)
 
-This revision lets a server answer `tools/call` with `resultType: "input_required"`, after
-which the client re-sends the same call — new JSON-RPC `id`, same `params`, plus
-`inputResponses` and `requestState`. That splits one tool call across two requests, and it
-interacts with both of CTRLRun's bindings: the second request carries input a human approving
-the first never saw, and both requests resolve to the same effect key.
+A server may answer `tools/call` with `resultType: "input_required"`, carrying `inputRequests`
+(elicitation, sampling or roots requests for the client to fulfil) and, optionally, an opaque
+`requestState`. The client then **retries the original request** — new JSON-RPC `id`, the same
+`params`, plus `inputResponses` and, if the server supplied one, the exact `requestState` it
+was given. One tool call, several HTTP requests.
 
-Behaviour is per tool, from `mcp.mrtr` in the policy (§3.1). Default `deny`.
+The naive readings are both wrong. Treating the first leg as a completed action records an
+outcome the upstream never reported; refusing the continuation makes every eliciting tool
+unusable. What the gateway does instead is **hold the reservation open across the round trip**:
+the effect stays `EXECUTING`, the lease is extended, concurrent duplicates stay blocked
+throughout — which is the guarantee that actually matters — and only the *final* result is
+mapped by §6.8.
 
-**`mrtr: deny` (default)**
+That requires correlating the continuation to the call it continues. The specification gives
+exactly one correlator, and gives it conditionally.
 
-- A `tools/call` carrying `inputResponses` or `requestState` is refused before the policy is
-  evaluated: HTTP 400, `-41009` `ctrlrun.mrtr_not_permitted`, recorded in the shape of §6.6's
-  unrepresentable-argument refusal (`decision_reason: "mrtr_not_permitted"`), no reservation.
-- An `input_required` **result** is recorded `AMBIGUOUS`. The upstream received the request,
-  will not complete it, and has said nothing about what it did; the retry that would complete
-  it is one this gateway refuses to forward. A human resolves the key.
+#### 6.9.1 What the protocol offers, and what it does not
 
-So an eliciting tool blocks one effect key the first time it is called, loudly, once. The
-remedy is one line of policy — either `mrtr: allow`, or `decision: deny` for that tool, which
-refuses before execution and never touches an effect key.
+There is **no `_meta` key for MRTR correlation**. The only correlator is `params.requestState`,
+and the rules that matter here are:
 
-The cost lands only on tools that have one. A tool with no `effect:` in policy reserves
-nothing (§3.2), so an `input_required` result from it produces an `ambiguous` receipt and
-blocks nothing at all. An eliciting *read* costs a log line; an eliciting *write* costs a
-`ctrlrun resolve`. That is the right way round.
+- It is **optional**: *"The `InputRequiredResult` **MAY** include a `requestState` field"*, and
+  a server satisfies the protocol by returning `inputRequests` alone — *"Servers **MUST**
+  include at least one of `inputRequests` or `requestState` in every `InputRequiredResult`."*
+- Where present it is server-generated and opaque: *"an opaque string meaningful only to the
+  server. Clients **MUST NOT** inspect, parse, modify, or make any assumptions about its
+  contents"*, and the client *"**MUST** echo back the exact value of that field when retrying"*.
+- It is not single-use by construction. The spec is explicit that its own anti-replay advice
+  *"[does] not by themselves guarantee single-use. Servers for which a given `requestState`
+  must be consumed at most once … **MUST** enforce that invariant server-side."*
+- The JSON-RPC `id` **MUST** differ between the legs, so it correlates nothing.
+- A server **MAY** elicit repeatedly: *"Servers **MAY** choose to return an
+  `InputRequiredResult` on multiple attempts at the same request."*
 
-**`mrtr: allow`**
+So the answer to "can the follow-up be correlated to the original call?" is **only when the
+upstream supplied a `requestState`**. When it did not, the sole thing distinguishing a
+continuation from a fresh duplicate call is the presence of `inputResponses` — a field the
+agent controls completely — and admitting a held reservation on that basis would let any
+client walk past `DuplicateEffect(state="in_progress")` by inventing an `inputResponses`.
+There is no fix available at the gateway: the protocol simply did not mint an identity for
+that exchange.
 
-- The retry is forwarded, and `inputResponses` and `requestState` are included in the action's
-  arguments under exactly those names. The second leg is therefore a different action with a
-  different hash, and a human approving it approves the elicited input too. If they were
-  excluded, one approval would authorize any answer to the elicitation, which is v0.1 §4.2 A1's
-  hole reopened.
-- The fold is for hashing, policy and evidence only. The **forwarded** request puts them back
-  where MCP expects them — `params.inputResponses` and `params.requestState` beside
-  `params.arguments`, not inside it — with every value taken from `Action.canonical_arguments`
-  as §6.7 requires. What was hashed and what is sent stay the same values in a different
-  shape; if that shape were wrong the upstream would reject the retry, which is the safe
-  direction but still a bug.
-- If `params.arguments` already contains a key named `inputResponses` or `requestState`, the
-  call is refused (`reserved_argument_name`). Two candidate values for one name is the
-  fail-closed case, as it is for `{resource}` in v0.1 §5.1.
-- An `input_required` result is recorded `FAILED`, so the retry reserves the same effect key as
-  attempt 2 (v0.1 §5.4).
+#### 6.9.2 Held reservation, where the upstream made it possible
 
-That last mapping is an assertion, and `mrtr: allow` is where an operator makes it. It has more
-behind it than most: this revision *requires* the client to re-send the original params, so a
-server with an irreversible side effect before an `input_required` is already unsafe under
-MCP's own contract. But "already unsafe" is not "did nothing", CTRLRun does not get to assume
-a well-behaved upstream, and so the declaration is required and its default is `deny`.
+When an intercepted `tools/call` with an effect key returns `input_required` **with a
+`requestState`**:
+
+1. The effect record stays `EXECUTING` under the same `action_id`. No outcome is written.
+2. The lease is extended to `now + elicitation_timeout` (`--elicitation-timeout`, default
+   300 s) by `StateStore.extend_lease` (§6.9.4).
+3. The gateway stores the exact `requestState` bytes on the effect record and increments a
+   round counter.
+4. `EXECUTION_SUSPENDED` is appended, `data.reason = "input_required"`, with the
+   `inputRequests` keys and their methods and the round number.
+5. The `InputRequiredResult` is relayed to the client unchanged, plus
+   `_meta["com.ctrlrun/receipt"]` (§6.8).
+
+A continuation is admitted only if **all** of these hold, checked before anything is
+forwarded:
+
+- it presents a `requestState` equal to the stored one, compared with `hmac.compare_digest`;
+- the effect record is still `EXECUTING`, held by that `action_id`, with a live lease;
+- its `params.arguments` canonicalize to **exactly** the held action's canonical arguments.
+
+Then the stored `requestState` is **consumed** in the same store transaction that admits the
+continuation, so one elicitation admits one continuation. The spec puts that obligation on the
+party that needs single-use, and the party holding a reservation needs it: two continuations
+racing on one held key is the duplicate execution this product exists to prevent, wearing an
+`inputResponses` field as a disguise. `EXECUTION_RESUMED` is appended, carrying the
+`inputResponses` keys and a SHA-256 digest of their canonical form.
+
+The continuation is **the same action** — same `action_id`, same `action_hash`, same
+reservation, same attempt. It produces no second receipt. Its result is mapped by §6.8 as if
+it had arrived on the first leg, and if it is another `input_required` the cycle repeats from
+step 1.
+
+Two bounds, because a held reservation is a resource an upstream must not be able to pin
+forever:
+
+- `--max-elicitation-rounds`, default 8. Exceeding it records the effect `AMBIGUOUS` and
+  returns `-41010`: the gateway has sent that many tool calls and knows the outcome of none.
+- Each round extends the lease by `--elicitation-timeout` and no more. A client that never
+  returns lets the lease expire, and the record becomes `AMBIGUOUS` by the ordinary path of
+  v0.1 §5.3 E3 — *"the executor may have died mid-flight"* is exactly what has happened. This
+  is the only way an elicitation ends ambiguous.
+
+The held state lives on the effect record in the StateStore, not in gateway memory. A gateway
+that restarted mid-elicitation would otherwise strand a reservation nobody can ever continue,
+which is a self-inflicted `AMBIGUOUS` on every deploy.
+
+#### 6.9.3 The fallback, where it did not
+
+When an `input_required` arrives with **no `requestState`** for a tool with an effect key, the
+effect is recorded `AMBIGUOUS` and the client receives the result unchanged. A continuation
+then resolves to the same effect key and is refused with `-41005`, as any retry against an
+`AMBIGUOUS` record is.
+
+This is the fail-closed floor, and it is stated as a cost, not a feature: an upstream that
+elicits without a `requestState` cannot be fronted for a consequential tool without a
+`ctrlrun resolve` per call. The remedy is upstream — a `requestState` is one field, the spec
+recommends it carry a principal, a TTL and a digest of the originating request anyway, and a
+server that omits it has also given up on statelessness for itself.
+
+A continuation whose `requestState` matches no held record — a forgery, or a gateway that
+restarted before the record was written — is refused with `-41009`
+`ctrlrun.unknown_continuation` before any forwarding.
+
+**Tools with no effect key are unaffected throughout.** There is no reservation to hold, so an
+`input_required` produces an `ambiguous` receipt that blocks nothing and the continuation is an
+ordinary `tools/call` with its own action and its own receipt. An eliciting *read* costs a log
+line either way.
+
+#### 6.9.4 Amendment to v0.1 §5.3
+
+v0.1 §5.3 ends: *"there is no setting that releases an expired reservation, and none that
+extends a lease already granted."* v0.2 amends the second clause only, and narrowly.
+
+```python
+StateStore.extend_lease(effect_key: str, action_id: str, until: datetime) -> None
+```
+
+MUST be atomic, and MUST refuse — raising `DuplicateEffect` or `AmbiguousEffect` as the state
+warrants — unless **all** of: the record is `EXECUTING`; its `action_id` is the caller's; and
+its lease **has not already expired**. That last condition is the whole of the safety
+argument. A record whose lease has lapsed may already have been declared `AMBIGUOUS` by
+another attempt (v0.1 §5.4), and extending it would resurrect a reservation someone else has
+moved on from — reintroducing exactly the double execution the lease exists to prevent. An
+expired lease is still not extendable by anything, and an expired reservation is still
+released by nobody.
+
+The first clause is untouched. Nothing releases an expired reservation, and only a human or a
+`reconcile` hook (§2.2) moves a record out of `AMBIGUOUS`.
+
+#### 6.9.5 What an approval does not cover
+
+An approval binds to the action as proposed (v0.1 §4.2 A1), and the elicited input is not part
+of it: a human approves `refund(payment_id="txn_1", amount=2000)` and the upstream may then
+elicit something the approval never described. Two of the three ways that could be abused are
+closed — the continuation must present the exact held `requestState`, and its arguments must
+canonicalize identically, so the approved call cannot be mutated mid-elicitation. What remains
+open is the content of `inputResponses` itself, which is why `EXECUTION_RESUMED` records its
+keys and a digest and `ctrlrun inspect` shows them.
+
+It is a real gap, not a solved one: a compromised upstream can elicit a consequential choice
+that no human authorized, and evidence will show what was supplied without anyone having
+approved it. An operator who cannot accept that for a given tool sets `decision: deny`. Item 5
+MUST carry this into `THREAT_MODEL.md`, and binding an approval across a round trip is a v0.3
+question, alongside the authority model.
 
 ### 6.10 Decision, approval, and what the client sees
 
@@ -720,7 +886,7 @@ a well-behaved upstream, and so the declaration is required and its default is `
 | `ApprovalMismatch` | `-41006` `ctrlrun.blocked` | 409 | `reason` |
 | no principal | `-41007` `ctrlrun.no_principal` | 403 | — |
 | unrepresentable argument | `-41008` | 400 | `pointer` |
-| MRTR refused | `-41009` | 400 | `tool` |
+| continuation matches no held elicitation | `-41009` `ctrlrun.unknown_continuation` | 400 | `tool` |
 | upstream outcome unknown | `-41010` | 502 | `effect_key`, `action_id` |
 | upstream proven not executed | `-41011` | 502 | `effect_key`, `action_id` |
 
@@ -767,20 +933,23 @@ again is legitimate.
 | Condition | HTTP | Code |
 |---|---|---|
 | `Origin` present and not allowlisted | 403 | — (empty body permitted) |
-| `GET` / `DELETE` on the MCP endpoint | 405 | — |
 | Body larger than `--max-body-bytes` | 413 | — |
 | Body not valid JSON | 400 | `-32700` |
 | Body not a JSON-RPC 2.0 message, or a JSON array (batch) | 400 | `-32600` |
-| `MCP-Protocol-Version` absent, or earlier than `2026-07-28` | 400 | `-32022` |
-| `Mcp-Method` or `Mcp-Name` absent, or disagreeing with the body | 400 | `-32020` |
+| A JSON-RPC *response* body on a `2026-07-28` request | 400 | `-32600` |
+| `MCP-Protocol-Version` naming a revision outside the accepted set (§6.2) | 400 | `-32022` |
+| `Mcp-Method` or `Mcp-Name` absent on a `2026-07-28` request, or disagreeing with the body on any | 400 | `-32020` |
 | An `Mcp-Param-{Name}` disagreeing with the body | 400 | `-32020` |
 | No principal derivable | 403 | `-41007` |
 | A `float` anywhere in `params.arguments` | 400 | `-41008` |
-| `inputResponses`/`requestState` under `mrtr: deny` | 400 | `-41009` |
+| A continuation whose `requestState` matches no held elicitation | 400 | `-41009` |
 
 Everything above the principal row is refused before an Action exists and therefore leaves no
 receipt and no events, only a log line. Everything from the principal row down is described in
 §6.5, §6.6 and §6.9.
+
+`GET` and `DELETE` are **not** on this list: they are relayed (§6.2), and it is the upstream's
+answer — `405` from a `2026-07-28` server — that reaches the client.
 
 ### 6.12 What the gateway is not
 
@@ -983,11 +1152,16 @@ with `Mcp-Name` and `Mcp-Param-*` recomputed to match. The action hash recorded 
 equals the hash of what the upstream received.
 
 ### T20 — The gateway refuses what it cannot decide about
-Parameterized over §6.11: an unparseable body, a JSON array body, a missing
-`MCP-Protocol-Version`, `MCP-Protocol-Version: 2025-11-25`, a missing `Mcp-Method`, an
-`Mcp-Name` disagreeing with `params.name`, an `Mcp-Param-*` disagreeing with the body, a body
-over the size limit, an unallowlisted `Origin`, and a `GET`. Each produces the specified status
-and code, and the fake upstream's request count stays zero.
+Parameterized over §6.11: an unparseable body, a JSON array body, `MCP-Protocol-Version:
+1999-01-01`, a missing `Mcp-Method` **on a `2026-07-28` request**, an `Mcp-Name` disagreeing
+with `params.name`, an `Mcp-Param-*` disagreeing with the body, a body over the size limit, and
+an unallowlisted `Origin`. Each produces the specified status and code, and the fake upstream's
+request count stays zero.
+
+The mirror of that, per §6.2: on a `2025-11-25` request the absence of `Mcp-Method` and
+`Mcp-Name` is **not** a refusal, and the call is decided from the body and forwarded; a `GET`,
+a `DELETE` and an `Mcp-Session-Id` are relayed rather than refused; and a `2026-07-28` request
+whose body is a JSON-RPC *response* is refused where a `2025-11-25` one is relayed.
 
 ### T21 — No principal, no action
 With `--principal-header X-Agent` configured and the header absent, the call is refused with
@@ -1022,13 +1196,33 @@ executes, consumes that approval, and commits. A third identical call returns `-
 `ctrlrun deny <id>`, resending the identical call returns `-41003` and creates **no** second
 approval request, until the denied one expires.
 
-### T26 — MRTR is refused by default and bounded when allowed
-Under the default, a `tools/call` carrying `inputResponses` is refused with `-41009` and the
-upstream is not called, and an `input_required` result leaves the effect `AMBIGUOUS`. Under
-`mrtr: allow`, the retry is forwarded, `inputResponses` is part of the action's arguments and
-therefore of its hash, an `input_required` result leaves the effect `FAILED`, and the retry
-reserves the same key as attempt 2. A tool argument literally named `inputResponses` is refused
-under both settings.
+### T26 — A held reservation across an elicitation
+With `requestState`: an `input_required` result leaves the effect `EXECUTING` with an extended
+lease and writes no receipt; a concurrent duplicate `tools/call` on the same effect key is
+refused with `-41004` (`in_progress`) *while the elicitation is outstanding*; the continuation
+presenting the exact `requestState` and identical canonical arguments is admitted, and its
+final result produces one receipt on the original `action_id` with `attempt == 1`. Events are
+`EXECUTION_SUSPENDED` then `EXECUTION_RESUMED`, the latter carrying the `inputResponses` digest.
+
+Refusals, each leaving the record `EXECUTING` and the upstream uncalled: a continuation with a
+wrong `requestState` (`-41009`); a second continuation presenting a `requestState` already
+consumed (`-41009`); a continuation whose `params.arguments` differ from the held action's
+(`-41009`); and a continuation arriving after the lease expired (`-41005`, the record having
+become `AMBIGUOUS` by v0.1 §5.3 E3).
+
+Bounds: exceeding `--max-elicitation-rounds` records `AMBIGUOUS` and returns `-41010`; an
+elicitation never continued lease-expires to `AMBIGUOUS` and nothing else.
+
+Without `requestState`: the `input_required` result leaves the effect `AMBIGUOUS` and a
+continuation is refused with `-41005`. For a tool with no effect key, an `input_required`
+produces an `ambiguous` receipt, blocks nothing, and the continuation runs as an ordinary call.
+
+### T26b — `extend_lease` refuses what it must
+Against a real SQLite store: `extend_lease` succeeds only for an `EXECUTING` record held by
+that `action_id` with a live lease. It refuses for a record in `RESERVED`, `COMMITTED`,
+`FAILED` or `AMBIGUOUS`, for a different `action_id`, and — the one that matters — for an
+`EXECUTING` record whose lease has **already expired**, which another attempt may have
+declared `AMBIGUOUS`. Deterministic: the clock is advanced, not slept on.
 
 ### T27 — Webhook signature, both directions
 The outbound POST carries `CTRLRun-Signature` verifying against the exact bytes sent. Inbound:
@@ -1053,6 +1247,18 @@ A **subprocess** running `import ctrlrun` reports no module from an extra in `sy
 in-process it would pass or fail on what pytest happened to import first. With the extra
 absent, `ctrlrun gateway` and `OTelEventSink()` raise `MissingDependency` whose message
 contains `pip install 'ctrlrun[gateway]'` / `'ctrlrun[otel]'`, never `ModuleNotFoundError`.
+
+### T30b — Resumption is not relayed for an intercepted call
+An intercepted `tools/call` answered with an SSE stream carrying `id:` fields reaches the
+client with those fields stripped, so it cannot request a resume of a stream whose outcome the
+gateway owns. A non-intercepted stream reaches the client with its `id:` fields intact.
+
+### T31 — Every example runs and every template loads
+Each script under `examples/` exits 0 with no network, against its own state directory, and
+prints the refusal it exists to demonstrate. Every `examples/policies/<sector>.yaml` loads
+through `Policy.load` without error, declares `schema: ctrlrun.policy/v1`, carries the "Adapt
+before use" header, and uses no key added by §3. No template's text contains a compliance
+claim (asserted against a word list including "compliant", "compliance", "certified").
 
 ---
 
@@ -1085,23 +1291,27 @@ Policy.mcp_options(action_name: str) -> McpOptions
 @dataclass(frozen=True)
 class McpOptions:
     not_executed_on_error: bool = False
-    mrtr: Literal["deny", "allow"] = "deny"
 
 StateStore.find_granted_approval(action_hash: str) -> Approval | None
 StateStore.find_denied_request(action_hash: str) -> ApprovalRequest | None
 StateStore.resolve_effect(effect_key, state, *, resolved_by: str) -> None
+StateStore.extend_lease(effect_key: str, action_id: str, until: datetime) -> None
+StateStore.hold_continuation(effect_key, action_id, request_state: str) -> None
+StateStore.take_continuation(effect_key, request_state: str) -> EffectRecord
 ```
 
 **Removed:** `SQLiteStateStore.journal`. The store no longer writes JSONL; `Control` does,
 through `JSONLEventSink` (§4.3). The files it writes, and where, are unchanged.
 
-Two event types join v0.1 §6.2: `RECONCILIATION_STARTED`, `RECONCILIATION_RESOLVED`.
-`EFFECT_RESOLVED` gains `data.resolved_by`. The receipt schema is **unchanged**:
+Four event types join v0.1 §6.2: `RECONCILIATION_STARTED`, `RECONCILIATION_RESOLVED`,
+`EXECUTION_SUSPENDED`, `EXECUTION_RESUMED`. The last two are named for what happens to the
+attempt, not for the transport that caused it: `receipt.py` does not learn MCP vocabulary
+(`ARCHITECTURE.md` §6). `EFFECT_RESOLVED` gains `data.resolved_by`. The receipt schema is **unchanged**:
 `ctrlrun.receipt/v1` still describes every receipt v0.2 writes.
 
 New JSON-RPC error codes, frozen: `-41001` denied · `-41002` approval_required · `-41003`
 approval_denied · `-41004` duplicate_effect · `-41005` ambiguous_effect · `-41006` blocked ·
-`-41007` no_principal · `-41008` unrepresentable_argument · `-41009` mrtr_not_permitted ·
+`-41007` no_principal · `-41008` unrepresentable_argument · `-41009` unknown_continuation ·
 `-41010` upstream_ambiguous · `-41011` upstream_not_executed.
 
 CLI:
@@ -1116,6 +1326,7 @@ ctrlrun gateway --upstream URL --alias NAME
                 [--user-header NAME] [--environment NAME]
                 [--wait-approvals] [--approval-timeout SECONDS]
                 [--upstream-timeout SECONDS] [--max-body-bytes N]
+                [--elicitation-timeout SECONDS] [--max-elicitation-rounds N]
                 [--allow-origin ORIGIN]... [--allow-remote]
                 [--public-url URL] [--allow-insecure-webhook]
                 [--otel] [--otel-arguments]
@@ -1128,8 +1339,9 @@ and OTLP/HTTP exporter). Neither is in `dependencies`.
 
 ## 12. Explicitly out of scope for v0.2
 
-Everything in v0.1 §9 that v0.2 does not deliver, and specifically: legacy MCP revisions
-(`2025-11-25` and earlier, the `initialize` handshake, `Mcp-Session-Id`, resumable streams);
-more than one upstream per gateway; multi-host reservation; an ACS adapter or any ACS claim;
+Everything in v0.1 §9 that v0.2 does not deliver, and specifically: the deprecated
+`2024-11-05` HTTP+SSE transport; relaying SSE resumption for an intercepted call (§6.2);
+binding an approval across an elicitation round trip (§6.9.5); more than one upstream per
+gateway; multi-host reservation; an ACS adapter or any ACS claim;
 authenticating the principal or the approver; signed receipts; MCP `tasks`, `apps` or any other
 extension; `ctrlrun verify`; framework adapters; Postgres; anything in `VISION.md`.

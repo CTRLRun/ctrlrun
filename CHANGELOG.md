@@ -13,10 +13,10 @@ Work towards 0.2.0. Version is `0.2.0.dev0`; nothing here has shipped.
 
 ### Added
 
-- `docs/SPEC-v0.2.md` — the v0.2 contract, written as a delta over v0.1. Seven deliverables:
-  a reconciliation hook, per-action `effect:` / `resource:` in policy, an `EventSink`
-  protocol, `ctrlrun inspect`, an MCP gateway, a webhook approval provider, and an
-  OpenTelemetry sink. Acceptance tests T13–T30.
+- `docs/SPEC-v0.2.md` — the v0.2 contract, written as a delta over v0.1. Eight deliverables:
+  a reconciliation hook, `examples/` scripts and sector policy templates, per-action
+  `effect:` / `resource:` in policy, an `EventSink` protocol, `ctrlrun inspect`, an MCP
+  gateway, a webhook approval provider, and an OpenTelemetry sink. Acceptance tests T13–T31.
 - Empty `gateway` and `otel` extras in `pyproject.toml`. `pip install ctrlrun` will keep
   installing nothing but `pyyaml` and `click`; anything needing an HTTP server or a
   third-party SDK goes in an extra, imported lazily.
@@ -25,9 +25,17 @@ Work towards 0.2.0. Version is `0.2.0.dev0`; nothing here has shipped.
 
 - The spec is written against **MCP revision 2026-07-28**, which removed the `initialize`
   handshake, protocol-level sessions and `Mcp-Session-Id`, and made `Mcp-Method` / `Mcp-Name`
-  required request headers that servers must validate against the body. The gateway will
-  accept that revision and later ones only; earlier revisions are refused with
-  `UnsupportedProtocolVersion` rather than served on unvalidated headers.
+  required request headers that servers must validate against the body. The gateway will also
+  serve `2025-03-26` through `2025-11-25` in passthrough mode, relaying session ids, `GET` SSE
+  streams and `DELETE` without interpreting them; header–body validation applies only where the
+  headers exist. Decisions come from the parsed body on every revision, so header trust is
+  never the guarantee. The deprecated `2024-11-05` HTTP+SSE transport is not served.
+- An MCP tool call held open across a multi round-trip elicitation keeps its effect reservation
+  in `EXECUTING` with an extended lease, so concurrent duplicates stay blocked for the whole
+  exchange and only the final result is mapped to an outcome. This needs the upstream to supply
+  a `requestState`, the protocol's only correlator and an optional one; without it the first
+  leg is `AMBIGUOUS`, because the alternative would let any client walk past duplicate
+  protection by inventing an `inputResponses` field.
 - A policy file using the new `effect:` / `resource:` / `mcp:` keys must declare
   `schema: ctrlrun.policy/v2`. `ctrlrun.policy/v1` files keep loading unchanged; a `v2` file
   will not load on 0.1.0, which is the point — 0.1.0 would ignore the effect template and

@@ -70,6 +70,43 @@ The agent is treated as a potentially compromised or hallucinating principal. Ev
 - No reconciliation; AMBIGUOUS always needs a human (v0.2 adds executor `check`).
 - The decorator can be bypassed by code that doesn't use it.
 
+## Known v0.2 limitations (specified, not yet shipped)
+
+These follow from `SPEC-v0.2.md` and are recorded here as they are decided, not after the code
+lands. Nothing in this section describes behaviour you can run today.
+
+- **A lazily-validating upstream can win a retry it should not have.** The gateway maps the
+  JSON-RPC errors that the specification defines as emitted *before dispatch* — `-32700`,
+  `-32600`, `-32601`, `-32602`, and MCP's `-32020` / `-32021` / `-32022`, plus HTTP `401` and a
+  scope-challenge `403` — to `FAILED`, permitting an automatic retry. They are the closest
+  thing MCP offers to an executor raising `NotExecuted` (SPEC-v0.1 §5.5): the peer is stating
+  in band that it rejected the request rather than running the method. An upstream that does
+  work and *then* returns `-32602` violates JSON-RPC 2.0, and CTRLRun will retry against a side
+  effect that already landed. The alternative — mapping every error to `AMBIGUOUS` — makes a
+  routine token expiry or a typo'd tool name cost a human `ctrlrun resolve`, which is how a
+  guarantee becomes something people switch off. The asymmetry stays where v0.1 put it:
+  `-32603 Internal error` and every unrecognized code are `AMBIGUOUS`.
+- **`not_executed_on_error: true` is an operator's assertion, and is not checked.** It maps a
+  tool result carrying `isError: true` to `FAILED` for one tool. It is `NotExecuted` expressed
+  in YAML by the person who knows their upstream, and it is wrong in exactly the same way if
+  they are wrong.
+- **An approval does not cover input elicited mid-call.** A tool call held open across an MCP
+  multi round-trip exchange executes with `inputResponses` the approver never saw. Two of the
+  three mutation paths are closed — the continuation must present the exact `requestState` the
+  gateway relayed, and its arguments must canonicalize identically to the approved ones — so
+  the approved call cannot be altered. What remains is the content of the elicited answer
+  itself, which a compromised upstream chooses the question for. It is recorded
+  (`EXECUTION_RESUMED` carries the keys and a digest) but not approved. Deny the tool if that
+  is unacceptable; binding an approval across a round trip is a v0.3 question.
+- **The gateway's principal is not authenticated.** `--principal-header` is worth whatever the
+  proxy that sets it is worth, and `--principal-from-client-info` reads a field the MCP
+  specification says implementations *"SHOULD NOT rely on … for security decisions"*. It is
+  survivable only because a v0.1 policy cannot address the principal at all, so an
+  unauthenticated one misattributes a receipt and cannot widen a decision. That stops being
+  true with the authority model, and the `clientInfo` option is removed in v0.3.
+- **Reservation is still single-host.** Two gateways in front of one upstream share no
+  reservations unless they share a state file on one machine.
+
 ## Disclosure
 
 Report vulnerabilities privately to contact@arpanghoshal.com. Do not open public issues for security reports. `SECURITY.md` has the process and what counts as a vulnerability.
