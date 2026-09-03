@@ -1,0 +1,32 @@
+# ctrlrun.yaml — action-level autonomy policy (v0.1)
+# Unknown actions are DENIED. There is no default-allow. List what is safe.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads: autonomous. Declare no effect key on these in code.
+  customer.read:
+    decision: allow
+  invoice.read:
+    decision: allow
+
+  # External communication: autonomous in v0.1 (allow_with_log arrives later).
+  email.send:
+    decision: allow
+
+  # Money: autonomy depends on the amount. First matching rule wins.
+  # Amounts are integer minor units (cents). Floats are rejected.
+  stripe.refund:
+    rules:
+      - when: { amount_lte: 50000 }        # ≤ €500.00
+        decision: allow
+      - when: { amount_lte: 500000 }       # ≤ €5,000.00
+        decision: approve
+      - decision: deny
+
+  # Privilege changes: never autonomous.
+  iam.grant_admin:
+    decision: deny
+
+  # Destructive infrastructure: human every time.
+  k8s.delete_namespace:
+    decision: approve

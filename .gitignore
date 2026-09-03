@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# CTRLRun local state (SPEC-v0.1 §5, §6)
+.ctrlrun/
+ctrlrun.yaml
+
+# OS
+.DS_Store
