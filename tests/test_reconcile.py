@@ -327,6 +327,37 @@ def test_T15_eager_reconciliation_never_runs_while_an_interrupt_unwinds(control,
     assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
 
 
+def test_T15_eager_reconciliation_skips_a_record_this_attempt_could_not_mark(
+    control, state_store
+):
+    """A record whose outcome this attempt could not write is not this attempt's to resolve.
+
+    The window is opened deterministically: the executor moves the record to a terminal state
+    mid-flight, the way a human running `ctrlrun resolve` during a long call would, and then
+    raises. `mark_ambiguous` is refused, so there is nothing here to reconcile.
+    """
+    calls: list[str] = []
+
+    @protect(
+        "stripe.refund",
+        effect="refund:{payment_id}",
+        control=control,
+        reconcile=lambda effect_key: calls.append(effect_key) or "not_executed",
+        reconcile_eagerly=True,
+    )
+    def refund(payment_id: str, amount: int) -> str:
+        record = state_store.get_effect("refund:txn_1")
+        state_store.mark_ambiguous("refund:txn_1", record.action_id, "lost")
+        state_store.resolve_effect("refund:txn_1", EffectState.COMMITTED, "cli:local")
+        raise TimeoutError("response lost")
+
+    with context(agent="refund-agent"), pytest.raises(TimeoutError):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert calls == []
+    assert state_store.get_effect("refund:txn_1").state is EffectState.COMMITTED
+
+
 def test_T15_a_base_exception_from_the_hook_propagates(control, state_store):
     remote = Remote()
     _strand(control, remote)
