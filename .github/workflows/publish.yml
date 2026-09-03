@@ -1,0 +1,114 @@
+name: Publish
+
+# Trusted publishing (PyPI OIDC). There is no API token anywhere in this repository, in its
+# secrets, or in anyone's shell — the runner mints a short-lived credential for one upload
+# and that is the whole of it. A library that exists to keep consequential actions from
+# happening twice should not ship behind a long-lived credential someone can replay.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Metadata renders on PyPI
+        run: twine check --strict dist/*
+
+      # The tag is what a human typed; the version is what actually ships. A tag that does
+      # not name the version in pyproject.toml would publish something nobody asked for, so
+      # it fails here rather than on PyPI, where a version number can never be reused.
+      - name: The tag matches the packaged version
+        id: version
+        run: |
+          version=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag  packaged=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match pyproject version $version"
+            exit 1
+          fi
+          # PEP 440 pre-release (a/b/rc) or a dev release routes to TestPyPI.
+          if python -c "import sys;from packaging.version import Version;sys.exit(0 if Version('$version').is_prerelease else 1)"; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The same gates the release has to pass on main, re-run against the artifacts that
+      # are about to be uploaded rather than against the working tree.
+      - name: The sdist can run its own tests
+        run: |
+          mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
+          cd /tmp/sdist
+          pip install ".[dev]"
+          pytest -q
+
+      - name: The quick start works from the wheel
+        run: |
+          python -m venv /tmp/qs
+          /tmp/qs/bin/pip install dist/*.whl
+          mkdir -p /tmp/qs-run && cd /tmp/qs-run
+          timeout 60 /tmp/qs/bin/ctrlrun demo
+          /tmp/qs/bin/ctrlrun init
+          test -f ctrlrun.yaml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # A pre-release tag (0.1.0a1) goes here and only here. Install it in a clean venv, run the
+  # demo, read the rendered page — then cut the real version.
+  testpypi:
+    needs: build
+    if: needs.build.outputs.prerelease == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/ctrlrun
+    permissions:
+      id-token: write # the OIDC token trusted publishing exchanges; nothing else
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: build
+    if: needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ctrlrun
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
