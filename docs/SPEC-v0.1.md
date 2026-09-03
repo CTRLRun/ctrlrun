@@ -274,7 +274,13 @@ NEW → RESERVED → EXECUTING → COMMITTED
 
 ```python
 class StateStore(Protocol):
+    # An approved action takes authority and effect identity in ONE call (§4.2 A4).
+    def consume_approval_and_reserve(self, approval_id: str, action_hash: str,
+                                     effect_key: str, action_id: str,
+                                     lease: timedelta) -> tuple[Approval, Reservation]: ...
+    # The one-sided cases, for an action that has only one half to take.
     def reserve_effect(self, effect_key: str, action_id: str, lease: timedelta) -> Reservation: ...
+    def consume_approval(self, approval_id: str, action_hash: str) -> Approval: ...
     def begin_execution(self, effect_key: str, action_id: str) -> None: ...
     def commit_effect(self, effect_key: str, action_id: str, result: Any) -> None: ...
     def fail_effect(self, effect_key: str, action_id: str, error: str) -> None: ...
@@ -282,11 +288,14 @@ class StateStore(Protocol):
     def get_effect(self, effect_key: str) -> EffectRecord | None: ...
     # approvals
     def put_approval_request(...); def grant_approval(...); def deny_approval(...)
-    def consume_approval(self, approval_id: str, action_hash: str) -> Approval: ...
     # evidence
     def append_event(self, event: Event) -> None: ...
     def put_receipt(self, receipt: Receipt) -> None: ...
 ```
+
+`consume_approval_and_reserve` is what §4.2 A4 asks for, and a caller MUST NOT reconstruct it by sequencing `consume_approval` and `reserve_effect`: two calls cannot share a transaction, so the split consumes an approval for an attempt that then fails to reserve — the exact hole A4 closes. `reserve_effect` is for an action with no approval to take (`ALLOW` with an `effect=`), `consume_approval` for an approved action with no effect key (§5.1); neither is a building block for the other case.
+
+Inside the one call: the approval is checked first, so its refusal is the one raised when a replayed approval and a duplicate effect both apply (T4); the reservation is decided before either half is written, so a refused reservation leaves the approval granted (T12).
 
 - **E1 Atomic reservation.** `reserve_effect` MUST succeed for at most one caller per `effect_key` across threads *and processes*. SQLite implementation: `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE; INSERT ... ; COMMIT` with `UNIQUE(effect_key)`.
 - **E2 Existing effect.** If a record exists, reservation outcome depends on its state (§5.4).
@@ -475,6 +484,12 @@ Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | N
 ```
 
 `approvals=None` builds a `LocalApprovalProvider(store)`: the local provider is the only one that asks a real human, so it is the safe default, and a `Control` is never without a way to ask.
+
+**Where the state lives.** `Control.from_file()` opens a `SQLiteStateStore` at `.ctrlrun/state.db` **in the policy file's directory**, creating the directory if absent. Beside the policy, not beside the process: workers started from different working directories but sharing a policy must share one store, or reservation is atomic within each of them and meaningless between them (§5.3 E1).
+
+`CTRLRUN_STATE` overrides the path. Set but empty → `InvalidArgument`, as `CTRLRUN_CONFIG` fails in §3.4: a configured-but-blank path is a misconfiguration, and falling back to the default would put an agent's effects in a store nobody is watching.
+
+An in-memory SQLite path — `:memory:`, or any path carrying `mode=memory` — MUST be refused with `InvalidArgument`, wherever it comes from. Such a database is private to a single connection, so it cannot reserve across threads, let alone processes; accepting one would drop E1 silently, which is the one failure mode this store exists to prevent. `InMemoryStateStore` is the supported in-process store, and says what it cannot do.
 
 `effect` and `resource` are templates (§5.1). The call is bound to the wrapped function's signature and defaults are applied, so a defaulted argument is part of the action and of its hash — the action must describe what will actually run.
 

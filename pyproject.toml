@@ -62,6 +62,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Error class names are frozen by SPEC-v0.1 §8; no "Error" suffix.
 "src/ctrlrun/errors.py" = ["N818"]
+# SPEC-v0.1 §5.3 freezes `commit_effect(effect_key, action_id, result: Any)`. An executor's
+# return value has no narrower type, and the store only serializes it.
+"src/ctrlrun/state.py" = ["ANN401"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]

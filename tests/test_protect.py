@@ -13,6 +13,7 @@ from ctrlrun import (
     ApprovalRequired,
     Control,
     Decision,
+    DuplicateEffect,
     Event,
     InMemoryStateStore,
     InvalidArgument,
@@ -452,6 +453,69 @@ def test_a_malformed_policy_file_means_no_Control_can_be_constructed(tmp_path):
 
     with pytest.raises(PolicyError):
         Control.from_file(path)
+
+
+# --- where the state lives (SPEC §8, §5.3 E1) -----------------------------------------
+
+
+def _policy_file(tmp_path):
+    path = tmp_path / "ctrlrun.yaml"
+    path.write_text(POLICY, encoding="utf-8")
+    return path
+
+
+def test_state_lands_beside_the_policy_file(tmp_path):
+    # Beside the policy, not beside the process: two workers sharing a policy must share
+    # one store, or reservation is atomic within each of them and meaningless between them.
+    loaded = Control.from_file(_policy_file(tmp_path))
+
+    assert loaded.store.path == tmp_path / ".ctrlrun" / "state.db"
+    assert loaded.store.path.exists()
+
+
+def test_CTRLRUN_STATE_overrides_the_state_path(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "shared" / "ctrlrun.db"
+    monkeypatch.setenv("CTRLRUN_STATE", str(elsewhere))
+
+    loaded = Control.from_file(_policy_file(tmp_path))
+
+    assert loaded.store.path == elsewhere
+    assert elsewhere.exists()
+    assert not (tmp_path / ".ctrlrun").exists()
+
+
+def test_two_controls_sharing_CTRLRUN_STATE_share_their_effects(tmp_path, monkeypatch):
+    monkeypatch.setenv("CTRLRUN_STATE", str(tmp_path / "shared.db"))
+    first = Control.from_file(_policy_file(tmp_path))
+    second = Control.from_file(tmp_path / "ctrlrun.yaml")
+
+    first.store.reserve_effect("refund:txn_1", "act_1")
+
+    with pytest.raises(DuplicateEffect):
+        second.store.reserve_effect("refund:txn_1", "act_2")
+
+
+def test_an_empty_CTRLRUN_STATE_is_refused(tmp_path, monkeypatch):
+    # As CTRLRUN_CONFIG does in §3.4: a blank path is a misconfiguration, and falling back
+    # would put an agent's effects in a store nobody is watching.
+    monkeypatch.setenv("CTRLRUN_STATE", "   ")
+
+    with pytest.raises(InvalidArgument):
+        Control.from_file(_policy_file(tmp_path))
+
+
+def test_an_in_memory_CTRLRUN_STATE_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("CTRLRUN_STATE", ":memory:")
+
+    with pytest.raises(InvalidArgument):
+        Control.from_file(_policy_file(tmp_path))
+
+
+def test_an_in_memory_uri_CTRLRUN_STATE_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("CTRLRUN_STATE", "file:state?mode=memory&cache=shared")
+
+    with pytest.raises(InvalidArgument):
+        Control.from_file(_policy_file(tmp_path))
 
 
 def test_an_undeclared_control_is_discovered_from_the_policy_file(tmp_path, monkeypatch):

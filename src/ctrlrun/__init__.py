@@ -12,12 +12,15 @@ from .approval import (
     ScriptedApprovalProvider,
 )
 from .control import Control, context, protect, with_approval
+from .effect import EffectRecord, EffectState
 from .errors import (
     ActionDenied,
+    AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
     ApprovalTimeout,
     CTRLRunError,
+    DuplicateEffect,
     EffectKeyError,
     InvalidArgument,
     NotExecuted,
@@ -25,11 +28,12 @@ from .errors import (
 )
 from .policy import Decision, Policy
 from .receipt import Event, Receipt
-from .state import InMemoryStateStore, StateStore
+from .state import InMemoryStateStore, SQLiteStateStore, StateStore
 
 __all__ = [
     "Action",
     "ActionDenied",
+    "AmbiguousEffect",
     "Approval",
     "ApprovalMismatch",
     "ApprovalProvider",
@@ -39,7 +43,10 @@ __all__ = [
     "CTRLRunError",
     "Control",
     "Decision",
+    "DuplicateEffect",
     "EffectKeyError",
+    "EffectRecord",
+    "EffectState",
     "Event",
     "InMemoryStateStore",
     "InvalidArgument",
@@ -49,6 +56,7 @@ __all__ = [
     "PolicyError",
     "Principal",
     "Receipt",
+    "SQLiteStateStore",
     "ScriptedApprovalProvider",
     "StateStore",
     "action_hash",

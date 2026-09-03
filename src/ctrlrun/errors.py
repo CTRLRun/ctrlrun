@@ -6,7 +6,12 @@ class CTRLRunError(Exception):
 
 
 class InvalidArgument(CTRLRunError):
-    """An Action field or argument cannot be canonicalized (SPEC-v0.1 §2.3)."""
+    """An argument cannot be accepted as given.
+
+    An Action field or argument that cannot be canonicalized (SPEC-v0.1 §2.3), and — the
+    same kind of wiring bug — a StateStore transition no record can make, such as committing
+    an effect nobody reserved.
+    """
 
 
 class PolicyError(CTRLRunError):
@@ -68,6 +73,37 @@ class ApprovalMismatch(CTRLRunError):
         super().__init__(message if message is not None else reason)
         self.reason = reason
         self.approval_id = approval_id
+
+
+class DuplicateEffect(CTRLRunError):
+    """This logical effect already happened, or is happening now (SPEC-v0.1 §5.4).
+
+    `state` is `committed` — the effect is done — or `in_progress`, meaning another attempt
+    holds a live reservation on the key. Neither permits a second execution.
+    """
+
+    def __init__(
+        self, message: str | None = None, *, state: str, effect_key: str | None = None
+    ) -> None:
+        super().__init__(message if message is not None else state)
+        self.state = state
+        self.effect_key = effect_key
+
+
+class AmbiguousEffect(CTRLRunError):
+    """The outcome of this effect is unknown; only a human may resolve it (SPEC-v0.1 §5.4).
+
+    Raised for a record already in `AMBIGUOUS`, and for one whose lease expired mid-flight:
+    the worker may have died after the remote committed. A retry is refused either way,
+    until `ctrlrun resolve` says which it was.
+    """
+
+    def __init__(
+        self, message: str | None = None, *, effect_key: str, action_id: str | None = None
+    ) -> None:
+        super().__init__(message if message is not None else effect_key)
+        self.effect_key = effect_key
+        self.action_id = action_id
 
 
 class NotExecuted(CTRLRunError):

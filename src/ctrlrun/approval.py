@@ -17,7 +17,13 @@ from enum import StrEnum
 from typing import Final, Protocol, runtime_checkable
 
 from .action import Action
-from .errors import ApprovalMismatch, ApprovalTimeout, InvalidArgument
+from .errors import (
+    ActionDenied,
+    ApprovalMismatch,
+    ApprovalTimeout,
+    CTRLRunError,
+    InvalidArgument,
+)
 
 #: SPEC-v0.1 §4.1 — an approval request lives for fifteen minutes unless told otherwise.
 DEFAULT_APPROVAL_TTL: Final = timedelta(minutes=15)
@@ -148,6 +154,98 @@ class ApprovalRecord:
             granted_at=self.granted_at,
             expires_at=self.expires_at,
         )
+
+
+@dataclass(frozen=True)
+class ApprovalVerdict:
+    """What a store must do about one approval it was handed (SPEC-v0.1 §4.2).
+
+    Exactly one of `record` and `refusal` is set. `expire` means the record must first be
+    marked `expired`, and that write kept even though the approval is refused: a lapsed
+    approval is evidence, not something to roll back.
+    """
+
+    record: ApprovalRecord | None = None
+    refusal: CTRLRunError | None = None
+    expire: bool = False
+
+
+def check_consumable(
+    record: ApprovalRecord | None, approval_id: str, action_hash: str, now: datetime
+) -> ApprovalVerdict:
+    """Decide whether a presented approval authorizes this action (SPEC-v0.1 §4.2).
+
+    Pure: it reads a record and returns a verdict, so every store applies the same rules and
+    performs the same writes. The hash is checked *before* the status, so a mutated action
+    leaves the approval untouched and still grantable for the action the human actually saw
+    (A1, acceptance test T2).
+    """
+    if record is None:
+        return ApprovalVerdict(
+            refusal=ApprovalMismatch(
+                f"no approval {approval_id}", reason=UNKNOWN_APPROVAL, approval_id=approval_id
+            )
+        )
+    if record.action_hash != action_hash:
+        return ApprovalVerdict(
+            refusal=ApprovalMismatch(
+                f"approval {approval_id} authorizes {record.action_hash}, not {action_hash}",
+                reason=HASH_MISMATCH,
+                approval_id=approval_id,
+            )
+        )
+    if record.status is ApprovalStatus.DENIED:
+        return ApprovalVerdict(
+            refusal=ActionDenied(
+                f"approval {approval_id} was denied by {record.approver}",
+                reason=APPROVAL_DENIED,
+            )
+        )
+    if record.status is not ApprovalStatus.GRANTED:
+        return ApprovalVerdict(
+            refusal=ApprovalMismatch(
+                f"approval {approval_id} is {record.status}, not granted",
+                reason=str(record.status),
+                approval_id=approval_id,
+            )
+        )
+    if now > record.expires_at:
+        # A3: expiry is checked here, at consumption, not only at grant time.
+        return ApprovalVerdict(refusal=_expired(record, approval_id), expire=True)
+    return ApprovalVerdict(record=record)
+
+
+def check_answerable(
+    record: ApprovalRecord | None, approval_id: str, now: datetime
+) -> ApprovalVerdict:
+    """Decide whether a request may still be granted or denied (SPEC-v0.1 §4.1)."""
+    if record is None:
+        return ApprovalVerdict(
+            refusal=ApprovalMismatch(
+                f"no approval request {approval_id}",
+                reason=UNKNOWN_APPROVAL,
+                approval_id=approval_id,
+            )
+        )
+    if record.status is not ApprovalStatus.PENDING:
+        return ApprovalVerdict(
+            refusal=ApprovalMismatch(
+                f"approval request {approval_id} is already {record.status}",
+                reason=str(record.status),
+                approval_id=approval_id,
+            )
+        )
+    if now > record.expires_at:
+        return ApprovalVerdict(refusal=_expired(record, approval_id), expire=True)
+    return ApprovalVerdict(record=record)
+
+
+def _expired(record: ApprovalRecord, approval_id: str) -> ApprovalMismatch:
+    return ApprovalMismatch(
+        f"approval {approval_id} expired at {record.expires_at.isoformat()}",
+        reason=str(ApprovalStatus.EXPIRED),
+        approval_id=approval_id,
+    )
 
 
 class ApprovalStore(Protocol):

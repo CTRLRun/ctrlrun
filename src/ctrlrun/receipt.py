@@ -147,3 +147,34 @@ class Receipt:
     def to_json(self) -> str:
         """One JSONL line. Enums render by value (SPEC-v0.1 §6.1)."""
         return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]) -> Receipt:
+        """The inverse of `to_dict`: a receipt read back out of a store or a JSONL file."""
+        principal = document["principal"]
+        return cls(
+            receipt_id=document["receipt_id"],
+            action_id=document["action_id"],
+            action=document["action"],
+            action_hash=document["action_hash"],
+            principal=Principal(agent=principal["agent"], user=principal["user"]),
+            resource=document["resource"],
+            arguments=document["arguments"],
+            environment=document["environment"],
+            decision=Decision(document["decision"]),
+            decision_reason=document["decision_reason"],
+            approval_id=document["approval_id"],
+            approver=document["approver"],
+            effect_key=document["effect_key"],
+            attempt=document["attempt"],
+            result=ReceiptResult(document["result"]),
+            error=document["error"],
+            started_at=datetime.fromisoformat(document["started_at"]),
+            finished_at=datetime.fromisoformat(document["finished_at"]),
+        )
+
+    @classmethod
+    def from_json(cls, line: str) -> Receipt:
+        """Parse one JSONL line written by `to_json`."""
+        document: dict[str, Any] = json.loads(line)
+        return cls.from_dict(document)

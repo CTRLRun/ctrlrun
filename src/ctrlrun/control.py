@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final, ParamSpec, TypeVar
 
 from .action import Action, Principal
@@ -27,22 +28,26 @@ from .approval import (
     LocalApprovalProvider,
 )
 from .effect import (
+    DEFAULT_LEASE,
     UNRESOLVED_EFFECT,
+    Reservation,
     resolve_effect_key,
     resolve_resource,
     template_placeholders,
 )
 from .errors import (
     ActionDenied,
+    AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
+    DuplicateEffect,
     EffectKeyError,
     InvalidArgument,
     NotExecuted,
 )
 from .policy import Decision, Evaluation, Policy
 from .receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, new_receipt_id
-from .state import InMemoryStateStore, StateStore
+from .state import SQLiteStateStore, StateStore
 
 _LOG = logging.getLogger(__name__)
 
@@ -53,6 +58,11 @@ DEFAULT_ENVIRONMENT: Final = "production"
 
 #: Denial reason when a protected function is called outside `ctrlrun.context()`.
 NO_PRINCIPAL: Final = "no_principal"
+
+#: Where `Control.from_file` keeps its store, and the env var that overrides it (SPEC §8).
+STATE_ENV_VAR: Final = "CTRLRUN_STATE"
+DEFAULT_STATE_DIR: Final = ".ctrlrun"
+DEFAULT_STATE_FILENAME: Final = "state.db"
 
 
 def _utc_now() -> datetime:
@@ -144,11 +154,13 @@ class Control:
         """Build a Control from a policy file (`$CTRLRUN_CONFIG`, else `./ctrlrun.yaml`).
 
         A missing or malformed policy raises `PolicyError`: a Control cannot be constructed
-        without one (SPEC-v0.1 §3.4).
+        without one (SPEC-v0.1 §3.4). State lands in `.ctrlrun/state.db` beside the policy —
+        or wherever `$CTRLRUN_STATE` says — so approvals and effects outlive the process and
+        are shared by every worker that loaded the same policy (§5.3 E1, §8).
         """
-        # SPEC: §5.3 — SQLiteStateStore replaces this default with build-list item 6.
-        store = InMemoryStateStore()
-        return cls(Policy.from_file(path), store, LocalApprovalProvider(store))
+        policy = Policy.from_file(path)
+        store = SQLiteStateStore(_state_path(policy.source))
+        return cls(policy, store, LocalApprovalProvider(store))
 
     @property
     def policy(self) -> Policy:
@@ -182,16 +194,6 @@ class Control:
         """
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
-        if effect_key is not None:
-            # SPEC: §5.3 — the key is carried through the evidence here, but reserving it
-            # atomically is build-list item 6. Until that lands, a declared effect buys
-            # traceability and no duplicate protection, which is worth saying out loud.
-            _LOG.warning(
-                "%s: effect %r is recorded but not reserved: duplicate protection arrives "
-                "with build-list item 6",
-                action.name,
-                effect_key,
-            )
 
         started_at = self._clock()
         self._append(
@@ -215,16 +217,28 @@ class Control:
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
-        approval = (
-            self._authorize(action, evaluation, started_at, effect_key)
-            if evaluation.decision is Decision.APPROVE
-            else None
-        )
+        approval, reservation = self._secure(action, evaluation, started_at, effect_key)
+        attempt = 1 if reservation is None else reservation.attempt
 
+        if effect_key is not None:
+            try:
+                self._store.begin_execution(effect_key, action.action_id)
+            except (DuplicateEffect, AmbiguousEffect) as refused:
+                # The key was taken from under this attempt between winning it and starting:
+                # its lease expired and another attempt declared the effect AMBIGUOUS. The
+                # refusal is terminal for this proposal, so it gets a receipt like any other.
+                self._refused(
+                    action, evaluation, started_at, effect_key, refused, approval=approval
+                )
+                raise
         self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
         try:
-            executor()
+            result = executor()
         except NotExecuted as exc:
+            if effect_key is not None:
+                # SPEC §5.5 — the executor asserted the remote side did nothing, so this is
+                # the one outcome that leaves the key retryable (§5.4).
+                self._store.fail_effect(effect_key, action.action_id, str(exc))
             self._append(
                 EventType.EXECUTION_FAILED,
                 action,
@@ -240,6 +254,7 @@ class Control:
                 error=str(exc),
                 approval=approval,
                 effect_key=effect_key,
+                attempt=attempt,
             )
             raise
         except BaseException as exc:
@@ -248,6 +263,8 @@ class Control:
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
+            if effect_key is not None:
+                self._store.mark_ambiguous(effect_key, action.action_id, error)
             self._append(
                 EventType.EXECUTION_AMBIGUOUS,
                 action,
@@ -263,8 +280,11 @@ class Control:
                 error=error,
                 approval=approval,
                 effect_key=effect_key,
+                attempt=attempt,
             )
             raise
+        if effect_key is not None:
+            self._store.commit_effect(effect_key, action.action_id, result)
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
         return self._record(
             action,
@@ -273,6 +293,7 @@ class Control:
             started_at,
             approval=approval,
             effect_key=effect_key,
+            attempt=attempt,
         )
 
     # --- the effect key (SPEC-v0.1 §5.1) ------------------------------------------------
@@ -309,54 +330,40 @@ class Control:
             )
             raise
 
-    # --- the APPROVE path (SPEC-v0.1 §4.2) --------------------------------------------
+    # --- authority and the effect key (SPEC-v0.1 §4.2, §5.3) --------------------------
 
-    def _authorize(
+    def _secure(
         self,
         action: Action,
         evaluation: Evaluation,
         started_at: datetime,
-        effect_key: str | None = None,
-    ) -> Approval:
-        """Turn an APPROVE decision into a consumed approval, or refuse the action.
+        effect_key: str | None,
+    ) -> tuple[Approval | None, Reservation | None]:
+        """Take everything this action needs before it may run: the grant, and the key.
 
-        With no approval presented, the request is recorded and `ApprovalRequired` is raised
-        so the caller can come back with `with_approval(request_id)` (SPEC-v0.1 §4.3). No
-        receipt is written for that: the action is suspended awaiting a human, which is not
-        a terminal state (§6.1). The `APPROVAL_REQUESTED` event is the evidence.
+        Both are taken in one store transaction (SPEC-v0.1 §4.2 A4). The approval is checked
+        first, so a replayed approval is what gets raised when a duplicate effect would also
+        apply (T4), and a refused reservation leaves the approval granted for the action the
+        human actually saw (T12).
         """
-        presented = _PRESENTED_APPROVAL.get(None)
-        if presented is None:
-            request = self._approvals.request(action, self._approval_ttl)
-            self._append(
-                EventType.APPROVAL_REQUESTED,
-                action,
-                {
-                    "action_hash": action.action_hash,
-                    "expires_at": iso_timestamp(request.expires_at),
-                },
-                effect_key,
-                approval_id=request.request_id,
-            )
-            raise ApprovalRequired(
-                f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
-                f"then retry inside ctrlrun.with_approval({request.request_id!r})",
-                request_id=request.request_id,
-                action_id=action.action_id,
-            )
+        approval_id = (
+            self._presented(action, effect_key) if evaluation.decision is Decision.APPROVE else None
+        )
+        if approval_id is None and effect_key is None:
+            return None, None
 
         try:
-            approval = self._store.consume_approval(presented, action.action_hash)
+            approval, reservation = self._take(action, approval_id, effect_key)
         except ActionDenied as denied:
             # The store raises this when the record says a human refused. §4.2 makes that a
             # denial of the action, not a mismatch: nothing about the action was wrong.
-            approver = self._approver_of(presented)
+            approver = self._approver_of(approval_id)
             self._append(
                 EventType.APPROVAL_DENIED,
                 action,
                 {"approver": approver},
                 effect_key,
-                approval_id=presented,
+                approval_id=approval_id,
             )
             self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key)
             self._record(
@@ -365,7 +372,7 @@ class Control:
                 ReceiptResult.DENIED,
                 started_at,
                 error=str(denied),
-                approval_id=presented,
+                approval_id=approval_id,
                 approver=approver,
                 effect_key=effect_key,
             )
@@ -375,14 +382,14 @@ class Control:
         except ApprovalMismatch as mismatch:
             if mismatch.reason == ApprovalStatus.EXPIRED:
                 self._append(
-                    EventType.APPROVAL_EXPIRED, action, {}, effect_key, approval_id=presented
+                    EventType.APPROVAL_EXPIRED, action, {}, effect_key, approval_id=approval_id
                 )
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
                 {"reason": mismatch.reason, "action_hash": action.action_hash},
                 effect_key,
-                approval_id=presented,
+                approval_id=approval_id,
             )
             self._record(
                 action,
@@ -390,23 +397,115 @@ class Control:
                 ReceiptResult.BLOCKED,
                 started_at,
                 error=str(mismatch),
-                approval_id=presented,
-                approver=self._approver_of(presented),
+                approval_id=approval_id,
+                approver=self._approver_of(approval_id),
                 effect_key=effect_key,
             )
             raise
+        except (DuplicateEffect, AmbiguousEffect) as refused:
+            # SPEC §5.4 — this effect already happened, is happening, or ended unknown. The
+            # approval, if one was presented, was not consumed: it is still worth something.
+            self._refused(
+                action, evaluation, started_at, effect_key, refused, approval_id=approval_id
+            )
+            raise
 
+        if approval is not None:
+            self._append(
+                EventType.APPROVAL_CONSUMED,
+                action,
+                {"approver": approval.approver},
+                effect_key,
+                approval_id=approval.approval_id,
+            )
+        if reservation is not None:
+            self._append(
+                EventType.EFFECT_RESERVED,
+                action,
+                {
+                    "attempt": reservation.attempt,
+                    "lease_expires_at": iso_timestamp(reservation.lease_expires_at),
+                },
+                effect_key,
+                approval=approval,
+            )
+        return approval, reservation
+
+    def _refused(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        refused: DuplicateEffect | AmbiguousEffect,
+        *,
+        approval: Approval | None = None,
+        approval_id: str | None = None,
+    ) -> None:
+        """Record a refusal by the effect key: the event, and a `blocked` receipt (§6.1)."""
+        presented = approval.approval_id if approval is not None else approval_id
         self._append(
-            EventType.APPROVAL_CONSUMED,
+            EventType.EFFECT_RESERVATION_REFUSED,
             action,
-            {"approver": approval.approver},
+            _refusal_data(refused),
             effect_key,
-            approval_id=approval.approval_id,
+            approval_id=presented,
         )
-        return approval
+        self._record(
+            action,
+            evaluation,
+            ReceiptResult.BLOCKED,
+            started_at,
+            error=str(refused),
+            approval_id=presented,
+            approver=self._approver_of(presented),
+            effect_key=effect_key,
+        )
 
-    def _approver_of(self, approval_id: str) -> str | None:
+    def _presented(self, action: Action, effect_key: str | None) -> str:
+        """The approval this call presents, or record a request and suspend the action.
+
+        With nothing presented, `ApprovalRequired` is raised so the caller can come back with
+        `with_approval(request_id)` (SPEC-v0.1 §4.3). No receipt is written for that: the
+        action is suspended awaiting a human, which is not a terminal state (§6.1). The
+        `APPROVAL_REQUESTED` event is the evidence.
+        """
+        presented = _PRESENTED_APPROVAL.get(None)
+        if presented is not None:
+            return presented
+        request = self._approvals.request(action, self._approval_ttl)
+        self._append(
+            EventType.APPROVAL_REQUESTED,
+            action,
+            {"action_hash": action.action_hash, "expires_at": iso_timestamp(request.expires_at)},
+            effect_key,
+            approval_id=request.request_id,
+        )
+        raise ApprovalRequired(
+            f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
+            f"then retry inside ctrlrun.with_approval({request.request_id!r})",
+            request_id=request.request_id,
+            action_id=action.action_id,
+        )
+
+    def _take(
+        self, action: Action, approval_id: str | None, effect_key: str | None
+    ) -> tuple[Approval | None, Reservation | None]:
+        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4)."""
+        if approval_id is not None and effect_key is not None:
+            return self._store.consume_approval_and_reserve(
+                approval_id, action.action_hash, effect_key, action.action_id, DEFAULT_LEASE
+            )
+        if approval_id is not None:
+            return self._store.consume_approval(approval_id, action.action_hash), None
+        if effect_key is not None:
+            return None, self._store.reserve_effect(effect_key, action.action_id, DEFAULT_LEASE)
+        return None, None
+
+    def _approver_of(self, approval_id: str | None) -> str | None:
         """Who answered, for the evidence trail. `None` if there is no such record."""
+        if approval_id is None:
+            return None
         record = self._store.get_approval(approval_id)
         return None if record is None else record.approver
 
@@ -445,6 +544,7 @@ class Control:
         approval_id: str | None = None,
         approver: str | None = None,
         effect_key: str | None = None,
+        attempt: int = 1,
     ) -> Receipt:
         receipt = Receipt(
             receipt_id=new_receipt_id(),
@@ -460,6 +560,7 @@ class Control:
             approval_id=approval.approval_id if approval is not None else approval_id,
             approver=approval.approver if approval is not None else approver,
             effect_key=effect_key,
+            attempt=attempt,
             result=result,
             started_at=started_at,
             finished_at=self._clock(),
@@ -467,6 +568,32 @@ class Control:
         )
         self._store.put_receipt(receipt)
         return receipt
+
+
+def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
+    """Why a reservation was refused, for `EFFECT_RESERVATION_REFUSED` (SPEC §5.4, §6.2)."""
+    if isinstance(refused, DuplicateEffect):
+        return {"reason": "duplicate", "state": refused.state}
+    return {"reason": "ambiguous"}
+
+
+def _state_path(source: str) -> Path:
+    """Where `Control.from_file` keeps its state (SPEC-v0.1 §8).
+
+    `.ctrlrun/state.db` beside the policy file, unless `$CTRLRUN_STATE` names somewhere else.
+    Beside the policy, not beside the process: workers started from different directories but
+    sharing a policy must share one store, or reservation is atomic within each of them and
+    meaningless between them (§5.3 E1). Set but empty is a misconfiguration, not a licence to
+    fall back to the default — an agent's effects would land in a store nobody is watching.
+    """
+    configured = os.environ.get(STATE_ENV_VAR)
+    if configured is None:
+        return Path(source).parent / DEFAULT_STATE_DIR / DEFAULT_STATE_FILENAME
+    if not configured.strip():
+        raise InvalidArgument(
+            f"{STATE_ENV_VAR} is set but empty; unset it or point it at a state database"
+        )
+    return Path(configured)
 
 
 _DEFAULT_CONTROL: Control | None = None
@@ -535,8 +662,10 @@ def protect(
             effect_key = resolved._resolve_effect(action, effect)
             returned: list[R] = []
 
-            def executor() -> None:
-                returned.append(_invoke(func, signature, action.canonical_arguments))
+            def executor() -> R:
+                value = _invoke(func, signature, action.canonical_arguments)
+                returned.append(value)
+                return value
 
             try:
                 resolved.execute(action, executor, effect_key)
