@@ -29,7 +29,7 @@ RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v1"
 RECEIPTS_FILENAME: Final = "receipts.jsonl"
 EVENTS_FILENAME: Final = "events.jsonl"
 
-_ID_HEX_BYTES: Final = 6  # "ctr_" + 12 hex chars
+_ID_HEX_BYTES: Final = 16  # "ctr_" + 32 hex chars
 
 
 def new_receipt_id() -> str:

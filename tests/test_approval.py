@@ -384,7 +384,7 @@ def test_wait_false_raises_ApprovalRequired_carrying_the_request_id(control, sto
 
     request_id = excinfo.value.request_id
     assert request_id.startswith("apr_")
-    assert len(request_id) == len("apr_") + 12
+    assert len(request_id) == len("apr_") + 32  # 128 bits: it becomes a bearer token in v0.2
     assert calls == []
 
 

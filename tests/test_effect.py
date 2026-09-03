@@ -6,6 +6,8 @@ it cannot: never a silent `None`.
 """
 
 import json
+import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +26,7 @@ from ctrlrun import (
     NotExecuted,
     Policy,
     Principal,
+    SQLiteStateStore,
     context,
     protect,
 )
@@ -1515,3 +1518,45 @@ def test_a_store_refuses_a_lease_that_is_not_positive(state_store, lease):
         state_store.reserve_effect("refund:txn_1", "act_1", lease)
 
     assert state_store.get_effect("refund:txn_1") is None
+
+
+# --- the store releases what it opened (ARCHITECTURE §5) -------------------------------
+
+
+def test_close_releases_every_thread_the_store_opened(tmp_path):
+    """`close()` is a shutdown, not a per-thread courtesy.
+
+    A worker pool touches the store from many threads, and each gets its own connection
+    (sqlite3 connections are not shareable). Closing only the caller's would leave one open
+    file handle per thread that ever ran an action. Deterministic on purpose: the worker
+    threads are joined before `close()`, so a leak fails red rather than sometimes.
+    """
+    store = SQLiteStateStore(tmp_path / "state.db")
+    threads = [
+        threading.Thread(target=lambda index=index: store.reserve_effect(f"e:{index}", "act_1"))
+        for index in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    opened = set(store._open)
+    assert len(opened) == 5  # four workers, plus the one this thread opened
+
+    store.close()
+
+    assert store._open == set()
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+def test_the_store_is_usable_again_after_close(tmp_path):
+    """A thread whose connection `close()` tore down gets a fresh one, not a closed one."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.reserve_effect("refund:txn_1", "act_1")
+    store.close()
+
+    assert store.get_effect("refund:txn_1").state is EffectState.RESERVED
+    store.close()

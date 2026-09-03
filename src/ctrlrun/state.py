@@ -613,6 +613,8 @@ class SQLiteStateStore:
         self._path = Path(text)
         self._clock = clock
         self._local = threading.local()
+        self._open: set[sqlite3.Connection] = set()
+        self._open_lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._journal = EventLog(self._path.parent)
         self._connection().executescript(_SCHEMA)
@@ -627,23 +629,44 @@ class SQLiteStateStore:
         return self._journal
 
     def close(self) -> None:
-        """Close this thread's connection. Other threads keep theirs."""
-        connection = getattr(self._local, "connection", None)
-        if connection is not None:
+        """Close every connection this store opened, on whichever thread opened it.
+
+        A shutdown operation, not a per-thread one: a long-lived host that runs agents on a
+        thread pool would otherwise accumulate one open file handle per thread that ever
+        touched the store, and closing only the caller's would leave them all. A thread that
+        uses the store after this simply gets a fresh connection.
+
+        It is not safe to call while another thread is mid-transaction — that is the caller's
+        to arrange, as it is with any resource being torn down.
+        """
+        with self._open_lock:
+            connections, self._open = self._open, set()
+        for connection in connections:
             connection.close()
-            self._local.connection = None
 
     def _connection(self) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
-        if connection is None:
-            connection = sqlite3.connect(
-                self._path, isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000
-            )
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            connection.execute("PRAGMA synchronous=NORMAL")
-            self._local.connection = connection
+        if connection is not None:
+            with self._open_lock:
+                if connection in self._open:
+                    return connection
+            # `close()` tore this one down; open a fresh one rather than hand back a corpse.
+        # `check_same_thread=False` because `close()` closes other threads' connections. Each
+        # connection is still used by exactly one thread — that is what the thread-local is
+        # for — so the guard this drops was never the thing keeping them apart.
+        connection = sqlite3.connect(
+            self._path,
+            isolation_level=None,
+            timeout=BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        self._local.connection = connection
+        with self._open_lock:
+            self._open.add(connection)
         return connection
 
     # --- evidence ---------------------------------------------------------------------

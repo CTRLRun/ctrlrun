@@ -234,8 +234,11 @@ def _approval_replay(refund: Callable[..., Any], approvals: ScriptedApprovalProv
         approvals.wait(request_id, None)
         with with_approval(request_id):
             refund(payment_id="txn_4", amount=amount)
-        click.echo(f"   approval {request_id} used once  →  consumed")
-        click.echo(f"   {'same approval presented again':<35}  →")
+        used = f"approval {request_id} used once"
+        click.echo(f"   {used}  →  consumed")
+        # The two arrows line up, and the id's width is not a constant to hardcode: it grew
+        # once already (48 → 128 bits) and quietly knocked this column out of true.
+        click.echo(f"   {'same approval presented again':<{len(used)}}  →")
 
         def present_it_again() -> None:
             with with_approval(request_id):

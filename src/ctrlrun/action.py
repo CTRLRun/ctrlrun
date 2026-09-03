@@ -22,7 +22,7 @@ FrozenValue: TypeAlias = (
     "str | int | bool | tuple[FrozenValue, ...] | Mapping[str, FrozenValue] | None"
 )
 
-_ID_HEX_BYTES: Final = 6  # "act_" + 12 hex chars
+_ID_HEX_BYTES: Final = 16  # "act_" + 32 hex chars
 
 
 def _new_action_id() -> str:

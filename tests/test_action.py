@@ -141,7 +141,7 @@ def test_T7_action_id_has_the_specified_shape() -> None:
     action_id = _action().action_id
     assert action_id.startswith("act_")
     suffix = action_id.removeprefix("act_")
-    assert len(suffix) == 12
+    assert len(suffix) == 32
     assert set(suffix) <= set("0123456789abcdef")
 
 

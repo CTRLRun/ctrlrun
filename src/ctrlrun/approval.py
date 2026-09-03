@@ -37,7 +37,11 @@ HASH_MISMATCH: Final = "mismatch"
 #: `ActionDenied.reason` when the human said no.
 APPROVAL_DENIED: Final = "approval_denied"
 
-_ID_HEX_BYTES: Final = 6  # "apr_" + 12 hex chars
+#: "apr_" + 32 hex chars. 128 bits, not because anything in v0.1 can be attacked by guessing
+#: an approval id — consuming one needs write access to the store, which is game over anyway —
+#: but because a remote approval provider (v0.2, webhooks) turns this id into a bearer token,
+#: and an id format is not a thing you get to widen later without breaking every stored record.
+_ID_HEX_BYTES: Final = 16
 
 
 def _utc_now() -> datetime:
