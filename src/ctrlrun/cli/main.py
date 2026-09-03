@@ -473,6 +473,13 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
     is_flag=True,
     help="Permit an http:// webhook url, loopback only.",
 )
+@click.option("--otel", is_flag=True, help="Export one span per action (ctrlrun[otel]).")
+@click.option(
+    "--otel-arguments",
+    is_flag=True,
+    help="Include argument values as span attributes. Off by default: arguments carry "
+    "customer identifiers and amounts, and a trace backend is not the receipt store.",
+)
 def gateway(
     upstream: str,
     alias: str,
@@ -491,6 +498,8 @@ def gateway(
     webhook_url: str | None,
     webhook_secret_file: str | None,
     allow_insecure_webhook: bool,
+    otel: bool,
+    otel_arguments: bool,
 ) -> None:
     """Front an MCP server, applying this directory's policy to every tools/call."""
     host, _, port = listen.rpartition(":")
@@ -517,6 +526,8 @@ def gateway(
             webhook_url=webhook_url,
             webhook_secret_file=webhook_secret_file,
             allow_insecure_webhook=allow_insecure_webhook,
+            otel=otel,
+            otel_arguments=otel_arguments,
         )
     except CTRLRunError as exc:
         raise _fail(exc) from exc

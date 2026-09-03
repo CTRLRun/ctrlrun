@@ -261,6 +261,11 @@ class Control:
         return self._approvals
 
     @property
+    def sinks(self) -> tuple[EventSink, ...]:
+        """The sinks this Control fans out to, in registration order (SPEC-v0.2 §4.1)."""
+        return self._sinks
+
+    @property
     def lease(self) -> timedelta:
         """How long a reservation this Control takes is held for (SPEC-v0.1 §5.3 E3)."""
         return self._lease
