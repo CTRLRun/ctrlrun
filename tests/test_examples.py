@@ -50,6 +50,15 @@ SECTORS = (
 #: SPEC-v0.2 §1.1 — the header every template carries, verbatim.
 HEADER = "Starting point on the v0.1 kernel. Adapt before use."
 
+#: The rule the templates are shaped by, stated at the top of each so a reader can apply it
+#: to the actions their own system has rather than only to the ones listed. A template whose
+#: decisions cannot be re-derived is a list to copy, which is not what a template is for.
+DECISION_RULE = (
+    "cheap to undo",
+    "leaves the building",
+    "destroys the evidence",
+)
+
 #: Keys SPEC-v0.2 §3 adds. A template using one would not load on v0.1 at all, which is the
 #: whole reason §1.1 holds these to v0.1 primitives.
 V2_KEYS = ("effect:", "resource:", "mcp:")
@@ -210,6 +219,19 @@ def test_T31_every_template_carries_the_adapt_before_use_header(sector):
     text = (TEMPLATES / f"{sector}.yaml").read_text(encoding="utf-8")
 
     assert HEADER in text.splitlines()[0] or HEADER in "\n".join(text.splitlines()[:3])
+
+
+@pytest.mark.parametrize("sector", SECTORS)
+def test_T31_every_template_states_the_rule_its_decisions_follow(sector):
+    """The teaching, not the list: a reader has to be able to decide an action not shown.
+
+    Asserted in the preamble — the first dozen lines, above `schema:` — because a rule
+    buried under forty lines of YAML is a rule nobody reads before copying the file.
+    """
+    preamble = (TEMPLATES / f"{sector}.yaml").read_text(encoding="utf-8").split("schema:")[0]
+    missing = [clause for clause in DECISION_RULE if clause not in preamble]
+
+    assert not missing, f"{sector}.yaml does not state: {missing}"
 
 
 @pytest.mark.parametrize("sector", SECTORS)
