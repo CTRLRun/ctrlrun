@@ -26,10 +26,17 @@ from .approval import (
     ApprovalStatus,
     LocalApprovalProvider,
 )
+from .effect import (
+    UNRESOLVED_EFFECT,
+    resolve_effect_key,
+    resolve_resource,
+    template_placeholders,
+)
 from .errors import (
     ActionDenied,
     ApprovalMismatch,
     ApprovalRequired,
+    EffectKeyError,
     InvalidArgument,
     NotExecuted,
 )
@@ -169,43 +176,62 @@ class Control:
 
         The executor's own exceptions propagate: `NotExecuted` after a `failed` receipt,
         anything else after an `ambiguous` one (SPEC-v0.1 §5.5).
+
+        `effect_key` is the already-resolved logical effect identity (§5.1); it is recorded
+        on the receipt and on every event for this action.
         """
+        if effect_key is not None and not effect_key:
+            raise InvalidArgument("effect_key must be a non-empty string or None")
         if effect_key is not None:
-            # SPEC: §5.3 — atomic effect reservation is build-list item 6. Accepting a key
-            # and not reserving it would silently drop the duplicate protection it asks for.
-            raise NotImplementedError(
-                f"effect_key={effect_key!r}: effect reservation is not implemented yet "
-                "(build-list item 6)"
+            # SPEC: §5.3 — the key is carried through the evidence here, but reserving it
+            # atomically is build-list item 6. Until that lands, a declared effect buys
+            # traceability and no duplicate protection, which is worth saying out loud.
+            _LOG.warning(
+                "%s: effect %r is recorded but not reserved: duplicate protection arrives "
+                "with build-list item 6",
+                action.name,
+                effect_key,
             )
 
         started_at = self._clock()
-        self._append(EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash})
+        self._append(
+            EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash}, effect_key
+        )
         evaluation = self._policy.evaluate(action)
         self._append(
             EventType.POLICY_EVALUATED,
             action,
             {"decision": str(evaluation.decision), "reason": evaluation.reason},
+            effect_key,
         )
 
         if evaluation.decision is Decision.DENY:
-            self._append(EventType.ACTION_DENIED, action, {"reason": evaluation.reason})
-            self._record(action, evaluation, ReceiptResult.DENIED, started_at)
+            self._append(EventType.ACTION_DENIED, action, {"reason": evaluation.reason}, effect_key)
+            self._record(
+                action, evaluation, ReceiptResult.DENIED, started_at, effect_key=effect_key
+            )
             raise ActionDenied(
                 f"{action.name} denied: {evaluation.reason}",
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
         approval = (
-            self._authorize(action, evaluation, started_at)
+            self._authorize(action, evaluation, started_at, effect_key)
             if evaluation.decision is Decision.APPROVE
             else None
         )
 
-        self._append(EventType.EXECUTION_STARTED, action, {}, approval=approval)
+        self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
         try:
             executor()
         except NotExecuted as exc:
-            self._append(EventType.EXECUTION_FAILED, action, {"error": str(exc)}, approval=approval)
+            self._append(
+                EventType.EXECUTION_FAILED,
+                action,
+                {"error": str(exc)},
+                effect_key,
+                approval=approval,
+            )
             self._record(
                 action,
                 evaluation,
@@ -213,6 +239,7 @@ class Control:
                 started_at,
                 error=str(exc),
                 approval=approval,
+                effect_key=effect_key,
             )
             raise
         except BaseException as exc:
@@ -221,7 +248,13 @@ class Control:
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
-            self._append(EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, approval=approval)
+            self._append(
+                EventType.EXECUTION_AMBIGUOUS,
+                action,
+                {"error": error},
+                effect_key,
+                approval=approval,
+            )
             self._record(
                 action,
                 evaluation,
@@ -229,16 +262,62 @@ class Control:
                 started_at,
                 error=error,
                 approval=approval,
+                effect_key=effect_key,
             )
             raise
-        self._append(EventType.EXECUTION_COMMITTED, action, {}, approval=approval)
+        self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
         return self._record(
-            action, evaluation, ReceiptResult.COMMITTED, started_at, approval=approval
+            action,
+            evaluation,
+            ReceiptResult.COMMITTED,
+            started_at,
+            approval=approval,
+            effect_key=effect_key,
         )
+
+    # --- the effect key (SPEC-v0.1 §5.1) ------------------------------------------------
+
+    def _resolve_effect(self, action: Action, template: str | None) -> str | None:
+        """Resolve an effect template against a constructed action, or deny the action.
+
+        A missing placeholder is never a silent `None` (§5.1): the action is refused and
+        recorded as denied, before the policy is consulted. An action whose logical effect
+        cannot be identified cannot be protected against duplication, whatever the policy
+        would have said about it — and unlike a call outside `context()` (§2.1) there is a
+        principal here, so the refusal belongs in the evidence log.
+        """
+        if template is None:
+            return None
+        started_at = self._clock()
+        try:
+            return resolve_effect_key(template, action)
+        except EffectKeyError as exc:
+            self._append(EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash})
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {"reason": UNRESOLVED_EFFECT, "effect": template, "error": str(exc)},
+            )
+            # SPEC: §6.1 — a receipt needs a decision and the policy never rendered one, so
+            # the fail-closed value is recorded: denied, for a reason that is not a rule.
+            self._record(
+                action,
+                Evaluation(Decision.DENY, UNRESOLVED_EFFECT),
+                ReceiptResult.DENIED,
+                started_at,
+                error=str(exc),
+            )
+            raise
 
     # --- the APPROVE path (SPEC-v0.1 §4.2) --------------------------------------------
 
-    def _authorize(self, action: Action, evaluation: Evaluation, started_at: datetime) -> Approval:
+    def _authorize(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None = None,
+    ) -> Approval:
         """Turn an APPROVE decision into a consumed approval, or refuse the action.
 
         With no approval presented, the request is recorded and `ApprovalRequired` is raised
@@ -256,6 +335,7 @@ class Control:
                     "action_hash": action.action_hash,
                     "expires_at": iso_timestamp(request.expires_at),
                 },
+                effect_key,
                 approval_id=request.request_id,
             )
             raise ApprovalRequired(
@@ -272,9 +352,13 @@ class Control:
             # denial of the action, not a mismatch: nothing about the action was wrong.
             approver = self._approver_of(presented)
             self._append(
-                EventType.APPROVAL_DENIED, action, {"approver": approver}, approval_id=presented
+                EventType.APPROVAL_DENIED,
+                action,
+                {"approver": approver},
+                effect_key,
+                approval_id=presented,
             )
-            self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason})
+            self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key)
             self._record(
                 action,
                 evaluation,
@@ -283,17 +367,21 @@ class Control:
                 error=str(denied),
                 approval_id=presented,
                 approver=approver,
+                effect_key=effect_key,
             )
             raise ActionDenied(
                 str(denied), reason=denied.reason, action_id=action.action_id
             ) from denied
         except ApprovalMismatch as mismatch:
             if mismatch.reason == ApprovalStatus.EXPIRED:
-                self._append(EventType.APPROVAL_EXPIRED, action, {}, approval_id=presented)
+                self._append(
+                    EventType.APPROVAL_EXPIRED, action, {}, effect_key, approval_id=presented
+                )
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
                 {"reason": mismatch.reason, "action_hash": action.action_hash},
+                effect_key,
                 approval_id=presented,
             )
             self._record(
@@ -304,6 +392,7 @@ class Control:
                 error=str(mismatch),
                 approval_id=presented,
                 approver=self._approver_of(presented),
+                effect_key=effect_key,
             )
             raise
 
@@ -311,6 +400,7 @@ class Control:
             EventType.APPROVAL_CONSUMED,
             action,
             {"approver": approval.approver},
+            effect_key,
             approval_id=approval.approval_id,
         )
         return approval
@@ -327,6 +417,7 @@ class Control:
         type_: EventType,
         action: Action,
         data: Mapping[str, Any],
+        effect_key: str | None = None,
         *,
         approval: Approval | None = None,
         approval_id: str | None = None,
@@ -337,6 +428,7 @@ class Control:
                 action_id=action.action_id,
                 ts=self._clock(),
                 data=data,
+                effect_key=effect_key,
                 approval_id=approval_id if approval is None else approval.approval_id,
             )
         )
@@ -352,6 +444,7 @@ class Control:
         approval: Approval | None = None,
         approval_id: str | None = None,
         approver: str | None = None,
+        effect_key: str | None = None,
     ) -> Receipt:
         receipt = Receipt(
             receipt_id=new_receipt_id(),
@@ -366,6 +459,7 @@ class Control:
             decision_reason=evaluation.reason,
             approval_id=approval.approval_id if approval is not None else approval_id,
             approver=approval.approver if approval is not None else approver,
+            effect_key=effect_key,
             result=result,
             started_at=started_at,
             finished_at=self._clock(),
@@ -400,9 +494,14 @@ def protect(
 
     The wrapped function is the executor (SPEC-v0.1 §5.5), and it is invoked with the
     action's canonical arguments, never with the caller's own objects (§2.2).
+
+    `effect` and `resource` are templates over the call's arguments (§5.1). Their syntax is
+    checked here, at decoration time, so a typo fails at import rather than mid-agent-run.
     """
     if not name:
         raise InvalidArgument("protect(name=...) must be a non-empty action name")
+    _check_template(name, "effect", effect)
+    _check_template(name, "resource", resource)
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
@@ -410,20 +509,6 @@ def protect(
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            if effect is not None:
-                # SPEC-v0.1 §5.1 — the shared template resolver is build-list item 5.
-                raise NotImplementedError(
-                    f"{name}: effect={effect!r}: effect keys are not implemented yet "
-                    "(build-list item 5)"
-                )
-            if resource is not None and "{" in resource:
-                # SPEC-v0.1 §5.1 — `resource` is a template too, resolved by the same
-                # resolver against the bound arguments. Until item 5 lands, refuse rather
-                # than hash a literal `customer:{customer_id}` into the action.
-                raise NotImplementedError(
-                    f"{name}: resource={resource!r}: resource templates are not implemented "
-                    "yet (build-list item 5)"
-                )
             invocation = _CONTEXT.get(None)
             if invocation is None:
                 # SPEC-v0.1 §2.1 — a call outside context() is a wiring bug, not an agent
@@ -441,17 +526,20 @@ def protect(
                 name=name,
                 arguments=dict(bound.arguments),
                 principal=invocation.principal,
-                resource=resource,
+                # SPEC-v0.1 §5.1 — `resource` is part of the canonical form, so it resolves
+                # before the Action exists; the effect template resolves against the Action.
+                resource=None if resource is None else resolve_resource(resource, bound.arguments),
                 environment=invocation.environment,
             )
             resolved = control if control is not None else _default_control()
+            effect_key = resolved._resolve_effect(action, effect)
             returned: list[R] = []
 
             def executor() -> None:
                 returned.append(_invoke(func, signature, action.canonical_arguments))
 
             try:
-                resolved.execute(action, executor, effect_key=None)
+                resolved.execute(action, executor, effect_key)
             except ApprovalRequired as pending:
                 if not wait:
                     raise
@@ -460,12 +548,22 @@ def protect(
                 # the refusal belongs in the receipt Control writes, not in the decorator.
                 resolved.approvals.wait(pending.request_id, None)
                 with with_approval(pending.request_id):
-                    resolved.execute(action, executor, effect_key=None)
+                    resolved.execute(action, executor, effect_key)
             return returned[0]
 
         return wrapper
 
     return decorator
+
+
+def _check_template(name: str, kwarg: str, template: str | None) -> None:
+    """Reject a malformed `effect=` / `resource=` template at decoration time (SPEC §5.1)."""
+    if template is None:
+        return
+    try:
+        template_placeholders(template)
+    except InvalidArgument as exc:
+        raise InvalidArgument(f"protect({name!r}, {kwarg}=...): {exc}") from exc
 
 
 def _reject_variadic(signature: inspect.Signature, name: str) -> None:

@@ -240,6 +240,16 @@ An action with no `effect=` declared has no logical effect: no reservation, no d
 
 Effect keys are opaque strings, globally unique within a StateStore. Namespace them: `refund:{payment_id}`, not `{payment_id}`.
 
+**Template grammar.** A template is literal text and `{name}` placeholders, where `name` is an identifier — a letter or underscore, then letters, digits or underscores — because it names an argument, and an argument name is a Python parameter name. Nothing else: no `{{` escapes, no format specs, no attribute or index access, no unmatched brace. Anything else → `InvalidArgument`, raised by `@protect` at **decoration time**, so a typo fails at import rather than mid-run. The grammar is deliberately smaller than `str.format`: an effect key is an identity, not a formatted string, and a typo must never become part of one.
+
+**Placeholder values.** A placeholder MUST resolve to a non-empty `str` or an `int`, and `bool` is not an `int` here any more than it is in §3.2. `None`, `""`, `bool`, and any list or mapping → `EffectKeyError`. `None` and `""` identify nothing and would collide across unrelated actions; a container has no stable rendering; a `bool` names no effect. An `effect_key` passed directly to `Control.execute` is under the same rule: a non-empty string or `None`, anything else → `InvalidArgument`.
+
+**`{resource}` and an argument of the same name.** `{resource}` in an effect template names the action's `resource` field. If the action also carries an argument named `resource`, the template is ambiguous → `EffectKeyError`. Two candidate values for one identity is the fail-closed case: refuse, rather than silently pick the one the author did not mean, because which one it is decides whether two attempts are the same effect. `{resource}` on an action with no `resource` is a missing placeholder, as any other unresolvable name is.
+
+**Resolution order, and the shape of the refusal.** The effect key is resolved **before** the policy is evaluated. An action whose logical effect cannot be identified cannot be protected against duplication, whatever the policy would have said about it, and asking a human to approve an action that can never reserve wastes the one scarce resource in the system. So an unresolvable template refuses an action the policy would have allowed, and the refusal is recorded: receipt `result: "denied"`, `decision: "deny"`, `decision_reason: "effect_key_error"`, `effect_key: null`; events `ACTION_PROPOSED` then `ACTION_DENIED` with `data.reason = "effect_key_error"`, and **no** `POLICY_EVALUATED`, because the policy never ran. The `decision` is the fail-closed value rather than a rule the policy reached — the reason says which. Unlike a call outside `context()` (§2.1), there is a principal here to attribute the refusal to, so it belongs in the evidence log.
+
+**`EffectKeyError` is not an `ActionDenied`.** It subclasses `CTRLRunError` directly. "The action is denied" above describes the outcome, not the exception: an unresolvable template is a wiring bug in the agent's own code, and an agent loop's `except ActionDenied` — written to handle a policy saying no — must not swallow it.
+
 ### 5.2 States
 
 ```python

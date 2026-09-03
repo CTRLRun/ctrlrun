@@ -13,6 +13,14 @@ class PolicyError(CTRLRunError):
     """The policy is missing, unreadable, or malformed. Raised at load time (SPEC-v0.1 §3.4)."""
 
 
+class EffectKeyError(CTRLRunError):
+    """An effect template cannot be resolved to a key (SPEC-v0.1 §5.1).
+
+    The action is refused rather than executed without an effect key: an action whose
+    logical effect cannot be identified cannot be protected against duplication.
+    """
+
+
 class ActionDenied(CTRLRunError):
     """The action may not run. `reason` says why, e.g. `unknown_action` (SPEC-v0.1 §3.4)."""
 

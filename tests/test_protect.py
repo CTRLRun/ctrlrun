@@ -526,29 +526,33 @@ def test_an_APPROVE_decision_suspends_the_call_with_ApprovalRequired(control, st
     assert _event_types(store)[-1] == EventType.APPROVAL_REQUESTED
 
 
-# --- deferred to later build-list items ------------------------------------------------
+# --- effect and resource templates (SPEC §5.1; in depth in tests/test_effect.py) -------
 
 
-def test_an_effect_template_is_not_implemented_yet(control):
+def test_an_effect_template_reaches_the_receipt(control, store):
     @protect("customer.read", effect="read:{customer_id}", control=control)
     def read(customer_id: str) -> None: ...
 
-    with context(agent="support-agent"), pytest.raises(NotImplementedError):
+    with context(agent="support-agent"):
         read("cus_1")
 
+    assert store.receipts()[0].effect_key == "read:cus_1"
 
-def test_an_effect_key_passed_to_execute_is_not_implemented_yet(control):
+
+def test_an_effect_key_passed_to_execute_reaches_the_receipt(control):
     action = Action(name="customer.read", arguments={}, principal=Principal(agent="a"))
-    with pytest.raises(NotImplementedError):
-        control.execute(action, lambda: None, effect_key="read:cus_1")
+    receipt = control.execute(action, lambda: None, effect_key="read:cus_1")
+    assert receipt.effect_key == "read:cus_1"
 
 
-def test_a_templated_resource_is_not_implemented_yet(control):
+def test_a_templated_resource_reaches_the_receipt(control, store):
     @protect("customer.read", resource="customer:{customer_id}", control=control)
     def read(customer_id: str) -> None: ...
 
-    with context(agent="support-agent"), pytest.raises(NotImplementedError):
+    with context(agent="support-agent"):
         read("cus_1")
+
+    assert store.receipts()[0].resource == "customer:cus_1"
 
 
 def test_a_literal_resource_reaches_the_receipt(control, store):
