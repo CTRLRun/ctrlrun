@@ -86,6 +86,12 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # SPEC-v0.1 §5.3 freezes `commit_effect(effect_key, action_id, result: Any)`. An executor's
 # return value has no narrower type, and the store only serializes it.
 "src/ctrlrun/state.py" = ["ANN401"]
+# The gateway's subject matter is untyped JSON off a socket: a JSON-RPC `params`, a tool's
+# result, an HTTP client's response object behind a lazy import. Narrowing those to a lie
+# would be worse than saying `Any` and validating at the boundary, which is what mcp.py
+# does. N818: the error names follow this codebase's convention (DuplicateEffect,
+# AmbiguousEffect), not the suffix rule.
+"src/ctrlrun/gateway/*.py" = ["ANN401", "N818"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]

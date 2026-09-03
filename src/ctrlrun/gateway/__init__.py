@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import importlib
 from types import ModuleType
-from typing import Final, NoReturn
+from typing import Any, Final
 
 from ..errors import MissingDependency
 
@@ -36,14 +36,24 @@ def http_client() -> ModuleType:
         raise MissingDependency(_HTTP_CLIENT, _EXTRA) from exc
 
 
-def serve(*, upstream: str, alias: str, **options: object) -> NoReturn:
+def serve(*, upstream: str, alias: str, **options: Any) -> None:
     """Run a gateway in front of one upstream MCP server (SPEC-v0.2 §6.1).
 
     The dependency check happens first and unconditionally, so an operator who has not
     installed the extra learns it from one clear line rather than from a stack trace.
+
+    Blocks until interrupted. `Control.from_file()` finds the policy and the store, so a
+    gateway and a decorator-based worker sharing a policy share reservations (§6.1).
     """
     http_client()
-    raise NotImplementedError(
-        "the gateway's request handling arrives with build-list items 6b-6d; "
-        "this release ships the StateStore half it stands on (SPEC-v0.2 §6.9.4, §6.10)"
-    )
+    from ..control import Control
+    from .server import Gateway, GatewayConfig, httpx_forwarder, serve_forever
+
+    config = GatewayConfig(upstream=upstream, alias=alias, **options)
+    control = Control.from_file()
+    forwarder = httpx_forwarder(config)
+    try:
+        serve_forever(Gateway(config, control, forwarder))
+    finally:
+        forwarder.close()
+        control.store.close()

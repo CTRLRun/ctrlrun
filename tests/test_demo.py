@@ -942,7 +942,7 @@ def test_an_empty_CTRLRUN_CONFIG_is_refused(workspace, monkeypatch):
 
 
 def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
-    """SPEC-v0.1 §8, plus what SPEC-v0.2 §11 adds. `gateway` arrives with item 6."""
+    """SPEC-v0.1 §8, plus what SPEC-v0.2 §11 adds."""
     assert set(main.commands) == {
         "init",
         "demo",
@@ -952,6 +952,7 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         "effects",
         "resolve",
         "inspect",
+        "gateway",
     }
 
 
