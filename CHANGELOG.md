@@ -19,10 +19,8 @@ First packaged release. The v0.1 kernel is complete: every acceptance test in
 - **Action** — canonical form, `action_hash`, deep-frozen arguments. `float` is rejected in
   arguments: `0.1` and `0.10` are the same money and different hashes.
 - **Policy** — YAML loader with `ALLOW` / `APPROVE` / `DENY` and fail-closed defaults. An
-  unknown action is denied; there is no default-allow. A condition naming an `Action` field
-  rather than an argument — `environment_eq`, `agent_eq` — is refused at load, and a
-  condition on an argument the action does not carry logs a warning instead of failing
-  silently: a mistyped rule must not disappear into a catch-all `allow` below it.
+  unknown action is denied; there is no default-allow. See the config-breaking rule below
+  for how condition keys are validated.
 - **`@ctrlrun.protect()`** — binds a function call to an Action, evaluates it, and executes
   from the action's canonical arguments rather than the caller's objects.
 - **Approval binding** — approvals carry the `action_hash` of what a human saw, and are
@@ -36,6 +34,24 @@ First packaged release. The v0.1 kernel is complete: every acceptance test in
 - **CLI** — `init`, `demo`, `approve`, `deny`, `receipts`, `effects`, `resolve`.
 - **`ctrlrun demo`** — four failure scenarios, in process, no network.
 - `SECURITY.md` and `docs/CLAIMS.md`, which maps every README claim to its code and test.
+
+### Config-breaking rules
+
+Rules that reject a policy file which an earlier build of this kernel would have loaded.
+A `ctrlrun.yaml` written before this release may need an edit; the process refuses to start
+until it gets one, which is the point.
+
+- **A condition key naming an `Action` field is now a load-time `PolicyError`.** The
+  reserved names are `action_id`, `agent`, `environment`, `principal`, `resource` and
+  `user`. `when: { environment_eq: production }` reads exactly like it scopes a rule to
+  production, and matched nothing at all — conditions address an action's *arguments*, and
+  those are not arguments. Combined with a catch-all `decision: allow` beneath it, a rule
+  that looked restrictive silently permitted everything. If a protected function genuinely
+  takes an argument by one of those names, rename the argument (SPEC-v0.1 §3.2). Only the
+  whole name is reserved: `resource_id_eq` is unaffected.
+- **A condition on an argument the action does not carry now logs a warning.** The decision
+  is unchanged — still false, still never an error, per SPEC-v0.1 §3.2 — but a typo such as
+  `amont_lte` no longer disappears in silence. Nothing to edit; expect new log output.
 
 ### Notes
 
