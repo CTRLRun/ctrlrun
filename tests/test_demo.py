@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -615,9 +616,9 @@ def test_the_readme_demo_section_shows_the_amounts_the_demo_uses():
     printed = re.findall(r"€[\d,]+", _readme_demo_section())
 
     remaining = iter(printed)
-    assert all(
-        _euros(amount) in remaining for amount in README_AMOUNTS
-    ), f"expected {[_euros(a) for a in README_AMOUNTS]} in order, got {printed}"
+    assert all(_euros(amount) in remaining for amount in README_AMOUNTS), (
+        f"expected {[_euros(a) for a in README_AMOUNTS]} in order, got {printed}"
+    )
 
 
 def test_T11_the_demo_leaves_the_operators_own_store_alone(demo_run):
@@ -655,6 +656,44 @@ def test_the_shipped_example_policy_is_the_one_in_the_repository():
         pytest.skip("no repository checkout")
 
     assert example.read_text(encoding="utf-8") == EXAMPLE_POLICY
+
+
+#: Files outside the package that the test suite opens, and that must therefore travel in the
+#: sdist for a distribution packager to be able to run these tests at all.
+SOURCE_TREE_FIXTURES = ("ctrlrun.example.yaml", "tests/conftest.py")
+
+
+def _manifest_carries(manifest: str, path: str) -> bool:
+    """Whether MANIFEST.in's include rules match `path`, a repo-relative POSIX path."""
+    for line in manifest.splitlines():
+        command, _, rest = line.partition(" ")
+        words = rest.split()
+        if command == "include" and any(fnmatch(path, pattern) for pattern in words):
+            return True
+        if command == "recursive-include" and words:
+            directory, patterns = words[0], words[1:]
+            if path.startswith(f"{directory}/") and any(
+                fnmatch(Path(path).name, pattern) for pattern in patterns
+            ):
+                return True
+    return False
+
+
+def test_the_sdist_carries_everything_the_tests_need():
+    """The sdist ships `tests/`, so it must ship what `tests/` reads (MANIFEST.in).
+
+    An sdist carrying tests that cannot run is worse than one carrying none: a packager
+    reads the failure as a broken release. CI builds the sdist and runs the suite out of it,
+    which is the real guard; this is the fast one that fails in the editor instead.
+    """
+    root = Path(__file__).resolve().parents[1]
+    manifest = root / "MANIFEST.in"
+    if not manifest.exists():  # installed without the source tree
+        pytest.skip("no repository checkout")
+
+    rules = manifest.read_text(encoding="utf-8")
+    missing = [name for name in SOURCE_TREE_FIXTURES if not _manifest_carries(rules, name)]
+    assert not missing, f"MANIFEST.in does not carry: {missing}"
 
 
 # --- `ctrlrun approve` / `ctrlrun deny` (SPEC §4.3, §8) --------------------------------

@@ -1,0 +1,22 @@
+# What ships in the sdist beyond the package itself.
+#
+# The tests go in the sdist because a distribution packager builds from it and runs them.
+# That only works if everything they need goes too: `tests/conftest.py` holds the fixtures
+# every store test is parametrized over, and `ctrlrun.example.yaml` is asserted against by
+# `test_the_shipped_example_policy_is_the_one_in_the_repository`. Shipping tests that cannot
+# run is worse than shipping none, so `test_the_sdist_carries_everything_the_tests_need`
+# keeps this file honest.
+
+include ctrlrun.example.yaml
+include CHANGELOG.md
+include SECURITY.md
+include VISION.md
+recursive-include docs *.md
+recursive-include tests *.py
+
+# Local-only: working notes, and anything an operator's run left behind. Nothing here is
+# picked up by default — these are belt and braces, so a stray file cannot ride along.
+prune internal
+prune .ctrlrun
+prune .github
+global-exclude *.py[cod] .DS_Store
