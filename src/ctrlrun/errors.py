@@ -114,6 +114,35 @@ class NotExecuted(CTRLRunError):
     """
 
 
+class Suspended(CTRLRunError):
+    """Raised by an executor: the remote asked for something before it will finish.
+
+    SPEC-v0.2 §6.9 in the kernel's own terms, and modelled the way v0.1 §5.5 models "nothing
+    happened" — an explicit opt-in signal, never a default and never inferred. There is no
+    outcome to record: the effect record stays `EXECUTING`, its lease is extended, the
+    continuation is held, and the caller gets this back to relay.
+
+    `continuation` is whatever the remote said to present again. It is opaque here — CTRLRun
+    never parses it, and only ever compares it with `hmac.compare_digest`.
+    """
+
+    def __init__(self, continuation: bytes | str) -> None:
+        if isinstance(continuation, bytes):
+            try:
+                continuation = continuation.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InvalidArgument(
+                    "Suspended(continuation=...) must be UTF-8 decodable"
+                ) from exc
+        if not continuation:
+            raise InvalidArgument(
+                "Suspended(continuation=...) must be non-empty; a continuation nobody can "
+                "present again is a suspension nobody can end"
+            )
+        super().__init__(f"suspended awaiting a continuation ({len(continuation)} bytes)")
+        self.continuation = continuation
+
+
 class MissingDependency(CTRLRunError):
     """An optional extra is not installed (SPEC-v0.2 §1.1, §11).
 

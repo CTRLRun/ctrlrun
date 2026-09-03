@@ -34,6 +34,7 @@ from ..errors import (
     EffectKeyError,
     InvalidArgument,
     NotExecuted,
+    Suspended,
 )
 from ..receipt import Receipt
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
@@ -92,6 +93,27 @@ RECEIPT_META_KEY: Final = "com.ctrlrun/receipt"
 
 #: §6.6 — the decision reason recorded when an argument cannot be represented.
 UNREPRESENTABLE_REASON: Final = "unrepresentable_argument"
+
+#: §6.9.3 — an upstream that elicits without a `requestState` cannot be fronted for a
+#: consequential tool without a `ctrlrun resolve` per call. Stated as a cost, not a feature:
+#: the protocol minted no identity for that exchange, and the only thing distinguishing a
+#: continuation from a fresh duplicate call is a field the agent controls completely.
+_STATELESS_ELICITATION: Final = GatewayOutcome(
+    EffectState.AMBIGUOUS, code=-41010, token="ctrlrun.upstream_ambiguous", http_status=502
+)
+
+
+def _request_state(payload: bytes | None) -> str | None:
+    """The `requestState` an `input_required` result carried, if it carried one (§6.9.1)."""
+    if payload is None:
+        return None
+    try:
+        document = json.loads(payload)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    result = document.get("result") if isinstance(document, dict) else None
+    state = result.get("requestState") if isinstance(result, Mapping) else None
+    return state if isinstance(state, str) and state else None
 
 
 class UpstreamAmbiguous(CTRLRunError):
@@ -360,21 +382,6 @@ class Gateway:
             error=f"{pointer} is a float, which an Action cannot represent",
         )
 
-    # SPEC: v0.2 §6.9 — held reservations across an elicitation are NOT implemented, and
-    # the reason is structural rather than an omission. §6.9.2 requires the effect record to
-    # stay `EXECUTING` with no outcome written while the client answers, which spans two HTTP
-    # requests and therefore two `Control.execute` calls. `Control.execute` writes a terminal
-    # outcome for any executor exception (v0.1 §5.5), and there is no way for an executor to
-    # say "suspend, record nothing" — so an `input_required` currently reaches §6.8's
-    # unrecognized-resultType row and is recorded `AMBIGUOUS`, which is §6.9.3's fail-closed
-    # floor applied to every elicitation rather than only to the ones with no `requestState`.
-    #
-    # Closing it needs one of two decisions, and both are wider than §6.9's own text: either
-    # `Control` grows a resume path, or the gateway owns reserve/begin/commit for intercepted
-    # calls — which would make it the second module that composes the others, against
-    # ARCHITECTURE §6. The StateStore half (`hold_continuation`, `take_continuation`) is
-    # built and tested; this is the composition question above it.
-
     def _execute(
         self,
         action: Action,
@@ -395,6 +402,8 @@ class Gateway:
 
         options = self._control.policy.mcp_options(action.name)
         held: dict[str, Any] = {}
+        presented = parsed.document.get("params", {})
+        presented = presented.get("requestState") if isinstance(presented, Mapping) else None
 
         def executor() -> Any:
             # §6.7 — the request the gateway sends is built from the action's *canonical*
@@ -413,13 +422,64 @@ class Gateway:
             held["status"] = status
             held["headers"] = response_headers
             held["outcome"] = outcome
+            if outcome.elicitation:
+                # §6.9 — neither leg is an outcome. Where the upstream gave a `requestState`
+                # the reservation is held across the round trip; where it did not, the
+                # protocol minted no identity for the exchange and §6.9.3's floor applies.
+                state = _request_state(payload)
+                if state is None:
+                    raise UpstreamAmbiguous(_STATELESS_ELICITATION)
+                raise Suspended(state)
             if outcome.effect is EffectState.COMMITTED:
                 return payload
             if outcome.effect is EffectState.FAILED:
                 raise NotExecuted(str(outcome.token or observed))
             raise UpstreamAmbiguous(outcome)
 
+        if isinstance(presented, str) and presented:
+            return self._continue(action, executor, held, presented, request_id)
         return self._through_control(action, executor, effect_key, held, request_id)
+
+    def _continue(
+        self,
+        action: Action,
+        executor: Callable[[], Any],
+        held: dict[str, Any],
+        presented: str,
+        request_id: JsonRpcId,
+    ) -> _Response:
+        """A continuation: the same action, the same reservation (SPEC-v0.2 §6.9.2).
+
+        `Control.resume` consumes the continuation atomically and rehydrates the action from
+        the store, so a gateway that restarted mid-round can still finish one. The hash check
+        is this layer's: a continuation must be the same action, and `resume` cannot know what
+        the client just sent.
+        """
+        code, token, status = UNKNOWN_CONTINUATION
+        try:
+            receipt = self._control.resume(presented, executor)
+        except Suspended:
+            key = self._control.policy.effect_template(action.name)
+            resolved = None if key is None else resolve_effect_key(key, action)
+            over = self._over_the_round_bound(action, resolved, request_id)
+            return over or self._upstream_response(action, held, resolved, suspended=True)
+        except InvalidArgument as refused:
+            _LOG.warning("refused a continuation for %s: %s", action.name, refused)
+            return _json(
+                status,
+                json_rpc_error(request_id, code, token, str(refused), tool=action.name),
+            )
+        except AmbiguousEffect as refused:
+            code, token, status = AMBIGUOUS_EFFECT
+            return _json(
+                status,
+                json_rpc_error(
+                    request_id, code, token, str(refused), effect_key=refused.effect_key
+                ),
+            )
+        except (NotExecuted, UpstreamAmbiguous):
+            return self._upstream_response(action, held, None)
+        return self._upstream_response(action, held, receipt.effect_key, receipt)
 
     def _through_control(
         self,
@@ -486,6 +546,11 @@ class Gateway:
                 status,
                 json_rpc_error(request_id, code, token, str(refused), reason=refused.reason),
             )
+        except Suspended:
+            # §6.9.2 step 5 — the InputRequiredResult is relayed unchanged, plus the receipt
+            # meta. No outcome was written and no receipt exists; the reservation is held.
+            over = self._over_the_round_bound(action, effect_key, request_id)
+            return over or self._upstream_response(action, held, effect_key, suspended=True)
         except (NotExecuted, UpstreamAmbiguous):
             return self._upstream_response(action, held, effect_key)
         return self._upstream_response(action, held, effect_key, receipt)
@@ -551,6 +616,40 @@ class Gateway:
             )
         return None
 
+    def _over_the_round_bound(
+        self, action: Action, effect_key: str | None, request_id: JsonRpcId
+    ) -> _Response | None:
+        """§6.9.2's first bound. A held reservation is a resource an upstream must not be able
+        to pin forever, and the lease bound only stops a client that stops answering.
+
+        Exceeding it records the effect `AMBIGUOUS` and returns `-41010`: the gateway has sent
+        that many tool calls and knows the outcome of none of them.
+        """
+        if effect_key is None:
+            return None
+        rounds = self._control.store.continuation_rounds(effect_key)
+        if rounds <= self._config.max_elicitation_rounds:
+            return None
+        record = self._control.store.get_effect(effect_key)
+        if record is not None:
+            self._control.store.mark_ambiguous(
+                effect_key, record.action_id, f"elicitation exceeded {rounds - 1} rounds"
+            )
+        _LOG.warning("%s: elicitation exceeded the round bound at %s", action.name, rounds)
+        code, token, status = UPSTREAM_AMBIGUOUS
+        return _json(
+            status,
+            json_rpc_error(
+                request_id,
+                code,
+                token,
+                f"the upstream elicited more than {self._config.max_elicitation_rounds} times "
+                "and the outcome of none of those calls is known",
+                effect_key=effect_key,
+                action_id=action.action_id,
+            ),
+        )
+
     def _awaiting(self, action: Action, pending: ApprovalRequired, request_id: Any) -> _Response:
         """§6.10 — "no" is an answer, and re-asking is not free."""
         record = self._control.store.get_approval(pending.request_id)
@@ -566,6 +665,8 @@ class Gateway:
         held: dict[str, Any],
         effect_key: str | None,
         receipt: Receipt | None = None,
+        *,
+        suspended: bool = False,
     ) -> _Response:
         """Relay the upstream's own answer, or synthesize one where none arrived (§6.8)."""
         outcome = held.get("outcome")
@@ -573,7 +674,13 @@ class Gateway:
             "action_id": action.action_id,
             "receipt_id": receipt.receipt_id if receipt is not None else None,
             "effect_key": effect_key,
-            "result": str(outcome.effect) if outcome and outcome.effect else "ambiguous",
+            "result": (
+                "suspended"
+                if suspended
+                else str(outcome.effect)
+                if outcome and outcome.effect
+                else "ambiguous"
+            ),
             "attempt": receipt.attempt if receipt is not None else 1,
         }
         if outcome is not None and outcome.relay and held.get("payload") is not None:
