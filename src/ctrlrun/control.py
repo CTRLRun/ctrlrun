@@ -140,6 +140,7 @@ class Control:
         *,
         clock: Callable[[], datetime] = _utc_now,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
+        lease: timedelta = DEFAULT_LEASE,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -148,6 +149,7 @@ class Control:
         )
         self._clock = clock
         self._approval_ttl = approval_ttl
+        self._lease = _checked_lease(lease, "Control(lease=...)")
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Control:
@@ -174,6 +176,11 @@ class Control:
     def approvals(self) -> ApprovalProvider:
         return self._approvals
 
+    @property
+    def lease(self) -> timedelta:
+        """How long a reservation this Control takes is held for (SPEC-v0.1 §5.3 E3)."""
+        return self._lease
+
     def evaluate(self, action: Action) -> Evaluation:
         """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8)."""
         return self._policy.evaluate(action)
@@ -183,17 +190,23 @@ class Control:
         action: Action,
         executor: Callable[[], Any],
         effect_key: str | None = None,
+        *,
+        lease: timedelta | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
         The executor's own exceptions propagate: `NotExecuted` after a `failed` receipt,
-        anything else after an `ambiguous` one (SPEC-v0.1 §5.5).
+        anything else after an `ambiguous` one (SPEC-v0.1 §5.5). The exception is an effect
+        record that moved on while the executor ran — the lease lapsed and a human owns it
+        now — where the store's refusal propagates instead, after an `ambiguous` receipt.
 
         `effect_key` is the already-resolved logical effect identity (§5.1); it is recorded
-        on the receipt and on every event for this action.
+        on the receipt and on every event for this action. `lease` is how long this action's
+        reservation is held; `None` means this Control's lease (§5.3 E3).
         """
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
+        held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
 
         started_at = self._clock()
         self._append(
@@ -217,7 +230,7 @@ class Control:
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
-        approval, reservation = self._secure(action, evaluation, started_at, effect_key)
+        approval, reservation = self._secure(action, evaluation, started_at, effect_key, held)
         attempt = 1 if reservation is None else reservation.attempt
 
         if effect_key is not None:
@@ -238,7 +251,17 @@ class Control:
             if effect_key is not None:
                 # SPEC §5.5 — the executor asserted the remote side did nothing, so this is
                 # the one outcome that leaves the key retryable (§5.4).
-                self._store.fail_effect(effect_key, action.action_id, str(exc))
+                try:
+                    self._store.fail_effect(effect_key, action.action_id, str(exc))
+                except (DuplicateEffect, AmbiguousEffect) as refused:
+                    # SPEC: §5.2 — the record moved on while the executor ran: this attempt's
+                    # lease lapsed and another declared the effect AMBIGUOUS, which only a
+                    # human moves it out of. The store's refusal is what propagates, not the
+                    # NotExecuted: an agent that caught that would retry a key it lost.
+                    self._unrecorded(
+                        action, evaluation, started_at, effect_key, attempt, refused, approval
+                    )
+                    raise
             self._append(
                 EventType.EXECUTION_FAILED,
                 action,
@@ -264,7 +287,14 @@ class Control:
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
             if effect_key is not None:
-                self._store.mark_ambiguous(effect_key, action.action_id, error)
+                try:
+                    self._store.mark_ambiguous(effect_key, action.action_id, error)
+                except (DuplicateEffect, AmbiguousEffect) as refused:
+                    # Recording an unknown outcome must never mask the exception that caused
+                    # it. A store that refuses here has the record in a state a human already
+                    # owns — where this attempt was trying to put it — and the receipt below
+                    # says `ambiguous` either way.
+                    _LOG.warning("%s: effect %s: %s", action.name, effect_key, refused)
             self._append(
                 EventType.EXECUTION_AMBIGUOUS,
                 action,
@@ -284,7 +314,17 @@ class Control:
             )
             raise
         if effect_key is not None:
-            self._store.commit_effect(effect_key, action.action_id, result)
+            try:
+                self._store.commit_effect(effect_key, action.action_id, result)
+            except (DuplicateEffect, AmbiguousEffect) as refused:
+                # SPEC: §5.2 — the executor returned, but the key is no longer this attempt's
+                # to commit: the lease lapsed and the record is AMBIGUOUS until a human says
+                # otherwise. What happened at the remote is now as unknown as a timeout, so
+                # the attempt is recorded `ambiguous` rather than committed.
+                self._unrecorded(
+                    action, evaluation, started_at, effect_key, attempt, refused, approval
+                )
+                raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
         return self._record(
             action,
@@ -338,6 +378,7 @@ class Control:
         evaluation: Evaluation,
         started_at: datetime,
         effect_key: str | None,
+        lease: timedelta,
     ) -> tuple[Approval | None, Reservation | None]:
         """Take everything this action needs before it may run: the grant, and the key.
 
@@ -353,7 +394,7 @@ class Control:
             return None, None
 
         try:
-            approval, reservation = self._take(action, approval_id, effect_key)
+            approval, reservation = self._take(action, approval_id, effect_key, lease)
         except ActionDenied as denied:
             # The store raises this when the record says a human refused. §4.2 makes that a
             # denial of the action, not a mismatch: nothing about the action was wrong.
@@ -462,6 +503,37 @@ class Control:
             effect_key=effect_key,
         )
 
+    def _unrecorded(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str,
+        attempt: int,
+        refused: DuplicateEffect | AmbiguousEffect,
+        approval: Approval | None,
+    ) -> None:
+        """Record an outcome the store refused to write (SPEC-v0.1 §5.2, §5.5).
+
+        The executor finished, but the effect record moved on while it ran, so what happened
+        at the remote is exactly as unknown as a timeout: `ambiguous`, whatever the executor
+        returned or raised. A terminal action still gets its receipt (§6.1).
+        """
+        error = f"{type(refused).__name__}: {refused}"
+        self._append(
+            EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, effect_key, approval=approval
+        )
+        self._record(
+            action,
+            evaluation,
+            ReceiptResult.AMBIGUOUS,
+            started_at,
+            error=error,
+            approval=approval,
+            effect_key=effect_key,
+            attempt=attempt,
+        )
+
     def _presented(self, action: Action, effect_key: str | None) -> str:
         """The approval this call presents, or record a request and suspend the action.
 
@@ -489,17 +561,17 @@ class Control:
         )
 
     def _take(
-        self, action: Action, approval_id: str | None, effect_key: str | None
+        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4)."""
         if approval_id is not None and effect_key is not None:
             return self._store.consume_approval_and_reserve(
-                approval_id, action.action_hash, effect_key, action.action_id, DEFAULT_LEASE
+                approval_id, action.action_hash, effect_key, action.action_id, lease
             )
         if approval_id is not None:
             return self._store.consume_approval(approval_id, action.action_hash), None
         if effect_key is not None:
-            return None, self._store.reserve_effect(effect_key, action.action_id, DEFAULT_LEASE)
+            return None, self._store.reserve_effect(effect_key, action.action_id, lease)
         return None, None
 
     def _approver_of(self, approval_id: str | None) -> str | None:
@@ -615,6 +687,7 @@ def protect(
     effect: str | None = None,
     resource: str | None = None,
     wait: bool = False,
+    lease: timedelta | None = None,
     control: Control | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
@@ -624,11 +697,16 @@ def protect(
 
     `effect` and `resource` are templates over the call's arguments (§5.1). Their syntax is
     checked here, at decoration time, so a typo fails at import rather than mid-agent-run.
+
+    `lease` is how long this action's reservation is held (§5.3 E3), for work that takes
+    longer than the Control's default; it overrides that default and nothing else. Expiry
+    means what it always meant: past the lease the effect is `AMBIGUOUS`, never released.
     """
     if not name:
         raise InvalidArgument("protect(name=...) must be a non-empty action name")
     _check_template(name, "effect", effect)
     _check_template(name, "resource", resource)
+    held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
@@ -668,7 +746,7 @@ def protect(
                 return value
 
             try:
-                resolved.execute(action, executor, effect_key)
+                resolved.execute(action, executor, effect_key, lease=held)
             except ApprovalRequired as pending:
                 if not wait:
                     raise
@@ -677,12 +755,26 @@ def protect(
                 # the refusal belongs in the receipt Control writes, not in the decorator.
                 resolved.approvals.wait(pending.request_id, None)
                 with with_approval(pending.request_id):
-                    resolved.execute(action, executor, effect_key)
+                    resolved.execute(action, executor, effect_key, lease=held)
             return returned[0]
 
         return wrapper
 
     return decorator
+
+
+def _checked_lease(lease: object, where: str) -> timedelta:
+    """A lease must be a positive `timedelta` (SPEC-v0.1 §5.3 E3).
+
+    Checked wherever one is offered — `Control`, `execute`, `protect` — because each is a
+    separate way in, and a lease that has already expired reserves nothing: the first
+    contender would find the record expired and declare a perfectly healthy effect ambiguous.
+    """
+    if not isinstance(lease, timedelta):
+        raise InvalidArgument(f"{where}: lease must be a timedelta, not {type(lease).__name__}")
+    if lease <= timedelta(0):
+        raise InvalidArgument(f"{where}: lease must be positive, got {lease!r}")
+    return lease
 
 
 def _check_template(name: str, kwarg: str, template: str | None) -> None:

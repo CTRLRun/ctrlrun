@@ -28,7 +28,10 @@ from ctrlrun import (
     protect,
 )
 from ctrlrun.effect import (
+    COMMITTED_EFFECT,
     DEFAULT_LEASE,
+    IN_PROGRESS_EFFECT,
+    LEASE_EXPIRED,
     UNRESOLVED_EFFECT,
     EffectState,
     resolve_effect_key,
@@ -951,3 +954,564 @@ def test_an_effect_taken_over_before_execution_blocks_the_action(
     assert receipt.result is ReceiptResult.BLOCKED
     assert _event_types(state_store)[-1] == EventType.EFFECT_RESERVATION_REFUSED
     assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+
+
+# --- the executor outcome map (SPEC §5.5, build-list item 7) --------------------------
+
+
+class _FakeRemote:
+    """A remote that does the thing, and may then lose the response (SPEC §7 T1).
+
+    `commits` counts what happened at the far end; `calls` counts what the agent tried. A
+    blind retry that executes moves both, and two commits for one logical effect is the
+    double refund the whole library exists to refuse.
+    """
+
+    def __init__(self, *, then: type[BaseException] | None = None) -> None:
+        self.calls = 0
+        self.commits = 0
+        self._then = then
+
+    def refund(self, payment_id: str) -> str:
+        self.calls += 1
+        self.commits += 1
+        if self._then is not None:
+            raise self._then("the response never arrived")
+        return f"re_{payment_id}"
+
+
+@pytest.fixture
+def lost_response(reserving_control):
+    """The T1 setup: a refund whose remote commits and then raises `TimeoutError`."""
+    remote = _FakeRemote(then=TimeoutError)
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        return remote.refund(payment_id)
+
+    return remote, refund
+
+
+def test_T1_a_lost_response_leaves_the_effect_ambiguous(lost_response, state_store):
+    remote, refund = lost_response
+
+    with context(agent="refund-agent"), pytest.raises(TimeoutError):
+        refund(payment_id="txn_1", amount=2000)
+
+    record = state_store.get_effect("refund:txn_1")
+    assert record.state is EffectState.AMBIGUOUS
+    assert "TimeoutError" in record.error
+    assert remote.commits == 1
+
+
+def test_T1_a_lost_response_writes_an_ambiguous_receipt(lost_response, state_store):
+    _, refund = lost_response
+
+    with context(agent="refund-agent"), pytest.raises(TimeoutError):
+        refund(payment_id="txn_1", amount=2000)
+
+    (receipt,) = state_store.receipts()
+    assert receipt.result is ReceiptResult.AMBIGUOUS
+    assert receipt.effect_key == "refund:txn_1"
+    assert receipt.attempt == 1
+    assert "TimeoutError" in receipt.error
+    assert _event_types(state_store)[-1] == EventType.EXECUTION_AMBIGUOUS
+
+
+def test_T1_a_blind_retry_is_refused_and_never_reaches_the_remote(lost_response, state_store):
+    remote, refund = lost_response
+
+    with context(agent="refund-agent"):
+        with pytest.raises(TimeoutError):
+            refund(payment_id="txn_1", amount=2000)
+        with pytest.raises(AmbiguousEffect) as refused:
+            refund(payment_id="txn_1", amount=2000)
+
+    assert remote.calls == 1
+    assert remote.commits == 1
+    assert refused.value.effect_key == "refund:txn_1"
+
+
+def test_T1_a_blind_retry_writes_a_blocked_receipt(lost_response, state_store):
+    _, refund = lost_response
+
+    with context(agent="refund-agent"):
+        with pytest.raises(TimeoutError):
+            refund(payment_id="txn_1", amount=2000)
+        with pytest.raises(AmbiguousEffect):
+            refund(payment_id="txn_1", amount=2000)
+
+    ambiguous, blocked = state_store.receipts()
+    assert ambiguous.result is ReceiptResult.AMBIGUOUS
+    assert blocked.result is ReceiptResult.BLOCKED
+    assert blocked.action_id != ambiguous.action_id
+    assert blocked.action_hash == ambiguous.action_hash
+    assert _event_types(state_store)[-1] == EventType.EFFECT_RESERVATION_REFUSED
+
+
+def test_T1_the_ambiguous_record_survives_the_blocked_retry(lost_response, state_store):
+    """A refused retry changes nothing: the record still belongs to the first attempt."""
+    _, refund = lost_response
+
+    with context(agent="refund-agent"):
+        with pytest.raises(TimeoutError):
+            refund(payment_id="txn_1", amount=2000)
+        first = state_store.get_effect("refund:txn_1")
+        with pytest.raises(AmbiguousEffect):
+            refund(payment_id="txn_1", amount=2000)
+
+    after = state_store.get_effect("refund:txn_1")
+    assert after.state is EffectState.AMBIGUOUS
+    assert after.action_id == first.action_id
+    assert after.attempt == 1
+
+
+def test_T8_a_failed_attempt_permits_a_retry_that_commits(reserving_control, state_store):
+    """`NotExecuted` is the executor's proof that nothing happened, so a retry may run."""
+    remote = _FakeRemote()
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        if remote.calls == 0:
+            remote.calls += 1
+            raise NotExecuted("the remote rejected the request before any side effect")
+        return remote.refund(payment_id)
+
+    with context(agent="refund-agent"):
+        with pytest.raises(NotExecuted):
+            refund(payment_id="txn_1", amount=2000)
+        assert state_store.get_effect("refund:txn_1").state is EffectState.FAILED
+        refund(payment_id="txn_1", amount=2000)
+
+    failed, committed = state_store.receipts()
+    assert (failed.result, failed.attempt) == (ReceiptResult.FAILED, 1)
+    assert (committed.result, committed.attempt) == (ReceiptResult.COMMITTED, 2)
+    record = state_store.get_effect("refund:txn_1")
+    assert record.state is EffectState.COMMITTED
+    assert record.attempt == 2
+    assert record.error is None
+    assert remote.commits == 1
+
+
+def test_T9_an_expired_lease_makes_the_next_attempt_ambiguous(
+    reserving_control, state_store, fake_clock
+):
+    """A worker reserved, began, and died. Its lease lapses; the next attempt is refused."""
+    _reserve_and_execute(state_store, action_id="act_dead_worker")
+    fake_clock.advance(DEFAULT_LEASE + timedelta(seconds=1))
+    calls: list[str] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        calls.append(payment_id)
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert calls == []
+    record = state_store.get_effect("refund:txn_1")
+    assert record.state is EffectState.AMBIGUOUS
+    assert record.error == LEASE_EXPIRED
+    assert record.lease_expires_at is None
+    (receipt,) = state_store.receipts()
+    assert receipt.result is ReceiptResult.BLOCKED
+
+
+def test_T9_an_expired_lease_is_never_released_to_a_later_attempt(
+    reserving_control, state_store, fake_clock
+):
+    _reserve_and_execute(state_store, action_id="act_dead_worker")
+    fake_clock.advance(DEFAULT_LEASE * 100)
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        raise AssertionError("an abandoned lease is resolved by a human, never by waiting")
+
+    with context(agent="refund-agent"):
+        for _ in range(3):
+            with pytest.raises(AmbiguousEffect):
+                refund(payment_id="txn_1", amount=2000)
+            fake_clock.advance(DEFAULT_LEASE)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+
+
+def test_a_committed_effect_refuses_a_retry_with_DuplicateEffect(reserving_control, state_store):
+    remote = _FakeRemote()
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        return remote.refund(payment_id)
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=2000)
+        with pytest.raises(DuplicateEffect) as refused:
+            refund(payment_id="txn_1", amount=2000)
+
+    assert refused.value.state == COMMITTED_EFFECT
+    assert refused.value.effect_key == "refund:txn_1"
+    assert remote.commits == 1
+    assert state_store.receipts()[1].result is ReceiptResult.BLOCKED
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        Exception("something went wrong"),
+        RuntimeError("the client library gave up"),
+        ConnectionError("connection reset"),
+        TimeoutError("read timed out"),
+        ValueError("unparseable response"),
+        CTRLRunError("even one of ours"),
+    ],
+)
+def test_any_exception_that_is_not_NotExecuted_is_ambiguous_never_failed(
+    reserving_control, state_store, raised
+):
+    """SPEC §5.5 — the executor opts *into* FAILED. Everything else is an unknown outcome."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        raise raised
+
+    with context(agent="refund-agent"), pytest.raises(type(raised)):
+        refund(payment_id="txn_1", amount=2000)
+
+    record = state_store.get_effect("refund:txn_1")
+    assert record.state is EffectState.AMBIGUOUS
+    assert record.state is not EffectState.FAILED
+    assert type(raised).__name__ in record.error
+    assert state_store.receipts()[0].result is ReceiptResult.AMBIGUOUS
+    assert EventType.EXECUTION_FAILED not in _event_types(state_store)
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit(1), GeneratorExit()])
+def test_an_exception_that_is_not_an_Exception_is_still_ambiguous(
+    reserving_control, state_store, raised
+):
+    """SPEC §5.5 — "anything else" means `BaseException`.
+
+    A `KeyboardInterrupt` arriving mid-request leaves exactly what a timeout leaves: the
+    remote may already have committed. The record is written before the exception resumes.
+    """
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        raise raised
+
+    with context(agent="refund-agent"), pytest.raises(type(raised)):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    assert state_store.receipts()[0].result is ReceiptResult.AMBIGUOUS
+
+
+def test_only_NotExecuted_and_its_subclasses_map_to_failed(reserving_control, state_store):
+    class RejectedByRemote(NotExecuted):
+        """What an integration would raise on a 4xx: nothing happened, and it knows."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        raise RejectedByRemote("422 before any side effect")
+
+    with context(agent="refund-agent"), pytest.raises(RejectedByRemote):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.FAILED
+    assert state_store.receipts()[0].result is ReceiptResult.FAILED
+
+
+# --- an outcome the store refuses to write (SPEC §5.2, §5.5) --------------------------
+
+
+def _overtake_mid_execution(state_store, fake_clock):
+    """Let this attempt's lease lapse and have another declare the effect AMBIGUOUS.
+
+    Every step is a real store operation, and it opens the window deterministically: when
+    the executor returns, the record no longer belongs to the attempt that is running.
+    """
+    fake_clock.advance(DEFAULT_LEASE + timedelta(seconds=1))
+    with pytest.raises(AmbiguousEffect):
+        state_store.reserve_effect("refund:txn_1", "act_overtaking", DEFAULT_LEASE)
+
+
+def test_a_commit_the_store_refuses_is_recorded_ambiguous(
+    reserving_control, state_store, fake_clock
+):
+    remote = _FakeRemote()
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        result = remote.refund(payment_id)
+        _overtake_mid_execution(state_store, fake_clock)
+        return result
+
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert remote.commits == 1
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    (receipt,) = state_store.receipts()
+    assert receipt.result is ReceiptResult.AMBIGUOUS
+    assert _event_types(state_store)[-1] == EventType.EXECUTION_AMBIGUOUS
+    assert EventType.EXECUTION_COMMITTED not in _event_types(state_store)
+
+
+def test_a_failed_outcome_never_collapses_an_ambiguous_record(
+    reserving_control, state_store, fake_clock
+):
+    """SPEC §5.2 — `AMBIGUOUS` MUST NOT collapse to `FAILED`, not even via §5.5."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        _overtake_mid_execution(state_store, fake_clock)
+        raise NotExecuted("the remote rejected the request")
+
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    (receipt,) = state_store.receipts()
+    assert receipt.result is ReceiptResult.AMBIGUOUS
+    assert EventType.EXECUTION_FAILED not in _event_types(state_store)
+
+
+def test_a_refused_failed_outcome_still_blocks_the_retry_it_would_have_permitted(
+    reserving_control, state_store, fake_clock
+):
+    """The raised error is the store's refusal: an agent catching `NotExecuted` retries."""
+    calls: list[str] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        calls.append(payment_id)
+        if len(calls) == 1:
+            _overtake_mid_execution(state_store, fake_clock)
+            raise NotExecuted("the remote rejected the request")
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        try:
+            refund(payment_id="txn_1", amount=2000)
+        except NotExecuted:  # pragma: no cover - the assertion below is the point
+            refund(payment_id="txn_1", amount=2000)
+        except AmbiguousEffect:
+            pass
+
+    assert calls == ["txn_1"]
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+
+
+def test_recording_an_unknown_outcome_never_masks_the_executors_exception(
+    reserving_control, state_store
+):
+    """A store that cannot record the unknown outcome must not swallow what caused it.
+
+    The double refuses strictly more than the real store, which cannot reach this refusal
+    while the record is the attempt's own; the guarantee is that the exception survives.
+    """
+
+    def refuses(effect_key: str, action_id: str, error: str) -> None:
+        raise DuplicateEffect("someone else owns this key now", state=IN_PROGRESS_EFFECT)
+
+    state_store.mark_ambiguous = refuses
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        raise TimeoutError("the response never arrived")
+
+    with context(agent="refund-agent"), pytest.raises(TimeoutError):
+        refund(payment_id="txn_1", amount=2000)
+
+    (receipt,) = state_store.receipts()
+    assert receipt.result is ReceiptResult.AMBIGUOUS
+    assert "TimeoutError" in receipt.error
+
+
+# --- leases and the injected clock (SPEC §5.3 E3, §8) ---------------------------------
+
+
+def test_the_lease_is_measured_on_the_injected_clock(reserving_control, state_store, fake_clock):
+    """No wall clock anywhere: a frozen clock means an exact, unmoving lease."""
+    leases: list[Any] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        leases.append(state_store.get_effect("refund:txn_1").lease_expires_at)
+        return f"re_{payment_id}"
+
+    started = fake_clock()
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert leases == [started + DEFAULT_LEASE]
+    (receipt,) = state_store.receipts()
+    assert receipt.started_at == started
+    assert receipt.finished_at == started
+
+
+@pytest.mark.parametrize(
+    ("raises", "state"),
+    [
+        (None, EffectState.COMMITTED),
+        (NotExecuted("nothing happened"), EffectState.FAILED),
+        (TimeoutError("lost the response"), EffectState.AMBIGUOUS),
+    ],
+)
+def test_a_terminal_record_holds_no_lease(
+    reserving_control, state_store, fake_clock, raises, state
+):
+    """A terminal record holding a lease would be a lie about work still in flight."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        if raises is not None:
+            raise raises
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        if raises is None:
+            refund(payment_id="txn_1", amount=2000)
+        else:
+            with pytest.raises(type(raises)):
+                refund(payment_id="txn_1", amount=2000)
+
+    record = state_store.get_effect("refund:txn_1")
+    assert record.state is state
+    assert record.lease_expires_at is None
+    assert not record.lease_is_live(fake_clock())
+
+
+# --- how long the lease is (SPEC §5.3 E3, §8) -----------------------------------------
+
+LONG = timedelta(minutes=30)
+
+
+def _leases_seen(state_store, control, lease=None):
+    """Run one refund and report the lease its reservation was given."""
+    seen: list[Any] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", lease=lease, control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        seen.append(state_store.get_effect("refund:txn_1").lease_expires_at)
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=2000)
+    return seen
+
+
+def test_a_control_leases_an_effect_for_five_minutes_by_default(state_store, fake_clock):
+    control = Control(Policy.from_yaml(POLICY), state_store, clock=fake_clock)
+
+    assert control.lease == DEFAULT_LEASE == timedelta(minutes=5)
+    assert _leases_seen(state_store, control) == [fake_clock() + DEFAULT_LEASE]
+
+
+def test_the_control_lease_applies_to_every_action_it_decides(state_store, fake_clock):
+    control = Control(Policy.from_yaml(POLICY), state_store, clock=fake_clock, lease=LONG)
+
+    assert _leases_seen(state_store, control) == [fake_clock() + LONG]
+
+
+def test_a_per_action_lease_overrides_the_controls_default(state_store, fake_clock):
+    control = Control(Policy.from_yaml(POLICY), state_store, clock=fake_clock, lease=LONG)
+
+    assert _leases_seen(state_store, control, lease=timedelta(minutes=45)) == [
+        fake_clock() + timedelta(minutes=45)
+    ]
+
+
+def test_a_lease_long_enough_for_the_work_keeps_it_in_flight(
+    reserving_control, state_store, fake_clock
+):
+    """A 20-minute deploy under a 30-minute lease is still *running*, not abandoned.
+
+    Under the 5-minute default the same work would be overtaken and every success would
+    become AMBIGUOUS — safe, but wrong, and a user would "fix" it by dropping the effect key.
+    """
+    contenders: list[Any] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", lease=LONG, control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        fake_clock.advance(timedelta(minutes=20))
+        with pytest.raises(DuplicateEffect) as refused:
+            state_store.reserve_effect("refund:txn_1", "act_contender", DEFAULT_LEASE)
+        contenders.append(refused.value.state)
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert contenders == [IN_PROGRESS_EFFECT]
+    assert state_store.get_effect("refund:txn_1").state is EffectState.COMMITTED
+    assert state_store.receipts()[0].result is ReceiptResult.COMMITTED
+
+
+def test_a_longer_lease_does_not_change_what_expiry_means(
+    reserving_control, state_store, fake_clock
+):
+    """SPEC §5.3 E3 — past its lease, however long, the record is AMBIGUOUS, never released."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", lease=LONG, control=reserving_control)
+    def refund(payment_id: str, amount: int) -> str:
+        fake_clock.advance(LONG + timedelta(seconds=1))
+        with pytest.raises(AmbiguousEffect):
+            state_store.reserve_effect("refund:txn_1", "act_contender", DEFAULT_LEASE)
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    assert state_store.receipts()[0].result is ReceiptResult.AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "lease", [timedelta(0), timedelta(seconds=-1), timedelta(minutes=-30), -DEFAULT_LEASE]
+)
+def test_a_lease_that_is_not_positive_is_rejected_at_decoration_time(control, lease):
+    """A lease that has already expired reserves nothing: refuse at import, not mid-run."""
+    with pytest.raises(InvalidArgument, match="lease"):
+
+        @protect("stripe.refund", effect="refund:{payment_id}", lease=lease, control=control)
+        def refund(payment_id: str, amount: int) -> str:  # pragma: no cover - never decorated
+            return f"re_{payment_id}"
+
+
+@pytest.mark.parametrize("lease", [300, "5m", 5.0, True])
+def test_a_lease_that_is_not_a_timedelta_is_rejected_at_decoration_time(control, lease):
+    with pytest.raises(InvalidArgument, match="lease"):
+
+        @protect("stripe.refund", effect="refund:{payment_id}", lease=lease, control=control)
+        def refund(payment_id: str, amount: int) -> str:  # pragma: no cover - never decorated
+            return f"re_{payment_id}"
+
+
+@pytest.mark.parametrize("lease", [timedelta(0), timedelta(seconds=-1), 300, None])
+def test_a_control_refuses_a_lease_that_is_not_a_positive_timedelta(store, lease):
+    with pytest.raises(InvalidArgument, match="lease"):
+        Control(Policy.from_yaml(POLICY), store, lease=lease)
+
+
+@pytest.mark.parametrize("lease", [timedelta(0), timedelta(seconds=-1), 300])
+def test_execute_refuses_a_lease_that_is_not_a_positive_timedelta(control, store, lease):
+    """The second defence: `execute` is public, and a caller may pass its own lease."""
+    calls: list[int] = []
+
+    with pytest.raises(InvalidArgument, match="lease"):
+        control.execute(_action(), lambda: calls.append(1), "refund:txn_1", lease=lease)
+
+    assert calls == []
+    assert store.get_effect("refund:txn_1") is None
+    assert store.receipts() == ()
+
+
+@pytest.mark.parametrize("lease", [timedelta(0), timedelta(seconds=-1)])
+def test_a_store_refuses_a_lease_that_is_not_positive(state_store, lease):
+    """The last defence: the store itself, where the lease becomes an expiry time."""
+    with pytest.raises(InvalidArgument, match="lease"):
+        state_store.reserve_effect("refund:txn_1", "act_1", lease)
+
+    assert state_store.get_effect("refund:txn_1") is None

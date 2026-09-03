@@ -9,7 +9,8 @@ resolves to nothing identifiable is refused rather than rendered.
 with it and then only write, so the rule that refuses a duplicate lives in exactly one place
 and the in-memory store cannot drift into permitting what SQLite refuses.
 
-The full transition machinery of §5.2 — and `ctrlrun resolve` — arrives with items 7 and 8.
+The transitions of §5.2 are in `state.py`, where the records live. `ctrlrun resolve` — the
+only way out of `AMBIGUOUS`, because it is the only one a human drives — arrives with item 8.
 """
 
 from __future__ import annotations

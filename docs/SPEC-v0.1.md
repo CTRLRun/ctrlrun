@@ -299,7 +299,13 @@ Inside the one call: the approval is checked first, so its refusal is the one ra
 
 - **E1 Atomic reservation.** `reserve_effect` MUST succeed for at most one caller per `effect_key` across threads *and processes*. SQLite implementation: `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE; INSERT ... ; COMMIT` with `UNIQUE(effect_key)`.
 - **E2 Existing effect.** If a record exists, reservation outcome depends on its state (§5.4).
-- **E3 Lease.** A reservation carries `lease_expires_at` (default 5 min). A record in `RESERVED` or `EXECUTING` whose lease has expired is treated as `AMBIGUOUS` (the executor may have died mid-flight). It is not silently released.
+- **E3 Lease.** A reservation carries `lease_expires_at`. A record in `RESERVED` or `EXECUTING` whose lease has expired is treated as `AMBIGUOUS` (the executor may have died mid-flight). It is not silently released.
+
+**How long a lease is.** Five minutes by default, set per Control (`Control(..., lease=...)`) and overridden per action (`@protect(..., lease=...)`), because the right length is a property of the work, not of the library. A five-minute lease on a twenty-minute deploy expires mid-flight and turns every success into `AMBIGUOUS` — safe, but wrong, and the fix a user reaches for is to stop declaring an `effect=` at all, which removes duplicate protection entirely. A guarantee people switch off is not a guarantee.
+
+The lease MUST be a positive `timedelta`. Zero or negative reserves nothing — the first contender would find the record expired and declare a healthy effect ambiguous — so it is `InvalidArgument`, raised by `@protect` at **decoration time** (with the template checks of §5.1), and by `Control` and `Control.execute` when either is handed one.
+
+Length is the only thing configurable here. Past its lease, however long, a record is `AMBIGUOUS` and only a human moves it on: there is no setting that releases an expired reservation, and none that extends a lease already granted.
 
 ### 5.4 Retry rules
 
@@ -328,6 +334,12 @@ The wrapped function is the executor. Its result is mapped:
 The executor opts *into* `FAILED` by raising `NotExecuted`, asserting it knows the remote side did nothing (e.g. HTTP 4xx validation error before any side effect). The default for the unknown is `AMBIGUOUS`. This asymmetry is deliberate and MUST NOT be inverted.
 
 "Anything else" means `BaseException`, not `Exception`. A `KeyboardInterrupt` or `SystemExit` arriving mid-request leaves exactly the outcome a timeout leaves — the remote may already have committed — so the effect MUST be recorded `AMBIGUOUS` before the exception is re-raised. Narrowing that catch to `Exception` is a regression, not a cleanup.
+
+**An outcome the store refuses to write.** The mapping above is a write to the effect record, and that write can be refused: while the executor ran, this attempt's lease lapsed and another attempt declared the effect `AMBIGUOUS` (§5.3 E3), which only a human moves it out of. The attempt is then recorded `ambiguous` — receipt `result: "ambiguous"`, event `EXECUTION_AMBIGUOUS` — whatever the executor returned or raised, because what happened at the remote is now exactly as unknown as a timeout. The store's refusal (`AmbiguousEffect`, or `DuplicateEffect`) is what propagates to the caller.
+
+It propagates *instead of* `NotExecuted`, and that is the point of stating it: `NotExecuted` is the one exception an agent may read as permission to retry, and this attempt no longer holds the key it would retry. A refused `FAILED` MUST NOT reach the caller as `NotExecuted`, and MUST NOT move the record: `AMBIGUOUS` does not collapse to `FAILED` by this path either (§5.2).
+
+**Recording the unknown never masks what caused it.** When the outcome being written is itself `AMBIGUOUS`, a refusal by the store MUST NOT replace the executor's exception. The record is already in the state this attempt was trying to put it in, the receipt says `ambiguous` either way, and the exception the executor raised is the one the caller sees. `mark_ambiguous` is therefore idempotent, and a failure to record an unknown outcome is logged, not raised — the alternative is a library that swallows a `KeyboardInterrupt` while tidying up after it.
 
 ---
 
@@ -471,16 +483,19 @@ from .errors import (
 
 ```python
 protect(name: str, *, effect: str | None = None, resource: str | None = None,
-        wait: bool = False, control: Control | None = None) -> Callable
+        wait: bool = False, lease: timedelta | None = None,
+        control: Control | None = None) -> Callable
 
 context(agent: str, user: str | None = None, environment: str | None = None) -> ContextManager
 with_approval(request_id: str) -> ContextManager
 
 Control.from_file(path=None) -> Control
 Control(policy: Policy, store: StateStore, approvals: ApprovalProvider | None = None, *,
-        clock=..., approval_ttl: timedelta = timedelta(minutes=15))
+        clock=..., approval_ttl: timedelta = timedelta(minutes=15),
+        lease: timedelta = timedelta(minutes=5))
 Control.evaluate(action: Action) -> Evaluation   # decision + reason, no side effects
-Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | None) -> Receipt
+Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | None,
+                *, lease: timedelta | None = None) -> Receipt
 ```
 
 `approvals=None` builds a `LocalApprovalProvider(store)`: the local provider is the only one that asks a real human, so it is the safe default, and a `Control` is never without a way to ask.
@@ -492,6 +507,8 @@ Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | N
 An in-memory SQLite path — `:memory:`, or any path carrying `mode=memory` — MUST be refused with `InvalidArgument`, wherever it comes from. Such a database is private to a single connection, so it cannot reserve across threads, let alone processes; accepting one would drop E1 silently, which is the one failure mode this store exists to prevent. `InMemoryStateStore` is the supported in-process store, and says what it cannot do.
 
 `effect` and `resource` are templates (§5.1). The call is bound to the wrapped function's signature and defaults are applied, so a defaulted argument is part of the action and of its hash — the action must describe what will actually run.
+
+`lease` is how long one action's reservation is held (§5.3 E3). `@protect(..., lease=...)` overrides the `Control`'s, which is five minutes unless it was given one; `execute(lease=None)` means the Control's. It is the only lease knob: a lease that is not a positive `timedelta` is `InvalidArgument` wherever it is offered, and for `@protect` that is at decoration time, alongside the template syntax check.
 
 `protect` MUST reject a function declaring `*args` or `**kwargs`, at decoration time, with `InvalidArgument`. An Action's arguments are a mapping of *named* values (§2.1), and policy conditions and templates address them by name; a variadic parameter has no such name and could never be written into a rule. Positional-only and keyword-only parameters are accepted — they have names.
 

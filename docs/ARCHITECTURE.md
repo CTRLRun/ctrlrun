@@ -103,6 +103,8 @@ Evidence has to leave the system to be useful (audit, SIEM, a PR comment). JSONL
 ### 4.9 Leases, not locks
 A reservation that never completes (worker crash) can't hold the key forever, but it can't be silently released either — the effect may have happened. Expired lease → `AMBIGUOUS`. Same principle as 4.4.
 
+The length is the caller's (`Control(lease=...)`, `@protect(lease=...)`, five minutes by default) because only they know how long the work takes; the meaning of expiry is not. A default that is too short for a slow action would make every success ambiguous, and the user's remedy would be to drop the effect key and lose duplicate protection altogether — so we make the knob, not the escape hatch, the obvious move.
+
 ## 5. Data model (SQLite)
 
 ```sql
