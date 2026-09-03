@@ -1,10 +1,16 @@
 # Starting point on the v0.1 kernel. Adapt before use.
 #
+# The rule these decisions follow, so you can apply it to actions not listed here:
+#   cheap to undo          → allow    (autonomous)
+#   leaves the building    → approve  (a human, every time)
+#   destroys the evidence  → deny     (not an agent action at any size)
+#
 # Unknown actions are denied. There is no default-allow: this file is the list of what an
 # agent may do, and anything not written here is refused.
 #
-# The asymmetry to keep: containment is cheap to undo and expensive to delay, so some of it
-# is autonomous. Widening access, and destroying evidence, never are.
+# Security is where the first line earns its keep: containment is cheap to undo *and*
+# expensive to delay, so a single-host action is autonomous where the same verb across a
+# fleet is not. Read `firewall.add_deny_rule` against `firewall.add_allow_rule` below.
 schema: ctrlrun.policy/v1
 
 actions:
