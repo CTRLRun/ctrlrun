@@ -75,6 +75,19 @@ def test_importing_ctrlrun_does_not_import_the_gateway_extra():
     assert finished.stdout.strip() == "False"
 
 
+def test_importing_ctrlrun_does_not_import_a_tls_stack():
+    """§7's outbound half is stdlib, but `urllib.request` drags in `ssl`, and §1.1's rule is
+    that a core install pays only for what it uses. The import is inside the method."""
+    finished = subprocess.run(
+        [sys.executable, "-c", "import ctrlrun, sys; print('ssl' in sys.modules)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert finished.stdout.strip() == "False"
+
+
 def test_importing_ctrlrun_does_not_import_the_gateway_package():
     finished = subprocess.run(
         [sys.executable, "-c", "import ctrlrun, sys; print('ctrlrun.gateway' in sys.modules)"],
