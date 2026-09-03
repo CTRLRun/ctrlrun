@@ -81,12 +81,28 @@ _REFUSE_EVERY_SOCKET = '''\
 
 import socket
 
+_real = socket.socket
+
+
+class _Refusing(_real):
+    """A socket that exists but will not connect, which is what a cut cable looks like.
+
+    Replacing the *type* with a function breaks anything that subclasses it — `ssl` does —
+    so the refusal goes on the operations instead.
+    """
+
+    def connect(self, *args, **kwargs):
+        raise RuntimeError("an example tried to connect; examples must run with no network")
+
+    def connect_ex(self, *args, **kwargs):
+        raise RuntimeError("an example tried to connect; examples must run with no network")
+
 
 def _refuse(*args, **kwargs):
-    raise RuntimeError("an example opened a socket; examples must run with no network")
+    raise RuntimeError("an example tried to resolve a name; examples run with no network")
 
 
-socket.socket = _refuse
+socket.socket = _Refusing
 socket.create_connection = _refuse
 socket.getaddrinfo = _refuse
 '''

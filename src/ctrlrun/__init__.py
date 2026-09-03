@@ -31,6 +31,7 @@ from .errors import (
 from .policy import Decision, Policy
 from .receipt import Event, EventSink, JSONLEventSink, Receipt
 from .state import InMemoryStateStore, SQLiteStateStore, StateStore
+from .webhook import WebhookApprovalProvider
 
 __all__ = [
     "Action",
@@ -66,6 +67,7 @@ __all__ = [
     "ScriptedApprovalProvider",
     "StateStore",
     "Suspended",
+    "WebhookApprovalProvider",
     "action_hash",
     "canonicalize",
     "context",

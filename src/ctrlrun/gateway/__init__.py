@@ -47,10 +47,32 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     """
     http_client()
     from ..control import Control
+    from ..webhook import WebhookApprovalProvider, webhook_secret
     from .server import Gateway, GatewayConfig, httpx_forwarder, serve_forever
 
-    config = GatewayConfig(upstream=upstream, alias=alias, **options)
+    public_url = options.pop("public_url", None)
+    webhook_url = options.pop("webhook_url", None)
+    secret_file = options.pop("webhook_secret_file", None)
+    allow_insecure = bool(options.pop("allow_insecure_webhook", False))
+    secret = webhook_secret(secret_file) if secret_file else webhook_secret()
+
+    config = GatewayConfig(upstream=upstream, alias=alias, webhook_secret=secret, **options)
     control = Control.from_file()
+    if webhook_url:
+        # §7 — the provider notifies; the gateway's endpoint receives. Both need the same
+        # secret, and neither takes it from a command-line argument (§7.3).
+        control = Control(
+            control.policy,
+            control.store,
+            WebhookApprovalProvider(
+                control.store,
+                url=webhook_url,
+                secret=secret,
+                public_url=public_url,
+                allow_insecure=allow_insecure,
+            ),
+            sinks=[],
+        )
     forwarder = httpx_forwarder(config)
     try:
         serve_forever(Gateway(config, control, forwarder))

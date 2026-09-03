@@ -18,6 +18,7 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Final, Protocol, TypeAlias
 
@@ -61,6 +62,7 @@ DEFAULT_PATH: Final = "/mcp"
 
 #: Reserved for the webhook approval endpoint (§7.2). The MCP path may not overlap it.
 CTRLRUN_PREFIX: Final = "/ctrlrun/"
+APPROVALS_PATH: Final = "/ctrlrun/approvals/"
 
 DEFAULT_UPSTREAM_TIMEOUT: Final = 30.0
 DEFAULT_APPROVAL_TIMEOUT: Final = 900.0
@@ -151,6 +153,8 @@ class GatewayConfig:
     allow_remote: bool = False
     elicitation_timeout: float = DEFAULT_ELICITATION_TIMEOUT
     max_elicitation_rounds: int = DEFAULT_MAX_ELICITATION_ROUNDS
+    webhook_secret: str | None = None
+    replay_window: float = 300.0
 
     def __post_init__(self) -> None:
         import re
@@ -233,6 +237,30 @@ class Gateway:
         return self._config
 
     # --- the request path ---------------------------------------------------------------
+
+    def handle_approval(
+        self, request_id: str, body: bytes, headers: Mapping[str, str]
+    ) -> _Response:
+        """`POST /ctrlrun/approvals/<request_id>` (SPEC-v0.2 §7.2).
+
+        The gateway serves it because it is the one server this release ships. Everything the
+        endpoint decides lives in `webhook.handle_inbound`, which is core: this is the socket
+        and nothing else.
+        """
+        from ..webhook import SIGNATURE_HEADER, handle_inbound
+
+        if self._config.webhook_secret is None:
+            _LOG.warning("an inbound approval arrived but no webhook secret is configured")
+            return _Response(404)
+        status, message = handle_inbound(
+            self._control.store,
+            request_id,
+            body,
+            _header(headers, SIGNATURE_HEADER) or "",
+            secret=self._config.webhook_secret,
+            replay_window=timedelta(seconds=self._config.replay_window),
+        )
+        return _json(status, {"status": "ok" if status == 200 else "refused", "detail": message})
 
     def handle(self, body: bytes, headers: Mapping[str, str]) -> _Response:
         """Decide one POST. Returns what the client gets, and records what happened."""

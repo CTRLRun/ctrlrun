@@ -460,6 +460,19 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
 @click.option("--max-body-bytes", type=int, default=1024 * 1024, show_default=True)
 @click.option("--allow-origin", "allow_origins", multiple=True, help="Repeatable.")
 @click.option("--allow-remote", is_flag=True, help="Permit a non-loopback --listen.")
+@click.option("--public-url", default=None, help="Where the gateway is reachable, for respond_to.")
+@click.option("--webhook-url", default=None, help="Notify this endpoint on APPROVAL_REQUESTED.")
+@click.option(
+    "--webhook-secret-file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read the shared secret from here instead of $CTRLRUN_WEBHOOK_SECRET.",
+)
+@click.option(
+    "--allow-insecure-webhook",
+    is_flag=True,
+    help="Permit an http:// webhook url, loopback only.",
+)
 def gateway(
     upstream: str,
     alias: str,
@@ -474,6 +487,10 @@ def gateway(
     max_body_bytes: int,
     allow_origins: tuple[str, ...],
     allow_remote: bool,
+    public_url: str | None,
+    webhook_url: str | None,
+    webhook_secret_file: str | None,
+    allow_insecure_webhook: bool,
 ) -> None:
     """Front an MCP server, applying this directory's policy to every tools/call."""
     host, _, port = listen.rpartition(":")
@@ -496,6 +513,10 @@ def gateway(
             max_body_bytes=max_body_bytes,
             allow_origins=tuple(allow_origins),
             allow_remote=allow_remote,
+            public_url=public_url,
+            webhook_url=webhook_url,
+            webhook_secret_file=webhook_secret_file,
+            allow_insecure_webhook=allow_insecure_webhook,
         )
     except CTRLRunError as exc:
         raise _fail(exc) from exc
