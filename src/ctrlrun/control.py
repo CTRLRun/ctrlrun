@@ -17,7 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, ParamSpec, TypeVar
+from typing import Any, Final, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
@@ -29,7 +29,11 @@ from .approval import (
 )
 from .effect import (
     DEFAULT_LEASE,
+    RECONCILED_STATES,
+    RECONCILED_UNKNOWN,
+    RESOLVED_BY_RECONCILE,
     UNRESOLVED_EFFECT,
+    ReconcileOutcome,
     Reservation,
     resolve_effect_key,
     resolve_resource,
@@ -40,6 +44,7 @@ from .errors import (
     AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
+    CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
     InvalidArgument,
@@ -58,6 +63,15 @@ DEFAULT_ENVIRONMENT: Final = "production"
 
 #: Denial reason when a protected function is called outside `ctrlrun.context()`.
 NO_PRINCIPAL: Final = "no_principal"
+
+#: The two moments a `reconcile` hook may run, for `RECONCILIATION_STARTED.data.trigger`
+#: (SPEC-v0.2 §2.3). There are no others.
+RECONCILE_BLOCKING: Final = "blocking"
+RECONCILE_EAGER: Final = "eager"
+
+#: Why an answer was forced to `"unknown"`, for `RECONCILIATION_RESOLVED.data.reason` (§2.5).
+RECONCILE_RAISED: Final = "raised"
+RECONCILE_INVALID_RETURN: Final = "invalid_return"
 
 #: Where `Control.from_file` keeps its store, and the env var that overrides it (SPEC §8).
 STATE_ENV_VAR: Final = "CTRLRUN_STATE"
@@ -120,6 +134,50 @@ def with_approval(request_id: str) -> Iterator[None]:
         yield
     finally:
         _PRESENTED_APPROVAL.reset(token)
+
+
+class _Reconciler:
+    """One attempt's right to ask a `reconcile` hook, spent at most once (SPEC-v0.2 §2.3).
+
+    Both trigger points can arise inside a single `Control.execute`: a blocking answer of
+    `not_executed` unblocks the reservation, the attempt then runs and ends `AMBIGUOUS`, and
+    eager reconciliation would fire on the same attempt. The budget is counted here rather
+    than inferred from control flow, so a wrong or slow hook costs one call per attempt and a
+    retry loop cannot amplify it.
+    """
+
+    __slots__ = ("_eagerly", "_hook", "_used")
+
+    def __init__(self, hook: Callable[[str], ReconcileOutcome] | None, eagerly: bool) -> None:
+        self._hook = hook
+        self._eagerly = eagerly
+        self._used = False
+
+    @property
+    def eager(self) -> bool:
+        return self._eagerly
+
+    def available(self, effect_key: str | None) -> bool:
+        return self._hook is not None and not self._used and effect_key is not None
+
+    def ask(self, effect_key: str) -> tuple[str, str | None, str | None]:
+        """Run the hook once. Returns `(outcome, reason, error)`; never raises `Exception`.
+
+        Anything the hook raises, and any return value that is not one of the three literals,
+        is `"unknown"` — the answer that changes nothing (SPEC-v0.2 §2.4). A `BaseException`
+        that is not an `Exception` propagates, for the reason in §2.3.
+        """
+        assert self._hook is not None
+        self._used = True
+        try:
+            answer = self._hook(effect_key)
+        except Exception as exc:
+            return RECONCILED_UNKNOWN, RECONCILE_RAISED, f"{type(exc).__name__}: {exc}"
+        if answer == RECONCILED_UNKNOWN:
+            return RECONCILED_UNKNOWN, None, None
+        if answer in RECONCILED_STATES:
+            return str(answer), None, None
+        return RECONCILED_UNKNOWN, RECONCILE_INVALID_RETURN, repr(answer)
 
 
 # --- Control ---------------------------------------------------------------------------
@@ -192,6 +250,8 @@ class Control:
         effect_key: str | None = None,
         *,
         lease: timedelta | None = None,
+        reconcile: Callable[[str], ReconcileOutcome] | None = None,
+        reconcile_eagerly: bool = False,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
@@ -203,10 +263,15 @@ class Control:
         `effect_key` is the already-resolved logical effect identity (§5.1); it is recorded
         on the receipt and on every event for this action. `lease` is how long this action's
         reservation is held; `None` means this Control's lease (§5.3 E3).
+
+        `reconcile` asks the remote what happened to an effect whose outcome is unknown, and
+        is the only authority besides a human that may move a record out of `AMBIGUOUS`
+        (SPEC-v0.2 §2.2). It runs at most once per call.
         """
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
         held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
+        reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
         self._append(
@@ -230,7 +295,9 @@ class Control:
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
-        approval, reservation = self._secure(action, evaluation, started_at, effect_key, held)
+        approval, reservation = self._secure(
+            action, evaluation, started_at, effect_key, held, reconciler
+        )
         attempt = 1 if reservation is None else reservation.attempt
 
         if effect_key is not None:
@@ -286,9 +353,11 @@ class Control:
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
+            recorded = effect_key is None
             if effect_key is not None:
                 try:
                     self._store.mark_ambiguous(effect_key, action.action_id, error)
+                    recorded = True
                 except (DuplicateEffect, AmbiguousEffect) as refused:
                     # Recording an unknown outcome must never mask the exception that caused
                     # it. A store that refuses here has the record in a state a human already
@@ -302,6 +371,13 @@ class Control:
                 effect_key,
                 approval=approval,
             )
+            # SPEC-v0.2 §2.3 — eager reconciliation, and never while a KeyboardInterrupt or
+            # SystemExit unwinds: v0.1 §5.5 already refuses to let tidying up swallow an
+            # interrupt, and calling arbitrary user code during one is the same mistake with
+            # a longer stack. `recorded` gates it too: a record this attempt could not mark
+            # is not this attempt's to resolve.
+            if reconciler.eager and recorded and isinstance(exc, Exception):
+                self._reconciled(reconciler, action, effect_key, RECONCILE_EAGER)
             self._record(
                 action,
                 evaluation,
@@ -379,6 +455,7 @@ class Control:
         started_at: datetime,
         effect_key: str | None,
         lease: timedelta,
+        reconciler: _Reconciler,
     ) -> tuple[Approval | None, Reservation | None]:
         """Take everything this action needs before it may run: the grant, and the key.
 
@@ -393,63 +470,88 @@ class Control:
         if approval_id is None and effect_key is None:
             return None, None
 
-        try:
-            approval, reservation = self._take(action, approval_id, effect_key, lease)
-        except ActionDenied as denied:
-            # The store raises this when the record says a human refused. §4.2 makes that a
-            # denial of the action, not a mismatch: nothing about the action was wrong.
-            approver = self._approver_of(approval_id)
-            self._append(
-                EventType.APPROVAL_DENIED,
-                action,
-                {"approver": approver},
-                effect_key,
-                approval_id=approval_id,
-            )
-            self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key)
-            self._record(
-                action,
-                evaluation,
-                ReceiptResult.DENIED,
-                started_at,
-                error=str(denied),
-                approval_id=approval_id,
-                approver=approver,
-                effect_key=effect_key,
-            )
-            raise ActionDenied(
-                str(denied), reason=denied.reason, action_id=action.action_id
-            ) from denied
-        except ApprovalMismatch as mismatch:
-            if mismatch.reason == ApprovalStatus.EXPIRED:
+        # At most two passes: an `AMBIGUOUS` refusal may be reconciled once (SPEC-v0.2 §2.3),
+        # and whatever the second attempt meets is final.
+        for reconciled in (False, True):
+            try:
+                approval, reservation = self._take(action, approval_id, effect_key, lease)
+                break
+            except AmbiguousEffect as refused:
+                # SPEC-v0.2 §2.3 — the record is `AMBIGUOUS` now, whether it already was or
+                # was just moved there by an expired lease (v0.1 §5.4). Either way it is in
+                # the state reconciliation asks about, which is why the order is this way
+                # round.
+                if reconciled or not self._reconciled(
+                    reconciler, action, effect_key, RECONCILE_BLOCKING
+                ):
+                    self._refused(
+                        action,
+                        evaluation,
+                        started_at,
+                        effect_key,
+                        refused,
+                        approval_id=approval_id,
+                    )
+                    raise
+            except ActionDenied as denied:
+                # The store raises this when the record says a human refused. §4.2 makes that
+                # a denial of the action, not a mismatch: nothing about the action was wrong.
+                approver = self._approver_of(approval_id)
                 self._append(
-                    EventType.APPROVAL_EXPIRED, action, {}, effect_key, approval_id=approval_id
+                    EventType.APPROVAL_DENIED,
+                    action,
+                    {"approver": approver},
+                    effect_key,
+                    approval_id=approval_id,
                 )
-            self._append(
-                EventType.APPROVAL_INVALIDATED,
-                action,
-                {"reason": mismatch.reason, "action_hash": action.action_hash},
-                effect_key,
-                approval_id=approval_id,
-            )
-            self._record(
-                action,
-                evaluation,
-                ReceiptResult.BLOCKED,
-                started_at,
-                error=str(mismatch),
-                approval_id=approval_id,
-                approver=self._approver_of(approval_id),
-                effect_key=effect_key,
-            )
-            raise
-        except (DuplicateEffect, AmbiguousEffect) as refused:
-            # SPEC §5.4 — this effect already happened, is happening, or ended unknown. The
-            # approval, if one was presented, was not consumed: it is still worth something.
-            self._refused(
-                action, evaluation, started_at, effect_key, refused, approval_id=approval_id
-            )
-            raise
+                self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key)
+                self._record(
+                    action,
+                    evaluation,
+                    ReceiptResult.DENIED,
+                    started_at,
+                    error=str(denied),
+                    approval_id=approval_id,
+                    approver=approver,
+                    effect_key=effect_key,
+                )
+                raise ActionDenied(
+                    str(denied), reason=denied.reason, action_id=action.action_id
+                ) from denied
+            except ApprovalMismatch as mismatch:
+                if mismatch.reason == ApprovalStatus.EXPIRED:
+                    self._append(
+                        EventType.APPROVAL_EXPIRED,
+                        action,
+                        {},
+                        effect_key,
+                        approval_id=approval_id,
+                    )
+                self._append(
+                    EventType.APPROVAL_INVALIDATED,
+                    action,
+                    {"reason": mismatch.reason, "action_hash": action.action_hash},
+                    effect_key,
+                    approval_id=approval_id,
+                )
+                self._record(
+                    action,
+                    evaluation,
+                    ReceiptResult.BLOCKED,
+                    started_at,
+                    error=str(mismatch),
+                    approval_id=approval_id,
+                    approver=self._approver_of(approval_id),
+                    effect_key=effect_key,
+                )
+                raise
+            except DuplicateEffect as refused:
+                # SPEC §5.4 — this effect already happened or is happening now. The approval,
+                # if one was presented, was not consumed: it is still worth something.
+                self._refused(
+                    action, evaluation, started_at, effect_key, refused, approval_id=approval_id
+                )
+                raise
 
         if approval is not None:
             self._append(
@@ -471,6 +573,57 @@ class Control:
                 approval=approval,
             )
         return approval, reservation
+
+    def _reconciled(
+        self,
+        reconciler: _Reconciler,
+        action: Action,
+        effect_key: str | None,
+        trigger: str,
+    ) -> bool:
+        """Ask the hook once, and move the record only where its answer points (§2.2, §2.4).
+
+        Returns whether the record moved. `"unknown"` — which is also what an exception and a
+        nonsense return value become — moves nothing and returns `False`, so every caller's
+        fail-closed path is the one that was already there.
+        """
+        if not reconciler.available(effect_key):
+            return False
+        assert effect_key is not None
+        self._append(
+            EventType.RECONCILIATION_STARTED,
+            action,
+            {"effect_key": effect_key, "trigger": trigger},
+            effect_key,
+        )
+        outcome, reason, error = reconciler.ask(effect_key)
+        data: dict[str, Any] = {"outcome": outcome}
+        if reason is not None:
+            data["reason"] = reason
+            data["error"] = error
+        self._append(EventType.RECONCILIATION_RESOLVED, action, data, effect_key)
+        if reason is not None:
+            _LOG.warning(
+                "%s: reconcile(%s) gave no answer (%s): %s", action.name, effect_key, reason, error
+            )
+        state = RECONCILED_STATES.get(outcome)
+        if state is None:
+            return False
+        try:
+            self._store.resolve_effect(effect_key, state, RESOLVED_BY_RECONCILE)
+        except CTRLRunError as refused:
+            # The record moved out of `AMBIGUOUS` between the refusal and the answer — a
+            # human, or another process, got there first. Their resolution stands; this one
+            # is dropped, which is the same nothing `"unknown"` would have done.
+            _LOG.warning("%s: reconcile(%s) not applied: %s", action.name, effect_key, refused)
+            return False
+        self._append(
+            EventType.EFFECT_RESOLVED,
+            action,
+            {"state": str(state), "resolved_by": RESOLVED_BY_RECONCILE},
+            effect_key,
+        )
+        return True
 
     def _refused(
         self,
@@ -692,6 +845,8 @@ def protect(
     resource: str | None = None,
     wait: bool = False,
     lease: timedelta | None = None,
+    reconcile: Callable[[str], ReconcileOutcome] | None = None,
+    reconcile_eagerly: bool = False,
     control: Control | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
@@ -705,16 +860,22 @@ def protect(
     `lease` is how long this action's reservation is held (§5.3 E3), for work that takes
     longer than the Control's default; it overrides that default and nothing else. Expiry
     means what it always meant: past the lease the effect is `AMBIGUOUS`, never released.
+
+    `reconcile` asks the remote what happened to an effect whose outcome is unknown
+    (SPEC-v0.2 §2). With `reconcile_eagerly`, it also runs immediately after this call
+    produces an `AMBIGUOUS` outcome, rather than only when one blocks a later attempt.
     """
     if not name:
         raise InvalidArgument("protect(name=...) must be a non-empty action name")
     _check_template(name, "effect", effect)
     _check_template(name, "resource", resource)
     held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
+    _reconciler(reconcile, reconcile_eagerly, f"protect({name!r}")
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
         _reject_variadic(signature, name)
+        dangling: list[bool] = []
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -742,6 +903,17 @@ def protect(
             )
             resolved = control if control is not None else _default_control()
             effect_key = resolved._resolve_effect(action, effect)
+            if reconcile is not None and effect_key is None and not dangling:
+                # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
+                # may come from the policy and that is not loaded yet. A hook with no key to
+                # reconcile does nothing, unlike a mistyped template, which changes an
+                # identity: §5.1 refuses that, and this only says so. Once per function.
+                dangling.append(True)
+                _LOG.warning(
+                    "%s: reconcile= is set but the action has no effect key, so it will "
+                    "never be called; declare effect= to give the action an identity",
+                    name,
+                )
             returned: list[R] = []
 
             def executor() -> R:
@@ -750,21 +922,57 @@ def protect(
                 return value
 
             try:
-                resolved.execute(action, executor, effect_key, lease=held)
+                resolved.execute(
+                    action,
+                    executor,
+                    effect_key,
+                    lease=held,
+                    reconcile=reconcile,
+                    reconcile_eagerly=reconcile_eagerly,
+                )
             except ApprovalRequired as pending:
                 if not wait:
                     raise
                 # SPEC-v0.1 §4.3 — with wait=True the decorator blocks on the provider and
                 # then re-presents the same proposal. It re-presents a *denied* answer too:
                 # the refusal belongs in the receipt Control writes, not in the decorator.
+                # The new proposal gets its own reconciliation budget: it is a new attempt.
                 resolved.approvals.wait(pending.request_id, None)
                 with with_approval(pending.request_id):
-                    resolved.execute(action, executor, effect_key, lease=held)
+                    resolved.execute(
+                        action,
+                        executor,
+                        effect_key,
+                        lease=held,
+                        reconcile=reconcile,
+                        reconcile_eagerly=reconcile_eagerly,
+                    )
             return returned[0]
 
         return wrapper
 
     return decorator
+
+
+def _reconciler(reconcile: object, reconcile_eagerly: object, where: str) -> _Reconciler:
+    """Validate the pair, wherever one is offered, and hand back this attempt's budget.
+
+    `reconcile_eagerly` without a hook asks for a second trigger point on a hook that does
+    not exist. It is a wiring bug with no safe reading, so it is refused rather than ignored
+    — at decoration time for `protect`, alongside the template and lease checks (§5.1, §5.3).
+    """
+    if reconcile is not None and not callable(reconcile):
+        raise InvalidArgument(
+            f"{where}, reconcile=...): must be callable, not {type(reconcile).__name__}"
+        )
+    if not isinstance(reconcile_eagerly, bool):
+        raise InvalidArgument(f"{where}, reconcile_eagerly=...): must be a bool")
+    if reconcile_eagerly and reconcile is None:
+        raise InvalidArgument(
+            f"{where}, reconcile_eagerly=True): there is no reconcile= hook to run eagerly"
+        )
+    hook = cast("Callable[[str], ReconcileOutcome] | None", reconcile)
+    return _Reconciler(hook, reconcile_eagerly)
 
 
 def _checked_lease(lease: object, where: str) -> timedelta:

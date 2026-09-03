@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from .action import Action
 from .errors import (
@@ -40,6 +40,17 @@ DEFAULT_LEASE: Final = timedelta(minutes=5)
 #: `DuplicateEffect.state` values (SPEC-v0.1 §5.4).
 COMMITTED_EFFECT: Final = "committed"
 IN_PROGRESS_EFFECT: Final = "in_progress"
+
+#: SPEC-v0.2 §2 — the three things a `reconcile` hook may say about a logical effect.
+ReconcileOutcome = Literal["committed", "not_executed", "unknown"]
+
+RECONCILED_COMMITTED: Final = "committed"
+RECONCILED_NOT_EXECUTED: Final = "not_executed"
+RECONCILED_UNKNOWN: Final = "unknown"
+
+#: Who moved a record out of `AMBIGUOUS`, for `EFFECT_RESOLVED.data.resolved_by` (§2.2).
+RESOLVED_BY_HUMAN: Final = "human"
+RESOLVED_BY_RECONCILE: Final = "reconcile"
 
 #: Recorded on a record whose holder disappeared with its lease still held (§5.3 E3).
 LEASE_EXPIRED: Final = "lease expired: the worker holding this effect never finished"
@@ -67,6 +78,15 @@ class EffectState(StrEnum):
     COMMITTED = "committed"
     FAILED = "failed"
     AMBIGUOUS = "ambiguous"
+
+
+#: Where each `reconcile` answer moves an `AMBIGUOUS` record (SPEC-v0.2 §2.4). `"unknown"` is
+#: absent because it moves nothing, which is the whole point of it: a hook that cannot answer
+#: must not be able to widen anything.
+RECONCILED_STATES: Final[Mapping[str, EffectState]] = {
+    RECONCILED_COMMITTED: EffectState.COMMITTED,
+    RECONCILED_NOT_EXECUTED: EffectState.FAILED,
+}
 
 
 @dataclass(frozen=True)

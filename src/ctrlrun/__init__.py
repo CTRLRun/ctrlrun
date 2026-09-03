@@ -12,7 +12,7 @@ from .approval import (
     ScriptedApprovalProvider,
 )
 from .control import Control, context, protect, with_approval
-from .effect import EffectRecord, EffectState
+from .effect import EffectRecord, EffectState, ReconcileOutcome
 from .errors import (
     ActionDenied,
     AmbiguousEffect,
@@ -56,6 +56,7 @@ __all__ = [
     "PolicyError",
     "Principal",
     "Receipt",
+    "ReconcileOutcome",
     "SQLiteStateStore",
     "ScriptedApprovalProvider",
     "StateStore",

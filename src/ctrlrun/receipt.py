@@ -55,7 +55,7 @@ class ReceiptResult(StrEnum):
 
 
 class EventType(StrEnum):
-    """The closed set of event types in SPEC-v0.1 §6.2."""
+    """The closed set of event types in SPEC-v0.1 §6.2, extended by SPEC-v0.2 §2.5."""
 
     ACTION_PROPOSED = "ACTION_PROPOSED"
     POLICY_EVALUATED = "POLICY_EVALUATED"
@@ -73,6 +73,8 @@ class EventType(StrEnum):
     EXECUTION_AMBIGUOUS = "EXECUTION_AMBIGUOUS"
     EFFECT_RESOLVED = "EFFECT_RESOLVED"
     ACTION_DENIED = "ACTION_DENIED"
+    RECONCILIATION_STARTED = "RECONCILIATION_STARTED"
+    RECONCILIATION_RESOLVED = "RECONCILIATION_RESOLVED"
 
 
 @dataclass(frozen=True)

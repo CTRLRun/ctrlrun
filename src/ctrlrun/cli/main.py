@@ -18,7 +18,7 @@ from typing import Final
 import click
 
 from ..control import DEFAULT_STATE_DIR, state_path
-from ..effect import EffectRecord, EffectState
+from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
 from ..errors import CTRLRunError
 from ..policy import DEFAULT_POLICY_FILENAME
 from ..receipt import Event, EventType, Receipt, iso_timestamp
@@ -232,6 +232,7 @@ def resolve(effect_key: str, committed: bool, failed: bool) -> None:
                 effect_key=effect_key,
                 state=str(record.state),
                 resolver=CLI_APPROVER,
+                resolved_by=RESOLVED_BY_HUMAN,
             )
         )
     except CTRLRunError as exc:

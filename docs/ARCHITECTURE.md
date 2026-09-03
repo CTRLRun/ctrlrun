@@ -86,7 +86,7 @@ A retry is a new proposal (`action_id`) for the same logical effect (`effect_key
 ### 4.4 AMBIGUOUS is a first-class terminal state
 A timeout after a request was sent is not a failure. The remote may have committed. Frameworks that map timeout → failed → retry are how double refunds happen. CTRLRun refuses to guess: `AMBIGUOUS` blocks retries until a human resolves it.
 
-*Trade-off:* this creates operational work (someone must run `ctrlrun resolve`). That is the correct place for the work to land. v0.2+ adds `QUERY_STATE` reconciliation for executors that can check the remote side.
+*Trade-off:* this creates operational work (someone must run `ctrlrun resolve`). That is the correct place for the work to land. v0.2 adds a `reconcile` hook (`SPEC-v0.2.md` §2) for executors that can ask the remote what happened: it is the second — and only other — authority permitted to move a record out of `AMBIGUOUS`, and only where its answer points. An answer it cannot give is `"unknown"`, which changes nothing.
 
 ### 4.5 The executor opts into FAILED
 Only `NotExecuted` maps to `FAILED`. Every other exception is `AMBIGUOUS`. The library cannot know whether an arbitrary exception fired before or after the side effect; the executor author can. Making the safe outcome the default means a lazy integration is a safe integration.

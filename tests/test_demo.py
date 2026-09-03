@@ -311,6 +311,9 @@ def test_T10_resolve_appends_an_EFFECT_RESOLVED_event(store, refund, remote):
     assert resolved[0].effect_key == "refund:txn_1"
     assert resolved[0].data["state"] == "failed"
     assert resolved[0].data["resolver"]
+    # SPEC-v0.2 §2.2 — evidence tells a human's judgement from a machine's answer, so every
+    # EFFECT_RESOLVED names its authority, this one included.
+    assert resolved[0].data["resolved_by"] == "human"
 
 
 def test_resolve_refuses_an_effect_that_is_not_ambiguous(control, store):
