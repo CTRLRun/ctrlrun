@@ -102,7 +102,11 @@ Align, don't invent: OWASP ACS, MCP, A2A, OAuth, OpenTelemetry, and NIST agent i
 
 ## 7. Sector packs (templates, not engines)
 
-Finance (payment authority, maker/checker, limits) · Healthcare (PHI disclosure, data scope, case assignment) · Legal (privileged documents, external disclosure, filing/settlement authority) · Insurance (claim authority, payout limits, eligibility) · Security (grant/revoke, credentials, isolation) · DevOps (prod deploy, DB mutation, deletion) · Government (benefits, records, permits). Same kernel, different `ctrlrun.yaml` and control registries.
+**Templates (v0.2).** A starting-point `ctrlrun.yaml` per sector, written against v0.1 primitives only: devops (prod deploy, DB mutation, deletion) · payments (refund authority, limits) · e-commerce (orders, cancellations, price changes) · insurance (claim authority, payout limits, eligibility) · healthcare (PHI disclosure, data scope, case assignment) · legal (privileged documents, external disclosure, filing/settlement authority) · security (grant/revoke, credentials, isolation) · government (benefits, records, permits) · hr (offers, terminations, compensation changes). Each says on its face that it is a starting point to be adapted, not a configuration to adopt.
+
+**Full depth (v0.6).** The same nine sectors, each with a control registry, approver roles, data scope, consequence defaults, and worked examples. Each pack is authored in one AI session and reviewed in a separate AI session that did not author it, against cited public sources — PCI DSS, PSD2, the HIPAA Security Rule, SOX/COSO and maker-checker guidance, ABA Model Rules, NIST SP 800-53, CIS benchmarks, records-management and employment-law basics. The review ships with the pack as `REVIEW.md`, listing every control, the source clause it derives from, and every gap found; unresolved gaps stay listed rather than being quietly closed. A pack states that it was authored and reviewed by AI against those sources, and never describes itself as compliant with any regulation. That is a claim only an accountable human reviewer can make, and CTRLRun does not make it on anyone's behalf.
+
+Same kernel, different `ctrlrun.yaml` and control registries.
 
 ## 8. What we will never build
 

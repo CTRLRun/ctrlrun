@@ -4,6 +4,8 @@ Dependency-first: every layer depends on the one below being correct. Milestones
 
 Standards rule: integrate first, map second, never claim compliance. A standard appears in a mapping doc only after code touches it and a test proves the guarantee.
 
+Sector rule: every pack cites its sources and ships its `REVIEW.md`. No compliance claims.
+
 ## v0.1 — Kernel (current)
 
 Action · Policy (ALLOW/APPROVE/DENY) · `@protect` · exact-action approval (hash, single-use, expiry) · effect key · SQLite atomic reservation · COMMITTED/FAILED/AMBIGUOUS · receipts + events (JSONL) · CLI · `ctrlrun demo` with four scenarios.
@@ -20,6 +22,7 @@ Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 - `ctrlrun inspect <action_id>`.
 - Reconciliation hook: executor may implement `check(effect_key) -> committed | not_executed | unknown` to resolve AMBIGUOUS automatically.
 - `examples/` directory with standalone scripts per scenario (`double-refund/`, `approval-mutation/`, `agent-race/`, `approval-replay/`). In v0.1 `ctrlrun demo` is the example; separate scripts earn their keep once there is more than one way to wire CTRLRun in.
+- Sector policy templates: `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare, legal, security, government, hr. Header comment: *"Starting point on the v0.1 kernel. Adapt before use."* Uses only v0.1 primitives.
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 
@@ -55,6 +58,7 @@ Standards: none new.
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity (hash chain / signatures).
+- Sector packs, full depth, all nine sectors: each pack ships a control registry, approver roles, data scope, consequence defaults, and worked examples. Each pack is authored in one AI session and reviewed in a separate AI session that did not author it, against the cited public sources for that sector (PCI DSS and PSD2 for payments; HIPAA Security Rule for healthcare; SOX/COSO and maker-checker guidance for finance and insurance; ABA Model Rules for legal; NIST SP 800-53 AC/AU families for security; CIS Kubernetes benchmarks for devops; public-sector records-management rules for government; employment-law basics for hr). The review produces `packs/<sector>/REVIEW.md` listing every control, the source clause it derives from, and each gap or uncertainty found; unresolved gaps stay listed. Each pack README states: *"Authored and reviewed by AI against the cited public sources."* No pack describes itself as compliant with any regulation.
 
 Standards: `docs/CONTROL-MAPPING.md` — clause-level mapping of receipt integrity/retention to EU AI Act Art. 12 and SOC 2 CC6/CC7, and of exact-action approval to Art. 14. Each row points at a test. Written only when a design partner asks.
 
