@@ -299,8 +299,6 @@ def find_unrepresentable(arguments: object, pointer: str = "") -> str | None:
     break the approval binding for every action that touches the value. The fix belongs in
     the tool's schema — integer minor units, or decimal strings.
     """
-    if isinstance(arguments, bool):
-        return None
     if isinstance(arguments, float):
         return pointer or "/"
     if isinstance(arguments, Mapping):

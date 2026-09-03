@@ -107,6 +107,10 @@ def test_T20_a_json_array_body_is_refused_with_32600():
 
     assert isinstance(refusal, Refusal)
     assert (refusal.http_status, refusal.code) == (400, -32600)
+    # The generic "not a JSON-RPC message" guard would also catch a list, with the same
+    # status and code. The message is the only observable difference, and it is the one an
+    # operator needs: a batch is refused for what it is, not for being malformed.
+    assert "batch" in refusal.message
 
 
 @pytest.mark.parametrize(
@@ -122,6 +126,30 @@ def test_T20_a_json_array_body_is_refused_with_32600():
     ],
 )
 def test_T20_a_body_that_is_not_a_jsonrpc_message_is_refused_with_32600(document):
+    refusal = parse_request(json.dumps(document).encode(), _headers())
+
+    assert isinstance(refusal, Refusal)
+    assert (refusal.http_status, refusal.code) == (400, -32600)
+
+
+def test_T20_a_well_formed_call_with_the_wrong_jsonrpc_version_is_still_refused():
+    """The `jsonrpc` check on its own, isolated.
+
+    Every other malformed body in the table above is also caught by a later guard with the
+    same status and code, so removing this check changed nothing any of them could see. This
+    body is well-formed in every other respect: only the version is wrong.
+    """
+    document = {**TOOLS_CALL, "jsonrpc": "1.0"}
+
+    refusal = parse_request(json.dumps(document).encode(), _headers())
+
+    assert isinstance(refusal, Refusal)
+    assert (refusal.http_status, refusal.code) == (400, -32600)
+
+
+def test_T20_a_well_formed_call_with_no_jsonrpc_member_is_still_refused():
+    document = {key: value for key, value in TOOLS_CALL.items() if key != "jsonrpc"}
+
     refusal = parse_request(json.dumps(document).encode(), _headers())
 
     assert isinstance(refusal, Refusal)
@@ -271,6 +299,9 @@ def test_a_malformed_base64_sentinel_is_refused_rather_than_compared_raw():
 
     assert isinstance(refusal, Refusal)
     assert refusal.code == -32020
+    # Comparing the wrapper against the body would also refuse this one, for the wrong
+    # reason — and would *accept* a body whose value happened to equal the wrapper text.
+    assert "does not decode" in refusal.message
 
 
 # --- T20's mirror: the 2025 revisions (§6.2) -------------------------------------------
