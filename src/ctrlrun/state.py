@@ -20,7 +20,7 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +45,7 @@ from .effect import (
     EffectState,
     Reservation,
     ReservationPlan,
+    plan_lease_extension,
     plan_reservation,
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
@@ -346,6 +347,27 @@ class StateStore(ApprovalStore, Protocol):
         """Every effect record, oldest first, optionally narrowed to one state."""
         ...
 
+    def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
+        """Extend a live `EXECUTING` reservation this action holds (SPEC-v0.2 §6.9.4).
+
+        Atomic, and refused unless all of: the record is `EXECUTING`, its `action_id` is the
+        caller's, and its lease **has not already expired**. An expired lease is extendable
+        by nothing, and an expired reservation is still released by nobody.
+        """
+        ...
+
+    def find_granted_approval(self, action_hash: str) -> Approval | None:
+        """The newest granted, unexpired approval for this hash, or `None` (§6.10)."""
+        ...
+
+    def find_denied_request(self, action_hash: str) -> ApprovalRequest | None:
+        """The newest unexpired *denied* request for this hash, or `None` (§6.10).
+
+        "No" is an answer, and re-asking is not free: without this the gateway would send a
+        human a fresh notification every time an agent resent a call it disliked.
+        """
+        ...
+
     def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
         """Every approval record carrying `action_hash`, oldest first (SPEC-v0.2 §5).
 
@@ -438,6 +460,18 @@ class InMemoryStateStore:
             return tuple(
                 record for record in self._approvals.values() if record.action_hash == action_hash
             )
+
+    def find_granted_approval(self, action_hash: str) -> Approval | None:
+        now = self._clock()
+        with self._lock:
+            records = list(self._approvals.values())
+        return _newest_granted(records, action_hash, now)
+
+    def find_denied_request(self, action_hash: str) -> ApprovalRequest | None:
+        now = self._clock()
+        with self._lock:
+            records = list(self._approvals.values())
+        return _newest_denied(records, action_hash, now)
 
     def grant_approval(self, approval_id: str, approver: str) -> Approval:
         approver = _approver(approver)
@@ -584,6 +618,13 @@ class InMemoryStateStore:
             resolved = _resolved(record, state, resolver, self._clock())
             self._effects[effect_key] = resolved
             return resolved
+
+    def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
+        with self._lock:
+            extended = plan_lease_extension(
+                self._effects.get(effect_key), effect_key, action_id, until, self._clock()
+            )
+            self._effects[effect_key] = extended
 
     def get_effect(self, effect_key: str) -> EffectRecord | None:
         with self._lock:
@@ -759,6 +800,12 @@ class SQLiteStateStore:
 
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         return self._read_approval(self._connection(), approval_id)
+
+    def find_granted_approval(self, action_hash: str) -> Approval | None:
+        return _newest_granted(self.approvals_for(action_hash), action_hash, self._clock())
+
+    def find_denied_request(self, action_hash: str) -> ApprovalRequest | None:
+        return _newest_denied(self.approvals_for(action_hash), action_hash, self._clock())
 
     def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
         connection = self._connection()
@@ -1018,6 +1065,23 @@ class SQLiteStateStore:
     def mark_ambiguous(self, effect_key: str, action_id: str, error: str) -> None:
         self._transition(effect_key, action_id, EffectState.AMBIGUOUS, _UNFINISHED, error=error)
 
+    def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            extended = plan_lease_extension(
+                self._read_effect(connection, effect_key),
+                effect_key,
+                action_id,
+                until,
+                self._clock(),
+            )
+            self._write_effect(connection, extended)
+        except BaseException:
+            self._unwind(connection)
+            raise
+        connection.commit()
+
     def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
         resolver = _approver(resolver)
         connection = self._connection()
@@ -1140,3 +1204,53 @@ def _required_action(action_id: str | None) -> str:
     if not action_id:
         raise InvalidArgument("reserving an effect needs the action_id reserving it")
     return action_id
+
+
+def _newest_granted(
+    records: Iterable[ApprovalRecord], action_hash: str, now: datetime
+) -> Approval | None:
+    """The newest granted, unexpired approval for `action_hash` (SPEC-v0.2 §6.10).
+
+    Matching on the hash rather than on a presented request id is safe for the reason v0.1
+    §4.2 A1 exists: the hash covers the principal, the arguments, the resource and the
+    environment, so an approval can only match an identical action from the same principal —
+    which is the same action. It is still single-use, and still consumed atomically with the
+    reservation, which is where that guarantee actually lives.
+    """
+    granted = [
+        record
+        for record in records
+        if record.action_hash == action_hash
+        and record.status is ApprovalStatus.GRANTED
+        and record.expires_at > now
+    ]
+    if not granted:
+        return None
+    # `reversed`, because `max` returns the *first* maximal element and `records` arrives
+    # oldest-first: two approvals granted in the same clock tick tie, and the later-stored
+    # one is the newer of them.
+    newest: ApprovalRecord = max(
+        reversed(list(granted)), key=lambda record: record.granted_at or record.request.created_at
+    )
+    return newest.as_approval()
+
+
+def _newest_denied(
+    records: Iterable[ApprovalRecord], action_hash: str, now: datetime
+) -> ApprovalRequest | None:
+    """The newest unexpired denied request for `action_hash` (SPEC-v0.2 §6.10).
+
+    A denial holds for the life of the request that carried it; once that expires, asking
+    again is legitimate.
+    """
+    denied = [
+        record
+        for record in records
+        if record.action_hash == action_hash
+        and record.status is ApprovalStatus.DENIED
+        and record.expires_at > now
+    ]
+    if not denied:
+        return None
+    newest: ApprovalRecord = max(reversed(denied), key=lambda record: record.request.created_at)
+    return newest.request

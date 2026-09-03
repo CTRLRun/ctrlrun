@@ -23,6 +23,7 @@ from .errors import (
     DuplicateEffect,
     EffectKeyError,
     InvalidArgument,
+    MissingDependency,
     NotExecuted,
     PolicyError,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "InvalidArgument",
     "JSONLEventSink",
     "LocalApprovalProvider",
+    "MissingDependency",
     "NotExecuted",
     "Policy",
     "PolicyError",
