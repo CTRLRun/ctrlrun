@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.1.0.dev0"
+version = "0.1.0a1"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,6 +22,13 @@ dependencies = [
     "pyyaml",
     "click",
 ]
+
+[project.urls]
+Homepage = "https://github.com/CTRLRun/ctrlrun"
+Repository = "https://github.com/CTRLRun/ctrlrun"
+Documentation = "https://github.com/CTRLRun/ctrlrun/tree/main/docs"
+Changelog = "https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md"
+Issues = "https://github.com/CTRLRun/ctrlrun/issues"
 
 [project.scripts]
 ctrlrun = "ctrlrun.cli.main:main"

@@ -152,8 +152,8 @@ def run_demo(root: Path) -> None:
         store.close()
 
     click.echo("")
-    click.echo(f"Receipts ({written}): {evidence / RECEIPTS_FILENAME}")
-    click.echo(f"Events:       {evidence / EVENTS_FILENAME}")
+    click.echo(f"Receipts ({written}): {written_path(root, evidence / RECEIPTS_FILENAME)}")
+    click.echo(f"Events:       {written_path(root, evidence / EVENTS_FILENAME)}")
     click.echo("")
     click.echo(f"Read them:    {read_them_command(evidence)}")
 
@@ -251,14 +251,31 @@ def _propose(refund: Callable[..., Any], payment_id: str, amount: int) -> str:
     return pending.request_id
 
 
+def written_path(root: Path, path: Path) -> str:
+    """`path` as the reader can retype it: relative to the directory the demo ran in.
+
+    The demo's transcript is meant to be pasted — into an issue, a post, the README — and an
+    absolute path carries the operator's username and directory layout along with it. A path
+    outside `root` has no relative form and is printed whole; the demo never writes one.
+    """
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def read_them_command(evidence: Path) -> str:
     """The command that reads the demo's receipts, ready to paste (SPEC-v0.1 §8).
 
     The demo keeps its own store, so `ctrlrun receipts` on its own would read the operator's.
     `$CTRLRUN_STATE` is the documented way to point a command at another store, and this is
     the one place a new user needs it.
+
+    The path is relative to where the demo ran, which is also where the reader is standing
+    when they paste this, so `evidence.parents[1]` is that directory: `<root>/.ctrlrun/demo`.
     """
-    return f"CTRLRUN_STATE={shlex.quote(str(evidence / 'state.db'))} ctrlrun receipts"
+    state = written_path(evidence.parents[1], evidence / "state.db")
+    return f"CTRLRUN_STATE={shlex.quote(state)} ctrlrun receipts"
 
 
 def _fresh_evidence_dir(root: Path) -> Path:

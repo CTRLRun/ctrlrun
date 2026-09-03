@@ -71,4 +71,4 @@ The agent is treated as a potentially compromised or hallucinating principal. Ev
 
 ## Disclosure
 
-Report vulnerabilities privately to the maintainer (add address before first release). Do not open public issues for security reports.
+Report vulnerabilities privately to contact@arpanghoshal.com. Do not open public issues for security reports. `SECURITY.md` has the process and what counts as a vulnerability.

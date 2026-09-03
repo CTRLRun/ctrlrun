@@ -37,6 +37,7 @@ from ctrlrun.cli.demo import (
     SCENARIO_HEADINGS,
     _euros,
     read_them_command,
+    written_path,
 )
 from ctrlrun.cli.main import EXAMPLE_POLICY, main
 from ctrlrun.receipt import RECEIPT_SCHEMA, EventLog, EventType, ReceiptResult
@@ -556,16 +557,67 @@ def test_T11_demo_prints_the_command_that_reads_what_it_wrote(demo_run):
     assert read_them_command(evidence) in result.output
 
 
-def test_the_readme_demo_section_shows_the_amounts_the_demo_uses():
-    """SPEC-v0.1 §7 T11 — the demo is the truth, and the README follows it."""
+def test_T11_the_demo_prints_no_absolute_paths(demo_run):
+    """The transcript is meant to be pasted in public, and `/Users/<name>/...` rides along."""
+    result, _, _ = demo_run
+
+    leaked = [line for line in result.output.splitlines() if re.search(r"(?:^|[\s=])/", line)]
+    assert not leaked, f"absolute paths in demo output: {leaked}"
+
+
+def test_the_demo_evidence_paths_are_relative_to_where_it_ran(tmp_path):
+    evidence = tmp_path / ".ctrlrun" / DEMO_DIRNAME
+
+    assert written_path(tmp_path, evidence / "receipts.jsonl") == ".ctrlrun/demo/receipts.jsonl"
+    assert read_them_command(evidence) == "CTRLRUN_STATE=.ctrlrun/demo/state.db ctrlrun receipts"
+
+
+def test_a_path_outside_the_run_directory_is_printed_whole(tmp_path):
+    """No relative form exists, and a wrong relative path would be worse than a long one."""
+    outside = tmp_path.parent / "elsewhere" / "receipts.jsonl"
+
+    assert written_path(tmp_path, outside) == str(outside)
+
+
+#: The only thing in the demo's output that differs between runs: generated approval ids.
+#: Evidence paths are printed relative to where the demo ran, so they are stable and the
+#: README must quote them exactly — that is what keeps an absolute path from creeping back in.
+_RUN_VARYING = re.compile(r"apr_[0-9a-f]+")
+
+
+def _readme_demo_section() -> str:
     readme = Path(__file__).resolve().parents[1] / "README.md"
     if not readme.exists():  # installed without the source tree
         pytest.skip("no repository checkout")
     section = readme.read_text(encoding="utf-8").split("## What `ctrlrun demo` shows")[1]
+    return section.split("\n## ")[0]
 
-    assert re.findall(r"€[\d,]+", section.split("\n## ")[0]) == [
-        _euros(amount) for amount in README_AMOUNTS
+
+def test_the_readme_demo_section_quotes_the_demo_output_verbatim(demo_run):
+    """SPEC-v0.1 §7 T11 — the demo is the truth, and the README follows it.
+
+    Every line the demo prints must appear in the README, so a change to the demo's output
+    that nobody carried across fails here instead of shipping a README that lies.
+    """
+    result, _, _ = demo_run
+    quoted = {_RUN_VARYING.sub("*", line) for line in _readme_demo_section().splitlines()}
+
+    missing = [
+        line
+        for line in result.output.splitlines()
+        if line.strip() and _RUN_VARYING.sub("*", line) not in quoted
     ]
+    assert not missing, f"README does not quote: {missing}"
+
+
+def test_the_readme_demo_section_shows_the_amounts_the_demo_uses():
+    """SPEC-v0.1 §7 T11 — the scenario amounts appear, in the order the demo refunds them."""
+    printed = re.findall(r"€[\d,]+", _readme_demo_section())
+
+    remaining = iter(printed)
+    assert all(
+        _euros(amount) in remaining for amount in README_AMOUNTS
+    ), f"expected {[_euros(a) for a in README_AMOUNTS]} in order, got {printed}"
 
 
 def test_T11_the_demo_leaves_the_operators_own_store_alone(demo_run):

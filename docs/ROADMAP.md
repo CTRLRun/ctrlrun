@@ -79,4 +79,4 @@ Standards: external security audit, then an EU controls pack. Phrased as "techni
 
 ## Beyond v1.0
 
-A management plane — organization-wide policy, approval center, fleet views, central evidence — is not on this roadmap. It gets built only if users pull toward it.
+A management plane — organization-wide policy, approval center, fleet views, central evidence — is not on this roadmap. It gets built only if users pull toward it, and `VISION.md` describes the shape it would take.
