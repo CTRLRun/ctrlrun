@@ -741,3 +741,199 @@ def test_in_memory_store_assigns_event_ids(store):
 
 def test_receipt_is_exported_from_the_package():
     assert Receipt.__module__ == "ctrlrun.receipt"
+
+
+# --- T16: the decorator wins a template mismatch (SPEC-v0.2 §3.2) ----------------------
+
+TEMPLATED_POLICY = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    decision: allow
+"""
+
+
+def _templated_control(store=None):
+    return Control(Policy.from_yaml(TEMPLATED_POLICY), store or InMemoryStateStore())
+
+
+def test_T16_the_policy_supplies_the_templates_the_decorator_omits():
+    control = _templated_control()
+
+    @protect("stripe.refund", control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=200)
+
+    receipt = control.store.receipts()[-1]
+    assert receipt.effect_key == "refund:txn_1"
+    assert receipt.resource == "payment:txn_1"
+
+
+def test_T16_a_decorator_and_a_policy_template_produce_the_same_action_hash():
+    """The gateway has no decorator (§3.2), so the two paths have to agree exactly."""
+    from_policy = _templated_control()
+    from_decorator = Control(
+        Policy.from_yaml(
+            TEMPLATED_POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v1")
+            .replace('    effect: "refund:{payment_id}"\n', "")
+            .replace('    resource: "payment:{payment_id}"\n', "")
+        ),
+        InMemoryStateStore(),
+    )
+
+    @protect("stripe.refund", control=from_policy)
+    def policy_refund(payment_id: str, amount: int) -> str:
+        return f"re_{payment_id}"
+
+    @protect(
+        "stripe.refund",
+        effect="refund:{payment_id}",
+        resource="payment:{payment_id}",
+        control=from_decorator,
+    )
+    def decorated_refund(payment_id: str, amount: int) -> str:
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        policy_refund(payment_id="txn_1", amount=200)
+        decorated_refund(payment_id="txn_1", amount=200)
+
+    left = from_policy.store.receipts()[-1]
+    right = from_decorator.store.receipts()[-1]
+    assert left.action_hash == right.action_hash
+    assert left.effect_key == right.effect_key == "refund:txn_1"
+    assert left.resource == right.resource == "payment:txn_1"
+
+
+def test_T16_a_gateway_built_action_hashes_the_same_as_the_decorator_call():
+    """§6.6 builds its Action from the policy's templates; this is that construction."""
+    from ctrlrun.effect import resolve_effect_key, resolve_resource
+
+    control = _templated_control()
+    policy = control.policy
+    arguments = {"payment_id": "txn_1", "amount": 200}
+
+    gateway_action = Action(
+        name="stripe.refund",
+        arguments=arguments,
+        principal=Principal(agent="refund-agent"),
+        resource=resolve_resource(policy.resource_template("stripe.refund"), arguments),
+    )
+    gateway_key = resolve_effect_key(policy.effect_template("stripe.refund"), gateway_action)
+
+    @protect("stripe.refund", control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=200)
+
+    receipt = control.store.receipts()[-1]
+    assert receipt.action_hash == gateway_action.action_hash
+    assert receipt.effect_key == gateway_key
+
+
+@pytest.mark.parametrize(
+    ("kwarg", "decorated", "expected_key", "expected_resource"),
+    [
+        ("effect", "rf:{payment_id}", "rf:txn_1", "payment:txn_1"),
+        ("resource", "card:{payment_id}", "refund:txn_1", "card:txn_1"),
+    ],
+)
+def test_T16_the_decorator_wins_a_mismatch(kwarg, decorated, expected_key, expected_resource):
+    """The code that will run is what executes; substituting the policy's template would
+    change an effect identity without changing a line of the program (§3.2)."""
+    control = _templated_control()
+
+    @protect("stripe.refund", control=control, **{kwarg: decorated})
+    def refund(payment_id: str, amount: int) -> str:
+        return f"re_{payment_id}"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=200)
+
+    receipt = control.store.receipts()[-1]
+    assert receipt.effect_key == expected_key
+    assert receipt.resource == expected_resource
+
+
+def test_T16_a_mismatch_warns_once_naming_both_templates(caplog):
+    control = _templated_control()
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+
+        @protect("stripe.refund", effect="rf:{payment_id}", control=control)
+        def refund(payment_id: str, amount: int) -> str:
+            return f"re_{payment_id}"
+
+        with context(agent="refund-agent"):
+            refund(payment_id="txn_1", amount=200)
+            refund(payment_id="txn_2", amount=200)
+
+    warnings = [
+        record.getMessage() for record in caplog.records if "rf:{payment_id}" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "refund:{payment_id}" in warnings[0]
+    assert "stripe.refund" in warnings[0]
+
+
+def test_T16_the_mismatch_warning_is_emitted_at_decoration_time_with_an_explicit_control(caplog):
+    """§3.2 — when `control=` is passed the Control resolves at decoration, so the warning
+    lands at import rather than waiting for the first agent run to surface it."""
+    control = _templated_control()
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+
+        @protect("stripe.refund", effect="rf:{payment_id}", control=control)
+        def refund(payment_id: str, amount: int) -> str:
+            return f"re_{payment_id}"
+
+    assert [record for record in caplog.records if "rf:{payment_id}" in record.getMessage()]
+
+
+def test_T16_matching_templates_do_not_warn(caplog):
+    control = _templated_control()
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+
+        @protect(
+            "stripe.refund",
+            effect="refund:{payment_id}",
+            resource="payment:{payment_id}",
+            control=control,
+        )
+        def refund(payment_id: str, amount: int) -> str:
+            return f"re_{payment_id}"
+
+        with context(agent="refund-agent"):
+            refund(payment_id="txn_1", amount=200)
+
+    assert not [record for record in caplog.records if "in force" in record.getMessage()]
+
+
+def test_T16_an_action_with_no_effect_in_policy_gets_no_reservation():
+    """§3.2's escape hatch, and it is the right answer for a read."""
+    control = _templated_control()
+
+    @protect("customer.read", control=control)
+    def read(customer_id: str) -> str:
+        return "ok"
+
+    document = TEMPLATED_POLICY + "  customer.read:\n    decision: allow\n"
+    control = Control(Policy.from_yaml(document), InMemoryStateStore())
+
+    @protect("customer.read", control=control)
+    def read_again(customer_id: str) -> str:
+        return "ok"
+
+    with context(agent="support-agent"):
+        read_again(customer_id="cus_1")
+
+    assert control.store.list_effects() == ()
+    assert control.store.receipts()[-1].effect_key is None

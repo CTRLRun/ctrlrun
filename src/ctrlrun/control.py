@@ -876,6 +876,12 @@ def protect(
         signature = inspect.signature(func)
         _reject_variadic(signature, name)
         dangling: list[bool] = []
+        compared: list[bool] = []
+        if control is not None:
+            # SPEC-v0.2 §3.2 — the warning lands when the function first resolves its
+            # Control, which is here when one was passed: an operator who added templates to
+            # a policy hears about the disagreement at import, not on the first agent run.
+            _templates_in_force(control, name, effect, resource, compared)
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -892,17 +898,27 @@ def protect(
                 )
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
+            # SPEC-v0.2 §3.2 — the Control resolves before the Action, because the policy
+            # may be the only place a template is declared and `resource` is part of the
+            # canonical form. The decorator's value wins where both exist.
+            resolved = control if control is not None else _default_control()
+            effect_template, resource_template = _templates_in_force(
+                resolved, name, effect, resource, compared
+            )
             action = Action(
                 name=name,
                 arguments=dict(bound.arguments),
                 principal=invocation.principal,
                 # SPEC-v0.1 §5.1 — `resource` is part of the canonical form, so it resolves
                 # before the Action exists; the effect template resolves against the Action.
-                resource=None if resource is None else resolve_resource(resource, bound.arguments),
+                resource=(
+                    None
+                    if resource_template is None
+                    else resolve_resource(resource_template, bound.arguments)
+                ),
                 environment=invocation.environment,
             )
-            resolved = control if control is not None else _default_control()
-            effect_key = resolved._resolve_effect(action, effect)
+            effect_key = resolved._resolve_effect(action, effect_template)
             if reconcile is not None and effect_key is None and not dangling:
                 # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
                 # may come from the policy and that is not loaded yet. A hook with no key to
@@ -952,6 +968,55 @@ def protect(
         return wrapper
 
     return decorator
+
+
+def _templates_in_force(
+    resolved: Control,
+    name: str,
+    effect: str | None,
+    resource: str | None,
+    compared: list[bool],
+) -> tuple[str | None, str | None]:
+    """The `effect` and `resource` templates this action will use (SPEC-v0.2 §3.2).
+
+    The decorator's value wins where both it and the policy declare one. The policy is a
+    deployment artefact and the decorator is a statement in the code that will run; when
+    they disagree, the code is what executes, and silently substituting the policy's
+    template would change an effect identity without changing a line of the program.
+
+    `compared` is the once-per-decorated-function latch for the warning, because a warning
+    that repeats per call is a warning nobody reads.
+    """
+    from_policy_effect = resolved.policy.effect_template(name)
+    from_policy_resource = resolved.policy.resource_template(name)
+    if not compared:
+        compared.append(True)
+        _warn_template_mismatch(name, "effect", effect, from_policy_effect)
+        _warn_template_mismatch(name, "resource", resource, from_policy_resource)
+    return (
+        effect if effect is not None else from_policy_effect,
+        resource if resource is not None else from_policy_resource,
+    )
+
+
+def _warn_template_mismatch(
+    name: str, kwarg: str, decorated: str | None, from_policy: str | None
+) -> None:
+    """Name the action, both templates, and which one is in force (SPEC-v0.2 §3.2).
+
+    A warning and not an error: an operator adding templates to a policy for the gateway's
+    sake must not break a running decorator-based deployment.
+    """
+    if decorated is None or from_policy is None or decorated == from_policy:
+        return
+    _LOG.warning(
+        "%s: %s= is %r in the decorator and %r in the policy; the decorator's is in force, "
+        "because that is the code that will run. Remove one of them.",
+        name,
+        kwarg,
+        decorated,
+        from_policy,
+    )
 
 
 def _reconciler(reconcile: object, reconcile_eagerly: object, where: str) -> _Reconciler:

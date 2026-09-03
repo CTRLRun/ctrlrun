@@ -1,4 +1,12 @@
-"""Policy loading and rule evaluation to a Decision. Build-list item 2; SPEC-v0.1 §3."""
+"""Policy loading and rule evaluation to a Decision. Build-list item 2; SPEC-v0.1 §3.
+
+SPEC-v0.2 §3 adds per-action `effect:` and `resource:` templates, because the gateway has no
+decorator to carry one. That is the only reason this module imports the template grammar from
+`effect.py`: it validates the syntax at load time, so a typo fails at startup rather than
+raising `EffectKeyError` at the moment an agent tries to move money. It stays ignorant of
+effect *state* — records, transitions and reservations are none of policy's business
+(ARCHITECTURE §6).
+"""
 
 from __future__ import annotations
 
@@ -15,9 +23,21 @@ from typing import Any, Final
 import yaml
 
 from .action import Action
-from .errors import PolicyError
+from .effect import template_placeholders
+from .errors import InvalidArgument, PolicyError
 
+#: The schema `ctrlrun init` writes, and the one every v0.1 file declares.
 POLICY_SCHEMA: Final = "ctrlrun.policy/v1"
+
+#: SPEC-v0.2 §3.1 — required by any document using `effect:`, `resource:` or `mcp:`. A v2
+#: file fails to load on v0.1, correctly: v0.1 would ignore the effect template and execute
+#: with no duplicate protection at all. The schema string is the only thing standing between
+#: those two outcomes, so it is not optional and not inferred.
+POLICY_SCHEMA_V2: Final = "ctrlrun.policy/v2"
+
+#: Both, newest last, for the message an unknown schema produces.
+SUPPORTED_SCHEMAS: Final = (POLICY_SCHEMA, POLICY_SCHEMA_V2)
+
 CONFIG_ENV_VAR: Final = "CTRLRUN_CONFIG"
 DEFAULT_POLICY_FILENAME: Final = "ctrlrun.yaml"
 
@@ -39,8 +59,15 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
 _TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions"})
-_ENTRY_KEYS: Final = frozenset({"decision", "rules"})
 _RULE_KEYS: Final = frozenset({"when", "decision"})
+
+#: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
+#: decorator to carry an effect template, so the policy file has to.
+_V2_ENTRY_KEYS: Final = frozenset({"effect", "resource", "mcp"})
+_ENTRY_KEYS: Final = frozenset({"decision", "rules"}) | _V2_ENTRY_KEYS
+
+#: And the closed key set of the `mcp` mapping, which is one key wide.
+_MCP_KEYS: Final = frozenset({"not_executed_on_error"})
 
 #: Names of `Action` fields (SPEC-v0.1 §2.1), which a condition cannot address: conditions
 #: see the action's *arguments* and nothing else (§3.2). Writing one reads like it scopes a
@@ -157,9 +184,28 @@ class _Rule:
 
 
 @dataclass(frozen=True)
+class McpOptions:
+    """Per-tool assertions an operator makes about their upstream (SPEC-v0.2 §3.1, §6.8).
+
+    `not_executed_on_error` is the `NotExecuted` of v0.1 §5.5 in YAML: the claim that this
+    tool reports errors only *before* acting. It defaults to the fail-closed value, so an
+    `isError: true` the operator has said nothing about is an `AMBIGUOUS` outcome.
+    """
+
+    not_executed_on_error: bool = False
+
+
+#: The options an action with no `mcp:` mapping gets. Shared, because it is immutable.
+_DEFAULT_MCP_OPTIONS: Final = McpOptions()
+
+
+@dataclass(frozen=True)
 class _ActionPolicy:
     decision: Decision | None
     rules: tuple[_Rule, ...]
+    effect: str | None = None
+    resource: str | None = None
+    mcp: McpOptions = _DEFAULT_MCP_OPTIONS
 
     def evaluate(self, action_name: str, arguments: Mapping[str, Any]) -> Evaluation:
         if self.decision is not None:
@@ -180,6 +226,7 @@ class Policy:
 
     actions: Mapping[str, _ActionPolicy]
     source: str
+    schema: str = POLICY_SCHEMA
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Policy:
@@ -209,9 +256,10 @@ class Policy:
             )
         # SPEC: §3.4 — an absent `schema` key is an unknown schema, never "assume v1".
         schema = document.get("schema")
-        if schema != POLICY_SCHEMA:
+        if schema not in SUPPORTED_SCHEMAS:
             raise PolicyError(
-                f"{source}: unknown policy schema {schema!r}, expected {POLICY_SCHEMA!r}"
+                f"{source}: unknown policy schema {schema!r}, expected one of "
+                f"{', '.join(repr(known) for known in SUPPORTED_SCHEMAS)}"
             )
         # SPEC: §3.1 — key sets are closed, so a typo such as `action:` fails at load
         # instead of silently denying everything at runtime.
@@ -227,8 +275,27 @@ class Policy:
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
                 raise PolicyError(f"{source}: action names must be non-empty strings, got {name!r}")
-            actions[name] = _parse_entry(entry, f"{source}: action {name!r}")
-        return cls(actions=MappingProxyType(actions), source=source)
+            actions[name] = _parse_entry(entry, f"{source}: action {name!r}", str(schema))
+        return cls(actions=MappingProxyType(actions), source=source, schema=str(schema))
+
+    def effect_template(self, action_name: str) -> str | None:
+        """This action's `effect:` template, or `None` (SPEC-v0.2 §3.1, §11).
+
+        `None` means the action has no logical effect and gets no reservation — the
+        documented escape hatch of v0.1 §5.1, and the right answer for a read.
+        """
+        entry = self.actions.get(action_name)
+        return None if entry is None else entry.effect
+
+    def resource_template(self, action_name: str) -> str | None:
+        """This action's `resource:` template, or `None` (SPEC-v0.2 §3.1, §11)."""
+        entry = self.actions.get(action_name)
+        return None if entry is None else entry.resource
+
+    def mcp_options(self, action_name: str) -> McpOptions:
+        """This action's `mcp:` options, defaulting to the fail-closed ones (§3.1, §11)."""
+        entry = self.actions.get(action_name)
+        return _DEFAULT_MCP_OPTIONS if entry is None else entry.mcp
 
     def evaluate(self, action: Action) -> Evaluation:
         """Decide an action. No side effects; an unlisted action is denied (SPEC-v0.1 §3.4)."""
@@ -258,19 +325,30 @@ def _reject_unknown_keys(mapping: Mapping[Any, Any], allowed: Iterable[str], whe
         )
 
 
-def _parse_entry(entry: object, where: str) -> _ActionPolicy:
+def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
     if not isinstance(entry, Mapping):
         raise PolicyError(
             f"{where}: entry must be a mapping with 'decision' or 'rules', got {_type_name(entry)}"
         )
     _reject_unknown_keys(entry, _ENTRY_KEYS, where)
+    _reject_v2_keys_under_v1(entry, where, schema)
     has_decision = "decision" in entry
     has_rules = "rules" in entry
     if has_decision == has_rules:
         raise PolicyError(f"{where}: entry must have exactly one of 'decision' or 'rules'")
 
+    effect = _parse_template(entry.get("effect"), "effect", where)
+    resource = _parse_template(entry.get("resource"), "resource", where)
+    mcp = _parse_mcp(entry.get("mcp"), where)
+
     if has_decision:
-        return _ActionPolicy(decision=_parse_decision(entry["decision"], where), rules=())
+        return _ActionPolicy(
+            decision=_parse_decision(entry["decision"], where),
+            rules=(),
+            effect=effect,
+            resource=resource,
+            mcp=mcp,
+        )
 
     rules = entry["rules"]
     if not isinstance(rules, list) or not rules:
@@ -280,7 +358,63 @@ def _parse_entry(entry: object, where: str) -> _ActionPolicy:
         rules=tuple(
             _parse_rule(rule, f"{where} rule[{index}]") for index, rule in enumerate(rules)
         ),
+        effect=effect,
+        resource=resource,
+        mcp=mcp,
     )
+
+
+def _reject_v2_keys_under_v1(entry: Mapping[Any, Any], where: str, schema: str) -> None:
+    """A v2 key in a v1 document is a load error naming the key and the schema (§3.1).
+
+    Not a warning, and not silently honoured. A v0.1 kernel reading this file would ignore
+    the effect template and execute with no duplicate protection at all, so a document that
+    depends on one has to say so in a way v0.1 refuses.
+    """
+    if schema != POLICY_SCHEMA:
+        return
+    used = sorted(key for key in entry if key in _V2_ENTRY_KEYS)
+    if used:
+        raise PolicyError(
+            f"{where}: {', '.join(repr(key) for key in used)} needs "
+            f"'schema: {POLICY_SCHEMA_V2}'; this document declares {POLICY_SCHEMA!r}, and "
+            "a v0.1 reader would ignore the template and execute with no duplicate protection"
+        )
+
+
+def _parse_template(value: object, kwarg: str, where: str) -> str | None:
+    """Validate an `effect:` / `resource:` template at load time (SPEC-v0.2 §3.1).
+
+    A malformed template is a `PolicyError` here, not an `EffectKeyError` when an agent
+    first reaches the action: the same reason `@protect` checks its templates at decoration
+    time (v0.1 §5.1). The grammar is `effect.py`'s, so the two paths cannot diverge.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PolicyError(f"{where}: {kwarg!r} must be a template string, got {_type_name(value)}")
+    try:
+        template_placeholders(value)
+    except InvalidArgument as exc:
+        raise PolicyError(f"{where}: {kwarg!r}: {exc}") from exc
+    return value
+
+
+def _parse_mcp(value: object, where: str) -> McpOptions:
+    if value is None:
+        return _DEFAULT_MCP_OPTIONS
+    if not isinstance(value, Mapping):
+        raise PolicyError(f"{where}: 'mcp' must be a mapping, got {_type_name(value)}")
+    _reject_unknown_keys(value, _MCP_KEYS, f"{where}: mcp")
+    claimed = value.get("not_executed_on_error", False)
+    # SPEC-v0.2 §3.1 — a bool, and `1` is not one. This is an assertion about a remote that
+    # CTRLRun cannot check (§6.8), so it is made deliberately or not at all.
+    if not isinstance(claimed, bool):
+        raise PolicyError(
+            f"{where}: mcp: 'not_executed_on_error' must be true or false, "
+            f"got {_type_name(claimed)}"
+        )
+    return McpOptions(not_executed_on_error=claimed)
 
 
 def _parse_decision(value: object, where: str) -> Decision:
