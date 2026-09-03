@@ -377,6 +377,75 @@ def test_T54_a_call_with_no_effect_key_needs_no_result_to_be_complete(hook, stor
     assert store.list_effects() == ()
 
 
+def test_T54_not_executed_on_error_does_not_reach_across_to_timeout(hook, store):
+    """The operator asserted something about *errors*. A timeout is not an error the tool
+    reported — it is the absence of any report — and no per-tool claim can speak for it."""
+    _both(hook, "timeout", tool="reports_before_acting")
+
+    assert store.get_effect("report:txn_1").state is EffectState.AMBIGUOUS
+
+
+def test_T54_a_result_with_no_request_id_ref_writes_nothing(hook, store):
+    """Nothing links this result to a call. Guessing which one it meant is how a duplicate
+    gets committed, so no effect is written and the output still passes."""
+    envelope = _result(CALL_ID)
+    del envelope["params"]["payload"]["request_id_ref"]
+    hook.handle(_call(request_id=CALL_ID))
+
+    response = hook.handle(envelope)
+
+    assert _result_of(hook, response)["decision"] == "allow"
+    assert store.get_effect("refund:txn_1").state is EffectState.EXECUTING
+    assert store.receipts() == ()
+
+
+def test_T51_an_argument_that_is_not_a_provenance_envelope_is_refused(hook, store):
+    """`tool-call-request.json` requires `{value, provenance?}` per argument. A bare value
+    is a payload this adapter does not understand, and reading it as one would hash
+    something the producer did not mean."""
+    envelope = _call()
+    # A mapping with provenance but no `value` — the shape a producer gets wrong, and the
+    # one a bare-value check would let through into `envelope["value"]` as a KeyError.
+    envelope["params"]["payload"]["arguments"] = {"payment_id": {"provenance": {"origin": "user"}}}
+
+    response = hook.handle(envelope)
+
+    assert "error" in response
+    assert store.events() == ()
+
+    bare = _call()
+    bare["params"]["payload"]["arguments"] = {"payment_id": "txn_1"}
+    assert "error" in hook.handle(bare)
+
+
+def test_T51_a_call_with_no_agent_id_is_refused(hook, store):
+    """An Action cannot exist without a principal (v0.1 §2.1). ACS makes `agent_id` required
+    on every envelope, so its absence is a malformed request, not a decision."""
+    envelope = _call()
+    del envelope["params"]["metadata"]["agent_id"]
+
+    response = hook.handle(envelope)
+
+    assert "error" in response
+    assert store.events() == ()
+    # `Principal` would refuse an empty agent too, with a message about the Principal. This
+    # one names the ACS field a producer has to fix, which is the difference worth keeping.
+    assert "agent_id" in response["error"]["message"]
+
+
+def test_T51_the_operation_appears_in_the_recorded_action_name(hook, store):
+    """Asserted on the receipt, not merely on an event existing: two verbs on one tool are
+    two actions, and a policy has to be able to say different things about them."""
+    envelope = _call(request_id=CALL_ID)
+    envelope["params"]["payload"]["operation"] = "void"
+    envelope["params"]["payload"]["tool"]["name"] = "read_balance"
+    hook.handle(envelope)
+
+    proposed = [e for e in store.events() if e.type.value == "POLICY_EVALUATED"]
+    assert proposed, "the action reached the policy"
+    assert store.receipts()[-1].action == "acs.stripe.read_balance.void"
+
+
 # --- T55: the adapter is in an extra, and says so when it is absent --------------------
 
 
@@ -388,9 +457,18 @@ def test_T55_an_unknown_method_is_a_jsonrpc_error_in_the_reserved_range(hook):
 
 
 def test_T55_a_malformed_envelope_is_a_jsonrpc_error(hook):
-    for broken in ({}, {"jsonrpc": "2.0"}, {"jsonrpc": "1.0", "method": TOOL_CALL_REQUEST}):
+    well_formed = _call()
+    wrong_version = {**well_formed, "jsonrpc": "1.0"}
+    for broken in (
+        {},
+        {"jsonrpc": "2.0"},
+        {"jsonrpc": "1.0", "method": TOOL_CALL_REQUEST},
+        # Only the version is wrong; every other guard would let this through, so this is
+        # the case that proves the version check is doing something.
+        wrong_version,
+    ):
         response = hook.handle(broken)
-        assert "error" in response
+        assert "error" in response, broken
 
 
 def test_T55_the_adapter_is_not_imported_by_importing_ctrlrun():
