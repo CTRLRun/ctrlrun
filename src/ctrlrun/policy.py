@@ -42,6 +42,15 @@ _TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions"})
 _ENTRY_KEYS: Final = frozenset({"decision", "rules"})
 _RULE_KEYS: Final = frozenset({"when", "decision"})
 
+#: Names of `Action` fields (SPEC-v0.1 §2.1), which a condition cannot address: conditions
+#: see the action's *arguments* and nothing else (§3.2). Writing one reads like it scopes a
+#: rule — `when: { environment_eq: production }` — and matches nothing, so it is refused at
+#: load. Same fail-closed reading as `{resource}` in §5.1: two candidate meanings for one
+#: name, so make the author rename rather than silently pick one.
+RESERVED_ARGUMENTS: Final = frozenset(
+    {"action_id", "agent", "environment", "principal", "resource", "user"}
+)
+
 
 class Decision(StrEnum):
     """What may happen to an action: exactly three outcomes in v0.1 (SPEC-v0.1 §3.3).
@@ -106,7 +115,18 @@ class _Condition:
 
     def matches(self, action_name: str, arguments: Mapping[str, Any]) -> bool:
         if self.argument not in arguments:
-            return False  # SPEC: §3.2 — an absent argument is a false condition, not an error.
+            # SPEC §3.2 — still false, never an error, but never silent either. Defaults are
+            # applied when a call is bound (§8), so an argument is either always present or
+            # never: an absent one is a typo, and silence let a mistyped rule disappear into
+            # a catch-all below it.
+            _LOG.warning(
+                "%s: condition %s ignored: the action has no argument %r (it has: %s)",
+                action_name,
+                self.key,
+                self.argument,
+                ", ".join(sorted(arguments)) or "none",
+            )
+            return False
         value = arguments[self.argument]
         if self.op == "eq":
             return _equal(value, self.operand)
@@ -314,7 +334,15 @@ def _split_condition_key(key: str, where: str) -> tuple[str, str]:
     for op in _OPERATORS_BY_LENGTH:
         suffix = f"_{op}"
         if key.endswith(suffix) and len(key) > len(suffix):
-            return key[: -len(suffix)], op
+            argument = key[: -len(suffix)]
+            if argument in RESERVED_ARGUMENTS:
+                raise PolicyError(
+                    f"{where}: condition {key!r} names the Action field {argument!r}, not an "
+                    "argument; a v0.1 condition can only address the action's arguments, so "
+                    "this rule would never match. If the protected function really does take "
+                    f"an argument called {argument!r}, rename it."
+                )
+            return argument, op
     raise PolicyError(
         f"{where}: condition {key!r} must be '<argument>_<op>' where op is one of "
         f"{', '.join(sorted(_OPERATORS))}"

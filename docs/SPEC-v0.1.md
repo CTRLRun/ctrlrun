@@ -37,7 +37,7 @@ class Action:
     principal: Principal           # who is acting
     resource: str | None = None    # opaque "type:id", e.g. "payment:txn_8231"
     environment: str = "production"
-    action_id: str = <generated>   # "act_" + 12 hex chars; NOT part of the hash
+    action_id: str = <generated>   # "act_" + 32 hex chars; NOT part of the hash
 
 @dataclass(frozen=True)
 class Principal:
@@ -83,6 +83,8 @@ Any other type, including `Decimal`, `set`, `bytes`, `datetime`, and arbitrary o
 
 Two actions with the same canonical form MUST produce the same hash regardless of Python dict insertion order. Any material change (name, any argument, resource, principal, environment) MUST change the hash.
 
+**No Unicode normalization is applied.** Strings are hashed as the exact code points given, so the NFC and NFD spellings of `café` are different arguments with different hashes. This is deliberate and fail-closed: an approval granted for one spelling does not authorize the other, which is the safe direction for a binding whose whole job is to notice that something changed. It also means a caller who re-encodes an argument between proposing an action and executing it has produced a different action — correctly, if inconveniently. Normalize at your system's edge, before the value reaches an Action, not inside the hash.
+
 ---
 
 ## 3. Policy
@@ -103,15 +105,17 @@ actions:
 
   stripe.refund:
     rules:
-      - when: { amount_lte: 500 }
+      - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 – €500.00
         decision: allow
-      - when: { amount_lte: 5000 }
+      - when: { amount_gte: 0, amount_lte: 500000 }     # €0.00 – €5,000.00
         decision: approve
       - decision: deny
 
   iam.grant_admin:
     decision: deny
 ```
+
+Amounts are integer minor units (§2.3). Bound both ends: `amount_lte` on its own admits a negative amount, and a refund of a negative amount is a charge.
 
 An action entry has **either** `decision` **or** `rules` (a non-empty list). Both or neither → `PolicyError` at load time.
 
@@ -132,7 +136,11 @@ Rules are evaluated top to bottom; **first match wins**. A rule with no `when` a
 | `_lt` `_lte` `_gt` `_gte` | numeric compare | `int` only |
 | `_in` | membership | list |
 
-Referencing an argument that is absent from the action → the condition is false (not an error). Applying a numeric op to a non-`int` argument → the condition is false and a warning is logged.
+Referencing an argument that is absent from the action → the condition is false (not an error) **and a warning is logged**. Applying a numeric op to a non-`int` argument → the condition is false and a warning is logged.
+
+The warning on an absent argument matters more than it looks. A call is bound to the function's signature with defaults applied (§8), so an argument is either always present or never present — an absent one is a mistyped name, not a value that happens to be missing on this call. Silently false is the right *decision* (a rule that cannot be evaluated must not match), but silence let `amont_lte` disappear into a catch-all `decision: allow` below it, turning a typo into a permissive policy. The decision stays false; it stops being quiet.
+
+**Conditions address arguments, and only arguments.** A condition key naming an `Action` field — `action_id`, `agent`, `environment`, `principal`, `resource`, `user` — MUST raise `PolicyError` at load. `when: { environment_eq: production }` reads exactly like it scopes a rule to production and would match nothing at all, because conditions see `action.canonical_arguments` and nothing else. This is the same fail-closed reading as `{resource}` in §5.1: two candidate meanings for one name, so refuse and make the author rename, rather than silently pick the one they did not mean. Only the whole argument name is reserved — `resource_id_eq` is an ordinary condition on an ordinary argument. Scoping a rule by environment or principal is not in v0.1 (§9); an action that must be decided differently per environment gets a different action name until then.
 
 Where a `when` is present it MUST be a non-empty mapping: `when: {}` and `when:` (null) → `PolicyError` at load. An empty mapping is far more likely a truncated edit than an intended catch-all, and the catch-all already has a spelling — omit `when`.
 
@@ -176,17 +184,18 @@ Exactly these three in v0.1. No `allow_with_log`, `transform`, or `terminate`.
 ```python
 @dataclass(frozen=True)
 class ApprovalRequest:
-    request_id: str        # "apr_" + 12 hex
+    request_id: str  # "apr_" + 32 hex (128 bits; it is a bearer token in v0.2)
     action_hash: str
-    action: Action         # for human display
+    action: Action  # for human display
     created_at: datetime
-    expires_at: datetime   # default now + 15 minutes
+    expires_at: datetime  # default now + 15 minutes
+
 
 @dataclass(frozen=True)
 class Approval:
-    approval_id: str       # == request_id in v0.1
+    approval_id: str  # == request_id in v0.1
     action_hash: str
-    approver: str          # free text in v0.1, e.g. "cli:local"
+    approver: str  # free text in v0.1, e.g. "cli:local"
     granted_at: datetime
     expires_at: datetime
 ```
@@ -472,14 +481,28 @@ Inject a store that fails `reserve_effect`; the approval remains `granted`.
 from .control import protect, Control, context, with_approval
 from .action import Action, Principal, action_hash, canonicalize
 from .policy import Decision, Policy
-from .approval import Approval, ApprovalRequest, ApprovalProvider, LocalApprovalProvider, ScriptedApprovalProvider
+from .approval import (
+    Approval,
+    ApprovalRequest,
+    ApprovalProvider,
+    LocalApprovalProvider,
+    ScriptedApprovalProvider,
+)
 from .effect import EffectState, EffectRecord
 from .state import StateStore, SQLiteStateStore, InMemoryStateStore
 from .receipt import Receipt, Event
 from .errors import (
-    CTRLRunError, InvalidArgument, PolicyError, EffectKeyError,
-    ActionDenied, ApprovalRequired, ApprovalTimeout, ApprovalMismatch,
-    DuplicateEffect, AmbiguousEffect, NotExecuted,
+    CTRLRunError,
+    InvalidArgument,
+    PolicyError,
+    EffectKeyError,
+    ActionDenied,
+    ApprovalRequired,
+    ApprovalTimeout,
+    ApprovalMismatch,
+    DuplicateEffect,
+    AmbiguousEffect,
+    NotExecuted,
 )
 ```
 

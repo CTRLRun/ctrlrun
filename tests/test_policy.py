@@ -354,8 +354,80 @@ def test_no_warning_is_logged_for_a_well_typed_condition(
     with caplog.at_level(logging.WARNING, logger="ctrlrun"):
         _decide(REFUND_POLICY, {"amount": 2000})
         _decide(_one_rule("value_eq", "EUR"), {"value": ["not", "a", "string"]})
-        _decide(_one_rule("amount_lte", "5"), {"currency": "EUR"})
     assert [record for record in caplog.records if record.levelno == logging.WARNING] == []
+
+
+# --- a condition that can never match says so (SPEC §3.2) -----------------------------
+
+
+def test_a_condition_on_an_absent_argument_is_false_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SPEC §3.2 — still false, never an error, but no longer silent.
+
+    Defaults are applied when a call is bound (§8), so an argument is either always present
+    or never: an absent one is a typo or a field name, not a value that happens to be
+    missing this time. Silence there let a mistyped rule fall through to a catch-all allow.
+    """
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        evaluation = _decide(_one_rule("amont_lte", "5000"), {"amount": 100})
+
+    assert evaluation.decision is Decision.DENY
+    assert evaluation.reason == "no_matching_rule"
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "amont" in warnings[0].getMessage()
+    assert "amount" in warnings[0].getMessage()  # names what the action actually carries
+
+
+def test_a_mistyped_condition_no_longer_falls_through_to_a_catch_all_allow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The regression this exists for: a typo made a deny rule vanish, silently.
+
+    The decision is unchanged — SPEC §3.2 keeps an absent argument false — so the rule below
+    still allows. What changed is that it can no longer happen quietly.
+    """
+    policy = """
+schema: ctrlrun.policy/v1
+actions:
+  stripe.refund:
+    rules:
+      - when: { amont_gte: 100000 }
+        decision: deny
+      - decision: allow
+"""
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        evaluation = _decide(policy, {"amount": 999999})
+
+    assert evaluation.decision is Decision.ALLOW
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    "field", ["environment", "resource", "principal", "agent", "user", "action_id"]
+)
+@pytest.mark.parametrize("op", ["eq", "neq", "lte", "in"])
+def test_a_condition_naming_an_action_field_is_refused_at_load(field: str, op: str) -> None:
+    """SPEC §3.2 — conditions address arguments; an Action field in one is refused.
+
+    `when: { environment_eq: production }` reads like it scopes a rule to production and
+    does nothing at all, because `environment` is an Action field and conditions see only
+    arguments. Same fail-closed reading as `{resource}` in §5.1: two candidate meanings for
+    one name, so refuse and make the author rename, rather than pick one silently.
+    """
+    operand = "[production]" if op == "in" else "1" if op == "lte" else "production"
+    with pytest.raises(PolicyError) as refused:
+        Policy.from_yaml(_one_rule(f"{field}_{op}", operand))
+
+    assert field in str(refused.value)
+    assert "argument" in str(refused.value)
+
+
+def test_an_argument_that_merely_contains_a_field_name_still_loads() -> None:
+    """Only the whole argument name is reserved: `resource_id` is an ordinary argument."""
+    policy = Policy.from_yaml(_one_rule("resource_id_eq", "srv-1"))
+    assert policy.evaluate(_action(arguments={"resource_id": "srv-1"})).decision is Decision.ALLOW
 
 
 # --- fail-closed defaults (SPEC §3.4) -------------------------------------------------
