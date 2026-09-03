@@ -222,16 +222,23 @@ def test_the_action_id_is_matched_exactly_never_as_a_prefix(refund, remote, stor
 
 
 def test_the_receipt_is_null_for_an_action_still_awaiting_a_human(control, store):
-    """§5, and v0.1 §6.1: a suspended action is not terminal, so it has no receipt yet."""
+    """§5, and v0.1 §6.1: a suspended action is not terminal, so it has no receipt yet.
+
+    Null because *this* action has none. Another action commits first and writes one, so a
+    lookup that returned any receipt rather than this action's would be caught here.
+    """
 
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
 
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_committed", amount=200)
     with context(agent="refund-agent"), pytest.raises(ApprovalRequired):
         refund(payment_id="txn_2", amount=2000)
 
-    action_id = store.events()[0].action_id
+    assert store.receipts(), "another action must hold a receipt for this to prove anything"
+    action_id = store.events()[-1].action_id
     document = json.loads(_ok(_cli("inspect", action_id, "--json")).stdout)
 
     assert document["receipt"] is None
@@ -244,13 +251,25 @@ def test_the_receipt_is_null_for_an_action_still_awaiting_a_human(control, store
 
 
 def test_the_effect_is_null_for_an_action_with_no_effect_key(control, store):
-    @protect("stripe.refund", control=control)
-    def refund(payment_id: str, amount: int) -> str:
+    """Null because *this* action has none — not because the store happens to be empty.
+
+    A keyed action runs first, so a lookup that fell back to any record rather than to this
+    action's would find one and be caught here.
+    """
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def keyed(payment_id: str, amount: int) -> str:
         return "re_1"
 
-    with context(agent="refund-agent"):
-        refund(payment_id="txn_1", amount=200)
+    @protect("stripe.refund", control=control)
+    def keyless(payment_id: str, amount: int) -> str:
+        return "re_2"
 
+    with context(agent="refund-agent"):
+        keyed(payment_id="txn_1", amount=200)
+        keyless(payment_id="txn_2", amount=200)
+
+    assert store.list_effects(), "the store must hold an effect record for this to prove anything"
     action_id = store.receipts()[-1].action_id
     document = json.loads(_ok(_cli("inspect", action_id, "--json")).stdout)
 
@@ -312,6 +331,27 @@ def test_the_human_output_shows_who_resolved_an_ambiguous_effect(refund, remote,
 
     assert "EFFECT_RESOLVED" in output
     assert "resolved_by=human" in output
+
+
+def test_the_human_output_of_a_suspended_action_comes_from_its_approval_request(control, store):
+    """An action awaiting a human has no receipt, and an Event carries neither its name nor
+    its arguments. The approval request holds the whole Action (v0.1 §4.1), and that is the
+    only reason this header can be rendered at all."""
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        return "re_1"
+
+    with context(agent="refund-agent", user="alice"), pytest.raises(ApprovalRequired):
+        refund(payment_id="txn_2", amount=2000)
+
+    action_id = store.events()[0].action_id
+    output = _ok(_cli("inspect", action_id)).stdout
+
+    assert "stripe.refund" in output.splitlines()[0]
+    assert "principal   refund-agent (user: alice)" in output
+    assert '"payment_id": "txn_2"' in output
+    assert "receipt     -  (awaiting a human)" in output
 
 
 def test_the_human_output_shows_the_approval_and_who_answered(control, store):
