@@ -15,13 +15,26 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, ParamSpec, TypeVar
 
 from .action import Action, Principal
-from .errors import ActionDenied, InvalidArgument, NotExecuted
+from .approval import (
+    DEFAULT_APPROVAL_TTL,
+    Approval,
+    ApprovalProvider,
+    ApprovalStatus,
+    LocalApprovalProvider,
+)
+from .errors import (
+    ActionDenied,
+    ApprovalMismatch,
+    ApprovalRequired,
+    InvalidArgument,
+    NotExecuted,
+)
 from .policy import Decision, Evaluation, Policy
-from .receipt import Event, EventType, Receipt, ReceiptResult, new_receipt_id
+from .receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, new_receipt_id
 from .state import InMemoryStateStore, StateStore
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +62,7 @@ class _Invocation:
 
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
+_PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
 
 @contextmanager
@@ -75,6 +89,22 @@ def context(agent: str, user: str | None = None, environment: str | None = None)
         _CONTEXT.reset(token)
 
 
+@contextmanager
+def with_approval(request_id: str) -> Iterator[None]:
+    """Present a granted approval to the calls made inside the block (SPEC-v0.1 §4.3).
+
+    The approval still has to match: it authorizes the exact action a human saw, once, and
+    only until it expires. Presenting it is an offer, not a decision.
+    """
+    if not request_id:
+        raise InvalidArgument("with_approval(request_id) must be a non-empty request id")
+    token = _PRESENTED_APPROVAL.set(request_id)
+    try:
+        yield
+    finally:
+        _PRESENTED_APPROVAL.reset(token)
+
+
 # --- Control ---------------------------------------------------------------------------
 
 
@@ -89,14 +119,18 @@ class Control:
         self,
         policy: Policy,
         store: StateStore,
+        approvals: ApprovalProvider | None = None,
         *,
         clock: Callable[[], datetime] = _utc_now,
+        approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
     ) -> None:
-        # SPEC: §8 — the frozen signature also carries `approvals: ApprovalProvider`; the
-        # provider protocol and its implementations arrive with build-list item 4.
         self._policy = policy
         self._store = store
+        self._approvals: ApprovalProvider = (
+            approvals if approvals is not None else LocalApprovalProvider(store, clock=clock)
+        )
         self._clock = clock
+        self._approval_ttl = approval_ttl
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Control:
@@ -106,7 +140,8 @@ class Control:
         without one (SPEC-v0.1 §3.4).
         """
         # SPEC: §5.3 — SQLiteStateStore replaces this default with build-list item 6.
-        return cls(Policy.from_file(path), InMemoryStateStore())
+        store = InMemoryStateStore()
+        return cls(Policy.from_file(path), store, LocalApprovalProvider(store))
 
     @property
     def policy(self) -> Policy:
@@ -115,6 +150,10 @@ class Control:
     @property
     def store(self) -> StateStore:
         return self._store
+
+    @property
+    def approvals(self) -> ApprovalProvider:
+        return self._approvals
 
     def evaluate(self, action: Action) -> Evaluation:
         """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8)."""
@@ -156,18 +195,25 @@ class Control:
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
-        if evaluation.decision is Decision.APPROVE:
-            # SPEC: §4 — approval request, grant and hash binding are build-list item 4.
-            raise NotImplementedError(
-                f"{action.name}: decision 'approve' is not implemented yet (build-list item 4)"
-            )
+        approval = (
+            self._authorize(action, evaluation, started_at)
+            if evaluation.decision is Decision.APPROVE
+            else None
+        )
 
-        self._append(EventType.EXECUTION_STARTED, action, {})
+        self._append(EventType.EXECUTION_STARTED, action, {}, approval=approval)
         try:
             executor()
         except NotExecuted as exc:
-            self._append(EventType.EXECUTION_FAILED, action, {"error": str(exc)})
-            self._record(action, evaluation, ReceiptResult.FAILED, started_at, error=str(exc))
+            self._append(EventType.EXECUTION_FAILED, action, {"error": str(exc)}, approval=approval)
+            self._record(
+                action,
+                evaluation,
+                ReceiptResult.FAILED,
+                started_at,
+                error=str(exc),
+                approval=approval,
+            )
             raise
         except BaseException as exc:
             # SPEC: §5.5 — anything that is not NotExecuted is an AMBIGUOUS outcome, never
@@ -175,15 +221,124 @@ class Control:
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
-            self._append(EventType.EXECUTION_AMBIGUOUS, action, {"error": error})
-            self._record(action, evaluation, ReceiptResult.AMBIGUOUS, started_at, error=error)
+            self._append(EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, approval=approval)
+            self._record(
+                action,
+                evaluation,
+                ReceiptResult.AMBIGUOUS,
+                started_at,
+                error=error,
+                approval=approval,
+            )
             raise
-        self._append(EventType.EXECUTION_COMMITTED, action, {})
-        return self._record(action, evaluation, ReceiptResult.COMMITTED, started_at)
+        self._append(EventType.EXECUTION_COMMITTED, action, {}, approval=approval)
+        return self._record(
+            action, evaluation, ReceiptResult.COMMITTED, started_at, approval=approval
+        )
 
-    def _append(self, type_: EventType, action: Action, data: Mapping[str, Any]) -> None:
+    # --- the APPROVE path (SPEC-v0.1 §4.2) --------------------------------------------
+
+    def _authorize(self, action: Action, evaluation: Evaluation, started_at: datetime) -> Approval:
+        """Turn an APPROVE decision into a consumed approval, or refuse the action.
+
+        With no approval presented, the request is recorded and `ApprovalRequired` is raised
+        so the caller can come back with `with_approval(request_id)` (SPEC-v0.1 §4.3). No
+        receipt is written for that: the action is suspended awaiting a human, which is not
+        a terminal state (§6.1). The `APPROVAL_REQUESTED` event is the evidence.
+        """
+        presented = _PRESENTED_APPROVAL.get(None)
+        if presented is None:
+            request = self._approvals.request(action, self._approval_ttl)
+            self._append(
+                EventType.APPROVAL_REQUESTED,
+                action,
+                {
+                    "action_hash": action.action_hash,
+                    "expires_at": iso_timestamp(request.expires_at),
+                },
+                approval_id=request.request_id,
+            )
+            raise ApprovalRequired(
+                f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
+                f"then retry inside ctrlrun.with_approval({request.request_id!r})",
+                request_id=request.request_id,
+                action_id=action.action_id,
+            )
+
+        try:
+            approval = self._store.consume_approval(presented, action.action_hash)
+        except ActionDenied as denied:
+            # The store raises this when the record says a human refused. §4.2 makes that a
+            # denial of the action, not a mismatch: nothing about the action was wrong.
+            approver = self._approver_of(presented)
+            self._append(
+                EventType.APPROVAL_DENIED, action, {"approver": approver}, approval_id=presented
+            )
+            self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason})
+            self._record(
+                action,
+                evaluation,
+                ReceiptResult.DENIED,
+                started_at,
+                error=str(denied),
+                approval_id=presented,
+                approver=approver,
+            )
+            raise ActionDenied(
+                str(denied), reason=denied.reason, action_id=action.action_id
+            ) from denied
+        except ApprovalMismatch as mismatch:
+            if mismatch.reason == ApprovalStatus.EXPIRED:
+                self._append(EventType.APPROVAL_EXPIRED, action, {}, approval_id=presented)
+            self._append(
+                EventType.APPROVAL_INVALIDATED,
+                action,
+                {"reason": mismatch.reason, "action_hash": action.action_hash},
+                approval_id=presented,
+            )
+            self._record(
+                action,
+                evaluation,
+                ReceiptResult.BLOCKED,
+                started_at,
+                error=str(mismatch),
+                approval_id=presented,
+                approver=self._approver_of(presented),
+            )
+            raise
+
+        self._append(
+            EventType.APPROVAL_CONSUMED,
+            action,
+            {"approver": approval.approver},
+            approval_id=approval.approval_id,
+        )
+        return approval
+
+    def _approver_of(self, approval_id: str) -> str | None:
+        """Who answered, for the evidence trail. `None` if there is no such record."""
+        record = self._store.get_approval(approval_id)
+        return None if record is None else record.approver
+
+    # --- evidence ---------------------------------------------------------------------
+
+    def _append(
+        self,
+        type_: EventType,
+        action: Action,
+        data: Mapping[str, Any],
+        *,
+        approval: Approval | None = None,
+        approval_id: str | None = None,
+    ) -> None:
         self._store.append_event(
-            Event(type=type_, action_id=action.action_id, ts=self._clock(), data=data)
+            Event(
+                type=type_,
+                action_id=action.action_id,
+                ts=self._clock(),
+                data=data,
+                approval_id=approval_id if approval is None else approval.approval_id,
+            )
         )
 
     def _record(
@@ -193,6 +348,10 @@ class Control:
         result: ReceiptResult,
         started_at: datetime,
         error: str | None = None,
+        *,
+        approval: Approval | None = None,
+        approval_id: str | None = None,
+        approver: str | None = None,
     ) -> Receipt:
         receipt = Receipt(
             receipt_id=new_receipt_id(),
@@ -205,6 +364,8 @@ class Control:
             environment=action.environment,
             decision=evaluation.decision,
             decision_reason=evaluation.reason,
+            approval_id=approval.approval_id if approval is not None else approval_id,
+            approver=approval.approver if approval is not None else approver,
             result=result,
             started_at=started_at,
             finished_at=self._clock(),
@@ -289,7 +450,17 @@ def protect(
             def executor() -> None:
                 returned.append(_invoke(func, signature, action.canonical_arguments))
 
-            resolved.execute(action, executor, effect_key=None)
+            try:
+                resolved.execute(action, executor, effect_key=None)
+            except ApprovalRequired as pending:
+                if not wait:
+                    raise
+                # SPEC-v0.1 §4.3 — with wait=True the decorator blocks on the provider and
+                # then re-presents the same proposal. It re-presents a *denied* answer too:
+                # the refusal belongs in the receipt Control writes, not in the decorator.
+                resolved.approvals.wait(pending.request_id, None)
+                with with_approval(pending.request_id):
+                    resolved.execute(action, executor, effect_key=None)
             return returned[0]
 
         return wrapper

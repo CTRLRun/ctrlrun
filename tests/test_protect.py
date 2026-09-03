@@ -10,6 +10,7 @@ import pytest
 from ctrlrun import (
     Action,
     ActionDenied,
+    ApprovalRequired,
     Control,
     Decision,
     Event,
@@ -510,15 +511,22 @@ def test_an_unknown_exception_is_never_recorded_as_failed(control, store):
     assert receipt.result != ReceiptResult.FAILED
 
 
-# --- deferred to later build-list items ------------------------------------------------
+# --- the APPROVE path (SPEC §4.3; covered in depth by tests/test_approval.py) ---------
 
 
-def test_an_APPROVE_decision_is_not_implemented_yet(control):
+def test_an_APPROVE_decision_suspends_the_call_with_ApprovalRequired(control, store):
     @protect("stripe.refund", control=control)
-    def refund(amount: int) -> None: ...
+    def refund(amount: int) -> None:
+        raise AssertionError("executor must not run without an approval")
 
-    with context(agent="refund-agent"), pytest.raises(NotImplementedError):
+    with context(agent="refund-agent"), pytest.raises(ApprovalRequired) as excinfo:
         refund(amount=2000)
+
+    assert excinfo.value.request_id.startswith("apr_")
+    assert _event_types(store)[-1] == EventType.APPROVAL_REQUESTED
+
+
+# --- deferred to later build-list items ------------------------------------------------
 
 
 def test_an_effect_template_is_not_implemented_yet(control):

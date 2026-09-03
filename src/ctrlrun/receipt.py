@@ -27,7 +27,7 @@ def new_receipt_id() -> str:
     return f"ctr_{secrets.token_hex(_ID_HEX_BYTES)}"
 
 
-def _iso(moment: datetime) -> str:
+def iso_timestamp(moment: datetime) -> str:
     """UTC ISO-8601 with a `Z` suffix, as in SPEC-v0.1 §6.1."""
     return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -84,7 +84,7 @@ class Event:
     def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
-            "ts": _iso(self.ts),
+            "ts": iso_timestamp(self.ts),
             "type": str(self.type),
             "action_id": self.action_id,
             "effect_key": self.effect_key,
@@ -140,8 +140,8 @@ class Receipt:
             "attempt": self.attempt,
             "result": str(self.result),
             "error": self.error,
-            "started_at": _iso(self.started_at),
-            "finished_at": _iso(self.finished_at),
+            "started_at": iso_timestamp(self.started_at),
+            "finished_at": iso_timestamp(self.finished_at),
         }
 
     def to_json(self) -> str:

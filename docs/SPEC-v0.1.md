@@ -195,7 +195,7 @@ Stored records additionally carry `status: pending | granted | denied | expired 
 
 ### 4.2 Invariants
 
-- **A1 Exact binding.** An approval is valid for an Action only if `approval.action_hash == action.action_hash`. Anything else → `ApprovalMismatch`, decision `DENY`, event `APPROVAL_INVALIDATED`.
+- **A1 Exact binding.** An approval is valid for an Action only if `approval.action_hash == action.action_hash`. Anything else → `ApprovalMismatch`, the action is refused (receipt `result: blocked`), event `APPROVAL_INVALIDATED`. The receipt keeps the decision policy actually reached — `decision: approve` — because a refusal at the approval gate does not retract what the policy said.
 - **A2 Single use.** Consuming an approval (transitioning `granted → consumed`) MUST be atomic in the StateStore. A second presentation → `ApprovalMismatch(reason="consumed")`.
 - **A3 Expiry.** `now > expires_at` → invalid. Expiry is checked at consumption time, not only at grant time.
 - **A4 Consumption precedes execution.** The approval is consumed in the same store transaction as the effect reservation (§5.3). If reservation fails, the approval is *not* consumed.
@@ -205,8 +205,19 @@ Stored records additionally carry `status: pending | granted | denied | expired 
 ```python
 class ApprovalProvider(Protocol):
     def request(self, action: Action, ttl: timedelta) -> ApprovalRequest: ...
-    def wait(self, request_id: str, timeout: timedelta | None) -> Approval | None: ...
+
+    def wait(self, request_id: str, timeout: timedelta | None) -> Approval | None:
+        """Block until the request is answered.
+
+        Returns the `Approval` if it was granted, and `None` if it was denied — `None`
+        means "answered, no", never "still waiting". Raises `ApprovalTimeout` if nobody
+        answers within `timeout`, or before the request's own `expires_at`, whichever
+        comes first. A `wait()` timeout is client-side: it changes nothing in the store,
+        so the request stays pending until it is granted, denied, or expires.
+        """
 ```
+
+`wait()` never *consumes* an approval; consumption happens in `Control` (§4.2 A4). A provider may record the answer on a human's behalf — `ScriptedApprovalProvider` writes its scripted grant or denial to the store — but it never invents one.
 
 v0.1 ships:
 
@@ -307,6 +318,8 @@ The executor opts *into* `FAILED` by raising `NotExecuted`, asserting it knows t
 
 One per action that reached a terminal state (including denials). JSON, one per line in `.ctrlrun/receipts.jsonl`, and stored in SQLite.
 
+An action awaiting approval has no receipt; `APPROVAL_REQUESTED` is its evidence. The request stays `pending` in the store until it is granted, denied, or expires, and can be presented later. This is the one place a proposed action leaves no receipt: it has not reached a terminal state, and `result` has no value for "waiting for a human".
+
 ```json
 {
   "schema": "ctrlrun.receipt/v1",
@@ -359,6 +372,8 @@ ACTION_DENIED
 ```
 
 Each event: `{event_id, ts, type, action_id, effect_key?, approval_id?, data}`.
+
+`APPROVAL_INVALIDATED` is the umbrella: it is appended whenever a presented approval did not authorize the action, with `data.reason` saying which invariant failed (`mismatch`, `consumed`, `expired`, `pending`, `unknown`). The more specific event, where one exists, is appended *first*: an expired approval produces `APPROVAL_EXPIRED` then `APPROVAL_INVALIDATED`, and a denied one produces `APPROVAL_DENIED` then `ACTION_DENIED` — a denial is a human's answer, not an invalid approval, so it does not take the umbrella.
 
 ---
 
@@ -443,10 +458,13 @@ context(agent: str, user: str | None = None, environment: str | None = None) -> 
 with_approval(request_id: str) -> ContextManager
 
 Control.from_file(path=None) -> Control
-Control(policy: Policy, store: StateStore, approvals: ApprovalProvider, clock=...)
+Control(policy: Policy, store: StateStore, approvals: ApprovalProvider | None = None, *,
+        clock=..., approval_ttl: timedelta = timedelta(minutes=15))
 Control.evaluate(action: Action) -> Evaluation   # decision + reason, no side effects
 Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | None) -> Receipt
 ```
+
+`approvals=None` builds a `LocalApprovalProvider(store)`: the local provider is the only one that asks a real human, so it is the safe default, and a `Control` is never without a way to ask.
 
 `effect` and `resource` are templates (§5.1). The call is bound to the wrapped function's signature and defaults are applied, so a defaulted argument is part of the action and of its hash — the action must describe what will actually run.
 
