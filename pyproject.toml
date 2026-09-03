@@ -23,6 +23,9 @@ dependencies = [
     "click",
 ]
 
+[project.scripts]
+ctrlrun = "ctrlrun.cli.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",

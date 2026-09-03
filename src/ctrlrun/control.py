@@ -45,7 +45,7 @@ from .errors import (
     InvalidArgument,
     NotExecuted,
 )
-from .policy import Decision, Evaluation, Policy
+from .policy import Decision, Evaluation, Policy, discover_policy_path
 from .receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, new_receipt_id
 from .state import SQLiteStateStore, StateStore
 
@@ -161,7 +161,7 @@ class Control:
         are shared by every worker that loaded the same policy (§5.3 E1, §8).
         """
         policy = Policy.from_file(path)
-        store = SQLiteStateStore(_state_path(policy.source))
+        store = SQLiteStateStore(state_path(policy.source))
         return cls(policy, store, LocalApprovalProvider(store))
 
     @property
@@ -649,23 +649,27 @@ def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
     return {"reason": "ambiguous"}
 
 
-def _state_path(source: str) -> Path:
-    """Where `Control.from_file` keeps its state (SPEC-v0.1 §8).
+def state_path(source: str | os.PathLike[str] | None = None) -> Path:
+    """Where the state database lives for a given policy file (SPEC-v0.1 §8).
 
     `.ctrlrun/state.db` beside the policy file, unless `$CTRLRUN_STATE` names somewhere else.
     Beside the policy, not beside the process: workers started from different directories but
     sharing a policy must share one store, or reservation is atomic within each of them and
     meaningless between them (§5.3 E1). Set but empty is a misconfiguration, not a licence to
     fall back to the default — an agent's effects would land in a store nobody is watching.
+
+    `source=None` discovers the policy the way `Control.from_file` does, which is how the CLI
+    finds the store an agent is using without needing to load the policy itself.
     """
     configured = os.environ.get(STATE_ENV_VAR)
-    if configured is None:
-        return Path(source).parent / DEFAULT_STATE_DIR / DEFAULT_STATE_FILENAME
-    if not configured.strip():
-        raise InvalidArgument(
-            f"{STATE_ENV_VAR} is set but empty; unset it or point it at a state database"
-        )
-    return Path(configured)
+    if configured is not None:
+        if not configured.strip():
+            raise InvalidArgument(
+                f"{STATE_ENV_VAR} is set but empty; unset it or point it at a state database"
+            )
+        return Path(configured)
+    resolved = discover_policy_path() if source is None else Path(source)
+    return resolved.parent / DEFAULT_STATE_DIR / DEFAULT_STATE_FILENAME
 
 
 _DEFAULT_CONTROL: Control | None = None

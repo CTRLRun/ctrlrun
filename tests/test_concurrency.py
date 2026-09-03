@@ -9,6 +9,7 @@ Nothing here counts executions in a Python object: eight processes share no memo
 remote appends one line to a file per call, and the count is the line count.
 """
 
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -60,6 +61,10 @@ BLOCKED_AMBIGUOUS = 4
 #: hanging CI (CLAUDE.md working style).
 BARRIER_TIMEOUT_S = 30.0
 JOIN_TIMEOUT_S = 120.0
+
+
+def _jsonl(path):
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 def _fake_remote(log_path: str) -> str:
@@ -169,6 +174,22 @@ def test_T3_every_proposal_is_a_distinct_action_for_the_same_effect(race):
     receipts = store.receipts()
     assert len({receipt.action_id for receipt in receipts}) == WORKERS
     assert {receipt.effect_key for receipt in receipts} == {EFFECT_KEY}
+
+
+def test_T3_eight_processes_leave_the_jsonl_evidence_intact(race):
+    """SPEC-v0.1 §6 — the same file the store mirrors into, written by eight workers.
+
+    One `O_APPEND` write per record, as the fake remote does above: whole lines interleave,
+    fragments do not. A torn line would make the evidence unreadable to everything.
+    """
+    store, _, _ = race
+    written = [json.loads(line) for line in _jsonl(store.journal.receipts_path)]
+
+    assert len(written) == WORKERS
+    assert {document["receipt_id"] for document in written} == {
+        receipt.receipt_id for receipt in store.receipts()
+    }
+    assert all(json.loads(line) for line in _jsonl(store.journal.events_path))
 
 
 # --- one approval, eight processes (SPEC §4.2 A2, A4) ---------------------------------

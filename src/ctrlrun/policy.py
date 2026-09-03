@@ -164,7 +164,7 @@ class Policy:
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Policy:
         """Load a policy from `path`, else `$CTRLRUN_CONFIG`, else `./ctrlrun.yaml`."""
-        resolved = Path(path) if path is not None else _discover_policy_path()
+        resolved = Path(path) if path is not None else discover_policy_path()
         try:
             text = resolved.read_text(encoding="utf-8")
         except OSError as exc:
@@ -220,7 +220,8 @@ class Policy:
         return entry.evaluate(action.name, action.canonical_arguments)
 
 
-def _discover_policy_path() -> Path:
+def discover_policy_path() -> Path:
+    """The policy file this process would load: `$CTRLRUN_CONFIG`, else `./ctrlrun.yaml`."""
     configured = os.environ.get(CONFIG_ENV_VAR)
     if configured is None:
         return Path.cwd() / DEFAULT_POLICY_FILENAME

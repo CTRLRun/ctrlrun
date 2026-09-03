@@ -19,6 +19,7 @@ Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 - Webhook approval provider (Slack/Teams/anything that can POST back).
 - `ctrlrun inspect <action_id>`.
 - Reconciliation hook: executor may implement `check(effect_key) -> committed | not_executed | unknown` to resolve AMBIGUOUS automatically.
+- `examples/` directory with standalone scripts per scenario (`double-refund/`, `approval-mutation/`, `agent-race/`, `approval-replay/`). In v0.1 `ctrlrun demo` is the example; separate scripts earn their keep once there is more than one way to wire CTRLRun in.
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 

@@ -16,6 +16,7 @@ written until both have been decided, so a refused reservation leaves the approv
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -47,7 +48,9 @@ from .effect import (
     plan_reservation,
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
-from .receipt import Event, EventType, Receipt
+from .receipt import Event, EventLog, EventType, Receipt
+
+_LOG = logging.getLogger(__name__)
 
 #: SPEC-v0.1 §5.3 E1 — a contender waits this long for the write lock before giving up.
 BUSY_TIMEOUT_MS: Final = 5000
@@ -57,6 +60,9 @@ _EXECUTING: Final = frozenset({EffectState.EXECUTING})
 #: `mark_ambiguous` accepts a reservation that never began (a crash between the two) and is
 #: idempotent, so recording an unknown outcome can never itself fail (SPEC §5.5).
 _UNFINISHED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING, EffectState.AMBIGUOUS})
+#: SPEC-v0.1 §5.2 — `AMBIGUOUS` is the only state a human resolves, and these are the two
+#: answers available: what actually happened at the remote was one or the other.
+RESOLUTIONS: Final = frozenset({EffectState.COMMITTED, EffectState.FAILED})
 
 _SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS effects(
@@ -226,6 +232,43 @@ def _transitioned(
     )
 
 
+def _resolvable(record: EffectRecord | None, effect_key: str, state: EffectState) -> EffectRecord:
+    """The record, if a human may move it to `state` (SPEC-v0.1 §5.2).
+
+    Only `AMBIGUOUS` is resolvable, and only to `COMMITTED` or `FAILED`. Every other record
+    is either terminal or belongs to an attempt in flight; a `resolve` that could overwrite
+    one would be a way to release a live reservation, which §5.3 says there is none of.
+    """
+    if state not in RESOLUTIONS:
+        raise InvalidArgument(f"an effect resolves to {'|'.join(sorted(RESOLUTIONS))}, not {state}")
+    if record is None:
+        raise InvalidArgument(f"no effect {effect_key!r} to resolve")
+    if record.state is not EffectState.AMBIGUOUS:
+        raise InvalidArgument(
+            f"effect {effect_key!r} is {record.state}, not ambiguous; only an effect with an "
+            "unknown outcome is resolved by hand"
+        )
+    return record
+
+
+def _resolved(
+    record: EffectRecord, state: EffectState, resolver: str, now: datetime
+) -> EffectRecord:
+    """The record after a human answered what the executor could not (SPEC-v0.1 §5.2).
+
+    The unknown that made it ambiguous stays on the record: a resolution is a human's claim
+    about what happened, and the evidence should say it was one.
+    """
+    note = f"resolved {state} by {resolver}"
+    return _transitioned(
+        record,
+        state,
+        now,
+        result=record.result,
+        error=note if record.error is None else f"{note} (was: {record.error})",
+    )
+
+
 def _reserved(
     reservation: Reservation, previous: EffectRecord | None, now: datetime
 ) -> EffectRecord:
@@ -287,8 +330,20 @@ class StateStore(ApprovalStore, Protocol):
         """Record that the outcome is unknown. Only a human moves it on (§5.2)."""
         ...
 
+    def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
+        """Move an `AMBIGUOUS` record to `COMMITTED` or `FAILED` (SPEC-v0.1 §5.2).
+
+        The only transition out of `AMBIGUOUS`, and the only one a human drives —
+        `ctrlrun resolve`. Anything else raises `InvalidArgument`.
+        """
+        ...
+
     def get_effect(self, effect_key: str) -> EffectRecord | None:
         """The record for this key, or `None`. A read: it never transitions anything."""
+        ...
+
+    def list_effects(self, state: EffectState | None = None) -> tuple[EffectRecord, ...]:
+        """Every effect record, oldest first, optionally narrowed to one state."""
         ...
 
     def append_event(self, event: Event) -> None:
@@ -497,9 +552,22 @@ class InMemoryStateStore:
     def mark_ambiguous(self, effect_key: str, action_id: str, error: str) -> None:
         self._transition(effect_key, action_id, EffectState.AMBIGUOUS, _UNFINISHED, error=error)
 
+    def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
+        resolver = _approver(resolver)
+        with self._lock:
+            record = _resolvable(self._effects.get(effect_key), effect_key, state)
+            resolved = _resolved(record, state, resolver, self._clock())
+            self._effects[effect_key] = resolved
+            return resolved
+
     def get_effect(self, effect_key: str) -> EffectRecord | None:
         with self._lock:
             return self._effects.get(effect_key)
+
+    def list_effects(self, state: EffectState | None = None) -> tuple[EffectRecord, ...]:
+        with self._lock:
+            records = sorted(self._effects.values(), key=lambda record: record.created_at)
+        return tuple(record for record in records if state is None or record.state is state)
 
     def _transition(
         self,
@@ -546,11 +614,17 @@ class SQLiteStateStore:
         self._clock = clock
         self._local = threading.local()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._journal = EventLog(self._path.parent)
         self._connection().executescript(_SCHEMA)
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def journal(self) -> EventLog:
+        """The JSONL evidence written beside the database (SPEC-v0.1 §6)."""
+        return self._journal
 
     def close(self) -> None:
         """Close this thread's connection. Other threads keep theirs."""
@@ -575,7 +649,7 @@ class SQLiteStateStore:
     # --- evidence ---------------------------------------------------------------------
 
     def append_event(self, event: Event) -> None:
-        self._connection().execute(
+        cursor = self._connection().execute(
             "INSERT INTO events(ts, type, action_id, effect_key, approval_id, data_json) "
             "VALUES(?,?,?,?,?,?)",
             (
@@ -587,6 +661,7 @@ class SQLiteStateStore:
                 json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":")),
             ),
         )
+        self._mirror(self._journal.append_event, replace(event, event_id=cursor.lastrowid))
 
     def put_receipt(self, receipt: Receipt) -> None:
         self._connection().execute(
@@ -601,6 +676,23 @@ class SQLiteStateStore:
                 _iso(receipt.finished_at),
             ),
         )
+        self._mirror(self._journal.put_receipt, receipt)
+
+    @staticmethod
+    def _mirror(write: Callable[[_T], None], record: _T) -> None:
+        """Copy a record the database already holds into the JSONL evidence (SPEC §6).
+
+        SPEC: §6 — the spec requires both, and does not say what happens when only one can
+        be written. The record is already durable in the database by the time this runs, so
+        a failing file is logged rather than raised: raising would turn an effect that has
+        committed at the remote into an exception the caller reads as a failure, which is
+        the one mistake this library exists to prevent. `ctrlrun receipts` reads the
+        database, so nothing is hidden by the loss.
+        """
+        try:
+            write(record)
+        except OSError as exc:
+            _LOG.warning("could not write JSONL evidence: %s", exc)
 
     def events(self) -> tuple[Event, ...]:
         rows = self._connection().execute("SELECT * FROM events ORDER BY event_id").fetchall()
@@ -892,8 +984,36 @@ class SQLiteStateStore:
     def mark_ambiguous(self, effect_key: str, action_id: str, error: str) -> None:
         self._transition(effect_key, action_id, EffectState.AMBIGUOUS, _UNFINISHED, error=error)
 
+    def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
+        resolver = _approver(resolver)
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
+            resolved = _resolved(record, state, resolver, self._clock())
+            self._write_effect(connection, resolved)
+        except BaseException:
+            self._unwind(connection)
+            raise
+        connection.commit()
+        return resolved
+
     def get_effect(self, effect_key: str) -> EffectRecord | None:
         return self._read_effect(self._connection(), effect_key)
+
+    def list_effects(self, state: EffectState | None = None) -> tuple[EffectRecord, ...]:
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT effect_key FROM effects"
+                + ("" if state is None else " WHERE state=?")
+                + " ORDER BY created_at, rowid",
+                () if state is None else (str(state),),
+            )
+            .fetchall()
+        )
+        records = (self.get_effect(row["effect_key"]) for row in rows)
+        return tuple(record for record in records if record is not None)
 
     def _transition(
         self,

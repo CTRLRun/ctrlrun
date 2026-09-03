@@ -75,7 +75,7 @@ Now the same agent can refund €100 on its own, must get a human to approve €
 **1. Duplicate effect after a lost response**
 
 ```
-refund €2,000  →  remote commits  →  response lost  →  effect: AMBIGUOUS
+refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS
 agent retries the same refund
 ✗ BLOCKED — effect may already have committed; blind retry refused
 ```
@@ -83,8 +83,8 @@ agent retries the same refund
 **2. Approval mutation**
 
 ```
-agent proposes refund €500     →  human approves (bound to action hash)
-agent executes  refund €5,000  →  ✗ BLOCKED — approved action ≠ requested action
+agent proposes refund €2,000  →  human approves (bound to action hash)
+agent executes refund €5,000  →  ✗ BLOCKED — approved action ≠ requested action
 ```
 
 **3. Concurrent agents, same effect**

@@ -1,24 +1,33 @@
 """Receipts and the event log. Build-list item 8; SPEC-v0.1 §6.
 
-Build-list item 3 needs the models: `Control` produces a `Receipt` for every action that
-reaches a terminal state, and an `Event` for every step it takes. The JSONL writer that
-lands these in `.ctrlrun/` arrives with item 8.
+`Control` produces a `Receipt` for every action that reaches a terminal state, and an `Event`
+for every step it takes. `EventLog` is where those land on disk: `.ctrlrun/receipts.jsonl`
+and `.ctrlrun/events.jsonl`, one JSON object per line, in append order.
+
+A receipt is evidence, and evidence has to outlive the tool that wrote it — so the file form
+is plain JSON with enums rendered by value, readable by anything that can read a line.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Final
 
 from .action import Principal
 from .policy import Decision
 
 RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v1"
+
+#: The two files of SPEC-v0.1 §6, written beside the state database.
+RECEIPTS_FILENAME: Final = "receipts.jsonl"
+EVENTS_FILENAME: Final = "events.jsonl"
 
 _ID_HEX_BYTES: Final = 6  # "ctr_" + 12 hex chars
 
@@ -178,3 +187,43 @@ class Receipt:
         """Parse one JSONL line written by `to_json`."""
         document: dict[str, Any] = json.loads(line)
         return cls.from_dict(document)
+
+
+class EventLog:
+    """The JSONL half of the evidence: two append-only files in one directory (SPEC §6).
+
+    `receipts.jsonl` and `events.jsonl` beside the state database, so `.ctrlrun/` holds the
+    whole record of what an agent did. The store is authoritative — these files are the
+    portable copy, written after the store accepted the same record.
+
+    Each write opens, appends one line and closes, so several processes sharing a store
+    (SPEC-v0.1 §5.3 E1) interleave whole lines rather than fragments of them.
+    """
+
+    def __init__(self, directory: str | os.PathLike[str]) -> None:
+        self._directory = Path(directory)
+
+    @property
+    def directory(self) -> Path:
+        return self._directory
+
+    @property
+    def receipts_path(self) -> Path:
+        return self._directory / RECEIPTS_FILENAME
+
+    @property
+    def events_path(self) -> Path:
+        return self._directory / EVENTS_FILENAME
+
+    def put_receipt(self, receipt: Receipt) -> None:
+        """Append one receipt as a JSON line."""
+        self._append(self.receipts_path, receipt.to_json())
+
+    def append_event(self, event: Event) -> None:
+        """Append one event as a JSON line, in the order the store assigned it."""
+        self._append(self.events_path, event.to_json())
+
+    def _append(self, path: Path, line: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{line}\n")

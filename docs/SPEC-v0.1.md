@@ -377,6 +377,8 @@ An action awaiting approval has no receipt; `APPROVAL_REQUESTED` is its evidence
 
 `result ∈ {committed, failed, ambiguous, denied, blocked}` where `blocked` covers duplicate/ambiguous-retry/approval-mismatch refusals. No signatures in v0.1 (v0.6).
 
+**When only one of the two writes succeeds.** SQLite is authoritative and the JSONL file is a convenience export of what it already holds, so the store is written first and the file second. A failed file write MUST be logged on the `ctrlrun` logger and MUST NOT be raised. By the time it runs, the effect has committed at the remote and the record is durable; raising there would reach the caller as an exception on a successful action, and an agent that reads it as a failure retries — which is the one mistake this library exists to prevent. Nothing is hidden by the loss: `ctrlrun receipts` and `ctrlrun effects` read the database, not the files. The reverse order is not available: a store that refuses the write has not recorded the action, and there is nothing to export.
+
 Enums MUST render by value everywhere evidence is produced — receipt JSON, event `data`, and CLI output: `"approve"`, never `"Decision.APPROVE"`. This is why `Decision` (§3.3) and `EffectState` (§5.2) are `StrEnum`; the guard is `test_decision_renders_by_value` in `tests/test_policy.py`, which pins `str()` and f-string interpolation. A receipt is read by tools that never imported CTRLRun.
 
 ### 6.2 Events
@@ -523,6 +525,10 @@ ctrlrun receipts [--last N] [--json]
 ctrlrun effects [--state ambiguous]
 ctrlrun resolve <effect_key> (--committed | --failed)
 ```
+
+Every command but `init` and `demo` works on the store `state_path()` resolves — the one an agent sharing this policy is already using — so `ctrlrun approve` answers a request some other process is waiting on.
+
+**Where the demo keeps its state.** `ctrlrun demo` MUST NOT write to that store. It keeps its own at `.ctrlrun/demo/state.db`, with the JSONL evidence of §6 beside it, and it MUST empty that directory of a previous run's evidence by filename — `state.db`, its `-wal` and `-shm`, `receipts.jsonl`, `events.jsonl` — never by removing a directory. Two reasons, both about not touching what it does not own: the demo reserves effect keys (`refund:txn_1`, `refund:txn_123`), which in a live store would collide with real work or block it; and a demo that is not repeatable is not a demo, since the second run would refuse every scenario as a duplicate. Its last line MUST print the `CTRLRUN_STATE=… ctrlrun receipts` command that reads what it just wrote.
 
 ---
 
