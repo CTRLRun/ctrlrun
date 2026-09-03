@@ -1309,6 +1309,7 @@ Policy.mcp_options(action_name: str) -> McpOptions
 class McpOptions:
     not_executed_on_error: bool = False
 
+StateStore.approvals_for(action_hash: str) -> tuple[ApprovalRecord, ...]
 StateStore.find_granted_approval(action_hash: str) -> Approval | None
 StateStore.find_denied_request(action_hash: str) -> ApprovalRequest | None
 StateStore.resolve_effect(effect_key, state, *, resolved_by: str) -> None

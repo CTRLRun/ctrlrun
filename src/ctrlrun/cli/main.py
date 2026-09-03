@@ -11,12 +11,17 @@ agent is waiting on in another shell.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import click
 
+from ..action import Principal
+from ..approval import ApprovalRecord
 from ..control import DEFAULT_STATE_DIR, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
 from ..errors import CTRLRunError
@@ -27,6 +32,9 @@ from .demo import run_demo
 
 #: Who the CLI records as the answer's author. Free text in v0.1 (SPEC-v0.1 §4.1).
 CLI_APPROVER: Final = "cli:local"
+
+#: SPEC-v0.2 §5 — the schema of one `ctrlrun inspect --json` document.
+INSPECTION_SCHEMA: Final = "ctrlrun.inspection/v1"
 
 #: `ctrlrun init` writes this. It is `ctrlrun.example.yaml` in the repository, and
 #: `test_the_shipped_example_policy_is_the_one_in_the_repository` keeps the two identical.
@@ -240,6 +248,198 @@ def resolve(effect_key: str, committed: bool, failed: bool) -> None:
     click.echo(f"{effect_key} resolved {record.state} by {CLI_APPROVER}")
     if record.state is EffectState.FAILED:
         click.echo("a retry of this effect is now permitted")
+
+
+@main.command()
+@click.argument("action_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+def inspect(action_id: str, as_json: bool) -> None:
+    """Show one action's whole history: proposal, decision, approval, effect, receipt."""
+    store = _store()
+    try:
+        events = tuple(event for event in store.events() if event.action_id == action_id)
+        receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+
+    if not events and receipt is None:
+        # SPEC-v0.2 §5 — non-zero, on stderr, with nothing on stdout, so a script cannot
+        # mistake "no such action" for "an action with no events". Matched exactly: no
+        # prefixes and no globs, as v0.1 §3.1 matches an action name.
+        raise click.ClickException(f"no action {action_id}")
+
+    approvals = _approvals_for(store, receipt, events)
+    effect = _effect_of(store, receipt, events)
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "schema": INSPECTION_SCHEMA,
+                    "action_id": action_id,
+                    "receipt": None if receipt is None else receipt.to_dict(),
+                    "effect": None if effect is None else _effect_dict(effect),
+                    "approvals": [_approval_dict(record) for record in approvals],
+                    "events": [event.to_dict() for event in events],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    for line in _inspection_lines(action_id, receipt, effect, approvals, events):
+        click.echo(line)
+
+
+def _approvals_for(
+    store: SQLiteStateStore, receipt: Receipt | None, events: tuple[Event, ...]
+) -> tuple[ApprovalRecord, ...]:
+    """Every approval carrying this action's hash (SPEC-v0.2 §5).
+
+    The hash comes from the receipt, or from `ACTION_PROPOSED` for an action still awaiting
+    a human — which has no receipt yet (v0.1 §6.1) and is exactly the case where the pending
+    request is the only thing there is to show.
+    """
+    action_hash = receipt.action_hash if receipt is not None else None
+    if action_hash is None:
+        action_hash = next(
+            (
+                str(event.data["action_hash"])
+                for event in events
+                if event.type is EventType.ACTION_PROPOSED and "action_hash" in event.data
+            ),
+            None,
+        )
+    if action_hash is None:
+        return ()
+    return store.approvals_for(action_hash)
+
+
+def _effect_of(
+    store: SQLiteStateStore, receipt: Receipt | None, events: tuple[Event, ...]
+) -> EffectRecord | None:
+    """This action's effect record, or `None` where it has no effect key (SPEC-v0.2 §5)."""
+    key = receipt.effect_key if receipt is not None else None
+    if key is None:
+        key = next((event.effect_key for event in events if event.effect_key), None)
+    return None if key is None else store.get_effect(key)
+
+
+def _inspection_lines(
+    action_id: str,
+    receipt: Receipt | None,
+    effect: EffectRecord | None,
+    approvals: tuple[ApprovalRecord, ...],
+    events: tuple[Event, ...],
+) -> list[str]:
+    """The header block and the event timeline of SPEC-v0.2 §5."""
+    proposed = _proposed_action(receipt, approvals)
+    name = "-" if proposed is None else proposed.name
+    lines = [f"{action_id}  {name}", ""]
+    if proposed is not None:
+        user = "" if proposed.principal.user is None else f" (user: {proposed.principal.user})"
+        lines += [
+            f"principal   {proposed.principal.agent}{user}",
+            f"resource    {proposed.resource or '-'}",
+            f"environment {proposed.environment}",
+            f"arguments   {json.dumps(dict(proposed.arguments), ensure_ascii=False)}",
+        ]
+    if receipt is not None:
+        lines.append(f"decision    {receipt.decision}  ({receipt.decision_reason})")
+    for record in approvals:
+        lines.append(f"approval    {_approval_summary(record)}")
+    if effect is not None:
+        lines.append(f"effect      {effect.effect_key}  {effect.state}  attempt {effect.attempt}")
+    if receipt is not None:
+        lines.append(f"receipt     {receipt.receipt_id}  {receipt.result}")
+    else:
+        # v0.1 §6.1 — an action suspended awaiting a human is not terminal, so there is no
+        # receipt to show, and saying so beats an empty line the reader has to interpret.
+        lines.append("receipt     -  (awaiting a human)")
+    lines.append("")
+    lines += [f"  {_event_line(event)}" for event in events]
+    return lines
+
+
+@dataclass(frozen=True)
+class _Proposal:
+    """The header fields of SPEC-v0.2 §5, from whichever record still holds them."""
+
+    name: str
+    principal: Principal
+    resource: str | None
+    environment: str
+    arguments: Mapping[str, Any]
+
+
+def _proposed_action(
+    receipt: Receipt | None, approvals: tuple[ApprovalRecord, ...]
+) -> _Proposal | None:
+    """The action as proposed: from the receipt, else from an approval request.
+
+    An action still awaiting a human has no receipt, and an `Event` carries neither the
+    action's name nor its arguments — but the approval request stores the whole `Action`
+    (v0.1 §4.1), which is the only reason a suspended action can be inspected at all. The two
+    sources spell the same fields differently (`Receipt.action` is `Action.name`), so they
+    are normalized here rather than duck-typed at the call site.
+    """
+    if receipt is not None:
+        return _Proposal(
+            name=receipt.action,
+            principal=receipt.principal,
+            resource=receipt.resource,
+            environment=receipt.environment,
+            arguments=receipt.arguments,
+        )
+    if not approvals:
+        return None
+    action = approvals[0].request.action
+    return _Proposal(
+        name=action.name,
+        principal=action.principal,
+        resource=action.resource,
+        environment=action.environment,
+        arguments=action.canonical_arguments,
+    )
+
+
+def _approval_summary(record: ApprovalRecord) -> str:
+    answered = "" if record.approver is None else f" by {record.approver}"
+    return f"{record.approval_id}  {record.status}{answered}"
+
+
+def _event_line(event: Event) -> str:
+    rendered = " ".join(f"{key}={value}" for key, value in event.data.items())
+    return f"{event.event_id:>3}  {iso_timestamp(event.ts)}  {event.type:<28}{rendered}".rstrip()
+
+
+def _effect_dict(record: EffectRecord) -> dict[str, Any]:
+    """The effect record as plain JSON data, enums by value (v0.1 §6.1)."""
+    return {
+        "effect_key": record.effect_key,
+        "state": str(record.state),
+        "action_id": record.action_id,
+        "attempt": record.attempt,
+        "created_at": iso_timestamp(record.created_at),
+        "updated_at": iso_timestamp(record.updated_at),
+        "lease_expires_at": (
+            None if record.lease_expires_at is None else iso_timestamp(record.lease_expires_at)
+        ),
+        "error": record.error,
+    }
+
+
+def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
+    """One approval record as plain JSON data, enums by value (v0.1 §6.1)."""
+    return {
+        "approval_id": record.approval_id,
+        "action_hash": record.action_hash,
+        "status": str(record.status),
+        "approver": record.approver,
+        "created_at": iso_timestamp(record.request.created_at),
+        "expires_at": iso_timestamp(record.expires_at),
+        "granted_at": None if record.granted_at is None else iso_timestamp(record.granted_at),
+        "consumed_at": None if record.consumed_at is None else iso_timestamp(record.consumed_at),
+    }
 
 
 def _receipt_line(receipt: Receipt) -> str:

@@ -346,6 +346,18 @@ class StateStore(ApprovalStore, Protocol):
         """Every effect record, oldest first, optionally narrowed to one state."""
         ...
 
+    def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
+        """Every approval record carrying `action_hash`, oldest first (SPEC-v0.2 §5).
+
+        Every one, not only the consumed one: an invalidated, expired or denied request is
+        part of an action's history, and `ctrlrun inspect` exists to show that history.
+
+        On `StateStore` rather than on `ApprovalStore`, which is deliberately the slice an
+        approval provider depends on. A provider answers one request; it has no business
+        enumerating them.
+        """
+        ...
+
     def append_event(self, event: Event) -> Event:
         """Append an event, assigning it the next `event_id`, and return it as stored.
 
@@ -420,6 +432,12 @@ class InMemoryStateStore:
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         with self._lock:
             return self._approvals.get(approval_id)
+
+    def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
+        with self._lock:
+            return tuple(
+                record for record in self._approvals.values() if record.action_hash == action_hash
+            )
 
     def grant_approval(self, approval_id: str, approver: str) -> Approval:
         approver = _approver(approver)
@@ -741,6 +759,15 @@ class SQLiteStateStore:
 
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         return self._read_approval(self._connection(), approval_id)
+
+    def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
+        connection = self._connection()
+        rows = connection.execute(
+            "SELECT approval_id FROM approvals WHERE action_hash=? ORDER BY rowid",
+            (action_hash,),
+        ).fetchall()
+        found = (self._read_approval(connection, row["approval_id"]) for row in rows)
+        return tuple(record for record in found if record is not None)
 
     def grant_approval(self, approval_id: str, approver: str) -> Approval:
         approver = _approver(approver)
