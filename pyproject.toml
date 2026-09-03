@@ -41,9 +41,14 @@ dev = [
 ]
 # SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
 # third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.
-# Declared empty until the item that needs them lands: item 5 adds the gateway's HTTP client,
-# item 7 the OpenTelemetry API, SDK and OTLP/HTTP exporter.
-gateway = []
+#
+# The gateway's only dependency is an HTTP client (§6.11): the listening side is stdlib
+# `http.server`, and what an ASGI stack would add is a second server, not a capability.
+# What is needed is a connect/write/read exception taxonomy precise enough to feed §6.8's
+# first row — a gateway that could not tell "never connected" from "no reply" would have to
+# call everything AMBIGUOUS, which is safe and useless.
+gateway = ["httpx>=0.27"]
+# Item 8 adds the OpenTelemetry API, SDK and OTLP/HTTP exporter.
 otel = []
 
 [tool.setuptools.packages.find]

@@ -314,3 +314,87 @@ def _rendered(name: str, value: object, template: str, error: type[CTRLRunError]
         f"{template!r}: '{{{name}}}' is {type(value).__name__}; a placeholder must resolve "
         "to a non-empty string or an int"
     )
+
+
+def plan_lease_extension(
+    record: EffectRecord | None,
+    effect_key: str,
+    action_id: str,
+    until: datetime,
+    now: datetime,
+) -> EffectRecord:
+    """The record an accepted `extend_lease` writes, or the refusal it raises (§6.9.4).
+
+    v0.1 §5.3 ended "there is no setting that releases an expired reservation, and none that
+    extends a lease already granted." SPEC-v0.2 §6.9.4 amends the second clause only, and
+    narrowly: an extension is accepted for an `EXECUTING` record held by this `action_id`
+    whose lease **has not already expired**, and for nothing else.
+
+    That last condition is the whole of the safety argument. A record whose lease has lapsed
+    may already have been declared `AMBIGUOUS` by another attempt (v0.1 §5.4), and extending
+    it would resurrect a reservation someone else has moved on from — reintroducing exactly
+    the double execution the lease exists to prevent.
+
+    Pure, like `plan_reservation`: both stores decide here and then only write, so the
+    in-memory double cannot drift into permitting what SQLite refuses.
+    """
+    if until.tzinfo is None or until.tzinfo.utcoffset(until) is None:
+        raise InvalidArgument(f"extend_lease(until=...) must be timezone-aware, got {until!r}")
+    if not action_id:
+        raise InvalidArgument("action_id must be a non-empty string")
+    if until <= now:
+        # Argument validation, and it belongs above the record checks: a live lease always
+        # expires after `now`, so a past `until` is also a shortening, and behind the
+        # no-shortening rule this guard would never run. Two defences that can only fire
+        # together are one defence and a comment.
+        raise InvalidArgument(
+            f"extend_lease(until={until!r}) is not in the future; a lease that has already "
+            "expired reserves nothing (v0.1 §5.3 E3)"
+        )
+
+    if record is None:
+        # SPEC: §6.9.4 — the spec names two refusals and does not enumerate this one. There
+        # is no record to extend and no evidence of what happened, which is what
+        # `AmbiguousEffect` says; it writes nothing, so nothing is widened by saying it.
+        raise AmbiguousEffect(
+            f"effect {effect_key!r} has no record to extend", effect_key=effect_key
+        )
+    if record.state is EffectState.COMMITTED:
+        raise DuplicateEffect(
+            f"effect {effect_key!r} was already committed by {record.action_id}",
+            state=COMMITTED_EFFECT,
+            effect_key=effect_key,
+        )
+    if record.lease_is_live(now) and (
+        record.state is not EffectState.EXECUTING or record.action_id != action_id
+    ):
+        # Someone is holding this key right now, and it is not this attempt — or it is, but
+        # it has not begun executing, so there is no round trip to extend across.
+        raise DuplicateEffect(
+            f"effect {effect_key!r} is {record.state} under {record.action_id}",
+            state=IN_PROGRESS_EFFECT,
+            effect_key=effect_key,
+        )
+    if not (record.state is EffectState.EXECUTING and record.lease_is_live(now)):
+        # One branch, not three. `AMBIGUOUS`, `FAILED` and a lapsed lease all refuse with
+        # the same exception and write nothing, so separate guards for each would be one
+        # defence wearing three hats — indistinguishable to a caller and to a test. The
+        # message names the state instead.
+        #
+        # The lapsed-lease case is the one that carries the safety argument: another attempt
+        # may already have declared this record `AMBIGUOUS` (v0.1 §5.4), and extending it
+        # would resurrect a reservation someone else has moved on from.
+        raise AmbiguousEffect(
+            f"effect {effect_key!r} is {record.state} under {record.action_id} with no live "
+            f"lease; it is not extendable by anything (SPEC-v0.2 §6.9.4)",
+            effect_key=effect_key,
+            action_id=record.action_id,
+        )
+    if record.lease_expires_at is not None and until < record.lease_expires_at:
+        # `extend_lease`, not `set_lease`: moving expiry closer is a release of reservation
+        # by another name, and v0.1 §5.3's first clause is untouched by §6.9.4.
+        raise InvalidArgument(
+            f"extend_lease(until={until!r}) would shorten the lease on {effect_key!r}, "
+            f"which expires at {record.lease_expires_at!r}"
+        )
+    return replace(record, lease_expires_at=until, updated_at=now)

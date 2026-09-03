@@ -112,3 +112,20 @@ class NotExecuted(CTRLRunError):
     This is the *only* exception that maps to `FAILED` and therefore permits a retry.
     Every other exception is an `AMBIGUOUS` outcome.
     """
+
+
+class MissingDependency(CTRLRunError):
+    """An optional extra is not installed (SPEC-v0.2 §1.1, §11).
+
+    Never `ImportError` or `ModuleNotFoundError`: an operator reads those as a broken
+    package rather than as an option they did not select. The message names the module that
+    is missing and the command that installs it.
+    """
+
+    def __init__(self, module: str, extra: str) -> None:
+        super().__init__(
+            f"{module!r} is not installed; it ships in the {extra!r} extra: "
+            f"pip install 'ctrlrun[{extra}]'"
+        )
+        self.module = module
+        self.extra = extra
