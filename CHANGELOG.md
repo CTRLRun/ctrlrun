@@ -9,6 +9,33 @@ any change to one appears here.
 
 ## [Unreleased]
 
+Work towards 0.2.0. Version is `0.2.0.dev0`; nothing here has shipped.
+
+### Added
+
+- `docs/SPEC-v0.2.md` — the v0.2 contract, written as a delta over v0.1. Seven deliverables:
+  a reconciliation hook, per-action `effect:` / `resource:` in policy, an `EventSink`
+  protocol, `ctrlrun inspect`, an MCP gateway, a webhook approval provider, and an
+  OpenTelemetry sink. Acceptance tests T13–T30.
+- Empty `gateway` and `otel` extras in `pyproject.toml`. `pip install ctrlrun` will keep
+  installing nothing but `pyyaml` and `click`; anything needing an HTTP server or a
+  third-party SDK goes in an extra, imported lazily.
+
+### Notes
+
+- The spec is written against **MCP revision 2026-07-28**, which removed the `initialize`
+  handshake, protocol-level sessions and `Mcp-Session-Id`, and made `Mcp-Method` / `Mcp-Name`
+  required request headers that servers must validate against the body. The gateway will
+  accept that revision and later ones only; earlier revisions are refused with
+  `UnsupportedProtocolVersion` rather than served on unvalidated headers.
+- A policy file using the new `effect:` / `resource:` / `mcp:` keys must declare
+  `schema: ctrlrun.policy/v2`. `ctrlrun.policy/v1` files keep loading unchanged; a `v2` file
+  will not load on 0.1.0, which is the point — 0.1.0 would ignore the effect template and
+  execute with no duplicate protection.
+- MCP tool arguments that CTRLRun cannot canonicalize — any JSON number with a fraction — will
+  be refused by the gateway, never rounded or coerced. Tools that move money through the
+  gateway need integer minor units or decimal strings in their schema.
+
 ## [0.1.0] — 2026-09-03
 
 First packaged release. The v0.1 kernel is complete: every acceptance test in

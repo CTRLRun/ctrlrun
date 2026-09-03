@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,12 @@ dev = [
     "mypy>=2.3",
     "ruff>=0.16",
 ]
+# SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
+# third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.
+# Declared empty until the item that needs them lands: item 5 adds the gateway's HTTP client,
+# item 7 the OpenTelemetry API, SDK and OTLP/HTTP exporter.
+gateway = []
+otel = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
