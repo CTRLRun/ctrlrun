@@ -58,37 +58,64 @@ class Receiver:
         self.posts: list[tuple[dict[str, str], bytes]] = []
         self.status = 200
         self.redirect_to: str | None = None
+        self.redirect_status = 302
 
 
 @pytest.fixture
-def receiver():
-    state = Receiver()
+def receiver_factory():
+    servers = []
 
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
+    def make() -> Receiver:
+        state = Receiver()
 
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length") or 0)
-            state.posts.append((dict(self.headers.items()), self.rfile.read(length)))
-            if state.redirect_to is not None:
-                self.send_response(307)
-                self.send_header("Location", state.redirect_to)
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                state.posts.append((dict(self.headers.items()), self.rfile.read(length)))
+                if state.redirect_to is not None:
+                    self.send_response(state.redirect_status)
+                    self.send_header("Location", state.redirect_to)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(state.status)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
-                return
-            self.send_response(state.status)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
 
-        def log_message(self, *args):
-            pass
+            def do_GET(self):
+                # urllib converts a POST to a GET when it follows 301/302/303, so a server
+                # that only recorded POSTs could not see a redirect it was sent.
+                state.posts.append((dict(self.headers.items()), b""))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    state.url = f"http://127.0.0.1:{server.server_address[1]}/hook"
-    yield state
-    server.shutdown()
-    server.server_close()
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        state.url = f"http://127.0.0.1:{server.server_address[1]}/hook"
+        servers.append(server)
+        return state
+
+    yield make
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def receiver(receiver_factory):
+    return receiver_factory()
+
+
+@pytest.fixture
+def elsewhere(receiver_factory):
+    """Somewhere the operator did not name, for the redirect test."""
+    return receiver_factory()
 
 
 @pytest.fixture
@@ -260,10 +287,43 @@ def test_T27_every_broken_condition_is_400_and_changes_nothing(store, receiver, 
     assert store.get_approval(request.request_id).status is ApprovalStatus.PENDING
 
 
-def test_T27_a_path_body_request_id_disagreement_is_refused(store, receiver):
+@pytest.mark.parametrize("side", ["path", "body"])
+def test_T27_a_path_body_request_id_disagreement_is_refused(store, receiver, side):
+    """Both directions. With only the path wrong, the lookup finds nothing and the refusal
+    is right for the wrong reason; with only the body wrong, the lookup finds the *real*
+    record and the comparison is the only thing standing between it and a grant."""
+    request = _pending(store, receiver)
+    where = {"path": {"path_request_id": "apr_other"}, "body": {"body_request_id": "apr_other"}}
+
+    status, _ = _inbound(store, request, **where[side])
+
+    assert status == 400
+    assert store.get_approval(request.request_id).status is ApprovalStatus.PENDING
+
+
+def test_T27_a_request_the_store_never_saw_is_refused(store, receiver):
+    """Not the same as a request in the wrong state: there is no record at all."""
+    request = _pending(store, receiver)
+    unknown = type(request)(
+        request_id="apr_nothing",
+        action_hash=request.action_hash,
+        action=request.action,
+        created_at=request.created_at,
+        expires_at=request.expires_at,
+    )
+
+    status, _ = _inbound(store, unknown)
+
+    assert status == 400
+    assert store.get_approval("apr_nothing") is None
+
+
+@pytest.mark.parametrize("decision", ["approve", "GRANT", "", None, 1])
+def test_T27_a_decision_that_is_not_grant_or_deny_is_refused(store, receiver, decision):
+    """A body the endpoint half-understands is a body it must not act on."""
     request = _pending(store, receiver)
 
-    status, _ = _inbound(store, request, path_request_id="apr_other")
+    status, _ = _inbound(store, request, decision)
 
     assert status == 400
     assert store.get_approval(request.request_id).status is ApprovalStatus.PENDING
@@ -367,14 +427,23 @@ def test_T28_an_unreachable_endpoint_does_not_raise_into_the_kernel(store, tmp_p
 # --- §7.1: what the provider refuses ---------------------------------------------------
 
 
-def test_a_redirect_is_never_followed(store, receiver):
-    """A redirect to another host would deliver the signed payload, and the action, somewhere
-    the operator did not name."""
-    receiver.redirect_to = "http://127.0.0.1:1/elsewhere"
+@pytest.mark.parametrize("status", [301, 302, 303])
+def test_a_redirect_is_never_followed(store, receiver, elsewhere, status):
+    """A redirect to another host would deliver the request, and the signature header with
+    it, somewhere the operator did not name.
+
+    Parametrized over 301/302/303 deliberately: those are the codes `urllib` follows on a
+    POST — converting it to a GET against the new host — and therefore the only ones where
+    the handler is what stops it. It refuses 307 and 308 on its own, so a test using those
+    would pass with the handler removed and prove nothing.
+    """
+    receiver.redirect_status = status
+    receiver.redirect_to = elsewhere.url
 
     request = _provider(store, receiver, retries=0, backoff=timedelta(0)).request(_action())
 
     assert len(receiver.posts) == 1
+    assert elsewhere.posts == []
     assert store.get_approval(request.request_id).status is ApprovalStatus.PENDING
 
 
@@ -393,10 +462,17 @@ def test_an_http_url_is_refused_unless_it_is_loopback_and_meant(store):
 # --- §7.3: the secret ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("secret", ["", "   ", "a" * 31, None])
-def test_a_weak_or_missing_secret_is_refused(store, secret):
-    with pytest.raises(InvalidArgument):
+@pytest.mark.parametrize(
+    ("secret", "why"), [("", "empty"), ("   ", "empty"), ("a" * 31, "shorter"), (None, "empty")]
+)
+def test_a_weak_or_missing_secret_is_refused(store, secret, why):
+    """The length check would refuse an empty one too; the message is the difference, and it
+    is the one an operator needs — "empty" points at the configuration, "too short" at the
+    value."""
+    with pytest.raises(InvalidArgument) as refused:
         WebhookApprovalProvider(store, url="https://example.com/hook", secret=secret)
+
+    assert why in str(refused.value)
 
 
 def test_the_secret_never_appears_in_a_log_line(store, receiver, caplog):

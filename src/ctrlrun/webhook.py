@@ -118,6 +118,9 @@ def webhook_secret(path: str | os.PathLike[str] | None = None) -> str | None:
 
 def _checked_secret(secret: object) -> str:
     if not isinstance(secret, str) or not secret.strip():
+        # The length check below would refuse this too. The message is the difference, and
+        # it is the one an operator needs: "empty" points at the configuration, "too short"
+        # points at the value.
         raise InvalidArgument(
             f"the webhook secret is empty; set {SECRET_ENV_VAR} or --webhook-secret-file"
         )
@@ -225,9 +228,11 @@ class WebhookApprovalProvider:
         # `_NoRedirects` because a redirect to another host would deliver the signed payload,
         # and the action inside it, somewhere the operator did not name.
         opener = urllib.request.build_opener(_no_redirects())
-        with opener.open(request, timeout=self._timeout.total_seconds()) as response:
-            if response.status >= 400:
-                raise CTRLRunError(f"the webhook endpoint answered {response.status}")
+        # No status check here: `urlopen` raises `HTTPError` for anything >= 400, and
+        # `HTTPError` is a `URLError`, which `_deliver` already treats as a failed delivery.
+        # A second check would be a branch no test could reach.
+        with opener.open(request, timeout=self._timeout.total_seconds()):
+            return
 
 
 def _no_redirects() -> urllib.request.BaseHandler:
