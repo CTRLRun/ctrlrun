@@ -104,9 +104,19 @@ names.** Nothing else changes — `AMBIGUOUS` still MUST NOT collapse to `FAILED
 path, an expired lease is still `AMBIGUOUS` and is still never silently released, and there is
 still no configuration that releases a reservation.
 
-Every `EFFECT_RESOLVED` event MUST carry `data.resolved_by ∈ {"human", "reconcile"}`, and the
-effect record MUST store it, so evidence distinguishes a human's judgement from a machine's
-answer. `ctrlrun effects` and `ctrlrun inspect` (§5) MUST show it.
+Every `EFFECT_RESOLVED` event MUST carry `data.resolved_by ∈ {"human", "reconcile"}`, so
+evidence distinguishes a human's judgement from a machine's answer. `ctrlrun inspect` (§5)
+MUST show it.
+
+It goes on the **event**, not as a new column on the effect record. An earlier draft of this
+section required both; storing it on the record means altering a table in databases that
+already exist, and v0.2 has no migration story — that is a v0.6 item, and inventing an ad-hoc
+one here to carry a field the event already carries is the wrong trade. The record keeps the
+resolution note v0.1 writes into its `error` field, which now names the authority.
+
+A resolution the store refuses — the record left `AMBIGUOUS` between the refusal and the
+answer, because a human or another process got there first — is logged and dropped. Their
+resolution stands, and dropping this one is the same nothing `"unknown"` would have done.
 
 ### 2.3 When it is called
 
@@ -139,6 +149,13 @@ attempt, never two, and a retry loop cannot amplify it.
 | `"committed"` | `AMBIGUOUS → COMMITTED` | refused, `DuplicateEffect(state="committed")` |
 | `"not_executed"` | `AMBIGUOUS → FAILED` | permitted, `attempt += 1` (v0.1 §5.4) |
 | `"unknown"` | unchanged | refused, `AmbiguousEffect` |
+
+**Reconciliation never rewrites a receipt.** A receipt is evidence of one attempt and what
+that attempt observed; where eager reconciliation follows an `AMBIGUOUS` outcome, the receipt
+still says `ambiguous` and the reconciled answer lives in `RECONCILIATION_RESOLVED` and
+`EFFECT_RESOLVED`. This is what `ctrlrun resolve` already does — a human's resolution does not
+reach back and edit the receipt of the attempt that ended unknown — and a hook is not granted
+more than a human has.
 
 Anything the hook raises → `"unknown"`, logged as a warning on the `ctrlrun` logger with the
 exception. Any return value that is not one of the three literals → `"unknown"`, logged as a
