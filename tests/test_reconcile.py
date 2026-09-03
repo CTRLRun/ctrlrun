@@ -446,6 +446,73 @@ def test_T15_a_hook_is_never_called_for_a_record_that_is_not_ambiguous(control, 
     assert remote.calls == 1
 
 
+def test_T15_a_resolution_the_store_refuses_is_logged_and_dropped(control, state_store, caplog):
+    """A human got there first, between the refusal and the answer (SPEC-v0.2 §2.2).
+
+    The window is opened deterministically: the hook resolves the record itself, the way
+    `ctrlrun resolve` running during a slow reconciliation query would. Their resolution
+    stands and this one is dropped, which is the same nothing `"unknown"` would have done —
+    so the attempt still meets the refusal it was already going to meet.
+    """
+    remote = Remote()
+    _strand(control, remote)
+
+    def reconcile(effect_key: str) -> str:
+        state_store.resolve_effect(effect_key, EffectState.COMMITTED, "cli:local")
+        return "not_executed"
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile)
+    def refund(payment_id: str, amount: int) -> str:
+        return remote.working_refund(payment_id, amount)
+
+    with (
+        caplog.at_level("WARNING", logger="ctrlrun"),
+        context(agent="refund-agent"),
+        pytest.raises(AmbiguousEffect),
+    ):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.COMMITTED
+    assert remote.calls == 1
+    # CTRLRun asked and got an answer, so the asking is recorded; applying it is what was
+    # dropped, so there is no second EFFECT_RESOLVED claiming a different authority.
+    resolved = _events(state_store, EventType.RECONCILIATION_RESOLVED)
+    assert len(resolved) == 1
+    assert resolved[0].data["outcome"] == "not_executed"
+    assert not _events(state_store, EventType.EFFECT_RESOLVED)
+    logged = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert [message for message in logged if "not applied" in message]
+
+
+def test_T15_eager_reconciliation_never_asks_about_an_action_with_no_effect_key(
+    control, state_store
+):
+    """The one path that reaches reconciliation with no key to reconcile (SPEC-v0.2 §2.1).
+
+    `_secure` returns early for a keyless action, so only the eager trigger can arrive here —
+    and it does, because a keyless attempt counts as having recorded its outcome. Written
+    separately because the guard has a second line of defence behind it (an assertion), and a
+    probabilistic test could not tell which of the two was holding.
+    """
+    calls: list[str] = []
+
+    @protect(
+        "customer.read",
+        control=control,
+        reconcile=lambda effect_key: calls.append(effect_key) or "not_executed",
+        reconcile_eagerly=True,
+    )
+    def read(customer_id: str) -> str:
+        raise TimeoutError("response lost")
+
+    with context(agent="support-agent"), pytest.raises(TimeoutError):
+        read(customer_id="cus_1")
+
+    assert calls == []
+    assert not _events(state_store, EventType.RECONCILIATION_STARTED)
+    assert state_store.receipts()[-1].result is ReceiptResult.AMBIGUOUS
+
+
 def test_T15_a_hook_on_an_action_with_no_effect_key_warns_and_is_never_called(control, caplog):
     """Not a decoration-time error: the template may come from policy (SPEC-v0.2 §2.1)."""
     calls: list[str] = []
