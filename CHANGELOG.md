@@ -19,7 +19,10 @@ First packaged release. The v0.1 kernel is complete: every acceptance test in
 - **Action** — canonical form, `action_hash`, deep-frozen arguments. `float` is rejected in
   arguments: `0.1` and `0.10` are the same money and different hashes.
 - **Policy** — YAML loader with `ALLOW` / `APPROVE` / `DENY` and fail-closed defaults. An
-  unknown action is denied; there is no default-allow.
+  unknown action is denied; there is no default-allow. A condition naming an `Action` field
+  rather than an argument — `environment_eq`, `agent_eq` — is refused at load, and a
+  condition on an argument the action does not carry logs a warning instead of failing
+  silently: a mistyped rule must not disappear into a catch-all `allow` below it.
 - **`@ctrlrun.protect()`** — binds a function call to an Action, evaluates it, and executes
   from the action's canonical arguments rather than the caller's objects.
 - **Approval binding** — approvals carry the `action_hash` of what a human saw, and are
@@ -41,6 +44,14 @@ First packaged release. The v0.1 kernel is complete: every acceptance test in
   Multi-host needs the Postgres store planned for v0.6.
 - Receipts are not signed. A database administrator can alter history (v0.6).
 - Approver identity is free text and is not authenticated (v0.3).
+- Generated ids (`act_`, `apr_`, `ctr_`) are 128 bits. An approval id is not a bearer token
+  in v0.1 — consuming one needs write access to the store — but it becomes one with the
+  webhook provider in v0.2, and an id format cannot be widened after records exist.
+- Effect key templates do not escape placeholder values, so a crafted argument can make two
+  distinct effects share one key. The result is a refusal rather than a double execution;
+  `docs/THREAT_MODEL.md` states the limit and the workaround.
+- Policy conditions address an action's arguments only. Scoping a rule by environment,
+  resource or principal arrives with the authority model in v0.3.
 
 [Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.1.0a1...HEAD
 [0.1.0a1]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0a1

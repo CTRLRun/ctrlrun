@@ -63,6 +63,7 @@ The agent is treated as a potentially compromised or hallucinating principal. Ev
 
 ## Known v0.1 limitations
 
+- **Effect key templates do not escape placeholder values.** A template is literal text with values substituted in, so `refund:{tenant}:{payment_id}` resolves `tenant="acme:evil", payment_id="p1"` and `tenant="acme", payment_id="evil:p1"` to the same key. Arguments come from the agent, which this model treats as untrusted, so a crafted argument can make two distinct logical effects share one identity. The consequence is a refusal, not a double execution — the second attempt is blocked as a duplicate — so this costs availability, not correctness, and it fails in the safe direction. Until values are escaped, put the untrusted placeholder last, or use a delimiter the value cannot contain.
 - Single-host reservation only (SQLite). Multi-host needs Postgres (v0.6).
 - Approver identity is free text; no authentication of the approver (v0.3).
 - Receipts are not signed; a database admin can alter history (v0.6).

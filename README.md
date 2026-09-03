@@ -41,6 +41,7 @@ Protect your first action:
 ```python
 import ctrlrun
 
+
 @ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
 def refund(payment_id: str, amount: int, currency: str = "EUR"):
     return stripe.refunds.create(payment_intent=payment_id, amount=amount)
@@ -57,14 +58,16 @@ actions:
 
   stripe.refund:
     rules:
-      - when: { amount_lte: 500 }
+      - when: { amount_gte: 0, amount_lte: 50000 }      # up to €500.00
         decision: allow
-      - when: { amount_lte: 5000 }
+      - when: { amount_gte: 0, amount_lte: 500000 }     # up to €5,000.00
         decision: approve
       - decision: deny
 ```
 
-Now the same agent can refund €100 on its own, must get a human to approve €2,000, and cannot refund €20,000 at all. Unknown actions are denied. CTRLRun fails closed.
+Amounts are integer minor units — cents, not euros. Floats are rejected outright, because `0.1` and `0.10` are the same money and different hashes.
+
+Now the same agent can refund €100 on its own, must get a human to approve €2,000, and cannot refund €20,000 at all. Neither can it refund a negative amount, which is a charge wearing a refund's name — an upper bound alone is not a range. Unknown actions are denied. CTRLRun fails closed.
 
 ## What `ctrlrun demo` shows
 
@@ -83,7 +86,7 @@ Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, abo
 
 2. Approval mutation
 
-   agent proposes refund €2,000  →  human approves apr_ecc9e0e2d723 (bound to the action hash)
+   agent proposes refund €2,000  →  human approves apr_0aa78e0380ba55d77a601dc782f57095 (bound to the action hash)
    agent executes refund €5,000  →
    ✗ BLOCKED — approved action ≠ requested action (mismatch)
 
@@ -95,8 +98,8 @@ Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, abo
 
 4. Approval replay
 
-   approval apr_701683c1f38c used once  →  consumed
-   same approval presented again        →
+   approval apr_dbc8bc6f06690cdf2e2c55a4e591ef3b used once  →  consumed
+   same approval presented again                            →
    ✗ BLOCKED — single-use approval already consumed
 
 Receipts (7): .ctrlrun/demo/receipts.jsonl

@@ -15,11 +15,13 @@ actions:
 
   # Money: autonomy depends on the amount. First matching rule wins.
   # Amounts are integer minor units (cents). Floats are rejected.
+  # Bound both ends: `amount_lte` alone lets a negative amount through, and a refund of
+  # a negative amount is a charge. An upper bound is not a range.
   stripe.refund:
     rules:
-      - when: { amount_lte: 50000 }        # ≤ €500.00
+      - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 to €500.00
         decision: allow
-      - when: { amount_lte: 500000 }       # ≤ €5,000.00
+      - when: { amount_gte: 0, amount_lte: 500000 }     # €0.00 to €5,000.00
         decision: approve
       - decision: deny
 
