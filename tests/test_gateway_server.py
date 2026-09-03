@@ -501,6 +501,25 @@ def test_T24_a_committed_response_reaches_the_client_otherwise_unchanged(client,
     assert document["jsonrpc"] == "2.0"
 
 
+def test_T24_a_second_identical_allowed_call_is_refused_as_a_duplicate(client, upstream, store):
+    """The `DuplicateEffect` path, which the approval tests never reach.
+
+    An approved action is caught earlier, by the check that will not send a human a decision
+    the effect key would refuse anyway (§6.10). An *allowed* one goes all the way to the
+    reservation, which is where v0.1 §5.4 refuses it — and that is the mapping under test.
+    """
+    upstream.respond({"resultType": "complete", "content": []})
+    _post(client)
+
+    again = _post(client)
+
+    assert again.status_code == 409
+    assert _error(again)["code"] == -41004
+    assert _error(again)["data"]["state"] == "committed"
+    assert _error(again)["data"]["effect_key"] == "refund:txn_1"
+    assert len(upstream.calls) == 1
+
+
 # --- T25: approval over the gateway ----------------------------------------------------
 
 
