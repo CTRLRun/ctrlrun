@@ -79,9 +79,10 @@ def test_T26b_an_extended_lease_keeps_the_record_alive_past_the_original(sqlite_
 def test_T26b_extend_lease_refuses_a_reserved_record(sqlite_store, fake_clock):
     sqlite_store.reserve_effect(KEY, MINE, LEASE)
 
-    with pytest.raises(CTRLRunError):
+    with pytest.raises(DuplicateEffect) as refused:
         sqlite_store.extend_lease(KEY, MINE, _until(fake_clock))
 
+    assert refused.value.state == IN_PROGRESS_EFFECT
     assert sqlite_store.get_effect(KEY).state is EffectState.RESERVED
 
 
@@ -99,9 +100,10 @@ def test_T26b_extend_lease_refuses_a_failed_record(sqlite_store, fake_clock):
     _executing(sqlite_store)
     sqlite_store.fail_effect(KEY, MINE, "rejected before any side effect")
 
-    with pytest.raises(CTRLRunError):
+    with pytest.raises(AmbiguousEffect) as refused:
         sqlite_store.extend_lease(KEY, MINE, _until(fake_clock))
 
+    assert "failed" in str(refused.value)
     # Refused without mutating: FAILED still permits a retry (v0.1 §5.4).
     assert sqlite_store.get_effect(KEY).state is EffectState.FAILED
 
@@ -110,9 +112,10 @@ def test_T26b_extend_lease_refuses_an_ambiguous_record(sqlite_store, fake_clock)
     _executing(sqlite_store)
     sqlite_store.mark_ambiguous(KEY, MINE, "response lost")
 
-    with pytest.raises(AmbiguousEffect):
+    with pytest.raises(AmbiguousEffect) as refused:
         sqlite_store.extend_lease(KEY, MINE, _until(fake_clock))
 
+    assert "ambiguous" in str(refused.value)
     assert sqlite_store.get_effect(KEY).state is EffectState.AMBIGUOUS
 
 
@@ -171,6 +174,23 @@ def test_T26b_extend_lease_refuses_an_until_in_the_past(sqlite_store, fake_clock
         sqlite_store.extend_lease(KEY, MINE, fake_clock.now - timedelta(seconds=1))
 
     assert sqlite_store.get_effect(KEY).lease_is_live(fake_clock.now)
+
+
+def test_T26b_a_past_until_is_refused_before_the_record_is_even_read(sqlite_store, fake_clock):
+    """The two refusals are separated deliberately (SPEC-v0.2 §6.9.4).
+
+    A live lease always expires after `now`, so a past `until` is also a shortening — behind
+    the no-shortening rule this check could never fire, and two defences that can only fire
+    together are one defence and a comment. Validating the argument first makes each
+    independently reachable, and this is the window where only the first one can apply:
+    there is no record, so there is no lease to shorten.
+    """
+    with pytest.raises(InvalidArgument):
+        sqlite_store.extend_lease("refund:nothing", MINE, fake_clock.now - timedelta(seconds=1))
+
+    # The same call with a future `until` gets the record refusal instead, not this one.
+    with pytest.raises(AmbiguousEffect):
+        sqlite_store.extend_lease("refund:nothing", MINE, _until(fake_clock))
 
 
 def test_T26b_extend_lease_refuses_a_naive_datetime(sqlite_store):
