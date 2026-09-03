@@ -144,6 +144,34 @@ def test_T31_every_example_keeps_its_state_under_its_own_directory(scenario, tmp
     assert written == {".ctrlrun"}
 
 
+def test_T31_every_file_an_example_needs_is_tracked_by_git():
+    """A file `.gitignore` swallows runs locally and is missing from every clone.
+
+    `.gitignore` ignores the operator's own policy at the repo root. The pattern was
+    unanchored once, which matched `examples/*/ctrlrun.yaml` too and kept every example's
+    policy out of this item's first commit — green locally, red on the first CI run against
+    a fresh checkout. This is that failure, caught before the push.
+    """
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("no repository checkout")
+
+    listed = subprocess.run(
+        ["git", "ls-files", "examples"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = set(listed.stdout.split())
+    needed = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in EXAMPLES.rglob("*")
+        if path.is_file() and path.suffix in (".py", ".yaml")
+    }
+
+    assert not needed - tracked, f"untracked: {sorted(needed - tracked)}"
+
+
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))
 def test_T31_every_example_is_repeatable(scenario, tmp_path, no_network):
     """A second run in the same directory must refuse the same thing, not a stale record."""

@@ -1,0 +1,13 @@
+# The policy this example runs under. Unknown actions are denied; there is no default-allow.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Amounts are integer minor units (cents). First matching rule wins, so the autonomous
+  # band has to come first, and both ends of every band are bound.
+  stripe.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 to €500.00 — autonomous
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 1000000 }    # €0.00 to €10,000.00 — a human
+        decision: approve
+      - decision: deny
