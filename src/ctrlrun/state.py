@@ -1443,16 +1443,18 @@ def _continuable(record: EffectRecord | None, effect_key: str, now: datetime) ->
     attempt's to finish. An expired one is `AMBIGUOUS` by the ordinary path of v0.1 §5.3 E3 —
     the executor may have died mid-flight, and that is exactly what has happened.
     """
-    if record is None or record.state is not EffectState.EXECUTING:
+    if record is None:
         raise AmbiguousEffect(
-            f"effect {effect_key!r} is no longer executing and cannot be resumed",
-            effect_key=effect_key,
-            action_id=None if record is None else record.action_id,
+            f"effect {effect_key!r} has no record to resume", effect_key=effect_key
         )
-    if not record.lease_is_live(now):
+    if not (record.state is EffectState.EXECUTING and record.lease_is_live(now)):
+        # One branch, not two: a resolved record and a lapsed lease both refuse with the same
+        # exception and write nothing, so separate guards for each would be one defence
+        # wearing two hats — indistinguishable to a caller and to a test. The message names
+        # the state instead.
         raise AmbiguousEffect(
-            f"effect {effect_key!r} was left executing by {record.action_id} and its lease "
-            "expired while the continuation was outstanding",
+            f"effect {effect_key!r} is {record.state} under {record.action_id} with no live "
+            "lease and cannot be resumed",
             effect_key=effect_key,
             action_id=record.action_id,
         )

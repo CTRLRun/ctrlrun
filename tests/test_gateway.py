@@ -417,16 +417,20 @@ def test_a_continuation_is_refused_once_the_lease_has_expired(sqlite_store, fake
     _held(sqlite_store, fake_clock)
     fake_clock.advance(timedelta(minutes=31))
 
-    with pytest.raises(AmbiguousEffect):
+    with pytest.raises(AmbiguousEffect) as refused:
         sqlite_store.take_continuation(CONTINUATION)
+
+    assert "executing" in str(refused.value)
 
 
 def test_a_continuation_is_refused_once_the_record_is_resolved(sqlite_store, fake_clock):
     action, _ = _held(sqlite_store, fake_clock)
     sqlite_store.mark_ambiguous(KEY, action.action_id, "lost")
 
-    with pytest.raises(AmbiguousEffect):
+    with pytest.raises(AmbiguousEffect) as refused:
         sqlite_store.take_continuation(CONTINUATION)
+
+    assert "ambiguous" in str(refused.value)
 
 
 def test_holding_needs_a_live_executing_record_this_action_holds(sqlite_store, fake_clock):
