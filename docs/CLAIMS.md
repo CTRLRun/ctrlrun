@@ -8,7 +8,7 @@ removed from the README in the same commit — the README is not allowed to desc
 that no longer ships. If you find a row here that does not hold against the version you
 installed, that is a bug: please open an issue.
 
-Regenerated for: **v0.1.0a1**. Line numbers refer to that tag.
+Regenerated for: **v0.1.0**. Line numbers refer to that tag.
 
 ## The opening paragraph
 

@@ -9,7 +9,7 @@ any change to one appears here.
 
 ## [Unreleased]
 
-## [0.1.0a1] — 2026-09-03
+## [0.1.0] — 2026-09-03
 
 First packaged release. The v0.1 kernel is complete: every acceptance test in
 `docs/SPEC-v0.1.md` §7 passes, including the multi-process concurrency test.
@@ -69,5 +69,5 @@ until it gets one, which is the point.
 - Policy conditions address an action's arguments only. Scoping a rule by environment,
   resource or principal arrives with the authority model in v0.3.
 
-[Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.1.0a1...HEAD
-[0.1.0a1]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0a1
+[Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0
