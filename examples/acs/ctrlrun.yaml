@@ -1,0 +1,19 @@
+# The policy this example runs under. Unknown actions are denied; there is no default-allow.
+#
+# The rule these decisions follow, so you can apply it to actions not listed here:
+#   cheap to undo          → allow    (autonomous)
+#   leaves the building    → approve  (a human, every time)
+#   destroys the evidence  → deny     (not an agent action at any size)
+#
+# Action names are built by the ACS hook as <prefix>.<provider>.<tool>, so a policy written
+# against an ACS deployment addresses one stable string per tool.
+schema: ctrlrun.policy/v2
+
+actions:
+  acs.stripe.create_refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }      # $0 to $500 — autonomous
+        decision: allow
+      - decision: deny
