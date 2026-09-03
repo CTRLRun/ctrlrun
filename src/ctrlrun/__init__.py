@@ -27,7 +27,7 @@ from .errors import (
     PolicyError,
 )
 from .policy import Decision, Policy
-from .receipt import Event, Receipt
+from .receipt import Event, EventSink, JSONLEventSink, Receipt
 from .state import InMemoryStateStore, SQLiteStateStore, StateStore
 
 __all__ = [
@@ -48,8 +48,10 @@ __all__ = [
     "EffectRecord",
     "EffectState",
     "Event",
+    "EventSink",
     "InMemoryStateStore",
     "InvalidArgument",
+    "JSONLEventSink",
     "LocalApprovalProvider",
     "NotExecuted",
     "Policy",

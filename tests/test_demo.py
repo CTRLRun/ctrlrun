@@ -41,7 +41,14 @@ from ctrlrun.cli.demo import (
     written_path,
 )
 from ctrlrun.cli.main import EXAMPLE_POLICY, main
-from ctrlrun.receipt import RECEIPT_SCHEMA, EventLog, EventType, ReceiptResult
+from ctrlrun.receipt import (
+    EVENTS_FILENAME,
+    RECEIPT_SCHEMA,
+    RECEIPTS_FILENAME,
+    EventType,
+    JSONLEventSink,
+    ReceiptResult,
+)
 
 POLICY = """
 schema: ctrlrun.policy/v1
@@ -112,8 +119,18 @@ def store(workspace):
 
 
 @pytest.fixture
-def control(workspace, store):
-    return Control(Policy.from_file(workspace / "ctrlrun.yaml"), store)
+def journal(workspace):
+    """SPEC-v0.2 §4.3 — the JSONL evidence is a `Control` sink now, not the store's job.
+
+    Pointed at the directory `Control.from_file()` would point it at, so every assertion
+    below still reads the files v0.1 §6 names, in the place v0.1 put them.
+    """
+    return JSONLEventSink(workspace / ".ctrlrun")
+
+
+@pytest.fixture
+def control(workspace, store, journal):
+    return Control(Policy.from_file(workspace / "ctrlrun.yaml"), store, sinks=[journal])
 
 
 @pytest.fixture
@@ -154,7 +171,7 @@ def _lines(path: Path) -> list[str]:
 # --- the JSONL evidence writers (SPEC §6.1, §6.2) -------------------------------------
 
 
-def test_a_receipt_is_appended_to_receipts_jsonl_beside_the_state_database(control, store):
+def test_a_receipt_is_appended_to_receipts_jsonl_beside_the_state_database(control, journal):
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -162,11 +179,11 @@ def test_a_receipt_is_appended_to_receipts_jsonl_beside_the_state_database(contr
     with context(agent="refund-agent"):
         refund(payment_id="txn_1", amount=200)
 
-    (line,) = _lines(store.journal.receipts_path)
+    (line,) = _lines(journal.receipts_path)
     assert json.loads(line)["result"] == "committed"
 
 
-def test_the_jsonl_receipt_parses_back_into_the_receipt_the_store_holds(control, store):
+def test_the_jsonl_receipt_parses_back_into_the_receipt_the_store_holds(control, store, journal):
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -174,11 +191,11 @@ def test_the_jsonl_receipt_parses_back_into_the_receipt_the_store_holds(control,
     with context(agent="refund-agent"):
         refund(payment_id="txn_1", amount=200)
 
-    (line,) = _lines(store.journal.receipts_path)
+    (line,) = _lines(journal.receipts_path)
     assert Receipt.from_json(line) == store.receipts()[0]
 
 
-def test_every_event_is_appended_to_events_jsonl_in_order(control, store):
+def test_every_event_is_appended_to_events_jsonl_in_order(control, store, journal):
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -186,14 +203,14 @@ def test_every_event_is_appended_to_events_jsonl_in_order(control, store):
     with context(agent="refund-agent"):
         refund(payment_id="txn_1", amount=200)
 
-    written = [json.loads(line) for line in _lines(store.journal.events_path)]
+    written = [json.loads(line) for line in _lines(journal.events_path)]
     assert [document["type"] for document in written] == [
         str(event.type) for event in store.events()
     ]
     assert [document["event_id"] for document in written] == [1, 2, 3, 4, 5]
 
 
-def test_every_jsonl_event_carries_the_fields_the_spec_names(control, store):
+def test_every_jsonl_event_carries_the_fields_the_spec_names(control, journal):
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -201,7 +218,7 @@ def test_every_jsonl_event_carries_the_fields_the_spec_names(control, store):
     with context(agent="refund-agent"):
         refund(payment_id="txn_1", amount=200)
 
-    for line in _lines(store.journal.events_path):
+    for line in _lines(journal.events_path):
         assert set(json.loads(line)) == {
             "event_id",
             "ts",
@@ -213,12 +230,28 @@ def test_every_jsonl_event_carries_the_fields_the_spec_names(control, store):
         }
 
 
-def test_the_jsonl_files_land_in_the_state_directory(store, workspace):
-    assert store.journal.receipts_path == workspace / ".ctrlrun" / "receipts.jsonl"
-    assert store.journal.events_path == workspace / ".ctrlrun" / "events.jsonl"
+def test_the_jsonl_files_land_in_the_state_directory(workspace):
+    """SPEC-v0.2 §4.3 — `Control.from_file()` installs the sink, and it writes where v0.1
+    wrote: an existing evidence directory is unchanged by the move out of the store."""
+    control = Control.from_file()
+    try:
+
+        @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+        def refund(payment_id: str, amount: int) -> str:
+            return "re_1"
+
+        with context(agent="refund-agent"):
+            refund(payment_id="txn_1", amount=200)
+    finally:
+        control.store.close()
+
+    assert (workspace / ".ctrlrun" / RECEIPTS_FILENAME).is_file()
+    assert (workspace / ".ctrlrun" / EVENTS_FILENAME).is_file()
 
 
-def test_a_new_store_on_the_same_directory_appends_rather_than_truncates(control, store, workspace):
+def test_a_new_store_on_the_same_directory_appends_rather_than_truncates(
+    control, journal, workspace
+):
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -227,7 +260,11 @@ def test_a_new_store_on_the_same_directory_appends_rather_than_truncates(control
         refund(payment_id="txn_1", amount=200)
     reopened = SQLiteStateStore(workspace / ".ctrlrun" / "state.db")
     try:
-        second = Control(Policy.from_file(workspace / "ctrlrun.yaml"), reopened)
+        second = Control(
+            Policy.from_file(workspace / "ctrlrun.yaml"),
+            reopened,
+            sinks=[JSONLEventSink(workspace / ".ctrlrun")],
+        )
 
         @protect("stripe.refund", effect="refund:{payment_id}", control=second)
         def other(payment_id: str, amount: int) -> str:
@@ -238,10 +275,10 @@ def test_a_new_store_on_the_same_directory_appends_rather_than_truncates(control
     finally:
         reopened.close()
 
-    assert len(_lines(store.journal.receipts_path)) == 2
+    assert len(_lines(journal.receipts_path)) == 2
 
 
-def test_a_receipt_line_is_written_only_after_the_store_accepted_it(control, store):
+def test_a_receipt_line_is_written_only_after_the_store_accepted_it(control, journal):
     @protect("stripe.refund", control=control)
     def denied(payment_id: str, amount: int) -> str:
         raise AssertionError("a denied action never executes")
@@ -249,13 +286,15 @@ def test_a_receipt_line_is_written_only_after_the_store_accepted_it(control, sto
     with context(agent="refund-agent"), pytest.raises(ActionDenied):
         denied(payment_id="txn_1", amount=999999)
 
-    (line,) = _lines(store.journal.receipts_path)
+    (line,) = _lines(journal.receipts_path)
     assert json.loads(line)["result"] == "denied"
 
 
 def test_an_unwritable_journal_never_fails_an_action_the_store_already_recorded(
-    control, store, monkeypatch, caplog
+    control, store, journal, monkeypatch, caplog
 ):
+    """v0.1 §6's rule, enforced since SPEC-v0.2 §4.2 by Control's general one about sinks."""
+
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
         return "re_1"
@@ -263,8 +302,8 @@ def test_an_unwritable_journal_never_fails_an_action_the_store_already_recorded(
     def refuse(_line: str) -> None:
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(store.journal, "put_receipt", lambda receipt: refuse("receipt"))
-    monkeypatch.setattr(store.journal, "append_event", lambda event: refuse("event"))
+    monkeypatch.setattr(journal, "on_receipt", lambda receipt: refuse("receipt"))
+    monkeypatch.setattr(journal, "on_event", lambda event: refuse("event"))
     with context(agent="refund-agent"), caplog.at_level("WARNING", logger="ctrlrun"):
         assert refund(payment_id="txn_1", amount=200) == "re_1"
 
@@ -967,8 +1006,8 @@ def test_the_decision_a_receipt_records_survives_the_round_trip(control, store, 
     assert Receipt.from_json(receipt.to_json()) == receipt
 
 
-def test_an_event_log_writes_to_the_directory_it_was_given(tmp_path):
-    log = EventLog(tmp_path / "evidence")
+def test_a_jsonl_sink_writes_to_the_directory_it_was_given(tmp_path):
+    log = JSONLEventSink(tmp_path / "evidence")
 
     assert log.receipts_path == tmp_path / "evidence" / "receipts.jsonl"
     assert log.events_path == tmp_path / "evidence" / "events.jsonl"

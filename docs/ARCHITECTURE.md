@@ -138,9 +138,9 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `policy.py` | YAML → rules → Decision; `effect:`/`resource:` templates | approvals, effect *state* |
 | `approval.py` | request/grant/consume, providers | executors |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
-| `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator |
+| `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
 | `control.py` | `Control` orchestration, decorator, context | CLI |
-| `receipt.py` | Receipt/Event models, JSONL writer | everything else |
+| `receipt.py` | Receipt/Event models, `EventSink`, JSONL sink | everything else |
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.

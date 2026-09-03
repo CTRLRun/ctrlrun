@@ -11,7 +11,7 @@ import functools
 import inspect
 import logging
 import os
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -51,7 +51,16 @@ from .errors import (
     NotExecuted,
 )
 from .policy import Decision, Evaluation, Policy, discover_policy_path
-from .receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, new_receipt_id
+from .receipt import (
+    Event,
+    EventSink,
+    EventType,
+    JSONLEventSink,
+    Receipt,
+    ReceiptResult,
+    iso_timestamp,
+    new_receipt_id,
+)
 from .state import SQLiteStateStore, StateStore
 
 _LOG = logging.getLogger(__name__)
@@ -199,6 +208,7 @@ class Control:
         clock: Callable[[], datetime] = _utc_now,
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
         lease: timedelta = DEFAULT_LEASE,
+        sinks: Sequence[EventSink] = (),
     ) -> None:
         self._policy = policy
         self._store = store
@@ -208,6 +218,7 @@ class Control:
         self._clock = clock
         self._approval_ttl = approval_ttl
         self._lease = _checked_lease(lease, "Control(lease=...)")
+        self._sinks = tuple(sinks)
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Control:
@@ -219,8 +230,16 @@ class Control:
         are shared by every worker that loaded the same policy (§5.3 E1, §8).
         """
         policy = Policy.from_file(path)
-        store = SQLiteStateStore(state_path(policy.source))
-        return cls(policy, store, LocalApprovalProvider(store))
+        state = state_path(policy.source)
+        store = SQLiteStateStore(state)
+        # SPEC-v0.2 §4.3 — the two files of v0.1 §6 land exactly where v0.1 put them,
+        # so an existing evidence directory is unchanged by the move out of the store.
+        return cls(
+            policy,
+            store,
+            LocalApprovalProvider(store),
+            sinks=[JSONLEventSink(state.parent)],
+        )
 
     @property
     def policy(self) -> Policy:
@@ -746,7 +765,7 @@ class Control:
         approval: Approval | None = None,
         approval_id: str | None = None,
     ) -> None:
-        self._store.append_event(
+        stored = self._store.append_event(
             Event(
                 type=type_,
                 action_id=action.action_id,
@@ -756,6 +775,7 @@ class Control:
                 approval_id=approval_id if approval is None else approval.approval_id,
             )
         )
+        self._fan_out("on_event", stored, str(stored.type))
 
     def _record(
         self,
@@ -792,7 +812,35 @@ class Control:
             error=error,
         )
         self._store.put_receipt(receipt)
+        self._fan_out("on_receipt", receipt, receipt.receipt_id)
         return receipt
+
+    def _fan_out(self, method: str, record: Event | Receipt, described: str) -> None:
+        """Hand one record to every sink, in registration order (SPEC-v0.2 §4.1, §4.2).
+
+        Called only after the authoritative store write for that record succeeded, so a sink
+        that reads the store finds what it was just handed.
+
+        A sink that raises is logged and skipped, and the remaining sinks still run: by the
+        time this executes the effect has committed at the remote and the record is durable,
+        and raising here would reach the caller as an exception on a successful action —
+        which an agent reads as a failure, and retries. That is the one mistake this library
+        exists to prevent, so it is not going to be introduced by a telemetry exporter.
+
+        A `BaseException` that is not an `Exception` propagates, for the reason in v0.1 §5.5:
+        swallowing a `KeyboardInterrupt` while exporting is worse than losing the export.
+        """
+        for sink in self._sinks:
+            try:
+                getattr(sink, method)(record)
+            except Exception as exc:
+                _LOG.warning(
+                    "%s.%s(%s) failed and was skipped: %s",
+                    type(sink).__name__,
+                    method,
+                    described,
+                    exc,
+                )
 
 
 def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
