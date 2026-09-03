@@ -185,19 +185,23 @@ def test_sinks_run_in_registration_order(store):
     assert order == ["first", "second"] * (len(order) // 2)
 
 
-def test_a_sink_sees_the_event_id_the_store_assigned(store):
-    """§4.1 — the id is the store's, so an export can be joined back to the record."""
+def test_a_sink_sees_the_event_id_the_store_assigned(state_store):
+    """§4.1 — the id is the store's, so an export can be joined back to the record.
+
+    Parametrized over both stores: the id comes from `lastrowid` in one and from a list
+    length in the other, and a sink cannot tell which store it is behind.
+    """
     recorder = Recorder()
-    control = _control(store, recorder)
+    control = _control(state_store, recorder)
     refund = _refund(control)
 
     with context(agent="refund-agent"):
         refund(payment_id="txn_1", amount=200)
 
     assert [event.event_id for event in recorder.events] == [
-        event.event_id for event in store.events()
+        event.event_id for event in state_store.events()
     ]
-    assert all(event.event_id is not None for event in recorder.events)
+    assert [event.event_id for event in recorder.events] == [1, 2, 3, 4, 5]
 
 
 def test_a_sink_runs_only_after_the_store_accepted_the_record(store):
@@ -357,20 +361,22 @@ def test_the_event_sink_protocol_is_structural(store):
     assert sink.seen == len(store.events()) + 1
 
 
-def test_the_store_returns_the_event_it_stored(store):
-    """§4.1 needs the assigned id, so `append_event` hands the stored event back."""
+def test_the_store_returns_the_event_it_stored(state_store):
+    """§4.1 needs the assigned id, so `append_event` hands the stored event back.
+
+    Against both stores, because this is the half of the contract `Control` depends on and
+    a double that returned the caller's own event would hide every id bug behind it.
+    """
     from datetime import UTC, datetime
 
     from ctrlrun.receipt import EventType
 
-    stored: Any = store.append_event(
+    first: Any = state_store.append_event(
         Event(type=EventType.ACTION_PROPOSED, action_id="act_1", ts=datetime.now(UTC))
     )
-
-    assert stored.event_id == 1
-    assert (
-        store.append_event(
-            Event(type=EventType.ACTION_PROPOSED, action_id="act_2", ts=datetime.now(UTC))
-        ).event_id
-        == 2
+    second: Any = state_store.append_event(
+        Event(type=EventType.ACTION_PROPOSED, action_id="act_2", ts=datetime.now(UTC))
     )
+
+    assert (first.event_id, second.event_id) == (1, 2)
+    assert [event.event_id for event in state_store.events()] == [1, 2]
