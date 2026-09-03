@@ -778,9 +778,11 @@ def test_T16_a_decorator_and_a_policy_template_produce_the_same_action_hash():
     """The gateway has no decorator (§3.2), so the two paths have to agree exactly."""
     from_policy = _templated_control()
     from_decorator = Control(
-        Policy.from_yaml(TEMPLATED_POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v1")
-                         .replace('    effect: "refund:{payment_id}"\n', "")
-                         .replace('    resource: "payment:{payment_id}"\n', "")),
+        Policy.from_yaml(
+            TEMPLATED_POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v1")
+            .replace('    effect: "refund:{payment_id}"\n', "")
+            .replace('    resource: "payment:{payment_id}"\n', "")
+        ),
         InMemoryStateStore(),
     )
 
@@ -874,9 +876,7 @@ def test_T16_a_mismatch_warns_once_naming_both_templates(caplog):
             refund(payment_id="txn_2", amount=200)
 
     warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if "rf:{payment_id}" in record.getMessage()
+        record.getMessage() for record in caplog.records if "rf:{payment_id}" in record.getMessage()
     ]
     assert len(warnings) == 1
     assert "refund:{payment_id}" in warnings[0]

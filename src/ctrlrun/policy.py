@@ -392,9 +392,7 @@ def _parse_template(value: object, kwarg: str, where: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise PolicyError(
-            f"{where}: {kwarg!r} must be a template string, got {_type_name(value)}"
-        )
+        raise PolicyError(f"{where}: {kwarg!r} must be a template string, got {_type_name(value)}")
     try:
         template_placeholders(value)
     except InvalidArgument as exc:
