@@ -9,17 +9,84 @@ any change to one appears here.
 
 ## [Unreleased]
 
-Work towards 0.2.0. Version is `0.2.0.dev0`; nothing here has shipped.
+Nothing yet.
+
+## [0.2.0] — unreleased
+
+Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml` and
+`click`; the gateway, the ACS hook and the OpenTelemetry sink live in extras.
 
 ### Added
 
-- `docs/SPEC-v0.2.md` — the v0.2 contract, written as a delta over v0.1. Eight deliverables:
-  a reconciliation hook, `examples/` scripts and sector policy templates, per-action
-  `effect:` / `resource:` in policy, an `EventSink` protocol, `ctrlrun inspect`, an MCP
-  gateway, a webhook approval provider, and an OpenTelemetry sink. Acceptance tests T13–T31.
-- Empty `gateway` and `otel` extras in `pyproject.toml`. `pip install ctrlrun` will keep
-  installing nothing but `pyyaml` and `click`; anything needing an HTTP server or a
-  third-party SDK goes in an extra, imported lazily.
+- **MCP gateway** — `ctrlrun gateway --upstream <url> --alias <name>`, in `ctrlrun[gateway]`.
+  An existing MCP tool server gets CTRLRun semantics with no agent changes: `tools/call`
+  becomes an Action, everything else is relayed unchanged. The request forwarded upstream is
+  built from the action's *canonical* arguments, so what was hashed, reserved and recorded is
+  byte-for-byte what the tool receives. Serves `2026-07-28` and `2025-03-26`–`2025-11-25` in
+  passthrough. A fresh connection per intercepted call, because "the connection was never
+  established" is the only observation that proves non-execution.
+- **Reconciliation hook** — `@protect(..., reconcile=...)`. The second authority permitted to
+  move a record out of `AMBIGUOUS`, and only where its answer points. An exception, a nonsense
+  return value and a hook that is never called all mean `"unknown"`, which changes nothing.
+- **`Suspended` and `Control.resume`** — an executor may say "the remote asked for something
+  before it will finish". The record stays `EXECUTING`, the lease is extended, the
+  continuation is held, no receipt is written, and the signal reaches the caller. Built for
+  MCP elicitation; used by the ACS adapter for the same reason.
+- **`EventSink`** — a protocol receiving every `Event` and `Receipt`, called after the
+  authoritative store write. `JSONLEventSink` is the v0.1 file writer under that interface.
+  A sink that raises is logged and skipped; it can never change a decision or an outcome.
+- **`OTelEventSink`** — in `ctrlrun[otel]`. One OpenTelemetry span per action, one span event
+  per step, `ctrlrun.*` attributes. Argument values are withheld unless asked for.
+- **`WebhookApprovalProvider`** — core, over stdlib `urllib.request`. One signed POST on
+  `APPROVAL_REQUESTED`; the gateway serves the signed inbound grant/deny at
+  `POST /ctrlrun/approvals/<request_id>`. An undelivered notification is not an approval.
+- **`ctrlrun inspect <action_id>`** — one action's whole history: proposal, decision,
+  approvals, effect, receipt and the event timeline. `--json` emits `ctrlrun.inspection/v1`.
+- **Policy `schema: ctrlrun.policy/v2`** — per-action `effect:`, `resource:` and `mcp:`
+  templates, needed because a gateway call has no decorator to carry them. Where a decorator
+  and the policy disagree, the decorator wins and the mismatch is warned about once.
+- **ACS control hook** — `ctrlrun.acs.AcsControlHook`, in `ctrlrun[gateway]`. Answers the
+  OWASP Agent Control Standard's `steps/toolCallRequest` and `steps/toolCallResult`. See
+  `docs/ACS.md` for the mapping and for the four places ACS is silent. **No compliance
+  claim**: at the commit read there is no ACS reference implementation and no conformance
+  suite, so there is nothing to be conformant with.
+- **`examples/`** — four standalone failure scenarios, an ACS integration example, and nine
+  sector policy templates under `examples/policies/`.
+
+### Changed
+
+- `StateStore.append_event` returns the event as stored, where it returned `None`. Sinks must
+  be called with the `event_id` the store assigned, and the store is the only thing that knows
+  it. Callers that ignore the return value are unaffected. Recorded in `SPEC-v0.1.md` §8.
+- `SQLiteStateStore` no longer writes JSONL. `Control` does, through `JSONLEventSink`, and
+  `Control.from_file()` installs one by default — so the two files land exactly where v0.1 put
+  them and existing evidence directories are unchanged.
+- `docs/SPEC-v0.2.md` §9 amended: it forbade an ACS adapter on the reading that ACS had no
+  stable interface. The v0.1.0 schemas say otherwise, so the adapter ships. The no-claim rule
+  is untouched.
+
+### Removed
+
+- `SQLiteStateStore.journal`, and the `EventLog` class behind it. `JSONLEventSink` is that
+  class under the sink interface, and it is `Control`'s now.
+
+### Fixed
+
+- `.gitignore` ignored `ctrlrun.yaml` unanchored, so it matched at any depth and silently kept
+  every example's policy file out of the repository. Anchored to `/ctrlrun.yaml`.
+
+### Compatibility
+
+- **A v0.1 `ctrlrun.yaml` loads unchanged.** `ctrlrun.policy/v2` is opt-in and additive; a
+  document declaring `v1` that uses a v2 key is a load-time `PolicyError` naming the key and
+  the schema it needs, because a v0.1 reader would ignore the template and execute with no
+  duplicate protection at all.
+- **The receipt schema is unchanged** — `ctrlrun.receipt/v1` still describes every receipt
+  v0.2 writes. `EFFECT_RESOLVED` gains `data.resolved_by`, and four event types join the set:
+  `RECONCILIATION_STARTED`, `RECONCILIATION_RESOLVED`, `EXECUTION_SUSPENDED`,
+  `EXECUTION_RESUMED`.
+- A database written by v0.1 is read by v0.2 without migration: the one new table
+  (`continuations`) is created on open.
 
 ### Notes
 

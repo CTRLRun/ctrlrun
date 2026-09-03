@@ -14,17 +14,30 @@ Exit: all acceptance tests in `SPEC-v0.1.md §7` pass; demo < 60 s; README liter
 
 Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 
-## v0.2 — Zero-friction deployment
+## v0.2 — Zero-friction deployment (shipped)
 
 - MCP adapter and `ctrlrun gateway --upstream <mcp server>` so an existing MCP tool server gets CTRLRun semantics with no agent changes.
 - OpenTelemetry export of events (align with ACS observability; don't invent a tracing format).
 - Webhook approval provider (Slack/Teams/anything that can POST back).
 - `ctrlrun inspect <action_id>`.
-- Reconciliation hook: executor may implement `check(effect_key) -> committed | not_executed | unknown` to resolve AMBIGUOUS automatically.
+- Reconciliation hook: `@protect(..., reconcile=...)` resolves AMBIGUOUS automatically, and only where its answer points.
 - `examples/` directory with standalone scripts per scenario (`double-refund/`, `approval-mutation/`, `agent-race/`, `approval-replay/`). In v0.1 `ctrlrun demo` is the example; separate scripts earn their keep once there is more than one way to wire CTRLRun in.
 - Sector policy templates: `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare, legal, security, government, hr. Header comment: *"Starting point on the v0.1 kernel. Adapt before use."* Uses only v0.1 primitives.
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
+
+**Reconciled against what shipped.** Three things arrived earlier than this file expected, and
+one arrived that it did not list:
+
+- The **OWASP ACS adapter** was a v0.3 standards line. Reading the v0.1.0 schemas showed a
+  stable enough interface to build against, so it shipped here — with no compliance claim, and
+  `docs/ACS.md` recording where the standard is silent.
+- **`Suspended` / `Control.resume`** were not on any milestone. MCP elicitation (§6.9) needs a
+  reservation held across a round trip the kernel does not control, and so does an advisory
+  hook model like ACS. It is public API now, frozen in `SPEC-v0.2.md` §11.
+- **Policy `schema: ctrlrun.policy/v2`** grew out of the gateway rather than being planned:
+  a tool call has no decorator to carry an effect template.
+- **`EventSink`** replaced the store's file writing, which the v0.1 kernel had owned.
 
 Standards: OpenTelemetry export (code), MCP gateway. The OWASP ACS adapter shipped in v0.2 (see `docs/ACS.md`); "ACS-compatible" is still unearned and waits on an ACS conformance suite to measure against.
 
@@ -37,7 +50,7 @@ Standards: OpenTelemetry export (code), MCP gateway. The OWASP ACS adapter shipp
 
 This is the first point at which `VISION.md` may be opened for design input.
 
-Standards: align principal/delegation semantics with NIST agent identity work and OAuth-based agent identity. Wording is "consumes identities from", never "implements".
+Standards: align principal/delegation semantics with NIST agent identity work and OAuth-based agent identity. Wording is "consumes identities from", never "implements". `--principal-from-client-info` is removed here: it exists in v0.2 only because a v0.1 policy cannot address the principal at all, and the authority model makes a self-reported name an authorization input.
 
 ## v0.4 — Verification
 
