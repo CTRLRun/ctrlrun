@@ -17,7 +17,11 @@ venv/
 
 # CTRLRun local state (SPEC-v0.1 §5, §6)
 .ctrlrun/
-ctrlrun.yaml
+# Anchored: this ignores the operator's own policy at the repo root, which `ctrlrun init`
+# writes. Unanchored it matched every `ctrlrun.yaml` at any depth, which silently kept the
+# examples' policy files out of a commit — they worked locally and were missing from every
+# clone. `test_T31_every_file_an_example_needs_is_tracked_by_git` is the guard.
+/ctrlrun.yaml
 
 # OS
 .DS_Store

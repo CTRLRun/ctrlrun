@@ -1,0 +1,11 @@
+# The policy this example runs under. Unknown actions are denied; there is no default-allow.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Amounts are integer minor units (cents). Both ends are bound: `amount_lte` on its own
+  # lets a negative amount through, and a refund of a negative amount is a charge.
+  stripe.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 to €500.00
+        decision: allow
+      - decision: deny

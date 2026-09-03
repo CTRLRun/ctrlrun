@@ -1,0 +1,11 @@
+# The policy this example runs under. Unknown actions are denied; there is no default-allow.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Both agents are inside policy here. Policy is not what stops the second one — the
+  # effect key is. Amounts are integer minor units (cents), with both ends bound.
+  stripe.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 to €500.00
+        decision: allow
+      - decision: deny

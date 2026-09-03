@@ -663,7 +663,15 @@ def test_the_shipped_example_policy_is_the_one_in_the_repository():
 
 #: Files outside the package that the test suite opens, and that must therefore travel in the
 #: sdist for a distribution packager to be able to run these tests at all.
-SOURCE_TREE_FIXTURES = ("ctrlrun.example.yaml", "tests/conftest.py")
+SOURCE_TREE_FIXTURES = (
+    "ctrlrun.example.yaml",
+    "tests/conftest.py",
+    # T31 runs every example script and loads every sector template out of the source tree
+    # (SPEC-v0.2 §1.1). CI builds the sdist and runs the suite from it, so both travel.
+    "examples/double-refund/main.py",
+    "examples/double-refund/ctrlrun.yaml",
+    "examples/policies/payments.yaml",
+)
 
 
 def _manifest_carries(manifest: str, path: str) -> bool:

@@ -1,0 +1,47 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# The asymmetry to keep: containment is cheap to undo and expensive to delay, so some of it
+# is autonomous. Widening access, and destroying evidence, never are.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Triage: autonomous.
+  alert.read:
+    decision: allow
+  siem.query:
+    decision: allow
+  threat_intel.lookup:
+    decision: allow
+
+  # Containment on one endpoint, in the middle of an incident, beats waiting for a human.
+  host.isolate:
+    rules:
+      - when: { host_count_gte: 1, host_count_lte: 1 }
+        decision: allow
+      - decision: approve
+
+  # Locking one account out is recoverable; locking out a directory is an outage.
+  user.disable:
+    rules:
+      - when: { user_count_gte: 1, user_count_lte: 1 }
+        decision: allow
+      - decision: approve
+
+  # A rule that blocks is containment. A rule that permits is a hole.
+  firewall.add_deny_rule:
+    decision: allow
+  firewall.add_allow_rule:
+    decision: approve
+  firewall.delete_rule:
+    decision: approve
+
+  # Evidence, and the keys to everything.
+  audit_log.delete:
+    decision: deny
+  iam.grant_admin:
+    decision: deny
+  edr.disable_protection:
+    decision: deny

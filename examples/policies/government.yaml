@@ -1,0 +1,43 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Amounts are integer minor units (cents). Nothing here is a statement about what your
+# statutory framework permits an automated system to decide; that question comes first, and
+# a template cannot answer it.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads and status: autonomous.
+  case.read:
+    decision: allow
+  case.check_status:
+    decision: allow
+  eligibility.precheck:
+    decision: allow
+
+  # Paying a benefit. Small, routine, in-band payments are the volume.
+  benefit.approve_payment:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }        # $0 to $500
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 }       # $0 to $5,000
+        decision: approve
+      - decision: deny
+
+  # An adverse decision has to be explainable by the person who made it.
+  benefit.terminate:
+    decision: approve
+  benefit.reduce:
+    decision: approve
+
+  # Correspondence goes out under a seal.
+  notice.send:
+    decision: approve
+  record.amend:
+    decision: approve
+
+  # The record is the citizen's evidence as much as the agency's.
+  record.delete:
+    decision: deny

@@ -1,0 +1,42 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Amounts are integer minor units (cents).
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads: autonomous.
+  policy.read:
+    decision: allow
+  claim.read:
+    decision: allow
+  claim.request_documents:
+    decision: allow
+
+  # Paying a claim is the consequential action here, and small ones are the volume.
+  claim.approve_payout:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }       # $0 to $1,000
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 2500000 }      # $0 to $25,000
+        decision: approve
+      - decision: deny
+
+  # A denial is a decision a person has to be able to stand behind and explain.
+  claim.deny:
+    decision: approve
+
+  # Ending or repricing cover changes what someone is protected against.
+  policy.cancel:
+    decision: approve
+  premium.adjust:
+    rules:
+      - when: { delta_gte: -5000, delta_lte: 5000 }       # within $50 either way
+        decision: allow
+      - decision: approve
+
+  # The record is the evidence. An agent does not remove it.
+  policyholder.delete:
+    decision: deny
