@@ -50,6 +50,8 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     from ..webhook import WebhookApprovalProvider, webhook_secret
     from .server import Gateway, GatewayConfig, httpx_forwarder, serve_forever
 
+    otel = bool(options.pop("otel", False))
+    otel_arguments = bool(options.pop("otel_arguments", False))
     public_url = options.pop("public_url", None)
     webhook_url = options.pop("webhook_url", None)
     secret_file = options.pop("webhook_secret_file", None)
@@ -58,6 +60,17 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
 
     config = GatewayConfig(upstream=upstream, alias=alias, webhook_secret=secret, **options)
     control = Control.from_file()
+    if otel:
+        # §8 — one more sink beside the JSONL one `from_file` installed. It never blocks and
+        # never raises into the kernel (§4.2), so adding it changes no decision.
+        from ..otel import OTelEventSink
+
+        control = Control(
+            control.policy,
+            control.store,
+            control.approvals,
+            sinks=[*control.sinks, OTelEventSink(arguments=otel_arguments)],
+        )
     if webhook_url:
         # §7 — the provider notifies; the gateway's endpoint receives. Both need the same
         # secret, and neither takes it from a command-line argument (§7.3).

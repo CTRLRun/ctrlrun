@@ -48,8 +48,14 @@ dev = [
 # first row — a gateway that could not tell "never connected" from "no reply" would have to
 # call everything AMBIGUOUS, which is safe and useless.
 gateway = ["httpx>=0.27"]
-# Item 8 adds the OpenTelemetry API, SDK and OTLP/HTTP exporter.
-otel = []
+# §8's sink hands spans to whatever processor the application configured. The API alone
+# would be enough for a library, but an operator installing this extra wants to be able to
+# export without assembling a stack, so the SDK and the OTLP/HTTP exporter come with it.
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -95,6 +101,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # Same reasoning for the ACS adapter: its subject matter is an untyped JSON-RPC envelope off
 # somebody else's wire, and `_Unknown` follows this codebase's error naming.
 "src/ctrlrun/acs.py" = ["ANN401", "N818"]
+# The OTel sink holds objects from a lazily-imported SDK: annotating them would mean
+# importing `opentelemetry` at module scope, which is the one thing §1.1 forbids.
+"src/ctrlrun/otel.py" = ["ANN401"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]

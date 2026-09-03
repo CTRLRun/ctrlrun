@@ -33,6 +33,70 @@ def _pyproject() -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def test_T30_a_subprocess_importing_ctrlrun_pulls_in_no_module_from_an_extra():
+    """SPEC-v0.2 §10's T30, in one place. A **subprocess**, because in-process this would
+    pass or fail on whatever pytest happened to import first."""
+    finished = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import ctrlrun, sys;"
+            "print(sorted(n for n in sys.modules"
+            " if n.split('.')[0] in ('httpx', 'opentelemetry')"
+            " or n in ('ctrlrun.gateway', 'ctrlrun.otel', 'ctrlrun.acs')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert finished.stdout.strip() == "[]"
+
+
+@pytest.mark.parametrize(
+    ("factory", "extra"),
+    [
+        ("from ctrlrun.gateway import serve; serve(upstream='http://x', alias='a')", "gateway"),
+        ("from ctrlrun.otel import OTelEventSink; OTelEventSink()", "otel"),
+    ],
+)
+def test_T30_a_missing_extra_says_which_one_to_install(factory, extra, tmp_path):
+    """Never `ModuleNotFoundError`: an operator reads that as a broken package rather than
+    as an option they did not select. Run in a subprocess with the extra's module hidden."""
+    script = (
+        "import sys, importlib.abc\n"
+        "class Block(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        f"        if name.split('.')[0] in ('httpx', 'opentelemetry'):\n"
+        "            raise ImportError(name)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "from ctrlrun import MissingDependency\n"
+        "try:\n"
+        f"    {factory}\n"
+        "except MissingDependency as exc:\n"
+        "    print(str(exc))\n"
+        "except BaseException as exc:\n"
+        "    print('WRONG:', type(exc).__name__, exc)\n"
+    )
+    finished = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+
+    assert f"pip install 'ctrlrun[{extra}]'" in finished.stdout, finished.stdout
+    assert "WRONG" not in finished.stdout
+
+
+def test_the_otel_extra_declares_the_api_sdk_and_exporter():
+    """§11 — the API alone would do for a library, but an operator installing this wants to
+    export without assembling a stack."""
+    declared = " ".join(_pyproject()["project"]["optional-dependencies"]["otel"])
+
+    assert "opentelemetry-api" in declared
+    assert "opentelemetry-sdk" in declared
+    assert "otlp" in declared
+
+
 def test_core_declares_only_pyyaml_and_click():
     declared = {
         name.split("[")[0].split(">")[0].split("=")[0].strip().lower()
