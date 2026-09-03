@@ -75,6 +75,10 @@ class EventType(StrEnum):
     ACTION_DENIED = "ACTION_DENIED"
     RECONCILIATION_STARTED = "RECONCILIATION_STARTED"
     RECONCILIATION_RESOLVED = "RECONCILIATION_RESOLVED"
+    #: SPEC-v0.2 §11 — named for what happens to the attempt, not for the transport that
+    #: caused it: `receipt.py` does not learn MCP vocabulary (ARCHITECTURE §6).
+    EXECUTION_SUSPENDED = "EXECUTION_SUSPENDED"
+    EXECUTION_RESUMED = "EXECUTION_RESUMED"
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,7 @@ written until both have been decided, so a refused reservation leaves the approv
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -75,6 +76,14 @@ CREATE TABLE IF NOT EXISTS effects(
   result_json TEXT,
   error TEXT,
   created_at TEXT,
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS continuations(
+  effect_key TEXT PRIMARY KEY,
+  action_id TEXT NOT NULL,
+  action_hash TEXT NOT NULL,
+  request_state TEXT NOT NULL,
+  rounds INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS approvals(
@@ -368,6 +377,34 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
+    def hold_continuation(
+        self, effect_key: str, action_id: str, request_state: str, *, action_hash: str
+    ) -> int:
+        """Hold this reservation open across an elicitation round trip (SPEC-v0.2 §6.9.2).
+
+        Refused unless the record is `EXECUTING`, held by this `action_id`, with a live
+        lease — the same conditions `extend_lease` requires, for the same reason. Returns the
+        round number, which is what `--max-elicitation-rounds` is counted against.
+
+        `action_hash` travels with it because the continuation is *the same action*, and the
+        gateway has to be able to prove that before admitting one.
+        """
+        ...
+
+    def take_continuation(self, effect_key: str, request_state: str) -> EffectRecord:
+        """Consume a held continuation, or refuse (SPEC-v0.2 §6.9.2).
+
+        The `request_state` is compared with `hmac.compare_digest` and consumed in the same
+        transaction that admits the continuation, so one elicitation admits exactly one. Two
+        continuations racing on one held key is the duplicate execution this product exists
+        to prevent, wearing an `inputResponses` field as a disguise.
+        """
+        ...
+
+    def held_action_hash(self, effect_key: str) -> str | None:
+        """The `action_hash` of the held continuation for this key, or `None`."""
+        ...
+
     def approvals_for(self, action_hash: str) -> tuple[ApprovalRecord, ...]:
         """Every approval record carrying `action_hash`, oldest first (SPEC-v0.2 §5).
 
@@ -415,6 +452,7 @@ class InMemoryStateStore:
         self._receipts: list[Receipt] = []
         self._approvals: dict[str, ApprovalRecord] = {}
         self._effects: dict[str, EffectRecord] = {}
+        self._continuations: dict[str, tuple[str, str, int]] = {}
 
     def close(self) -> None:
         """Nothing to release; here so either store can be closed the same way."""
@@ -626,6 +664,34 @@ class InMemoryStateStore:
             )
             self._effects[effect_key] = extended
 
+    def hold_continuation(
+        self, effect_key: str, action_id: str, request_state: str, *, action_hash: str
+    ) -> int:
+        with self._lock:
+            record = _holdable(self._effects.get(effect_key), effect_key, action_id, self._clock())
+            _, _, rounds = self._continuations.get(effect_key, ("", "", 0))
+            self._continuations[effect_key] = (request_state, action_hash, rounds + 1)
+            assert record is not None
+            return rounds + 1
+
+    def take_continuation(self, effect_key: str, request_state: str) -> EffectRecord:
+        with self._lock:
+            record = _continuable(
+                self._effects.get(effect_key),
+                self._continuations.get(effect_key),
+                effect_key,
+                request_state,
+                self._clock(),
+            )
+            held = self._continuations[effect_key]
+            self._continuations[effect_key] = ("", held[1], held[2])
+            return record
+
+    def held_action_hash(self, effect_key: str) -> str | None:
+        with self._lock:
+            held = self._continuations.get(effect_key)
+        return None if held is None else held[1]
+
     def get_effect(self, effect_key: str) -> EffectRecord | None:
         with self._lock:
             return self._effects.get(effect_key)
@@ -800,6 +866,76 @@ class SQLiteStateStore:
 
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         return self._read_approval(self._connection(), approval_id)
+
+    def hold_continuation(
+        self, effect_key: str, action_id: str, request_state: str, *, action_hash: str
+    ) -> int:
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _holdable(
+                self._read_effect(connection, effect_key), effect_key, action_id, self._clock()
+            )
+            row = connection.execute(
+                "SELECT rounds FROM continuations WHERE effect_key=?", (effect_key,)
+            ).fetchone()
+            rounds = (row["rounds"] if row else 0) + 1
+            connection.execute(
+                "INSERT INTO continuations(effect_key, action_id, action_hash, request_state, "
+                "rounds, updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(effect_key) DO UPDATE SET "
+                "action_id=excluded.action_id, action_hash=excluded.action_hash, "
+                "request_state=excluded.request_state, rounds=excluded.rounds, "
+                "updated_at=excluded.updated_at",
+                (
+                    effect_key,
+                    action_id,
+                    action_hash,
+                    request_state,
+                    rounds,
+                    _iso(self._clock()),
+                ),
+            )
+        except BaseException:
+            self._unwind(connection)
+            raise
+        connection.commit()
+        return rounds
+
+    def take_continuation(self, effect_key: str, request_state: str) -> EffectRecord:
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "SELECT request_state, action_hash, rounds FROM continuations WHERE effect_key=?",
+                (effect_key,),
+            ).fetchone()
+            held = (
+                None if row is None else (row["request_state"], row["action_hash"], row["rounds"])
+            )
+            record = _continuable(
+                self._read_effect(connection, effect_key),
+                held,
+                effect_key,
+                request_state,
+                self._clock(),
+            )
+            # Consumed in the same transaction that admits it (§6.9.2).
+            connection.execute(
+                "UPDATE continuations SET request_state='' WHERE effect_key=?", (effect_key,)
+            )
+        except BaseException:
+            self._unwind(connection)
+            raise
+        connection.commit()
+        return record
+
+    def held_action_hash(self, effect_key: str) -> str | None:
+        row = (
+            self._connection()
+            .execute("SELECT action_hash FROM continuations WHERE effect_key=?", (effect_key,))
+            .fetchone()
+        )
+        return None if row is None else str(row["action_hash"])
 
     def find_granted_approval(self, action_hash: str) -> Approval | None:
         return _newest_granted(self.approvals_for(action_hash), action_hash, self._clock())
@@ -1254,3 +1390,53 @@ def _newest_denied(
         return None
     newest: ApprovalRecord = max(reversed(denied), key=lambda record: record.request.created_at)
     return newest.request
+
+
+def _holdable(
+    record: EffectRecord | None, effect_key: str, action_id: str, now: datetime
+) -> EffectRecord:
+    """Whether this reservation may be held open across a round trip (SPEC-v0.2 §6.9.2).
+
+    The same conditions `extend_lease` requires, and for the same reason: a record that is
+    not this attempt's, live and executing is not this attempt's to suspend either.
+    """
+    if record is None or record.state is not EffectState.EXECUTING or not record.lease_is_live(now):
+        raise AmbiguousEffect(
+            f"effect {effect_key!r} is not executing under a live lease and cannot be held",
+            effect_key=effect_key,
+            action_id=None if record is None else record.action_id,
+        )
+    if record.action_id != action_id:
+        raise DuplicateEffect(
+            f"effect {effect_key!r} is held by {record.action_id}, not {action_id}",
+            state=IN_PROGRESS_EFFECT,
+            effect_key=effect_key,
+        )
+    return record
+
+
+def _continuable(
+    record: EffectRecord | None,
+    held: tuple[str, str, int] | None,
+    effect_key: str,
+    request_state: str,
+    now: datetime,
+) -> EffectRecord:
+    """Whether a continuation may be admitted (SPEC-v0.2 §6.9.2).
+
+    The record checks come first, so an expired or resolved reservation is refused as what it
+    is rather than as an unknown continuation. `hmac.compare_digest` because the presented
+    value is agent-supplied and comparing it byte by byte leaks its prefix.
+    """
+    if record is None or record.state is not EffectState.EXECUTING or not record.lease_is_live(now):
+        raise AmbiguousEffect(
+            f"effect {effect_key!r} is no longer executing under a live lease",
+            effect_key=effect_key,
+            action_id=None if record is None else record.action_id,
+        )
+    stored = "" if held is None else held[0]
+    if not stored or not hmac.compare_digest(stored, request_state):
+        raise InvalidArgument(
+            f"no held elicitation on {effect_key!r} matches the presented requestState"
+        )
+    return record
