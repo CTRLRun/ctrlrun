@@ -2,8 +2,7 @@
 
 `state_store` is parametrized over both shipped implementations. A reservation test written
 once therefore runs against `InMemoryStateStore` and `SQLiteStateStore`, which is how the
-double is kept from drifting into refusing less than the real store (CLAUDE.md working
-style; SPEC-v0.1 §5.3).
+double is kept from drifting into refusing less than the real store (SPEC-v0.1 §5.3).
 """
 
 from datetime import UTC, datetime, timedelta

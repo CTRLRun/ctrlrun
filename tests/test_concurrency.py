@@ -58,7 +58,7 @@ BLOCKED_DUPLICATE = 3
 BLOCKED_AMBIGUOUS = 4
 
 #: Every wait in this module is bounded, so a broken reservation fails red instead of
-#: hanging CI (CLAUDE.md working style).
+#: hanging CI.
 BARRIER_TIMEOUT_S = 30.0
 JOIN_TIMEOUT_S = 120.0
 
