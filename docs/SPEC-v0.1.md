@@ -32,7 +32,7 @@ Single approver. SQLite only. Python decorator + CLI + demo. Nothing else.
 ```python
 @dataclass(frozen=True)
 class Action:
-    name: str                      # dotted, e.g. "stripe.refund"; namespace = text before first "."
+    name: str                      # dotted, e.g. "stripe.refund"
     arguments: Mapping[str, Any]   # see §2.3 for allowed types
     principal: Principal           # who is acting
     resource: str | None = None    # opaque "type:id", e.g. "payment:txn_8231"
@@ -45,7 +45,11 @@ class Principal:
     user: str | None = None        # human on whose behalf, if any
 ```
 
+`name`, `environment` and `principal.agent` MUST be non-empty. `resource` and `principal.user` are either `None` or non-empty. Empty string → `InvalidArgument`.
+
 `action_id` identifies a *proposal*. A retry produces a new `action_id`. Identity of the *effect* is the effect key (§5), never `action_id`.
+
+Action equality follows the proposal, not the content: two Actions are equal iff their `action_id` is equal, and `hash(action)` is `hash(action_id)`. Two proposals with identical content are distinct Actions that share an `action_hash`.
 
 ### 2.2 Canonical form
 
@@ -55,7 +59,13 @@ The canonical form of an Action is the UTF-8 encoding of the JSON serialization 
 {"arguments": ..., "environment": ..., "name": ..., "principal": {"agent": ..., "user": ...}, "resource": ..., "schema": "ctrlrun.action/v1"}
 ```
 
-with `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False`, and all nested mappings sorted recursively. `action_id` and any timestamps are excluded.
+with `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False`, and all nested mappings sorted recursively. `action_id` and any timestamps are excluded. `canonicalize()` returns `bytes`.
+
+`arguments` is snapshotted at construction into a deep-frozen structure — mappings become read-only mappings, lists become tuples, recursively — so a caller holding the original object cannot change a constructed Action's hash.
+
+`Control.execute` MUST invoke the executor with arguments parsed back from the action's canonical form (`Action.canonical_arguments`), never with the original Python objects. Freezing prevents accidents; executing from canonical bytes makes mutation irrelevant to the approval binding. `Action.canonical_arguments` returns plain, mutable `dict`/`list` containers built fresh from the canonical bytes on each access, so the executor cannot reach back into the Action.
+
+`canonical_arguments` is the recommended way to rebuild an Action from an existing one (a retry, §5.4). Passing another Action's stored `arguments` mapping is also valid — the frozen tuples it contains are accepted on input (§2.3) and canonicalize identically.
 
 ### 2.3 Argument types and `action_hash`
 
@@ -64,6 +74,10 @@ with `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False`, and all ne
 Allowed argument value types: `str`, `int`, `bool`, `None`, `list` of allowed types, `dict[str, allowed]`.
 
 **`float` MUST be rejected** at Action construction with `InvalidArgument`. Rationale: `0.1` and `0.10` and `0.1000000001` are the same money and different hashes. Use integer minor units (`amount=200000` cents) or decimal strings (`"2000.00"`).
+
+`tuple` is accepted on input and normalized to a JSON array: a tuple and the equivalent list have the same canonical form and therefore the same hash, so rejecting it would buy no safety.
+
+Any other type, including `Decimal`, `set`, `bytes`, `datetime`, and arbitrary objects, and any non-`str` mapping key, MUST raise `InvalidArgument`. Validation is recursive: a disallowed value at any depth rejects the whole Action.
 
 Two actions with the same canonical form MUST produce the same hash regardless of Python dict insertion order. Any material change (name, any argument, resource, principal, environment) MUST change the hash.
 
