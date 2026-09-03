@@ -351,6 +351,117 @@ def test_the_open_span_map_is_bounded(store, exporter):
     assert sink.open_spans <= 4
 
 
+def test_an_event_for_an_action_this_sink_never_saw_start_opens_no_span(store, exporter):
+    """Every action opens with ACTION_PROPOSED (v0.1 §6.2). An event for one this sink never
+    saw belongs to a span somebody else owns — a process that restarted, or a `ctrlrun
+    resolve` run days later — and inventing one would export a span with no beginning."""
+    from datetime import UTC, datetime
+
+    from ctrlrun.receipt import Event, EventType
+
+    export, provider = exporter
+    sink = OTelEventSink(tracer_provider=provider)
+
+    sink.on_event(
+        Event(
+            type=EventType.EFFECT_RESOLVED,
+            action_id="act_from_another_process",
+            ts=datetime.now(UTC),
+            data={"state": "failed", "resolved_by": "human"},
+        )
+    )
+
+    assert sink.open_spans == 0
+    assert _spans(export) == ()
+
+
+def test_an_evicted_span_is_dropped_rather_than_ended(store, exporter):
+    """Ending one would export a span asserting an outcome that never happened."""
+    export, provider = exporter
+    sink = OTelEventSink(tracer_provider=provider, max_open_spans=2)
+    control = Control(Policy.from_yaml(POLICY), store, sinks=[sink])
+    refund = _refund(control)
+
+    for index in range(6):
+        with context(agent="refund-agent"), pytest.raises(ApprovalRequired):
+            refund(payment_id=f"txn_{index}", amount=2000)
+
+    assert sink.open_spans <= 2
+    assert _spans(export) == (), "an evicted span must never reach the exporter"
+
+
+def test_a_receipt_ends_only_its_own_action_span(store, exporter):
+    """One action commits while another is suspended awaiting a human. The receipt must end
+    the span it names and leave the other open, not the nearest one to hand."""
+    export, provider = exporter
+    control = _control(store, provider)
+    refund = _refund(control)
+
+    with context(agent="refund-agent"), pytest.raises(ApprovalRequired):
+        refund(payment_id="txn_waiting", amount=2000)
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_done", amount=200)
+
+    spans = _spans(export)
+    assert len(spans) == 1
+    assert _attrs(spans[0])["ctrlrun.effect_key"] == "refund:txn_done"
+
+
+def test_a_receipt_whose_span_was_evicted_ends_nobody_elses(store, exporter):
+    """The window eviction opens, and the one that matters.
+
+    A suspended action is the only way a receipt arrives long after its `ACTION_PROPOSED`
+    under the *same* action_id (§6.9): `Control.resume` writes one for the action that
+    suspended. If its span was evicted meanwhile, that receipt has no span to end — and
+    ending "the nearest span to hand" would close a live action's span and stamp it with a
+    different action's outcome. A wrong trace is worse than a missing one.
+    """
+    from ctrlrun import Suspended
+
+    export, provider = exporter
+    sink = OTelEventSink(tracer_provider=provider, max_open_spans=1)
+    control = Control(Policy.from_yaml(POLICY), store, sinks=[sink])
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def suspending(payment_id: str, amount: int) -> str:
+        raise Suspended("held-continuation")
+
+    with context(agent="refund-agent"), pytest.raises(Suspended):
+        suspending(payment_id="txn_suspended", amount=200)
+
+    # A second action's ACTION_PROPOSED evicts the suspended action's span.
+    with context(agent="refund-agent"), pytest.raises(ApprovalRequired):
+        _refund(control)(payment_id="txn_holds_the_slot", amount=2000)
+
+    # The suspended action now finishes, and its receipt carries the original action_id.
+    control.resume("held-continuation", lambda: "re_1")
+
+    assert _spans(export) == (), "the evicted action had no span, and took nobody else's"
+    assert sink.open_spans == 1
+
+
+def test_an_argument_value_otel_cannot_carry_is_dropped_not_stringified(store, exporter):
+    """An attribute whose type changed on the way out is worse than one that is absent: a
+    query written against it silently stops matching."""
+    export, provider = exporter
+    control = Control(
+        Policy.from_yaml(POLICY),
+        store,
+        sinks=[OTelEventSink(tracer_provider=provider, arguments=True)],
+    )
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def refund(payment_id: str, amount: int, tags: list) -> str:
+        return "re_1"
+
+    with context(agent="refund-agent"):
+        refund(payment_id="txn_1", amount=200, tags=["a", "b"])
+
+    attributes = _attrs(_spans(export)[0])
+    assert attributes["ctrlrun.argument.payment_id"] == "txn_1"
+    assert "ctrlrun.argument.tags" not in attributes
+
+
 # --- T30: the extra says so when it is absent ------------------------------------------
 
 
