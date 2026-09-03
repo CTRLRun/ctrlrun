@@ -1,0 +1,38 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Nothing in this file is a legal or regulatory judgement. It is a starting shape for the
+# actions an agent may take; which of them your setting permits at all is a question for
+# your clinical and legal owners, not for a template.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Scheduling and logistics: autonomous.
+  appointment.read:
+    decision: allow
+  appointment.reschedule:
+    decision: allow
+  eligibility.check:
+    decision: allow
+
+  # Moving patient records outside the system is the action that cannot be taken back.
+  patient.export_record:
+    decision: approve
+  message.send_to_patient:
+    decision: approve
+
+  # Ordering is a clinical act. A human signs for it, whatever the agent suggested.
+  lab.order:
+    decision: approve
+  referral.create:
+    decision: approve
+
+  # Prescribing, dose changes and record destruction are not agent actions at any size.
+  prescription.issue:
+    decision: deny
+  prescription.change_dose:
+    decision: deny
+  patient.delete_record:
+    decision: deny

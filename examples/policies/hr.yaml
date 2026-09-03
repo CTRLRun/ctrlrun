@@ -1,0 +1,42 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Amounts are integer minor units (cents). Employment decisions carry obligations that
+# vary by jurisdiction; which of these an agent may take at all is not a template's call.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Directory and self-service: autonomous.
+  directory.read:
+    decision: allow
+  pto.read_balance:
+    decision: allow
+  handbook.search:
+    decision: allow
+
+  # Approving leave inside an existing balance is the routine action.
+  pto.approve:
+    rules:
+      - when: { days_gte: 1, days_lte: 5 }
+        decision: allow
+      - decision: approve
+
+  # Pay changes compound every period and are awkward to unwind.
+  compensation.adjust:
+    rules:
+      - when: { delta_gte: 0, delta_lte: 100000 }         # up to $1,000, upward only
+        decision: approve
+      - decision: deny
+
+  payroll.run:
+    decision: approve
+  offer.send:
+    decision: approve
+
+  # Ending someone's employment, and erasing the file that would justify it.
+  employee.terminate:
+    decision: deny
+  employee.delete_record:
+    decision: deny

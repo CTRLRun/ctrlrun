@@ -1,0 +1,49 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Money is in integer minor units (cents); quantities are whole units.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads: autonomous.
+  catalog.read:
+    decision: allow
+  order.read:
+    decision: allow
+
+  # Cancelling an unshipped order is the routine support action. Bound by order value, so
+  # a wholesale order does not go the same way as a $30 one.
+  order.cancel:
+    rules:
+      - when: { total_gte: 0, total_lte: 20000 }          # $0 to $200
+        decision: allow
+      - decision: approve
+
+  # Refunds move money out.
+  order.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 10000 }        # $0 to $100
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 200000 }       # $0 to $2,000
+        decision: approve
+      - decision: deny
+
+  # Stock corrections are how an oversell happens twice.
+  inventory.adjust:
+    rules:
+      - when: { quantity_gte: -50, quantity_lte: 50 }
+        decision: allow
+      - decision: approve
+
+  # A wrong price is public, immediate, and honoured by somebody.
+  price.update:
+    decision: approve
+
+  shipment.create:
+    decision: allow
+
+  # Nothing an agent needs.
+  customer.delete:
+    decision: deny

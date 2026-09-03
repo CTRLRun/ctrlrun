@@ -1,0 +1,40 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Nothing in this file is legal advice about what may be delegated. It is a starting shape
+# for the actions an agent may take; a supervising lawyer decides which of them apply.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Research and internal drafting: autonomous.
+  matter.read:
+    decision: allow
+  document.read:
+    decision: allow
+  research.search_caselaw:
+    decision: allow
+  document.draft_internal:
+    decision: allow
+
+  # Anything that leaves the firm carries the firm's name on it.
+  document.send_to_client:
+    decision: approve
+  engagement_letter.send:
+    decision: approve
+
+  # A filing is on the record the moment it lands, and a deadline missed by a retry loop
+  # is not recoverable by a second attempt.
+  document.file_with_court:
+    decision: approve
+
+  # Closing a matter stops the clock on limitation dates somebody is tracking.
+  matter.close:
+    decision: approve
+
+  # Binding the client, and destroying the file, are not agent actions.
+  contract.execute:
+    decision: deny
+  client.delete:
+    decision: deny

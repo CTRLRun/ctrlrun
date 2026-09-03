@@ -1,0 +1,41 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+#
+# Amounts are integer minor units (cents). Floats are rejected at construction, because
+# 0.1 and 0.10 are the same money and different hashes.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads: autonomous.
+  invoice.read:
+    decision: allow
+  payment.read:
+    decision: allow
+
+  # Refunds move money out. First matching rule wins, so the autonomous band comes first,
+  # and both ends of every band are bound — an upper bound alone is not a range, and a
+  # refund of a negative amount is a charge.
+  stripe.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }       # $0 to $500 — autonomous
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 }      # $0 to $5,000 — a human
+        decision: approve
+      - decision: deny
+
+  # Payouts leave the platform entirely. No autonomous band at all.
+  stripe.create_payout:
+    decision: approve
+
+  # Changing what a customer is billed, on a recurring basis, compounds.
+  stripe.update_subscription:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 10000 }        # $0 to $100 per period
+        decision: allow
+      - decision: approve
+
+  # Deleting a customer destroys the record the receipts point at.
+  stripe.delete_customer:
+    decision: deny

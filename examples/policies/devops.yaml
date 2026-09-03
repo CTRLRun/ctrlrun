@@ -1,0 +1,42 @@
+# Starting point on the v0.1 kernel. Adapt before use.
+#
+# Unknown actions are denied. There is no default-allow: this file is the list of what an
+# agent may do, and anything not written here is refused.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Reads and diagnostics: autonomous. Declare no effect key on these in code.
+  k8s.get_pod_logs:
+    decision: allow
+  k8s.describe_deployment:
+    decision: allow
+  metrics.query:
+    decision: allow
+
+  # Scaling is reversible, but only inside a band somebody chose on purpose. Both ends are
+  # bound: `replicas_lte` alone would let a scale-to-zero through as "small".
+  k8s.scale_deployment:
+    rules:
+      - when: { replicas_gte: 1, replicas_lte: 10 }
+        decision: allow
+      - when: { replicas_gte: 1, replicas_lte: 100 }
+        decision: approve
+      - decision: deny
+
+  # Restarts drop in-flight requests. Cheap to undo, not free.
+  k8s.restart_deployment:
+    decision: approve
+
+  # Infrastructure that outlives the agent: a human every time.
+  terraform.apply:
+    decision: approve
+  secrets.rotate:
+    decision: approve
+
+  # Never autonomous, and never with a human either — these belong outside the agent.
+  k8s.delete_namespace:
+    decision: deny
+  terraform.destroy:
+    decision: deny
+  iam.grant_admin:
+    decision: deny
