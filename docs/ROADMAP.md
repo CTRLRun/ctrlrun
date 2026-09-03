@@ -2,11 +2,15 @@
 
 Dependency-first: every layer depends on the one below being correct. Milestones ship when their tests pass, not on dates. Nothing below v0.1 is in scope for code today.
 
+Standards rule: integrate first, map second, never claim compliance. A standard appears in a mapping doc only after code touches it and a test proves the guarantee.
+
 ## v0.1 — Kernel (current)
 
 Action · Policy (ALLOW/APPROVE/DENY) · `@protect` · exact-action approval (hash, single-use, expiry) · effect key · SQLite atomic reservation · COMMITTED/FAILED/AMBIGUOUS · receipts + events (JSONL) · CLI · `ctrlrun demo` with four scenarios.
 
 Exit: all acceptance tests in `SPEC-v0.1.md §7` pass; demo < 60 s; README literally true.
+
+Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 
 ## v0.2 — Zero-friction deployment
 
@@ -18,6 +22,8 @@ Exit: all acceptance tests in `SPEC-v0.1.md §7` pass; demo < 60 s; README liter
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 
+Standards: OWASP ACS adapter (code), OpenTelemetry export (code), MCP gateway. First use of "ACS-compatible", and only once the adapter exists.
+
 ## v0.3 — Authority
 
 - Principal abstraction and `IdentityProvider` interface.
@@ -27,34 +33,48 @@ Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 
 This is the first point at which `VISION.md` may be opened for design input.
 
+Standards: align principal/delegation semantics with NIST agent identity work and OAuth-based agent identity. Wording is "consumes identities from", never "implements".
+
 ## v0.4 — Verification
 
 - `ctrlrun verify`: runs deterministic failure scenarios against a user's config and reports pass/fail per guarantee (mutated approval, replayed approval, duplicate reservation, concurrent reservation, ambiguous retry, unknown action fail-close, expired authority, delegation escalation).
 - Counterexample output on failure.
 - GitHub Action + badge ("CTRLRun Verified n/n"). The badge means *declared guarantees pass*, never "this agent is secure."
 
+Standards: first mapping doc — each `ctrlrun verify` guarantee mapped to the OWASP Agentic Top 10 entries it mitigates. Entries not covered are listed as not covered.
+
 ## v0.5 — Framework ecosystem
 
 - Thin adapters: OpenAI Agents SDK, LangGraph. Reuse each framework's own HITL/approval primitives where they exist; never reimplement them.
 - Adapter contract documented so the community writes the rest (CrewAI, ADK, PydanticAI, TypeScript).
+
+Standards: none new.
 
 ## v0.6 — Production durability
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity (hash chain / signatures).
 
+Standards: `docs/CONTROL-MAPPING.md` — clause-level mapping of receipt integrity/retention to EU AI Act Art. 12 and SOC 2 CC6/CC7, and of exact-action approval to Art. 14. Each row points at a test. Written only when a design partner asks.
+
 ## v0.7 — Multi-agent
 
 - A2A integration: task-bound delegated authority with limits, expiry, and depth.
 - Authority propagation across agent hops.
 
+Standards: none new.
+
 ## v0.8–0.9 — Hardening
 
 Fuzzing, property tests, concurrency stress, failure injection, benchmarks, external security review, upgrade testing, compatibility guarantees, CodeQL/SAST/SBOM/signed artifacts.
 
+Standards: none new.
+
 ## v1.0 — Stable contracts
 
 1.0 means stable contracts, not feature count: Action schema, Receipt schema, effect semantics, Policy API, StateStore API, Adapter API. MCP production-grade. Authority model documented. Threat model published. Security audit complete. Upgrade path tested.
+
+Standards: external security audit, then an EU controls pack. Phrased as "technical controls supporting a compliance program".
 
 ## Beyond v1.0
 
