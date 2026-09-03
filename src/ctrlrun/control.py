@@ -148,9 +148,7 @@ class _Reconciler:
 
     __slots__ = ("_eagerly", "_hook", "_used")
 
-    def __init__(
-        self, hook: Callable[[str], ReconcileOutcome] | None, eagerly: bool
-    ) -> None:
+    def __init__(self, hook: Callable[[str], ReconcileOutcome] | None, eagerly: bool) -> None:
         self._hook = hook
         self._eagerly = eagerly
         self._used = False
@@ -487,7 +485,11 @@ class Control:
                     reconciler, action, effect_key, RECONCILE_BLOCKING
                 ):
                     self._refused(
-                        action, evaluation, started_at, effect_key, refused,
+                        action,
+                        evaluation,
+                        started_at,
+                        effect_key,
+                        refused,
                         approval_id=approval_id,
                     )
                     raise
@@ -502,9 +504,7 @@ class Control:
                     effect_key,
                     approval_id=approval_id,
                 )
-                self._append(
-                    EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key
-                )
+                self._append(EventType.ACTION_DENIED, action, {"reason": denied.reason}, effect_key)
                 self._record(
                     action,
                     evaluation,
@@ -521,7 +521,10 @@ class Control:
             except ApprovalMismatch as mismatch:
                 if mismatch.reason == ApprovalStatus.EXPIRED:
                     self._append(
-                        EventType.APPROVAL_EXPIRED, action, {}, effect_key,
+                        EventType.APPROVAL_EXPIRED,
+                        action,
+                        {},
+                        effect_key,
                         approval_id=approval_id,
                     )
                 self._append(
@@ -951,9 +954,7 @@ def protect(
     return decorator
 
 
-def _reconciler(
-    reconcile: object, reconcile_eagerly: object, where: str
-) -> _Reconciler:
+def _reconciler(reconcile: object, reconcile_eagerly: object, where: str) -> _Reconciler:
     """Validate the pair, wherever one is offered, and hand back this attempt's budget.
 
     `reconcile_eagerly` without a hook asks for a second trigger point on a hook that does

@@ -123,6 +123,16 @@ def test_T13_the_reconciliation_is_recorded_as_events(control, state_store):
     assert len(effect_resolved) == 1
     assert effect_resolved[0].data["resolved_by"] == "reconcile"
 
+    # The order is the argument: CTRLRun asked, learned an answer, and only then moved the
+    # record — and the retry won its reservation after that (SPEC-v0.2 §2.5).
+    reserved = _events(state_store, EventType.EFFECT_RESERVED)
+    assert (
+        started[0].event_id
+        < resolved[0].event_id
+        < effect_resolved[0].event_id
+        < reserved[-1].event_id
+    )
+
 
 def test_T13_the_hook_is_given_the_effect_key_and_nothing_else(control):
     remote = Remote()
@@ -133,9 +143,7 @@ def test_T13_the_hook_is_given_the_effect_key_and_nothing_else(control):
         seen.append(effect_key)
         return "not_executed"
 
-    @protect(
-        "stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile
-    )
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile)
     def refund(payment_id: str, amount: int) -> str:
         return remote.working_refund(payment_id, amount)
 
@@ -225,6 +233,47 @@ def test_T15_a_hook_that_cannot_answer_leaves_the_record_ambiguous(
     else:
         assert resolved[0].data["reason"] == reason
     assert not _events(state_store, EventType.EFFECT_RESOLVED)
+
+
+def test_T15_a_hook_that_raises_is_logged_and_its_exception_never_reaches_the_caller(
+    control, state_store, caplog
+):
+    """The hook's failure is the hook's, not the action's (SPEC-v0.2 §2.4).
+
+    What the caller sees is `AmbiguousEffect` — the refusal that was already there before
+    anyone offered a hook. What an operator sees is a warning naming the exception, because a
+    hook that has been failing for a week must not look like a hook that keeps saying it does
+    not know.
+    """
+    remote = Remote()
+    _strand(control, remote)
+
+    def reconcile(effect_key: str) -> str:
+        raise RuntimeError("remote unreachable")
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile)
+    def refund(payment_id: str, amount: int) -> str:
+        return remote.working_refund(payment_id, amount)
+
+    with (
+        caplog.at_level("WARNING", logger="ctrlrun"),
+        context(agent="refund-agent"),
+        pytest.raises(AmbiguousEffect),
+    ):
+        refund(payment_id="txn_1", amount=2000)
+
+    logged = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert [
+        message
+        for message in logged
+        if "refund:txn_1" in message and "remote unreachable" in message
+    ]
+
+    resolved = _events(state_store, EventType.RECONCILIATION_RESOLVED)
+    assert resolved[0].data["outcome"] == "unknown"
+    assert resolved[0].data["reason"] == "raised"
+    assert resolved[0].data["error"] == "RuntimeError: remote unreachable"
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
 
 
 def test_T15_the_hook_is_called_at_most_once_per_attempt(control, state_store):
@@ -327,9 +376,7 @@ def test_T15_eager_reconciliation_never_runs_while_an_interrupt_unwinds(control,
     assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
 
 
-def test_T15_eager_reconciliation_skips_a_record_this_attempt_could_not_mark(
-    control, state_store
-):
+def test_T15_eager_reconciliation_skips_a_record_this_attempt_could_not_mark(control, state_store):
     """A record whose outcome this attempt could not write is not this attempt's to resolve.
 
     The window is opened deterministically: the executor moves the record to a terminal state
@@ -365,9 +412,7 @@ def test_T15_a_base_exception_from_the_hook_propagates(control, state_store):
     def reconcile(effect_key: str) -> str:
         raise KeyboardInterrupt
 
-    @protect(
-        "stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile
-    )
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile)
     def refund(payment_id: str, amount: int) -> str:
         return remote.working_refund(payment_id, amount)
 
@@ -401,9 +446,7 @@ def test_T15_a_hook_is_never_called_for_a_record_that_is_not_ambiguous(control, 
     assert remote.calls == 1
 
 
-def test_T15_a_hook_on_an_action_with_no_effect_key_warns_and_is_never_called(
-    control, caplog
-):
+def test_T15_a_hook_on_an_action_with_no_effect_key_warns_and_is_never_called(control, caplog):
     """Not a decoration-time error: the template may come from policy (SPEC-v0.2 §2.1)."""
     calls: list[str] = []
 
@@ -464,6 +507,41 @@ def test_T15_a_failed_record_is_retried_without_asking_the_hook(control, state_s
     assert state_store.get_effect("refund:txn_1").attempt == 2
 
 
+def test_T15_without_a_hook_the_v0_1_path_is_unchanged(control, state_store):
+    """No hook, no second authority: SPEC-v0.1 §5.4 verbatim (SPEC-v0.2 §2.2).
+
+    The whole v0.1 effect suite runs unchanged in `tests/test_effect.py`, which is the real
+    guarantee. This pins the one path v0.2 amends, so a hook leaking into the no-hook case
+    fails here — next to the code that could cause it — rather than only in a distant file.
+    """
+    remote = Remote()
+    _strand(control, remote)
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        return remote.working_refund(payment_id, amount)
+
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund(payment_id="txn_1", amount=2000)
+
+    assert state_store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    assert remote.calls == 1
+    assert [event.type for event in state_store.events()] == [
+        EventType.ACTION_PROPOSED,
+        EventType.POLICY_EVALUATED,
+        EventType.EFFECT_RESERVED,
+        EventType.EXECUTION_STARTED,
+        EventType.EXECUTION_AMBIGUOUS,
+        EventType.ACTION_PROPOSED,
+        EventType.POLICY_EVALUATED,
+        EventType.EFFECT_RESERVATION_REFUSED,
+    ]
+    assert [receipt.result for receipt in state_store.receipts()] == [
+        ReceiptResult.AMBIGUOUS,
+        ReceiptResult.BLOCKED,
+    ]
+
+
 def test_T15_an_expired_lease_is_made_ambiguous_before_it_is_reconciled(
     control, state_store, fake_clock
 ):
@@ -488,9 +566,7 @@ def test_T15_an_expired_lease_is_made_ambiguous_before_it_is_reconciled(
         seen.append(str(state_store.get_effect(effect_key).state))
         return "unknown"
 
-    @protect(
-        "stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile
-    )
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control, reconcile=reconcile)
     def refund(payment_id: str, amount: int) -> str:
         return remote.working_refund(payment_id, amount)
 
