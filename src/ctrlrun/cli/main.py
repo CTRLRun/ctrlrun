@@ -442,6 +442,86 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
     }
 
 
+@main.command()
+@click.option("--upstream", required=True, help="The MCP server this gateway fronts.")
+@click.option("--alias", required=True, help="Names the upstream in 'mcp.<alias>.<tool>'.")
+@click.option("--listen", default="127.0.0.1:8900", show_default=True, help="HOST:PORT.")
+@click.option("--path", default="/mcp", show_default=True, help="The MCP endpoint path.")
+@click.option("--principal", default=None, help="A fixed agent name, for one tenant.")
+@click.option("--principal-header", default=None, help="Take the agent from this header.")
+@click.option(
+    "--principal-from-client-info",
+    is_flag=True,
+    help="Take it from clientInfo, which the protocol does not verify. Removed in v0.3.",
+)
+@click.option("--user-header", default=None, help="Take principal.user from this header.")
+@click.option("--environment", default="production", show_default=True)
+@click.option("--upstream-timeout", type=float, default=30.0, show_default=True)
+@click.option("--max-body-bytes", type=int, default=1024 * 1024, show_default=True)
+@click.option("--allow-origin", "allow_origins", multiple=True, help="Repeatable.")
+@click.option("--allow-remote", is_flag=True, help="Permit a non-loopback --listen.")
+def gateway(
+    upstream: str,
+    alias: str,
+    listen: str,
+    path: str,
+    principal: str | None,
+    principal_header: str | None,
+    principal_from_client_info: bool,
+    user_header: str | None,
+    environment: str,
+    upstream_timeout: float,
+    max_body_bytes: int,
+    allow_origins: tuple[str, ...],
+    allow_remote: bool,
+) -> None:
+    """Front an MCP server, applying this directory's policy to every tools/call."""
+    host, _, port = listen.rpartition(":")
+    try:
+        from ..gateway import serve
+
+        _announce_actions_without_an_effect()
+        serve(
+            upstream=upstream,
+            alias=alias,
+            host=host or "127.0.0.1",
+            port=int(port),
+            path=path,
+            principal=principal,
+            principal_header=principal_header,
+            principal_from_client_info=principal_from_client_info,
+            user_header=user_header,
+            environment=environment,
+            upstream_timeout=upstream_timeout,
+            max_body_bytes=max_body_bytes,
+            allow_origins=tuple(allow_origins),
+            allow_remote=allow_remote,
+        )
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    except KeyboardInterrupt:  # pragma: no cover - an operator pressing ctrl-c
+        click.echo("")
+
+
+def _announce_actions_without_an_effect() -> None:
+    """SPEC-v0.2 §3.2 — print the actions with no `effect:` at startup.
+
+    A write with no effect key is exactly the configuration this product exists to prevent,
+    and it should be visible on the line that starts the process rather than discovered in a
+    receipt three weeks later.
+    """
+    from ..policy import Policy
+
+    policy = Policy.from_file()
+    keyless = sorted(name for name in policy.actions if policy.effect_template(name) is None)
+    if not keyless:
+        return
+    click.echo(f"{len(keyless)} action(s) have no effect: template and get no reservation:")
+    for name in keyless:
+        click.echo(f"  {name}")
+    click.echo("That is right for a read, and wrong for anything that changes the world.")
+
+
 def _receipt_line(receipt: Receipt) -> str:
     return (
         f"{iso_timestamp(receipt.finished_at)}  {receipt.receipt_id}  {receipt.action}  "
