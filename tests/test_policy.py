@@ -605,8 +605,11 @@ def test_disallowed_operand_type_is_a_policy_error(condition: str, operand: str)
     "text",
     [
         pytest.param("actions:\n  customer.read:\n    decision: allow\n", id="missing-schema"),
+        # `ctrlrun.policy/v2` stood here until SPEC-v0.2 §3.1 made it a schema v0.2 loads.
+        # The rule under test is unchanged — an unsupported schema is refused — so the
+        # example moves forward to one that is still unsupported.
         pytest.param(
-            "schema: ctrlrun.policy/v2\nactions:\n  customer.read:\n    decision: allow\n",
+            "schema: ctrlrun.policy/v3\nactions:\n  customer.read:\n    decision: allow\n",
             id="future-schema",
         ),
         pytest.param(
@@ -736,3 +739,176 @@ def test_the_shipped_example_policy_loads_and_evaluates() -> None:
     assert policy.evaluate(_action(name="customer.read")).decision is Decision.ALLOW
     assert policy.evaluate(_action(name="iam.grant_admin")).decision is Decision.DENY
     assert policy.evaluate(_action(name="k8s.delete_namespace")).decision is Decision.APPROVE
+
+
+# --- T16: per-action effect: and resource: templates (SPEC-v0.2 §3) --------------------
+
+V2_POLICY = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    mcp:
+      not_executed_on_error: true
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: approve
+  customer.read:
+    decision: allow
+"""
+
+
+def test_T16_a_v2_document_loads_and_exposes_its_templates():
+    policy = Policy.from_yaml(V2_POLICY)
+
+    assert policy.effect_template("stripe.refund") == "refund:{payment_id}"
+    assert policy.resource_template("stripe.refund") == "payment:{payment_id}"
+    assert policy.mcp_options("stripe.refund").not_executed_on_error is True
+
+
+def test_T16_an_action_without_the_new_keys_has_no_templates():
+    """§3.2's documented escape hatch: no `effect:` means no logical effect, and no
+    reservation. Right for reads, and the reason it is `None` rather than an error."""
+    policy = Policy.from_yaml(V2_POLICY)
+
+    assert policy.effect_template("customer.read") is None
+    assert policy.resource_template("customer.read") is None
+    assert policy.mcp_options("customer.read").not_executed_on_error is False
+
+
+def test_T16_an_unknown_action_has_no_templates_either():
+    policy = Policy.from_yaml(V2_POLICY)
+
+    assert policy.effect_template("nothing.declared") is None
+    assert policy.resource_template("nothing.declared") is None
+    assert policy.mcp_options("nothing.declared").not_executed_on_error is False
+
+
+def test_T16_a_v1_document_still_loads_unchanged():
+    """A v1 file keeps loading exactly as it did, which is the compatibility half of §3.1."""
+    policy = Policy.from_yaml(REFUND_POLICY)
+
+    assert policy.evaluate(_action(arguments={"amount": 400})).decision is Decision.ALLOW
+    assert policy.effect_template("stripe.refund") is None
+
+
+@pytest.mark.parametrize("key", ["effect", "resource", "mcp"])
+def test_T16_a_key_added_by_v2_is_a_PolicyError_in_a_v1_document(key):
+    """v0.1 would ignore the template and execute with no duplicate protection at all, so
+    the schema string is the only thing standing between those outcomes (§3.1)."""
+    value = '"refund:{payment_id}"' if key != "mcp" else "{ not_executed_on_error: true }"
+    document = f"""
+schema: ctrlrun.policy/v1
+actions:
+  stripe.refund:
+    {key}: {value}
+    decision: allow
+"""
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert key in str(raised.value)
+    assert "ctrlrun.policy/v2" in str(raised.value)
+
+
+@pytest.mark.parametrize("key", ["effect", "resource"])
+@pytest.mark.parametrize("template", ["refund:{payment_id", "refund:{}", "refund:{1st}", ""])
+def test_T16_a_malformed_template_is_a_PolicyError_at_load(key, template):
+    """At load, not an `EffectKeyError` at runtime (§3.1): a typo must not wait for traffic."""
+    document = f"""
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    {key}: "{template}"
+    decision: allow
+"""
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(document)
+
+
+@pytest.mark.parametrize("key", ["effect", "resource"])
+def test_T16_a_template_that_is_not_a_string_is_a_PolicyError(key):
+    document = f"""
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    {key}: 17
+    decision: allow
+"""
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(document)
+
+
+@pytest.mark.parametrize("value", ["yes-please", "1", "null", "[]", "{}"])
+def test_T16_not_executed_on_error_must_be_a_bool(value):
+    """An operator's claim about their upstream, so it is a claim or it is nothing (§3.1)."""
+    document = f"""
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    mcp:
+      not_executed_on_error: {value}
+    decision: allow
+"""
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(document)
+
+
+def test_T16_not_executed_on_error_defaults_to_the_fail_closed_value():
+    document = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    mcp: {}
+    decision: allow
+"""
+    assert Policy.from_yaml(document).mcp_options("stripe.refund").not_executed_on_error is False
+
+
+def test_T16_an_unknown_key_under_mcp_is_a_PolicyError():
+    document = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    mcp:
+      not_executed_on_errors: true
+    decision: allow
+"""
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert "not_executed_on_errors" in str(raised.value)
+
+
+def test_T16_mcp_must_be_a_mapping():
+    document = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    mcp: true
+    decision: allow
+"""
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(document)
+
+
+def test_T16_an_unknown_key_in_an_entry_is_still_a_PolicyError():
+    document = """
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effekt: "refund:{payment_id}"
+    decision: allow
+"""
+    with pytest.raises(PolicyError):
+        Policy.from_yaml(document)
+
+
+def test_T16_an_unknown_schema_names_both_supported_ones():
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml("schema: ctrlrun.policy/v3\nactions: {}\n")
+
+    assert "ctrlrun.policy/v1" in str(raised.value)
+    assert "ctrlrun.policy/v2" in str(raised.value)

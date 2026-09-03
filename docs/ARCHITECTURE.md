@@ -135,7 +135,7 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | Module | Owns | Must not know about |
 |---|---|---|
 | `action.py` | model, canonicalization, hash | policy, storage |
-| `policy.py` | YAML → rules → Decision | approvals, effects |
+| `policy.py` | YAML → rules → Decision; `effect:`/`resource:` templates | approvals, effect *state* |
 | `approval.py` | request/grant/consume, providers | executors |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator |
@@ -144,6 +144,13 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.
+
+One exception, added in v0.2 and worth stating rather than discovering: `policy.py` imports the
+template grammar (`template_placeholders`) from `effect.py`, because SPEC-v0.2 §3.1 requires an
+`effect:` / `resource:` template to be validated when the policy loads and the grammar is
+security-critical enough that a second copy of it is worse than the import. Policy still knows
+nothing of effect state — no records, no transitions, no reservations — and `effect.py` does not
+import `policy.py`, so there is no cycle.
 
 ## 7. What changes after v0.1 (and what doesn't)
 
