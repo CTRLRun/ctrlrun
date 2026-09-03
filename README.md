@@ -53,6 +53,8 @@ def refund(payment_id: str, amount: int, currency: str = "EUR"):
 Configure autonomy per action in `ctrlrun.yaml`:
 
 ```yaml
+schema: ctrlrun.policy/v1
+
 actions:
   customer.read:
     decision: allow

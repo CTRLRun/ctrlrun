@@ -113,6 +113,10 @@ actions:
 
 An action entry has **either** `decision` **or** `rules` (a non-empty list). Both or neither → `PolicyError` at load time.
 
+Key sets are **closed**. The top level accepts `schema` and `actions`; an action entry accepts `decision` and `rules`; a rule accepts `when` and `decision`. Any other key → `PolicyError` at load, so `action:` for `actions:` or `unless:` for `when:` fails loudly instead of silently denying everything at runtime. `schema` is required: a document without it is an unknown schema (§3.4).
+
+`actions: {}` is valid and denies every action (§3.4). A missing `actions` key, or one whose value is not a mapping, → `PolicyError`. Action names MUST be non-empty strings and are matched exactly — no case folding, no prefixes.
+
 ### 3.2 Rules
 
 Rules are evaluated top to bottom; **first match wins**. A rule with no `when` always matches. If no rule matches → `DENY`.
@@ -128,10 +132,18 @@ Rules are evaluated top to bottom; **first match wins**. A rule with no `when` a
 
 Referencing an argument that is absent from the action → the condition is false (not an error). Applying a numeric op to a non-`int` argument → the condition is false and a warning is logged.
 
+Where a `when` is present it MUST be a non-empty mapping: `when: {}` and `when:` (null) → `PolicyError` at load. An empty mapping is far more likely a truncated edit than an intended catch-all, and the catch-all already has a spelling — omit `when`.
+
+Operands are validated at load against the argument types of §2.3, recursively. A `float` operand → `PolicyError` with the same rationale as §2.3; so does any other disallowed type, including the `date` and `datetime` an unquoted YAML scalar produces. An unknown operator suffix → `PolicyError`; a key is split on its **longest** matching suffix, so `amount_neq` is `amount` with `_neq`, never `amount_n` with `_eq`.
+
+**`bool` is not `int`** for the numeric ops, on either side: a `bool` operand → `PolicyError` at load, and a `bool` argument → the condition is false with a warning, exactly like any other non-`int`. Python makes `bool` a subclass of `int`; policy must not inherit that.
+
+Equality (`_eq`, `_neq`, and membership under `_in`) is **type-strict**, applied recursively inside lists and mappings: `True` never equals `1`, and a container never equals a scalar. §2.3 makes `True` and `1` different actions with different hashes; a policy in which they are the same value would be a hole.
+
 ### 3.3 Decisions
 
 ```python
-class Decision(str, Enum):
+class Decision(StrEnum):
     ALLOW = "allow"
     APPROVE = "approve"
     DENY = "deny"
@@ -139,13 +151,18 @@ class Decision(str, Enum):
 
 Exactly these three in v0.1. No `allow_with_log`, `transform`, or `terminate`.
 
+`StrEnum` (stdlib, Python ≥ 3.11), not `(str, Enum)`: a member must render as its value under `str()` and f-string interpolation, not as `Decision.ALLOW`, because those renderings reach receipts and CLI output (§6.1).
+
 ### 3.4 Fail-closed defaults (not configurable in v0.1)
 
 | Condition | Result |
 |---|---|
 | Action name not in `actions` | `DENY` (`reason="unknown_action"`) |
-| Policy file missing | `PolicyError` at load; `Control` cannot be constructed |
+| `actions: {}` | every action `DENY` (`reason="unknown_action"`) |
+| Policy file missing / unreadable | `PolicyError` at load; `Control` cannot be constructed |
+| `CTRLRUN_CONFIG` set but empty | `PolicyError` at load |
 | Policy malformed / unknown schema | `PolicyError` at load |
+| `schema` key absent | `PolicyError` at load — treated as an unknown schema, never as "assume v1" |
 | Argument type mismatch in a rule | condition false → falls through |
 
 ---
@@ -211,7 +228,7 @@ Effect keys are opaque strings, globally unique within a StateStore. Namespace t
 ### 5.2 States
 
 ```python
-class EffectState(str, Enum):
+class EffectState(StrEnum):
     NEW = "new"
     RESERVED = "reserved"
     EXECUTING = "executing"
@@ -309,6 +326,8 @@ One per action that reached a terminal state (including denials). JSON, one per 
 ```
 
 `result ∈ {committed, failed, ambiguous, denied, blocked}` where `blocked` covers duplicate/ambiguous-retry/approval-mismatch refusals. No signatures in v0.1 (v0.6).
+
+Enums MUST render by value everywhere evidence is produced — receipt JSON, event `data`, and CLI output: `"approve"`, never `"Decision.APPROVE"`. This is why `Decision` (§3.3) and `EffectState` (§5.2) are `StrEnum`; the guard is `test_decision_renders_by_value` in `tests/test_policy.py`, which pins `str()` and f-string interpolation. A receipt is read by tools that never imported CTRLRun.
 
 ### 6.2 Events
 

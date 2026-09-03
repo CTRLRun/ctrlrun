@@ -45,6 +45,12 @@ strict = true
 warn_unreachable = true
 mypy_path = "src"
 
+[[tool.mypy.overrides]]
+# PyYAML ships no stubs and types-PyYAML would be a new dependency. safe_load returns
+# untyped data either way; policy.py validates every value before use (SPEC-v0.1 §3.4).
+module = "yaml"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
