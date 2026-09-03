@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,7 @@ from ctrlrun import (
     Control,
     DuplicateEffect,
     InvalidArgument,
+    JSONLEventSink,
     Policy,
     Principal,
     SQLiteStateStore,
@@ -36,7 +38,7 @@ from ctrlrun import (
 )
 from ctrlrun.approval import DEFAULT_APPROVAL_TTL, ApprovalStatus
 from ctrlrun.effect import DEFAULT_LEASE, EffectState
-from ctrlrun.receipt import ReceiptResult
+from ctrlrun.receipt import EVENTS_FILENAME, RECEIPTS_FILENAME, ReceiptResult
 
 POLICY = """
 schema: ctrlrun.policy/v1
@@ -85,7 +87,9 @@ def _fake_remote(log_path: str) -> str:
 def _refund_worker(db_path: str, log_path: str, barrier) -> int:
     """One agent process: reserve `refund:txn_9`, and execute only if the reservation won."""
     store = SQLiteStateStore(db_path)
-    control = Control(Policy.from_yaml(POLICY), store)
+    # SPEC-v0.2 §4.3 — the JSONL is Control's now, so each worker installs its own sink
+    # on the shared directory. That is what this test is about: eight processes, one file.
+    control = Control(Policy.from_yaml(POLICY), store, sinks=[JSONLEventSink(Path(db_path).parent)])
 
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int) -> str:
@@ -181,15 +185,19 @@ def test_T3_eight_processes_leave_the_jsonl_evidence_intact(race):
 
     One `O_APPEND` write per record, as the fake remote does above: whole lines interleave,
     fragments do not. A torn line would make the evidence unreadable to everything.
+
+    Since SPEC-v0.2 §4.3 the writer is each process's `JSONLEventSink` rather than the
+    store, which is more of this guarantee under test, not less: the appends are no longer
+    serialized by anything the store does.
     """
     store, _, _ = race
-    written = [json.loads(line) for line in _jsonl(store.journal.receipts_path)]
+    written = [json.loads(line) for line in _jsonl(store.path.parent / RECEIPTS_FILENAME)]
 
     assert len(written) == WORKERS
     assert {document["receipt_id"] for document in written} == {
         receipt.receipt_id for receipt in store.receipts()
     }
-    assert all(json.loads(line) for line in _jsonl(store.journal.events_path))
+    assert all(json.loads(line) for line in _jsonl(store.path.parent / EVENTS_FILENAME))
 
 
 # --- one approval, eight processes (SPEC §4.2 A2, A4) ---------------------------------

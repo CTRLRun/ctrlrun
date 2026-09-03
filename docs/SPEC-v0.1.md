@@ -298,9 +298,15 @@ class StateStore(Protocol):
     # approvals
     def put_approval_request(...); def grant_approval(...); def deny_approval(...)
     # evidence
-    def append_event(self, event: Event) -> None: ...
+    def append_event(self, event: Event) -> Event: ...   # v0.2 §4.1: returns it as stored
     def put_receipt(self, receipt: Receipt) -> None: ...
 ```
+
+`append_event` returned `None` in v0.1. SPEC-v0.2 §4.1 requires `Control` to hand every event
+to its `EventSink`s **with the `event_id` the store assigned**, and the store is the only thing
+that knows it, so the stored event is returned. Callers that ignore the return value are
+unaffected; this is stated here rather than only in the v0.2 delta because §8 is where a store
+implementor reads the protocol.
 
 `consume_approval_and_reserve` is what §4.2 A4 asks for, and a caller MUST NOT reconstruct it by sequencing `consume_approval` and `reserve_effect`: two calls cannot share a transaction, so the split consumes an approval for an attempt that then fails to reserve — the exact hole A4 closes. `reserve_effect` is for an action with no approval to take (`ALLOW` with an `effect=`), `consume_approval` for an approved action with no effect key (§5.1); neither is a building block for the other case.
 

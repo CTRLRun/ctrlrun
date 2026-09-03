@@ -48,7 +48,7 @@ from .effect import (
     plan_reservation,
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
-from .receipt import Event, EventLog, EventType, Receipt
+from .receipt import Event, EventType, Receipt
 
 _LOG = logging.getLogger(__name__)
 
@@ -346,8 +346,13 @@ class StateStore(ApprovalStore, Protocol):
         """Every effect record, oldest first, optionally narrowed to one state."""
         ...
 
-    def append_event(self, event: Event) -> None:
-        """Append an event, assigning it the next `event_id`."""
+    def append_event(self, event: Event) -> Event:
+        """Append an event, assigning it the next `event_id`, and return it as stored.
+
+        The stored event is handed back because `Control` fans it out to its `EventSink`s
+        with the id this store assigned (SPEC-v0.2 §4.1). A sink that could not join its
+        export back to the record would be exporting something else.
+        """
         ...
 
     def put_receipt(self, receipt: Receipt) -> None:
@@ -382,9 +387,11 @@ class InMemoryStateStore:
 
     # --- evidence ---------------------------------------------------------------------
 
-    def append_event(self, event: Event) -> None:
+    def append_event(self, event: Event) -> Event:
         with self._lock:
-            self._events.append(replace(event, event_id=len(self._events) + 1))
+            stored = replace(event, event_id=len(self._events) + 1)
+            self._events.append(stored)
+        return stored
 
     def put_receipt(self, receipt: Receipt) -> None:
         with self._lock:
@@ -616,17 +623,11 @@ class SQLiteStateStore:
         self._open: set[sqlite3.Connection] = set()
         self._open_lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._journal = EventLog(self._path.parent)
         self._connection().executescript(_SCHEMA)
 
     @property
     def path(self) -> Path:
         return self._path
-
-    @property
-    def journal(self) -> EventLog:
-        """The JSONL evidence written beside the database (SPEC-v0.1 §6)."""
-        return self._journal
 
     def close(self) -> None:
         """Close every connection this store opened, on whichever thread opened it.
@@ -671,7 +672,7 @@ class SQLiteStateStore:
 
     # --- evidence ---------------------------------------------------------------------
 
-    def append_event(self, event: Event) -> None:
+    def append_event(self, event: Event) -> Event:
         cursor = self._connection().execute(
             "INSERT INTO events(ts, type, action_id, effect_key, approval_id, data_json) "
             "VALUES(?,?,?,?,?,?)",
@@ -684,7 +685,7 @@ class SQLiteStateStore:
                 json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":")),
             ),
         )
-        self._mirror(self._journal.append_event, replace(event, event_id=cursor.lastrowid))
+        return replace(event, event_id=cursor.lastrowid)
 
     def put_receipt(self, receipt: Receipt) -> None:
         self._connection().execute(
@@ -699,23 +700,6 @@ class SQLiteStateStore:
                 _iso(receipt.finished_at),
             ),
         )
-        self._mirror(self._journal.put_receipt, receipt)
-
-    @staticmethod
-    def _mirror(write: Callable[[_T], None], record: _T) -> None:
-        """Copy a record the database already holds into the JSONL evidence (SPEC §6).
-
-        SPEC: §6 — the spec requires both, and does not say what happens when only one can
-        be written. The record is already durable in the database by the time this runs, so
-        a failing file is logged rather than raised: raising would turn an effect that has
-        committed at the remote into an exception the caller reads as a failure, which is
-        the one mistake this library exists to prevent. `ctrlrun receipts` reads the
-        database, so nothing is hidden by the loss.
-        """
-        try:
-            write(record)
-        except OSError as exc:
-            _LOG.warning("could not write JSONL evidence: %s", exc)
 
     def events(self) -> tuple[Event, ...]:
         rows = self._connection().execute("SELECT * FROM events ORDER BY event_id").fetchall()

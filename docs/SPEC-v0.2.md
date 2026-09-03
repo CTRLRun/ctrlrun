@@ -1317,8 +1317,14 @@ StateStore.hold_continuation(effect_key, action_id, request_state: str) -> None
 StateStore.take_continuation(effect_key, request_state: str) -> EffectRecord
 ```
 
-**Removed:** `SQLiteStateStore.journal`. The store no longer writes JSONL; `Control` does,
-through `JSONLEventSink` (§4.3). The files it writes, and where, are unchanged.
+**Removed:** `SQLiteStateStore.journal`, and the `EventLog` behind it — `JSONLEventSink` is
+that class under the sink interface. The store no longer writes JSONL; `Control` does, through
+`JSONLEventSink` (§4.3). The files it writes, and where, are unchanged.
+
+**Changed:** `StateStore.append_event(event) -> Event` returns the event as stored, where v0.1
+returned `None`. §4.1 requires a sink to be called with the `event_id` the store assigned, and
+the store is the only thing that knows it. Callers that ignore the return value are unaffected.
+v0.1 §8 records this too, because that is where a store implementor reads the protocol.
 
 Four event types join v0.1 §6.2: `RECONCILIATION_STARTED`, `RECONCILIATION_RESOLVED`,
 `EXECUTION_SUSPENDED`, `EXECUTION_RESUMED`. The last two are named for what happens to the

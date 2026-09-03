@@ -27,7 +27,7 @@ from ..errors import (
     DuplicateEffect,
 )
 from ..policy import Policy
-from ..receipt import EVENTS_FILENAME, RECEIPTS_FILENAME
+from ..receipt import EVENTS_FILENAME, RECEIPTS_FILENAME, JSONLEventSink
 from ..state import SQLiteStateStore
 
 #: Where the demo keeps its own store and evidence, under `.ctrlrun/`.
@@ -130,7 +130,14 @@ def run_demo(root: Path) -> None:
     # Two grants: scenario 2's human, and scenario 4's. A scripted approver never grants
     # more than it was told to, so a scenario that asked twice would fail loudly.
     approvals = ScriptedApprovalProvider(store, ["grant", "grant"], approver="human:demo")
-    control = Control(Policy.from_yaml(DEMO_POLICY, source="<demo>"), store, approvals)
+    # SPEC-v0.2 §4.3 — the JSONL evidence is a Control sink now. The demo prints where
+    # both files landed, so it installs one on its own evidence directory.
+    control = Control(
+        Policy.from_yaml(DEMO_POLICY, source="<demo>"),
+        store,
+        approvals,
+        sinks=[JSONLEventSink(evidence)],
+    )
 
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id: str, amount: int, currency: str = "EUR") -> dict[str, Any]:

@@ -1,7 +1,7 @@
 """Receipts and the event log. Build-list item 8; SPEC-v0.1 §6.
 
 `Control` produces a `Receipt` for every action that reaches a terminal state, and an `Event`
-for every step it takes. `EventLog` is where those land on disk: `.ctrlrun/receipts.jsonl`
+for every step it takes. `JSONLEventSink` is where those land on disk: `.ctrlrun/receipts.jsonl`
 and `.ctrlrun/events.jsonl`, one JSON object per line, in append order.
 
 A receipt is evidence, and evidence has to outlive the tool that wrote it — so the file form
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from .action import Principal
 from .policy import Decision
@@ -191,7 +191,26 @@ class Receipt:
         return cls.from_dict(document)
 
 
-class EventLog:
+class EventSink(Protocol):
+    """Somewhere a copy of every `Event` and `Receipt` goes (SPEC-v0.2 §4.1).
+
+    `Control` calls a sink *after* the authoritative store write for that record has
+    succeeded, in registration order, with the `event_id` the store assigned. A sink is the
+    interface for the copies; it is not the interface for the record — the store's own
+    `events` and `receipts` tables are written inside the store, in its transaction, before
+    any sink runs (§4.3).
+
+    Sinks are not transactional, not ordered across processes, and not retried. A sink that
+    must not lose records buffers and retries inside itself. And a sink never raises into the
+    kernel: `Control` catches every `Exception` and carries on (§4.2).
+    """
+
+    def on_event(self, event: Event) -> None: ...
+
+    def on_receipt(self, receipt: Receipt) -> None: ...
+
+
+class JSONLEventSink:
     """The JSONL half of the evidence: two append-only files in one directory (SPEC §6).
 
     `receipts.jsonl` and `events.jsonl` beside the state database, so `.ctrlrun/` holds the
@@ -200,6 +219,10 @@ class EventLog:
 
     Each write opens, appends one line and closes, so several processes sharing a store
     (SPEC-v0.1 §5.3 E1) interleave whole lines rather than fragments of them.
+
+    SPEC-v0.2 §4.3 — this used to live inside `SQLiteStateStore`, which wrote both halves.
+    `Control` owns it now, as one `EventSink` among however many an application registers.
+    The files it writes, and where, are unchanged.
     """
 
     def __init__(self, directory: str | os.PathLike[str]) -> None:
@@ -217,11 +240,11 @@ class EventLog:
     def events_path(self) -> Path:
         return self._directory / EVENTS_FILENAME
 
-    def put_receipt(self, receipt: Receipt) -> None:
+    def on_receipt(self, receipt: Receipt) -> None:
         """Append one receipt as a JSON line."""
         self._append(self.receipts_path, receipt.to_json())
 
-    def append_event(self, event: Event) -> None:
+    def on_event(self, event: Event) -> None:
         """Append one event as a JSON line, in the order the store assigned it."""
         self._append(self.events_path, event.to_json())
 
