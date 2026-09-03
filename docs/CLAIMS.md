@@ -8,7 +8,7 @@ removed from the README in the same commit — the README is not allowed to desc
 that no longer ships. If you find a row here that does not hold against the version you
 installed, that is a bug: please open an issue.
 
-Regenerated for: **v0.1.0**. Line numbers refer to that tag.
+Regenerated for: **v0.2.0**. Line numbers refer to that tag.
 
 ## The opening paragraph
 
@@ -31,6 +31,35 @@ Regenerated for: **v0.1.0**. Line numbers refer to that tag.
 | "stops blind retries when an execution outcome is uncertain" | Only `NotExecuted` maps to `FAILED` — `control.py:250`. Every other exception, timeouts included, yields `AMBIGUOUS`. | `test_T1_a_blind_retry_writes_a_blocked_receipt`, `test_T1_the_ambiguous_record_survives_the_blocked_retry` |
 | "records what actually happened" | `ReceiptResult` — `receipt.py:44`; `Event` and JSONL `append_event` — `receipt.py:222` | `test_T11_every_demo_receipt_carries_every_field_in_the_spec`, `test_T11_every_demo_receipt_parses_back_into_a_Receipt` |
 | "Autonomy belongs to the action, not the agent." | `Policy.evaluate(action)` — `policy.py:233` — passes only the action's **name and arguments** to `_ActionPolicy.evaluate` (`policy.py:164`), whose signature has no principal in it. A rule cannot read who is acting even by accident. `agent_eq` and `user_eq` are refused at load (`policy.py:50`) rather than silently matching nothing. | `test_T6_an_action_name_is_matched_exactly`, `test_a_condition_naming_an_action_field_is_refused_at_load` |
+
+
+## What v0.2 adds to the README
+
+Every sentence the README gained in this release, mapped the same way.
+
+| Claim | Code | Proof |
+|---|---|---|
+| "Point the client at the gateway instead of at the tool server" | `Gateway.handle` — `gateway/server.py:135`; `serve` — `gateway/server.py:892` | `test_T19_the_upstream_receives_the_canonical_arguments` |
+| "No agent changes" | `tools/call` is intercepted and every other method relayed unchanged — `gateway/mcp.py:84` | `test_a_non_intercepted_method_is_relayed_with_no_ctrlrun_outcome` |
+| "The gateway prints … every action in your policy that has no `effect:` template" | `_announce_actions_without_an_effect` — `cli/main.py` | Shown in the README block; produced by `Policy.effect_template` — `policy.py:281` |
+| "Tools become actions named `mcp.<alias>.<tool>`" | `Gateway._intercept` — `gateway/server.py` | `test_T19_the_action_is_named_for_the_alias_and_the_tool` |
+| "Declare their effect and resource templates there" | `Policy.effect_template` / `resource_template` — `policy.py:281`; `McpOptions` — `policy.py:187` | `test_T16_a_v2_document_loads_and_exposes_its_templates`, `test_T16_a_decorator_and_a_policy_template_produce_the_same_action_hash` |
+| "Everything but `tools/call` is relayed untouched" | `parse_request(...).intercept` — `gateway/mcp.py:84` | `test_every_other_method_is_relayed_not_intercepted` |
+| "A lost response over the wire blocks the retry exactly as it does in-process" | `classify` — `gateway/outcome.py:144`, translated into v0.1 §5.5's own vocabulary by the gateway's executor | `test_T23_the_identical_call_sent_again_is_refused_and_the_upstream_called_once` |
+| "the only thing besides a human permitted to move a record out of `AMBIGUOUS`" | `Control._reconciled` — `control.py:713`; `RECONCILED_STATES` — `effect.py` | `test_T13_a_hook_answering_not_executed_moves_the_record_to_failed`, `test_T14_a_hook_answering_committed_refuses_the_retry_as_a_duplicate` |
+| "and only in the direction its answer points" | `"unknown"` is absent from `RECONCILED_STATES` — `effect.py` | `test_T15_a_hook_that_cannot_answer_leaves_the_record_ambiguous` |
+| "one OpenTelemetry span per action, one span event per step" | `OTelEventSink` — `otel.py:45` | `test_T29_one_action_produces_one_span_named_for_the_action`, `test_T29_every_event_becomes_a_span_event_named_by_its_type` |
+| "Argument values stay out of it unless you ask for them" | `OTelEventSink(arguments=...)` — `otel.py:45` | `test_T29_argument_values_are_not_attributes_by_default` |
+
+### Two claims the README deliberately does not make
+
+- **Nothing about ACS conformance.** `ctrlrun.acs.AcsControlHook` (`acs.py:74`) exists and is
+  tested (T51–T55), but at the ACS commit read there is no reference implementation and no
+  conformance suite. "ACS-compatible" appears nowhere in the README, in docstrings, or in CLI
+  output. `docs/ACS.md` says what was read and where the standard is silent.
+- **Nothing about exactly-once execution.** Unchanged from v0.1, and still the honest line:
+  CTRLRun guarantees it will not *knowingly* execute the same logical effect twice, and that
+  it will never treat an unknown outcome as a failure.
 
 ## Two claims stated as limits
 

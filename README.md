@@ -69,6 +69,52 @@ Amounts are integer minor units — cents, not euros. Floats are rejected outrig
 
 Now the same agent can refund €100 on its own, must get a human to approve €2,000, and cannot refund €20,000 at all. Neither can it refund a negative amount, which is a charge wearing a refund's name — an upper bound alone is not a range. Unknown actions are denied. CTRLRun fails closed.
 
+## Protect an existing MCP server
+
+No agent changes. Point the client at the gateway instead of at the tool server:
+
+```bash
+pip install "ctrlrun[gateway]"
+ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal refund-agent
+```
+
+The gateway prints, on the line that starts it, every action in your policy that has no
+`effect:` template — because a write with no effect key is exactly the configuration this
+exists to prevent, and it should not be discovered in a receipt three weeks later:
+
+```text
+1 action(s) have no effect: template and get no reservation:
+  mcp.acme.list_payments
+That is right for a read, and wrong for anything that changes the world.
+```
+
+Tools become actions named `mcp.<alias>.<tool>`, decided by the same `ctrlrun.yaml`. Declare
+their effect and resource templates there, since a tool call has no decorator to carry them:
+
+```yaml
+schema: ctrlrun.policy/v2
+
+actions:
+  mcp.acme.create_refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    decision: approve
+```
+
+Everything but `tools/call` is relayed untouched. A lost response over the wire blocks the
+retry exactly as it does in-process — that is the whole point of putting it here.
+
+## Two more things
+
+**Resolving an unknown outcome without a human.** `@protect(..., reconcile=...)` takes a
+function that asks the remote what happened to an effect, and it is the only thing besides a
+human permitted to move a record out of `AMBIGUOUS` — and only in the direction its answer
+points.
+
+**Exporting to your tracing backend.** `pip install "ctrlrun[otel]"` adds an
+`OTelEventSink`: one OpenTelemetry span per action, one span event per step. Argument values
+stay out of it unless you ask for them.
+
 ## What `ctrlrun demo` shows
 
 ```console
@@ -125,6 +171,8 @@ CTRLRun cannot guarantee exactly-once execution against external systems it does
 | Doc | Purpose |
 |---|---|
 | [`docs/SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md) | The v0.1 contract: models, invariants, acceptance tests |
+| [`docs/SPEC-v0.2.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) | The v0.2 delta: gateway, sinks, reconciliation, webhooks |
+| [`docs/ACS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ACS.md) | The OWASP Agent Control Standard: what maps, and where it is silent |
 | [`docs/ARCHITECTURE.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ARCHITECTURE.md) | Kernel design and key decisions |
 | [`docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ROADMAP.md) | v0.1 → v1.0 |
 | [`docs/THREAT_MODEL.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/THREAT_MODEL.md) | What CTRLRun defends against and what it doesn't |
