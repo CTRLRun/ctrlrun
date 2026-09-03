@@ -344,3 +344,126 @@ def test_the_two_lookups_agree_with_the_record_the_store_holds(state_store, fake
     assert state_store.get_approval("apr_1").status is ApprovalStatus.DENIED
     assert state_store.find_granted_approval(action.action_hash) is None
     assert state_store.find_denied_request(action.action_hash).request_id == "apr_1"
+
+
+# --- §6.9.2: the held continuation ------------------------------------------------------
+
+HASH = "sha256:" + "a" * 64
+OTHER_HASH = "sha256:" + "b" * 64
+STATE = "opaque-server-state-1"
+
+
+def test_a_held_continuation_is_taken_exactly_once(sqlite_store, fake_clock):
+    """§6.9.2 — one elicitation admits one continuation.
+
+    The spec puts single-use on the party that needs it, and the party holding a reservation
+    needs it: two continuations racing on one held key is the duplicate execution this
+    product exists to prevent, wearing an `inputResponses` field as a disguise.
+    """
+    _executing(sqlite_store)
+    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+
+    held = sqlite_store.take_continuation(KEY, STATE)
+
+    assert held.action_id == MINE
+    assert held.state is EffectState.EXECUTING
+    with pytest.raises(CTRLRunError):
+        sqlite_store.take_continuation(KEY, STATE)
+
+
+def test_a_continuation_with_the_wrong_request_state_is_refused(sqlite_store):
+    _executing(sqlite_store)
+    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+
+    with pytest.raises(CTRLRunError):
+        sqlite_store.take_continuation(KEY, "guessed")
+
+    # Refused without consuming: the real continuation can still arrive.
+    assert sqlite_store.take_continuation(KEY, STATE).action_id == MINE
+
+
+def test_a_continuation_for_a_key_that_holds_none_is_refused(sqlite_store):
+    _executing(sqlite_store)
+
+    with pytest.raises(CTRLRunError):
+        sqlite_store.take_continuation(KEY, STATE)
+
+
+def test_a_continuation_is_refused_once_the_lease_has_expired(sqlite_store, fake_clock):
+    """§6.9.2's second bound: a client that never returns lets the lease lapse, and the
+    record becomes AMBIGUOUS by the ordinary path of v0.1 §5.3 E3."""
+    _executing(sqlite_store)
+    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+    fake_clock.advance(LEASE + timedelta(seconds=1))
+
+    with pytest.raises(AmbiguousEffect):
+        sqlite_store.take_continuation(KEY, STATE)
+
+
+def test_a_continuation_is_refused_once_the_record_is_ambiguous(sqlite_store):
+    _executing(sqlite_store)
+    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+    sqlite_store.mark_ambiguous(KEY, MINE, "lost")
+
+    with pytest.raises(AmbiguousEffect):
+        sqlite_store.take_continuation(KEY, STATE)
+
+
+def test_holding_a_continuation_needs_a_live_executing_record_this_action_holds(sqlite_store):
+    sqlite_store.reserve_effect(KEY, MINE, LEASE)
+
+    with pytest.raises(CTRLRunError):
+        sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+
+    sqlite_store.begin_execution(KEY, MINE)
+    with pytest.raises(DuplicateEffect):
+        sqlite_store.hold_continuation(KEY, THEIRS, STATE, action_hash=HASH)
+
+
+def test_each_hold_increments_the_round_counter(sqlite_store):
+    """§6.9.2 — the bound an upstream must not be able to pin a reservation past."""
+    _executing(sqlite_store)
+
+    assert sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH) == 1
+    sqlite_store.take_continuation(KEY, STATE)
+    assert sqlite_store.hold_continuation(KEY, MINE, "state-2", action_hash=HASH) == 2
+    sqlite_store.take_continuation(KEY, "state-2")
+    assert sqlite_store.hold_continuation(KEY, MINE, "state-3", action_hash=HASH) == 3
+
+
+def test_the_held_action_hash_comes_back_with_the_record(sqlite_store):
+    """The continuation is the *same action*, so the gateway has to be able to prove it."""
+    _executing(sqlite_store)
+    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+
+    assert sqlite_store.held_action_hash(KEY) == HASH
+
+
+def test_the_held_state_survives_a_new_store_on_the_same_file(tmp_path, fake_clock):
+    """§6.9.2 — the held state lives in the StateStore, not in gateway memory: a gateway
+    that restarted mid-elicitation would otherwise strand a reservation nobody can
+    continue, which is a self-inflicted AMBIGUOUS on every deploy."""
+    path = tmp_path / "state.db"
+    first = SQLiteStateStore(path, clock=fake_clock)
+    try:
+        first.reserve_effect(KEY, MINE, LEASE)
+        first.begin_execution(KEY, MINE)
+        first.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+    finally:
+        first.close()
+
+    second = SQLiteStateStore(path, clock=fake_clock)
+    try:
+        assert second.take_continuation(KEY, STATE).action_id == MINE
+    finally:
+        second.close()
+
+
+def test_the_in_memory_store_holds_continuations_the_same_way(state_store, fake_clock):
+    state_store.reserve_effect(KEY, MINE, LEASE)
+    state_store.begin_execution(KEY, MINE)
+
+    assert state_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH) == 1
+    assert state_store.take_continuation(KEY, STATE).action_id == MINE
+    with pytest.raises(CTRLRunError):
+        state_store.take_continuation(KEY, STATE)

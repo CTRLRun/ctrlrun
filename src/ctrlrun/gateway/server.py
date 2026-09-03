@@ -64,6 +64,11 @@ CTRLRUN_PREFIX: Final = "/ctrlrun/"
 DEFAULT_UPSTREAM_TIMEOUT: Final = 30.0
 DEFAULT_APPROVAL_TIMEOUT: Final = 900.0
 
+#: SPEC-v0.2 §6.9.2's two bounds. A held reservation is a resource an upstream must not be
+#: able to pin forever.
+DEFAULT_ELICITATION_TIMEOUT: Final = 300.0
+DEFAULT_MAX_ELICITATION_ROUNDS: Final = 8
+
 #: §6.6 — the alias boundary in an action name must be unambiguous even though tool names
 #: may contain dots, so the alias may not.
 ALIAS_PATTERN: Final = r"^[a-z0-9][a-z0-9_-]*$"
@@ -77,6 +82,8 @@ AMBIGUOUS_EFFECT: Final = (-41005, "ctrlrun.ambiguous_effect", 409)
 BLOCKED: Final = (-41006, "ctrlrun.blocked", 409)
 NO_PRINCIPAL: Final = (-41007, "ctrlrun.no_principal", 403)
 UNREPRESENTABLE: Final = (-41008, "ctrlrun.unrepresentable_argument", 400)
+UNKNOWN_CONTINUATION: Final = (-41009, "ctrlrun.unknown_continuation", 400)
+UPSTREAM_AMBIGUOUS: Final = (-41010, "ctrlrun.upstream_ambiguous", 502)
 
 #: §6.8 — the `_meta` key every intercepted response carries, so a client is not left
 #: guessing what CTRLRun recorded. `com.ctrlrun/` is a legal prefix under the revision's
@@ -120,6 +127,8 @@ class GatewayConfig:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     allow_origins: tuple[str, ...] = ()
     allow_remote: bool = False
+    elicitation_timeout: float = DEFAULT_ELICITATION_TIMEOUT
+    max_elicitation_rounds: int = DEFAULT_MAX_ELICITATION_ROUNDS
 
     def __post_init__(self) -> None:
         import re
@@ -350,6 +359,21 @@ class Gateway:
             control._clock(),
             error=f"{pointer} is a float, which an Action cannot represent",
         )
+
+    # SPEC: v0.2 §6.9 — held reservations across an elicitation are NOT implemented, and
+    # the reason is structural rather than an omission. §6.9.2 requires the effect record to
+    # stay `EXECUTING` with no outcome written while the client answers, which spans two HTTP
+    # requests and therefore two `Control.execute` calls. `Control.execute` writes a terminal
+    # outcome for any executor exception (v0.1 §5.5), and there is no way for an executor to
+    # say "suspend, record nothing" — so an `input_required` currently reaches §6.8's
+    # unrecognized-resultType row and is recorded `AMBIGUOUS`, which is §6.9.3's fail-closed
+    # floor applied to every elicitation rather than only to the ones with no `requestState`.
+    #
+    # Closing it needs one of two decisions, and both are wider than §6.9's own text: either
+    # `Control` grows a resume path, or the gateway owns reserve/begin/commit for intercepted
+    # calls — which would make it the second module that composes the others, against
+    # ARCHITECTURE §6. The StateStore half (`hold_continuation`, `take_continuation`) is
+    # built and tested; this is the composition question above it.
 
     def _execute(
         self,
