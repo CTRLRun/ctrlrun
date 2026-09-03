@@ -47,6 +47,8 @@ class Principal:
 
 `name`, `environment` and `principal.agent` MUST be non-empty. `resource` and `principal.user` are either `None` or non-empty. Empty string → `InvalidArgument`.
 
+An Action cannot exist without a principal, and the principal comes from `context()` (§8). A `@protect`-wrapped function called outside any `context()` therefore has no Action to decide: it MUST raise `ActionDenied(reason="no_principal")` and MUST log a warning on the `ctrlrun` logger naming the action, and MUST NOT write a receipt or any events. A call outside `context()` is a wiring bug, not an agent action — it does not belong in the evidence log, which records actions and would have no principal to attribute this one to. It must not be silent either, which is what the warning is for.
+
 `action_id` identifies a *proposal*. A retry produces a new `action_id`. Identity of the *effect* is the effect key (§5), never `action_id`.
 
 Action equality follows the proposal, not the content: two Actions are equal iff their `action_id` is equal, and `hash(action)` is `hash(action_id)`. Two proposals with identical content are distinct Actions that share an `action_hash`.
@@ -221,6 +223,8 @@ Default behaviour of `@protect` on `APPROVE` when `wait=False` (the default): ra
 
 `@protect(..., effect="refund:{payment_id}")`. The template is resolved against the action's arguments (and `resource` via `{resource}`). Missing placeholder → `EffectKeyError` (the action is denied; never a silent `None`).
 
+`resource` is a template too — `@protect(..., resource="payment:{payment_id}")` — with the same syntax and the same resolver. It differs in *when* it resolves. `resource` is part of the canonical form and therefore of `action_hash` (§2.2), so it MUST be resolved against the bound call arguments **before** the Action is constructed, and a missing placeholder raises `InvalidArgument` at construction time, consistent with §2. The effect template resolves afterwards, against the constructed Action, which is why it can reference `{resource}` and `resource` cannot reference `{effect}`. A `resource` containing no placeholders is a literal.
+
 An action with no `effect=` declared has no logical effect: no reservation, no duplicate protection, receipt `effect_key: null`. This is the documented escape hatch for reads.
 
 Effect keys are opaque strings, globally unique within a StateStore. Namespace them: `refund:{payment_id}`, not `{payment_id}`.
@@ -289,9 +293,11 @@ The wrapped function is the executor. Its result is mapped:
 |---|---|
 | returns normally | `COMMITTED` |
 | raises `ctrlrun.NotExecuted` | `FAILED` |
-| raises anything else (incl. `TimeoutError`, connection errors) | `AMBIGUOUS` |
+| raises anything else (incl. `TimeoutError`, connection errors, `KeyboardInterrupt`) | `AMBIGUOUS` |
 
 The executor opts *into* `FAILED` by raising `NotExecuted`, asserting it knows the remote side did nothing (e.g. HTTP 4xx validation error before any side effect). The default for the unknown is `AMBIGUOUS`. This asymmetry is deliberate and MUST NOT be inverted.
+
+"Anything else" means `BaseException`, not `Exception`. A `KeyboardInterrupt` or `SystemExit` arriving mid-request leaves exactly the outcome a timeout leaves — the remote may already have committed — so the effect MUST be recorded `AMBIGUOUS` before the exception is re-raised. Narrowing that catch to `Exception` is a regression, not a cleanup.
 
 ---
 
@@ -415,7 +421,7 @@ Inject a store that fails `reserve_effect`; the approval remains `granted`.
 
 ```python
 # ctrlrun/__init__.py
-from .protect import protect, Control, context, with_approval
+from .control import protect, Control, context, with_approval
 from .action import Action, Principal, action_hash, canonicalize
 from .policy import Decision, Policy
 from .approval import Approval, ApprovalRequest, ApprovalProvider, LocalApprovalProvider, ScriptedApprovalProvider
@@ -441,6 +447,10 @@ Control(policy: Policy, store: StateStore, approvals: ApprovalProvider, clock=..
 Control.evaluate(action: Action) -> Evaluation   # decision + reason, no side effects
 Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | None) -> Receipt
 ```
+
+`effect` and `resource` are templates (§5.1). The call is bound to the wrapped function's signature and defaults are applied, so a defaulted argument is part of the action and of its hash — the action must describe what will actually run.
+
+`protect` MUST reject a function declaring `*args` or `**kwargs`, at decoration time, with `InvalidArgument`. An Action's arguments are a mapping of *named* values (§2.1), and policy conditions and templates address them by name; a variadic parameter has no such name and could never be written into a rule. Positional-only and keyword-only parameters are accepted — they have names.
 
 CLI (`click`):
 

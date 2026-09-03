@@ -137,7 +137,7 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `approval.py` | request/grant/consume, providers | executors |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator |
-| `protect.py` | `Control` orchestration, decorator, context | CLI |
+| `control.py` | `Control` orchestration, decorator, context | CLI |
 | `receipt.py` | Receipt/Event models, JSONL writer | everything else |
 | `cli/` | click commands, demo | internals beyond `Control` |
 
