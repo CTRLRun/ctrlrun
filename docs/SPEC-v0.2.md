@@ -77,6 +77,9 @@ anything it cannot parse, and it never lets a transport error look like a defini
 ### 2.1 The hook
 
 ```python
+Suspended(continuation: bytes | str)          # raised by an executor; §6.9
+Control.resume(continuation: str, executor) -> Receipt
+
 ReconcileOutcome = Literal["committed", "not_executed", "unknown"]
 
 protect(..., reconcile: Callable[[str], ReconcileOutcome] | None = None,
@@ -785,6 +788,37 @@ that exchange.
 
 #### 6.9.2 Held reservation, where the upstream made it possible
 
+**How this reaches the kernel.** A held reservation spans two HTTP requests and therefore two
+`Control` calls, and `Control.execute` writes a terminal outcome for any executor exception
+(v0.1 §5.5) — so the gateway cannot express "suspend, record nothing" through it. The kernel
+grows one signal and one method, and suspension is modelled the way v0.1 models *nothing
+happened*: an explicit opt-in an executor raises, never a default and never inferred.
+
+- `Suspended(continuation)`, raised by an executor, is handled in `Control.execute` **before**
+  the generic exception branch, alongside `NotExecuted`. The record stays `EXECUTING`, the
+  lease is extended by `Control(suspend_timeout=...)`, the continuation is held via
+  `hold_continuation` **in the same transaction**, `EXECUTION_SUSPENDED` is appended, **no
+  receipt is written** — the same rule as an action awaiting a human (v0.1 §6.1) — and the
+  signal propagates so the caller can relay the elicitation.
+- `Suspended` on an action with **no effect key** holds nothing: there is no reservation to
+  hold. `EXECUTION_SUSPENDED` records `held: false` and the signal still propagates.
+  Suspension without an effect key gives no protection at all — a concurrent caller can start
+  the same work — exactly as retries without one give none (v0.1 §5.1). It is logged, not
+  silently pretended.
+- `Control.resume(continuation, executor)` consumes the continuation atomically, rehydrates
+  the action and effect key from the store, checks the record is still `EXECUTING` under a
+  live lease, appends `EXECUTION_RESUMED`, and runs the executor through **the same** outcome
+  mapping `execute` uses. That path is one private function called by both: a resumption that
+  decided outcomes differently would be a second implementation of the only question this
+  library exists to answer. A resumed executor may raise `Suspended` again; each round
+  re-holds.
+- `resume` re-evaluates the policy for the **receipt**, not to re-decide. The action was
+  decided and reserved on the first leg, and refusing at resume would strand a reservation
+  the remote may already be acting on.
+
+`Control` remains the only module that composes the others (ARCHITECTURE §6); the gateway
+calls it.
+
 When an intercepted `tools/call` with an effect key returns `input_required` **with a
 `requestState`**:
 
@@ -1286,7 +1320,7 @@ claim (asserted against a word list including "compliant", "compliance", "certif
 from .effect import ReconcileOutcome
 from .receipt import EventSink, JSONLEventSink
 from .approval import WebhookApprovalProvider
-from .errors import MissingDependency
+from .errors import MissingDependency, Suspended
 # lazily importable, not re-exported at package import:
 #   ctrlrun.otel.OTelEventSink        (ctrlrun[otel])
 #   ctrlrun.gateway.serve             (ctrlrun[gateway])
@@ -1314,8 +1348,9 @@ StateStore.find_granted_approval(action_hash: str) -> Approval | None
 StateStore.find_denied_request(action_hash: str) -> ApprovalRequest | None
 StateStore.resolve_effect(effect_key, state, *, resolved_by: str) -> None
 StateStore.extend_lease(effect_key: str, action_id: str, until: datetime) -> None
-StateStore.hold_continuation(effect_key, action_id, request_state: str) -> None
-StateStore.take_continuation(effect_key, request_state: str) -> EffectRecord
+StateStore.hold_continuation(action, effect_key, continuation: str, until: datetime) -> int
+StateStore.take_continuation(continuation: str) -> HeldContinuation
+StateStore.continuation_rounds(effect_key: str) -> int
 ```
 
 **Removed:** `SQLiteStateStore.journal`, and the `EventLog` behind it — `JSONLEventSink` is

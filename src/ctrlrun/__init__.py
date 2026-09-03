@@ -26,6 +26,7 @@ from .errors import (
     MissingDependency,
     NotExecuted,
     PolicyError,
+    Suspended,
 )
 from .policy import Decision, Policy
 from .receipt import Event, EventSink, JSONLEventSink, Receipt
@@ -64,6 +65,7 @@ __all__ = [
     "SQLiteStateStore",
     "ScriptedApprovalProvider",
     "StateStore",
+    "Suspended",
     "action_hash",
     "canonicalize",
     "context",

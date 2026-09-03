@@ -139,11 +139,17 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `approval.py` | request/grant/consume, providers | executors |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
-| `control.py` | `Control` orchestration, decorator, context | CLI |
+| `control.py` | `Control` orchestration, decorator, context, suspend/resume | CLI |
 | `receipt.py` | Receipt/Event models, `EventSink`, JSONL sink | everything else |
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.
+
+The gateway (v0.2) does not change this. It builds an Action and calls `Control` — including
+`Control.resume` for an elicitation's second leg — rather than reserving and committing for
+itself. A gateway that owned the reservation would be a second module composing the others,
+and a second implementation of SPEC-v0.1 §5.5's asymmetry, which is the one rule in this
+codebase that must not drift.
 
 One exception, added in v0.2 and worth stating rather than discovering: `policy.py` imports the
 template grammar (`template_placeholders`) from `effect.py`, because SPEC-v0.2 §3.1 requires an

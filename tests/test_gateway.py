@@ -239,7 +239,7 @@ def _request(store, request_id: str, action: Action, clock, ttl=DEFAULT_APPROVAL
     return request
 
 
-def _action(amount: int = 2000) -> Action:
+def _approvable(amount: int = 2000) -> Action:
     return Action(
         name="mcp.acme.refund",
         arguments={"payment_id": "txn_1", "amount": amount},
@@ -248,7 +248,7 @@ def _action(amount: int = 2000) -> Action:
 
 
 def test_find_granted_approval_returns_the_newest_granted_one(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.grant_approval("apr_1", "human:ops")
     fake_clock.advance(timedelta(minutes=1))
@@ -263,7 +263,7 @@ def test_find_granted_approval_returns_the_newest_granted_one(state_store, fake_
 
 def test_find_granted_approval_breaks_a_tie_toward_the_later_record(state_store, fake_clock):
     """Two grants in one clock tick tie on `granted_at`; the later-stored one is newer."""
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     _request(state_store, "apr_2", action, fake_clock)
     state_store.grant_approval("apr_1", "human:ops")
@@ -273,14 +273,14 @@ def test_find_granted_approval_breaks_a_tie_toward_the_later_record(state_store,
 
 
 def test_find_granted_approval_ignores_a_pending_one(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
 
     assert state_store.find_granted_approval(action.action_hash) is None
 
 
 def test_find_granted_approval_ignores_a_consumed_one(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.grant_approval("apr_1", "human:ops")
     state_store.consume_approval("apr_1", action.action_hash)
@@ -289,7 +289,7 @@ def test_find_granted_approval_ignores_a_consumed_one(state_store, fake_clock):
 
 
 def test_find_granted_approval_ignores_an_expired_one(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock, ttl=timedelta(minutes=5))
     state_store.grant_approval("apr_1", "human:ops")
     fake_clock.advance(timedelta(minutes=6))
@@ -298,16 +298,16 @@ def test_find_granted_approval_ignores_an_expired_one(state_store, fake_clock):
 
 
 def test_find_granted_approval_ignores_another_actions_hash(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.grant_approval("apr_1", "human:ops")
 
-    assert state_store.find_granted_approval(_action(amount=9999).action_hash) is None
+    assert state_store.find_granted_approval(_approvable(amount=9999).action_hash) is None
 
 
 def test_find_denied_request_returns_an_unexpired_denial(state_store, fake_clock):
     """§6.10 — "no" is an answer, and re-asking is not free."""
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.deny_approval("apr_1", "human:ops")
 
@@ -320,7 +320,7 @@ def test_find_denied_request_returns_an_unexpired_denial(state_store, fake_clock
 def test_find_denied_request_ignores_an_expired_denial(state_store, fake_clock):
     """A denial holds for the life of the request that carried it; after that, asking
     again is legitimate (§6.10)."""
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock, ttl=timedelta(minutes=5))
     state_store.deny_approval("apr_1", "human:ops")
     fake_clock.advance(timedelta(minutes=6))
@@ -329,7 +329,7 @@ def test_find_denied_request_ignores_an_expired_denial(state_store, fake_clock):
 
 
 def test_find_denied_request_ignores_a_granted_one(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.grant_approval("apr_1", "human:ops")
 
@@ -337,7 +337,7 @@ def test_find_denied_request_ignores_a_granted_one(state_store, fake_clock):
 
 
 def test_the_two_lookups_agree_with_the_record_the_store_holds(state_store, fake_clock):
-    action = _action()
+    action = _approvable()
     _request(state_store, "apr_1", action, fake_clock)
     state_store.deny_approval("apr_1", "human:ops")
 
@@ -346,124 +346,156 @@ def test_the_two_lookups_agree_with_the_record_the_store_holds(state_store, fake
     assert state_store.find_denied_request(action.action_hash).request_id == "apr_1"
 
 
-# --- §6.9.2: the held continuation ------------------------------------------------------
+# --- §6.9.2: the held continuation, at the store layer ---------------------------------
 
-HASH = "sha256:" + "a" * 64
-OTHER_HASH = "sha256:" + "b" * 64
-STATE = "opaque-server-state-1"
+CONTINUATION = "opaque-server-state-1"
+
+
+def _action() -> Action:
+    return Action(
+        name="mcp.acme.refund",
+        arguments={"payment_id": "txn_1", "amount": 2000},
+        principal=Principal(agent="refund-agent"),
+    )
+
+
+def _held(store, fake_clock, action=None):
+    action = action or _action()
+    store.reserve_effect(KEY, action.action_id, LEASE)
+    store.begin_execution(KEY, action.action_id)
+    return action, store.hold_continuation(
+        action, KEY, CONTINUATION, fake_clock.now + timedelta(minutes=30)
+    )
 
 
 def test_a_held_continuation_is_taken_exactly_once(sqlite_store, fake_clock):
-    """§6.9.2 — one elicitation admits one continuation.
+    """§6.9.2 — one suspension admits one resumption. Two racing on one held key is the
+    duplicate execution this product exists to prevent, wearing a continuation as a
+    disguise."""
+    action, rounds = _held(sqlite_store, fake_clock)
 
-    The spec puts single-use on the party that needs it, and the party holding a reservation
-    needs it: two continuations racing on one held key is the duplicate execution this
-    product exists to prevent, wearing an `inputResponses` field as a disguise.
-    """
-    _executing(sqlite_store)
-    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+    held = sqlite_store.take_continuation(CONTINUATION)
 
-    held = sqlite_store.take_continuation(KEY, STATE)
-
-    assert held.action_id == MINE
-    assert held.state is EffectState.EXECUTING
-    with pytest.raises(CTRLRunError):
-        sqlite_store.take_continuation(KEY, STATE)
+    assert rounds == 1
+    assert held.action.action_id == action.action_id
+    assert held.effect_key == KEY
+    with pytest.raises(InvalidArgument):
+        sqlite_store.take_continuation(CONTINUATION)
 
 
-def test_a_continuation_with_the_wrong_request_state_is_refused(sqlite_store):
-    _executing(sqlite_store)
-    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+def test_holding_a_continuation_extends_the_lease_in_the_same_transaction(sqlite_store, fake_clock):
+    """§6.9.2 steps 2 and 3 are one write: a lease extended without the continuation stored
+    would hold a reservation nobody can ever continue."""
+    _held(sqlite_store, fake_clock)
 
-    with pytest.raises(CTRLRunError):
-        sqlite_store.take_continuation(KEY, "guessed")
+    assert sqlite_store.get_effect(KEY).lease_expires_at == fake_clock.now + timedelta(minutes=30)
+
+
+def test_the_whole_action_comes_back_with_the_continuation(sqlite_store, fake_clock):
+    """A resumption is the *same action*, and rehydrating it from the store is the only way a
+    process that restarted mid-round can still finish one."""
+    action, _ = _held(sqlite_store, fake_clock)
+
+    held = sqlite_store.take_continuation(CONTINUATION)
+
+    assert held.action.action_hash == action.action_hash
+    assert held.action.name == "mcp.acme.refund"
+    assert held.action.canonical_arguments == action.canonical_arguments
+
+
+def test_a_forged_continuation_is_refused(sqlite_store, fake_clock):
+    _held(sqlite_store, fake_clock)
+
+    with pytest.raises(InvalidArgument):
+        sqlite_store.take_continuation("guessed")
 
     # Refused without consuming: the real continuation can still arrive.
-    assert sqlite_store.take_continuation(KEY, STATE).action_id == MINE
-
-
-def test_a_continuation_for_a_key_that_holds_none_is_refused(sqlite_store):
-    _executing(sqlite_store)
-
-    with pytest.raises(CTRLRunError):
-        sqlite_store.take_continuation(KEY, STATE)
+    assert sqlite_store.take_continuation(CONTINUATION).effect_key == KEY
 
 
 def test_a_continuation_is_refused_once_the_lease_has_expired(sqlite_store, fake_clock):
-    """§6.9.2's second bound: a client that never returns lets the lease lapse, and the
-    record becomes AMBIGUOUS by the ordinary path of v0.1 §5.3 E3."""
-    _executing(sqlite_store)
-    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
-    fake_clock.advance(LEASE + timedelta(seconds=1))
+    _held(sqlite_store, fake_clock)
+    fake_clock.advance(timedelta(minutes=31))
 
-    with pytest.raises(AmbiguousEffect):
-        sqlite_store.take_continuation(KEY, STATE)
+    with pytest.raises(AmbiguousEffect) as refused:
+        sqlite_store.take_continuation(CONTINUATION)
 
-
-def test_a_continuation_is_refused_once_the_record_is_ambiguous(sqlite_store):
-    _executing(sqlite_store)
-    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
-    sqlite_store.mark_ambiguous(KEY, MINE, "lost")
-
-    with pytest.raises(AmbiguousEffect):
-        sqlite_store.take_continuation(KEY, STATE)
+    assert "executing" in str(refused.value)
 
 
-def test_holding_a_continuation_needs_a_live_executing_record_this_action_holds(sqlite_store):
-    sqlite_store.reserve_effect(KEY, MINE, LEASE)
+def test_a_continuation_is_refused_once_the_record_is_resolved(sqlite_store, fake_clock):
+    action, _ = _held(sqlite_store, fake_clock)
+    sqlite_store.mark_ambiguous(KEY, action.action_id, "lost")
+
+    with pytest.raises(AmbiguousEffect) as refused:
+        sqlite_store.take_continuation(CONTINUATION)
+
+    assert "ambiguous" in str(refused.value)
+
+
+def test_holding_needs_a_live_executing_record_this_action_holds(sqlite_store, fake_clock):
+    action = _action()
+    sqlite_store.reserve_effect(KEY, action.action_id, LEASE)
+    until = fake_clock.now + timedelta(minutes=30)
 
     with pytest.raises(CTRLRunError):
-        sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+        sqlite_store.hold_continuation(action, KEY, CONTINUATION, until)
 
-    sqlite_store.begin_execution(KEY, MINE)
+    sqlite_store.begin_execution(KEY, action.action_id)
     with pytest.raises(DuplicateEffect):
-        sqlite_store.hold_continuation(KEY, THEIRS, STATE, action_hash=HASH)
+        sqlite_store.hold_continuation(_action(), KEY, CONTINUATION, until)
 
 
-def test_each_hold_increments_the_round_counter(sqlite_store):
-    """§6.9.2 — the bound an upstream must not be able to pin a reservation past."""
-    _executing(sqlite_store)
+def test_each_hold_increments_the_round_counter(sqlite_store, fake_clock):
+    """The bound an upstream must not be able to pin a reservation past (§6.9.2)."""
+    action, first = _held(sqlite_store, fake_clock)
+    sqlite_store.take_continuation(CONTINUATION)
+    until = fake_clock.now + timedelta(minutes=30)
 
-    assert sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH) == 1
-    sqlite_store.take_continuation(KEY, STATE)
-    assert sqlite_store.hold_continuation(KEY, MINE, "state-2", action_hash=HASH) == 2
-    sqlite_store.take_continuation(KEY, "state-2")
-    assert sqlite_store.hold_continuation(KEY, MINE, "state-3", action_hash=HASH) == 3
+    second = sqlite_store.hold_continuation(action, KEY, "state-2", until)
+    sqlite_store.take_continuation("state-2")
+    third = sqlite_store.hold_continuation(action, KEY, "state-3", until)
+
+    assert (first, second, third) == (1, 2, 3)
 
 
-def test_the_held_action_hash_comes_back_with_the_record(sqlite_store):
-    """The continuation is the *same action*, so the gateway has to be able to prove it."""
-    _executing(sqlite_store)
-    sqlite_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+def test_two_effects_cannot_share_one_continuation(sqlite_store, fake_clock):
+    """Fail loudly rather than resolve to somebody else's action: a continuation is the only
+    thing identifying which suspension a resumption ends."""
+    _held(sqlite_store, fake_clock)
+    other = _action()
+    sqlite_store.reserve_effect("refund:txn_2", other.action_id, LEASE)
+    sqlite_store.begin_execution("refund:txn_2", other.action_id)
 
-    assert sqlite_store.held_action_hash(KEY) == HASH
+    with pytest.raises(InvalidArgument):
+        sqlite_store.hold_continuation(
+            other, "refund:txn_2", CONTINUATION, fake_clock.now + timedelta(minutes=30)
+        )
 
 
 def test_the_held_state_survives_a_new_store_on_the_same_file(tmp_path, fake_clock):
-    """§6.9.2 — the held state lives in the StateStore, not in gateway memory: a gateway
-    that restarted mid-elicitation would otherwise strand a reservation nobody can
-    continue, which is a self-inflicted AMBIGUOUS on every deploy."""
+    """§6.9.2 — the held state lives in the StateStore, not in gateway memory: a gateway that
+    restarted mid-elicitation would otherwise strand a reservation nobody can continue, which
+    is a self-inflicted AMBIGUOUS on every deploy."""
     path = tmp_path / "state.db"
     first = SQLiteStateStore(path, clock=fake_clock)
     try:
-        first.reserve_effect(KEY, MINE, LEASE)
-        first.begin_execution(KEY, MINE)
-        first.hold_continuation(KEY, MINE, STATE, action_hash=HASH)
+        action, _ = _held(first, fake_clock)
     finally:
         first.close()
 
     second = SQLiteStateStore(path, clock=fake_clock)
     try:
-        assert second.take_continuation(KEY, STATE).action_id == MINE
+        assert second.take_continuation(CONTINUATION).action.action_id == action.action_id
     finally:
         second.close()
 
 
 def test_the_in_memory_store_holds_continuations_the_same_way(state_store, fake_clock):
-    state_store.reserve_effect(KEY, MINE, LEASE)
-    state_store.begin_execution(KEY, MINE)
+    """A double that admits what SQLite refuses invalidates every test that uses it."""
+    action, rounds = _held(state_store, fake_clock)
 
-    assert state_store.hold_continuation(KEY, MINE, STATE, action_hash=HASH) == 1
-    assert state_store.take_continuation(KEY, STATE).action_id == MINE
-    with pytest.raises(CTRLRunError):
-        state_store.take_continuation(KEY, STATE)
+    assert rounds == 1
+    assert state_store.take_continuation(CONTINUATION).action.action_id == action.action_id
+    with pytest.raises(InvalidArgument):
+        state_store.take_continuation(CONTINUATION)

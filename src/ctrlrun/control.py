@@ -49,6 +49,7 @@ from .errors import (
     EffectKeyError,
     InvalidArgument,
     NotExecuted,
+    Suspended,
 )
 from .policy import Decision, Evaluation, Policy, discover_policy_path
 from .receipt import (
@@ -69,6 +70,10 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 DEFAULT_ENVIRONMENT: Final = "production"
+
+#: SPEC-v0.2 §6.9.2 — how long a reservation is held open across one round trip. A client
+#: that never returns lets this lapse, and the record becomes AMBIGUOUS by v0.1 §5.3 E3.
+DEFAULT_SUSPEND_TIMEOUT: Final = timedelta(minutes=5)
 
 #: Denial reason when a protected function is called outside `ctrlrun.context()`.
 NO_PRINCIPAL: Final = "no_principal"
@@ -209,6 +214,7 @@ class Control:
         approval_ttl: timedelta = DEFAULT_APPROVAL_TTL,
         lease: timedelta = DEFAULT_LEASE,
         sinks: Sequence[EventSink] = (),
+        suspend_timeout: timedelta = DEFAULT_SUSPEND_TIMEOUT,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -219,6 +225,7 @@ class Control:
         self._approval_ttl = approval_ttl
         self._lease = _checked_lease(lease, "Control(lease=...)")
         self._sinks = tuple(sinks)
+        self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Control:
@@ -331,8 +338,74 @@ class Control:
                 )
                 raise
         self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
+        return self._outcome(
+            action, evaluation, executor, effect_key, attempt, approval, started_at, reconciler
+        )
+
+    def resume(self, continuation: str, executor: Callable[[], Any]) -> Receipt:
+        """Finish an action a `Suspended` executor left open (SPEC-v0.2 §6.9).
+
+        The continuation is taken and consumed atomically, so one suspension admits exactly
+        one resumption; the action and its effect key are rehydrated from the store, which is
+        what lets a process that restarted mid-round still finish one. The record must still
+        be `EXECUTING` under a live lease — a lease that lapsed while the client was
+        answering is `AMBIGUOUS` by the ordinary path of v0.1 §5.3 E3.
+
+        The executor then runs through the **same** outcome mapping `execute` uses. There is
+        one implementation of v0.1 §5.5 in this codebase, and a resumed call gets that one:
+        a resumption that decided outcomes differently would be a second answer to the only
+        question this library exists to answer.
+        """
+        held = self._store.take_continuation(continuation)
+        started_at = self._clock()
+        action = held.action
+        self._append(
+            EventType.EXECUTION_RESUMED,
+            action,
+            {"round": held.rounds},
+            held.effect_key,
+        )
+        # SPEC: §6.9.2 — the policy is evaluated again for the *receipt*, not to re-decide.
+        # The action was decided and reserved on the first leg; refusing here would strand a
+        # reservation the remote may already be acting on, which is the one thing a held
+        # reservation exists to avoid.
+        evaluation = self._policy.evaluate(action)
+        return self._outcome(
+            action,
+            evaluation,
+            executor,
+            held.effect_key,
+            held.record.attempt,
+            None,
+            started_at,
+            _Reconciler(None, False),
+        )
+
+    def _outcome(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        executor: Callable[[], Any],
+        effect_key: str | None,
+        attempt: int,
+        approval: Approval | None,
+        started_at: datetime,
+        reconciler: _Reconciler,
+    ) -> Receipt:
+        """Run the executor and record what happened (SPEC-v0.1 §5.5).
+
+        The single implementation of the asymmetry: `NotExecuted` is the only outcome that
+        maps to `FAILED`, `Suspended` records no outcome at all, and everything else is
+        `AMBIGUOUS`. `execute` and `resume` both come through here, so the two cannot drift.
+        """
         try:
             result = executor()
+        except Suspended as suspension:
+            # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
+            # and this attempt is not finished. Handled above the generic branch precisely so
+            # it cannot be mistaken for one.
+            self._suspend(action, effect_key, suspension, approval)
+            raise
         except NotExecuted as exc:
             if effect_key is not None:
                 # SPEC §5.5 — the executor asserted the remote side did nothing, so this is
@@ -429,6 +502,45 @@ class Control:
             approval=approval,
             effect_key=effect_key,
             attempt=attempt,
+        )
+
+    def _suspend(
+        self,
+        action: Action,
+        effect_key: str | None,
+        suspension: Suspended,
+        approval: Approval | None,
+    ) -> None:
+        """Hold the reservation open and record that it is held (SPEC-v0.2 §6.9.2).
+
+        With no effect key there is nothing to hold, and the event says so. Suspension
+        without an effect key gives no protection at all — a second caller can start the same
+        work while the first is waiting — exactly as retries without one give none (v0.1
+        §5.1). It is permitted, logged, and recorded as unheld rather than silently pretended.
+        """
+        if effect_key is None:
+            _LOG.warning(
+                "%s: suspended with no effect key, so nothing is held; a concurrent caller "
+                "can start the same work. Declare effect= to make a suspension mean something",
+                action.name,
+            )
+            self._append(
+                EventType.EXECUTION_SUSPENDED,
+                action,
+                {"held": False, "round": 1},
+                None,
+                approval=approval,
+            )
+            return
+        rounds = self._store.hold_continuation(
+            action, effect_key, suspension.continuation, self._clock() + self._suspend_timeout
+        )
+        self._append(
+            EventType.EXECUTION_SUSPENDED,
+            action,
+            {"held": True, "round": rounds},
+            effect_key,
+            approval=approval,
         )
 
     # --- the effect key (SPEC-v0.1 §5.1) ------------------------------------------------
