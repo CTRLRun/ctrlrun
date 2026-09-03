@@ -452,7 +452,8 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
 @click.option(
     "--principal-from-client-info",
     is_flag=True,
-    help="Take it from clientInfo, which the protocol does not verify. Removed in v0.3.",
+    help="DEPRECATED, removed in 0.3 — use --principal-header. Takes the agent from "
+    "clientInfo, which the protocol does not verify.",
 )
 @click.option("--user-header", default=None, help="Take principal.user from this header.")
 @click.option("--environment", default="production", show_default=True)

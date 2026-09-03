@@ -60,7 +60,10 @@ jobs:
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
           cd /tmp/sdist
-          pip install ".[dev]"
+          # With the extras: without them the gateway, ACS, elicitation and OTel modules
+          # skip, and this gate guards an upload to a version number that can never be
+          # reused. It should be no weaker than the one on main.
+          pip install ".[dev,gateway,otel]"
           pytest -q
 
       - name: The quick start works from the wheel

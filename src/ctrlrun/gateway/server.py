@@ -900,8 +900,10 @@ def serve_forever(gateway: Gateway) -> None:
         # address the principal at all, so an unauthenticated one misattributes evidence and
         # cannot widen an outcome. It is removed in v0.3.
         _LOG.warning(
-            "--principal-from-client-info trusts a self-reported name; it is attribution on "
-            "a receipt, never an authorization input, and it is removed in v0.3"
+            "--principal-from-client-info is DEPRECATED and will be removed in 0.3; use "
+            "--principal-header instead. It trusts a name the protocol does not verify, "
+            "which is attribution on a receipt and never an authorization input — and v0.3's "
+            "authority model makes the principal an authorization input (SPEC-v0.2 §6.5)"
         )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

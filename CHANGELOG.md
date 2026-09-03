@@ -65,6 +65,18 @@ Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml
   stable interface. The v0.1.0 schemas say otherwise, so the adapter ships. The no-claim rule
   is untouched.
 
+### Deprecated
+
+- **`ctrlrun gateway --principal-from-client-info` — removed in 0.3. Use
+  `--principal-header`.** It takes the agent's name from `_meta["io.modelcontextprotocol/
+  clientInfo"]`, which the MCP revision says is self-reported and *"SHOULD NOT"* be relied on
+  for security decisions. It is offerable in 0.2 only because of a fact that stops being true:
+  a v0.1 policy cannot address the principal at all (`SPEC-v0.1.md` §3.2 refuses `agent_eq`
+  and every other reserved name at load), so an unauthenticated principal misattributes
+  evidence and cannot widen an outcome. v0.3's authority model makes the principal an
+  authorization input, at which point a self-reported name cannot be one. The flag warns at
+  startup and its `--help` says so.
+
 ### Removed
 
 - `SQLiteStateStore.journal`, and the `EventLog` class behind it. `JSONLEventSink` is that
