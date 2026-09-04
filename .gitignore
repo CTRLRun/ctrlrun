@@ -8,6 +8,12 @@ dist/
 # Environments
 .venv/
 venv/
+# Credentials the framework probe needs to run (SPEC-v0.4 §7). Kept out of the index because
+# `git add -A` does not ask: this file was staged once, and only GitHub's push protection
+# stood between it and a public commit.
+.env
+.env.*
+!.env.example
 
 # Tool caches
 .mypy_cache/
