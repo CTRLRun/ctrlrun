@@ -48,6 +48,14 @@ shipped, and the only thing in the tree today is the contract.
   test now checks every **git-tracked** file under `examples/` and `docs/` against the
   manifest's include patterns, and it found `examples/acs/README.md` had been missing since
   v0.2 as well.
+- **Fixed a test whose fuse was the suite's own duration.** T27's parametrize list built two
+  timestamps at **collection** time, so the future-dated one was 400 seconds ahead of
+  collection and only `400 - <however long the suite had been running>` seconds ahead by the
+  time the test executed. Past the replay window's 300 seconds it landed *inside* the window
+  and the refusal under test stopped happening. It had been latent since v0.2 and fired the
+  first time an item made the suite slower. The timestamps are built when the test runs, and
+  the fix is verified against a `conftest` that stalls 120 seconds between collection and the
+  body — the condition that failed CI.
 - **The nine sector templates stay on v0.1 and now say why.** They gain no `authority:`
   section: a grant names a real principal in a real organization, and a template that shipped
   plausible ones would invite an operator to adopt them.
