@@ -8,7 +8,7 @@ Sector rule: every pack cites its sources and ships its `REVIEW.md`. No complian
 
 Track rule: kernel versions ship correctness; the tracks that ship beside it (packs, templates, mappings, adapters) ship on their own cadence and never block or share a version with the kernel.
 
-## v0.1 — Kernel (current)
+## v0.1 — Kernel ✅ shipped
 
 Action · Policy (ALLOW/APPROVE/DENY) · `@protect` · exact-action approval (hash, single-use, expiry) · effect key · SQLite atomic reservation · COMMITTED/FAILED/AMBIGUOUS · receipts + events (JSONL) · CLI · `ctrlrun demo` with four scenarios.
 
@@ -16,7 +16,7 @@ Exit: all acceptance tests in `SPEC-v0.1.md §7` pass; demo < 60 s; README liter
 
 Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 
-## v0.2 — Zero-friction deployment (shipped)
+## v0.2 — Zero-friction deployment ✅ shipped
 
 - MCP adapter and `ctrlrun gateway --upstream <mcp server>` so an existing MCP tool server gets CTRLRun semantics with no agent changes.
 - OpenTelemetry export of events (align with ACS observability; don't invent a tracing format).
@@ -76,15 +76,20 @@ with RFC 8725's algorithm and explicit-typing rules applied, and it claims no co
 any of them. `--principal-from-client-info` is removed, and `AcsControlHook` gained the same
 requirement for the same reason: a self-reported name cannot be an authorization input.
 
-## v0.4 — Verification
+## v0.4 — Verification ✅ shipped
 
-- `ctrlrun verify`: runs deterministic failure scenarios against a user's config and reports pass/fail per guarantee (mutated approval, replayed approval, duplicate reservation, concurrent reservation, ambiguous retry, unknown action fail-close, expired authority, delegation escalation).
-- Counterexample output on failure.
-- GitHub Action + badge ("CTRLRun Verified n/n"). The badge means *declared guarantees pass*, never "this agent is secure."
+- `ctrlrun verify`: runs the kernel's own failure scenarios against the operator's config and reports pass, fail or **not applicable** per guarantee. Ten of them, `ctrlrun.guarantees/v1`: mutated approval · replayed approval · duplicate effect · concurrent reservation across real OS processes · ambiguous blocks a blind retry · unknown action fail-close · no principal · expired authority · delegation escalation on every dimension including omission · unknown exception is ambiguous, never failed.
+- **Not applicable is not a pass.** A guarantee this configuration cannot exercise is reported `N/A` with the reason, excluded from the denominator and listed separately. There is no flag that folds one into the count.
+- **Every guarantee carries a positive control.** A refusal asserted against a scenario in which nothing ran passes on a kernel with the guard deleted, so a control that misbehaves is `fail` with `reason: "control failed"` — never a pass, and never an N/A.
+- Counterexample output on failure: the ordered events, receipts and effect records that show the violation.
+- GitHub Action + badge, "CTRLRun verified N/M", where M is **applicable** guarantees. The badge means *declared guarantees pass*, never "this agent is secure."
+- `research/framework-probe/`, outside `src/` and never packaged: what an agent stack does with a lost response when nothing guards the effect. Behaviour, not quality.
 
-Standards: first mapping doc — each `ctrlrun verify` guarantee mapped to the OWASP Agentic Top 10 entries it mitigates. Entries not covered are listed as not covered.
+Exit: every acceptance test in `SPEC-v0.4.md §8` passes, and every one in v0.1, v0.2 and v0.3 still does. `ctrlrun verify` against `examples/authority/payments.yaml` reports 10/10; against `examples/policies/payments.yaml`, 5/5 with five not applicable — the N/A rule dogfooded rather than described.
 
-## v0.5 — Adapter contract
+Standards: first mapping doc — `docs/OWASP-AGENTIC-TOP10.md`, each guarantee mapped to the OWASP Top 10 for Agentic Applications entries it mitigates, and the four entries CTRLRun does not address listed by name. A reading of somebody else's taxonomy, and it says so on its first line.
+
+## v0.5 — Adapter contract (Current)
 
 - The adapter contract, documented. It is one of the six contracts v1.0 freezes, so it is written to be lived with.
 - Two reference adapters, to prove the contract is real rather than aspirational: OpenAI Agents SDK and LangGraph. Each reuses the framework's own HITL primitives — LangGraph's `interrupt()` and checkpointers, the Agents SDK's tool-approval interruption — mapped onto `Suspended` / `Control.resume`, which v0.2 already ships for exactly this shape. Never a second approval path beside the framework's own. They ship on the adapters track under their own versions like every other adapter; what v0.5 owns is the requirement that two exist and that the contract survived writing them.
