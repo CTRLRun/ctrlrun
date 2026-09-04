@@ -51,7 +51,7 @@ build-list position.
 |---|---|---|---|
 | 1 | The framework probe, executed against LangGraph and the Agents SDK | not packaged | `v0.4 §7` |
 | 2 | The adapter surface `ctrlrun.adapter`, and the `v0.3 §4.3.1` rows | core | §2, §4 |
-| 3 | The conformance kit, `ctrlrun[conformance]` | an extra | §5 |
+| 3 | The conformance kit, `ctrlrun.conformance` | core wheel, `pytest` behind `ctrlrun[conformance]` | §5 |
 | 4 | The LangGraph reference adapter, `ctrlrun-langgraph` | a separate distribution | §6 |
 | 5 | The OpenAI Agents SDK reference adapter, `ctrlrun-openai-agents` | a separate distribution | §6 |
 | 6 | A third adapter, written against this document alone | disposable | §8 |
@@ -97,6 +97,12 @@ does the same, for the same reason: the list matters more than the feature does.
 An adapter buys **one** thing over `@protect`: where the framework's interrupt exists, the
 human answers inside it. Everything else — the policy, the authority evaluation, the exact
 binding, the reservation, the receipt — is identical, because it is the same `Control` doing it.
+
+One qualification, made here rather than left for §3.4 to spring on a reader who has already
+been told "identical": the exact binding is identical **within a leg**. `@protect` has no
+interrupt and nothing to replay across, and an adapter does — so whether the payload a human
+*read* describes the action that then runs is prevention only where the framework carries back
+what was answered, and attribution where it does not. §3.4 splits it and says which is which.
 
 ### 1.2 What was read
 
@@ -172,7 +178,11 @@ class ApprovalAnswer:
 
     granted: bool
     approver: str
-    action_hash: str | None = None   # where the framework can carry it back; §3.4
+    #: The arguments the human's answer was given against, as the adapter recovered them from
+    #: its framework. Required where `FrameworkInterrupt.carries_approved_arguments` is True,
+    #: and `None` only where it is False (§3.4). Never the adapter's copy of
+    #: `PendingApproval.arguments`: that is manufacturing the check.
+    approved_arguments: Mapping[str, Any] | None = None
 
 
 @runtime_checkable
@@ -182,11 +192,23 @@ class FrameworkInterrupt(Protocol):
     #: The framework's name, as it appears in a conformance report. Non-empty.
     framework: str
 
+    #: Does this framework's resumption carry back what the human answered against (§3.4)?
+    #: A **declaration about the framework**, not a setting: `False` makes the kit report
+    #: `binding: not_applicable` with this adapter's reason, permanently and visibly, and it
+    #: can never make a check that would otherwise have run not run. `True` makes the
+    #: `approved_arguments` check mandatory, and an answer that omits them is refused.
+    carries_approved_arguments: bool
+
     def interrupt(self, pending: PendingApproval) -> ApprovalAnswer: ...
 
 
 class InterruptApprovalProvider:
-    """The one place an adapter's answer becomes a grant (§2.4). Core, not per adapter."""
+    """The one place an adapter's answer becomes a grant (§2.4). Core, not per adapter.
+
+    **The operator constructs it and hands it to `Control`**, exactly as they would a
+    `WebhookApprovalProvider`. An adapter never constructs a `Control` and never chooses its
+    `identity=`, its `clock=` or its `authority=` (§2.3, §3.8).
+    """
 
     def __init__(
         self,
@@ -200,9 +222,38 @@ class InterruptApprovalProvider:
     def wait(self, request_id: str, timeout: timedelta | None) -> Approval | None: ...
 
 
+def needs_approval(
+    control: Control,
+    action: str,
+    arguments: Mapping[str, Any],
+    *,
+    resource: str | None = None,
+) -> bool:
+    """Does this call need a human? For a framework that asks before it invokes (§3.5).
+
+    Core does it so no adapter has to: it resolves the principal from `control`, builds the
+    Action, and returns True iff `Control.evaluate` says `APPROVE`. It writes nothing and
+    creates no request.
+    """
+
+
 def banner(control: Control) -> None:
     """Log the `v0.3 §6.5` observe banner once per `Control`. An adapter MUST call it (§3.6)."""
 ```
+
+`needs_approval` exists because of a hole an independent review found in this section's first
+draft, and the reason is recorded rather than the hole quietly patched. That draft told the
+adapter to answer its framework's pre-invocation predicate "with `Control.evaluate(action)`",
+and `Action.principal` is a required field with no default (`v0.1 §2.1`): the only way to obey
+was `Principal(agent=<the framework's session user>)`, which §4.2 forbids by name and which
+`v0.3 §8.1` removed from the gateway and `v0.3 §8.4` then removed again from the ACS hook. It
+was the third costume. The predicate is core's now, and the principal never passes through an
+adapter's hands.
+
+`Control.resolve_principal(action_name) -> Principal` is promoted from private for it (§9): the
+identity seam an adapter may **read** and may not supply. It is `v0.3 §3.2`'s resolution
+unchanged — the provider wins where it answers, a decline is refused rather than backfilled once
+an `authority:` section is loaded, and a refusal is never backfilled at all.
 
 `InterruptApprovalProvider` satisfies `v0.1 §4.3`'s `ApprovalProvider`. That is the whole
 mechanism: **an adapter is an approval provider whose `wait()` routes through the framework's
@@ -214,10 +265,17 @@ does.
 checkpoints the interrupt payload, and a payload that would not serialize is one that works
 until the first restart.
 
-`ApprovalAnswer.approver` MUST be a non-empty string, and it is what lands on the receipt's
-`approver` field and in `APPROVAL_GRANTED`. An adapter that cannot name who answered writes
-what it does know — `"langgraph:interrupt"` — and never `""` and never `None`: an approval with
-no approver is evidence that answers the wrong question.
+`ApprovalAnswer.approver` MUST be a non-empty string — `InvalidArgument` otherwise (T129e) —
+and it is what `store.grant_approval` writes on the record, and from there what reaches
+`APPROVAL_CONSUMED.data.approver` and the receipt's `approver` field, by the path `Control`
+already has (`v0.1 §6.1`). An adapter that cannot name who answered writes what it does know
+and never `""` and never `None`: an approval with no approver is evidence that answers the
+wrong question.
+
+**It names a channel, not a person**, wherever the framework's primitive does not identify one.
+`"langgraph:interrupt"` says where the answer came from, in the same register as `v0.1`'s
+`"cli:local"` and `"cli:scripted"`, and no document may describe `approver` as *who* approved —
+that is `v0.3 §13`'s "authenticating the approver", which is still out of scope.
 
 ### 2.3 What an adapter is handed, what it must call, what it may never call
 
@@ -226,9 +284,9 @@ its canonical arguments, its resource, its environment, the principal's `agent` 
 `action_hash`, and the request's expiry. It does **not** carry the `Action` object, the
 `Control`, the store, or the executor — nothing an adapter could act on rather than display.
 
-**Must call.** `Control.execute` (or `@protect`, which calls it) for every action, and
-`Control.evaluate` where the framework needs the decision *before* it invokes the tool (§3.5).
-Nothing else in the kernel is required of an adapter.
+**Must call.** `@protect` (which calls `Control.execute`) for every action, and
+`ctrlrun.adapter.needs_approval` where the framework needs the decision *before* it invokes the
+tool (§3.5). Nothing else in the kernel is required of an adapter.
 
 **May never call.** Directly or through any object it can reach:
 
@@ -236,14 +294,29 @@ Nothing else in the kernel is required of an adapter.
 |---|---|
 | `StateStore.reserve_effect`, `consume_approval`, `consume_approval_and_reserve`, `begin_execution`, `commit_effect`, `fail_effect`, `mark_ambiguous`, `resolve_effect`, `extend_lease` | Reservation and outcome are `v0.1 §5.5`'s asymmetry. A second implementation of it is the one drift this codebase must not have. |
 | `StateStore.grant_approval`, `deny_approval` | The grant is written in exactly one place, and it is core's (§2.4). |
+| `StateStore.put_approval_request` | Creating a request out of band is the first half of a second approval path, and the second half is answering it. |
+| `StateStore.hold_continuation`, `take_continuation` | The elicitation machinery is reachable without `Control.resume`, so naming only `resume` would be the missing enumeration this project keeps finding (`v0.3 §4.3.1`). |
 | `StateStore.put_delegation`, `revoke_delegation`, `Control.delegate`, `Control.revoke` | An adapter creates no authority. |
 | `Control.resume`, and raising `Suspended` | That is the *elicitation* round trip, and an approval is not one (§3.1). |
 | Constructing a `Principal` | It sees one and never supplies one (§4.2). |
-| `Policy.evaluate` in isolation | `v0.3 §11` — the combined `§4.6` decision or nothing. `Control.evaluate` is that. |
+| **Constructing a `Control`** | `Control(identity=..., authority=..., clock=..., environment=...)` is every hole in this table by one route, and the most tempting one: an adapter that built its own `Control` would choose the identity provider, which is §4.2 defeated in a constructor keyword. The **operator** builds the `Control` and hands it to the adapter. |
+| `Policy.evaluate` in isolation | `v0.3 §11` — the combined `§4.6` decision or nothing. `needs_approval` and `Control.evaluate` are that. |
 
-**May call.** `Control.evaluate`, `control.policy.mode`, `ctrlrun.adapter.banner`, and the
-read-only accessors `Control.policy`, `Control.store`, `Control.environment`. Reading is not
-the problem; writing is.
+**May call.** `ctrlrun.adapter.needs_approval`, `ctrlrun.adapter.banner`, `Control.evaluate`,
+and the read-only accessors `Control.policy`, `Control.store`, `Control.environment`,
+`Control.resolve_principal`. Reading is not the problem; writing is.
+
+**Who wires it up.** The operator, in the same breath as the policy and the store:
+
+```python
+control = Control(policy, store, approvals=InterruptApprovalProvider(store, MyInterrupt()),
+                  identity=..., authority=...)
+agent = build_my_agent(control)          # the adapter is handed the Control, and builds none
+```
+
+This is not a convention, it is the boundary. Everything an adapter must not choose —
+the identity provider, the authority document, the clock, the environment, the mode — is
+chosen on the line above, by the person who deployed it, in the file they already look at.
 
 ### 2.4 One place the grant is written, and it is not the adapter
 
@@ -252,21 +325,49 @@ the problem; writing is.
 1. Reads the record. Absent → `ApprovalMismatch(reason="unknown")`, exactly as
    `LocalApprovalProvider` does. Not `pending` → the request has already been answered or
    consumed; return per `v0.1 §4.3` (`None` for anything that will never be granted).
-2. Checks the request's own expiry against the clock **before** interrupting. An expired
-   request is `ApprovalTimeout`: interrupting a human about a request that can no longer be
-   granted spends the one scarce resource in the system on nothing.
+2. Checks the deadline **before** interrupting — the request's own `expires_at`, or `timeout`
+   from now, whichever is sooner. Already past → `ApprovalTimeout`, and `interrupt()` is **not
+   called**: putting a request to a human that can no longer be granted spends the one scarce
+   resource in the system on nothing.
 3. Builds a `PendingApproval` from the record and calls `interrupt.interrupt(pending)`.
-4. Applies §3.4's binding check to the returned `ApprovalAnswer`.
-5. Records the answer: `store.grant_approval(request_id, answer.approver)` on a grant,
+4. Applies §3.4's binding check to the returned `ApprovalAnswer`, and checks `approver` is a
+   non-empty string.
+5. Re-checks the same deadline, now that the interrupt has returned. Past it →
+   `ApprovalTimeout`, **nothing is written, and the record is left `pending`**. A human who
+   deliberated past the request's expiry has answered a dead request.
+   `ScriptedApprovalProvider` has this rule for the same reason (`v0.1 §4.3`) — a double that
+   could grant what the real provider would refuse invalidates the tests that use it.
+6. Records the answer: `store.grant_approval(request_id, answer.approver)` on a grant,
    `store.deny_approval(request_id, answer.approver)` on a refusal — **the same two calls
    `ctrlrun approve` and `ctrlrun deny` make**, and the same two `WebhookApprovalProvider`
    makes when an answer arrives out of band.
-6. Re-checks expiry after the interrupt returns, before recording. A human who deliberated past
-   the request's expiry has answered a dead request: `ApprovalTimeout`, and nothing is written.
-   `ScriptedApprovalProvider` has this rule for the same reason (`v0.1 §4.3`) — a double that
-   could grant what the real provider would refuse invalidates the tests that use it.
 
-Step 5 is why rule 2 is structural. No adapter writes a grant, so no adapter can grow a second
+The order of 5 and 6 is the whole of step 5. `grant_approval` refuses an expired record on its
+own (`v0.1 §4.2 A3`), so writing first and checking after would reach the same *decision* —
+and would leave the record `expired` rather than `pending`, and would raise
+`ApprovalMismatch(reason="expired")` rather than `ApprovalTimeout`. Both are observable, and
+T129d asserts both, because a step whose removal changes nothing a test can see is
+documentation rather than defence.
+
+**`timeout`** is a deadline on the *provider*, not on the framework. `@protect(wait=True)`
+passes `None`, so the request's own expiry is the bound — which is `LocalApprovalProvider`'s
+rule unchanged. Where `interrupt()` blocks, the provider cannot interrupt it: the framework owns
+that call and the adapter's README says how its primitive is bounded (§7 item 5). Where
+`interrupt()` exits non-locally there is nothing to bound. So `timeout` is honoured at steps 2
+and 5 and nowhere else, and this sentence exists because a parameter in a frozen signature that
+no step mentions is a parameter somebody will implement differently.
+
+**No event is appended by the provider, and none is claimed.** An `ApprovalProvider` is
+constructed with an `ApprovalStore` (`v0.1 §5.3`) and has no sink and no `Control`; giving it
+one would make `adapter.py` import `receipt.py` and become a second thing fanning out evidence
+(`ARCHITECTURE.md` §6). So a refusal at step 4 appends **no `APPROVAL_INVALIDATED`** — it raises
+`ApprovalMismatch`, writes nothing, and leaves the request `pending` with its
+`APPROVAL_REQUESTED` standing as the only record that a human was asked. `WebhookApprovalProvider`
+is in exactly this position and appends nothing either. It is a real limitation and it is stated
+rather than papered over: a mutated answer is visible as an exception and as a request that was
+never granted, and not as an event with a reason on it.
+
+Step 6 is why rule 2 is structural. No adapter writes a grant, so no adapter can grow a second
 approval path by accident, by copy-paste, or by an author who read §1.1 and forgot it. The
 adapter's whole contribution is step 3.
 
@@ -335,7 +436,8 @@ The framework-independent shape. §3.5 says how each of the two framework shapes
 
 ```
 1.  the agent calls the protected tool
-2.  @protect builds the Action        — principal from Control's IdentityProvider (§4.2)
+2.  @protect builds the Action        — principal from Control's IdentityProvider, or from
+                                      context() where none is installed (v0.3 §3.2); §4.2
 3.  Control.execute                   — principal expiry, authority, policy (v0.3 §4.3.1)
 4.    policy says APPROVE
 5.    the provider records the request, APPROVAL_REQUESTED is appended
@@ -358,9 +460,41 @@ re-decided" row does not apply because nothing is held. Re-deciding is cheap and
 whole difference between an approval gate and a suspension.
 
 Step 12 re-presents **the same `Action` object** — same `action_id`, same `action_hash` — which
-is what `@protect(wait=True)` already does. An adapter that rebuilt the action between the two
-legs would be re-deriving the hash from whatever the framework replayed, which is exactly the
-mutation §3.4 is about.
+is what `@protect(wait=True)` already does *within one Python call*. An adapter that rebuilt the
+action between the two legs would be re-deriving the hash from whatever the framework replayed,
+which is exactly the mutation §3.4 is about.
+
+### 3.2.1 Where the framework replays, steps 1 to 15 happen twice, and what that costs
+
+Stated here rather than discovered by an implementer, because §3.2's list reads as one pass and
+the resumed-in-place shape (§3.5) is two.
+
+On the second pass `@protect` builds a **new** `Action` with a **new `action_id`**, and
+`_presented` creates a **new request**. So:
+
+- **`action_id` is not continuous.** The `action_id` on the `PendingApproval` the human saw is
+  the first pass's; the one on the receipt is the second's. Both are in the event log under
+  their own `ACTION_PROPOSED` and `APPROVAL_REQUESTED`, and correlating them is the reader's
+  work. `v0.1 §2.1` already says `action_id` identifies a *proposal* and a retry produces a new
+  one; a replayed pass is a new proposal by that definition. **`action_hash` is continuous**,
+  because `action_id` is excluded from the canonical form (`v0.1 §2.2`) — which is why §3.4's
+  carried value is about content and never about an id.
+- **The first pass's request is orphaned.** It stays `pending` and grantable by
+  `ctrlrun approve` for its full TTL, for the same `action_hash`. Not a hole — an approval is
+  single-use and hash-bound and is consumed atomically with the reservation — but not nothing
+  either, and an operator watching a queue will see two requests for one refund.
+- **The approval TTL does not bound the human's deliberation in this shape.** They answer
+  against the first pass's request; the grant lands on the second pass's, created *after* they
+  answered. What bounds the interval is the framework's checkpoint, which may hold it for a
+  month. §2.4's steps 2 and 5 are not dead — they fire wherever `interrupt()` blocks rather than
+  exiting non-locally, which is the other shape and every synchronous framework — but in a
+  resumed-in-place adapter they guard a window that adapter never opens.
+
+None of this is safe by accident. **Step 13 is what makes it safe**: the resumed pass re-runs
+principal expiry, authority and policy at resumption time, so a credential that expired, an
+authority revoked or a delegation escalated during the month refuses the action then. What the
+human's consent does not carry across the interval is an expiry of its own, and §7 item 5
+requires the adapter's README to say so in those words.
 
 ### 3.3 What crosses the interrupt
 
@@ -380,34 +514,48 @@ step 14 is the one created at step 5, from the action executing at step 15, and 
 framework, with no cooperation from either.
 
 What crossing an interrupt adds is a second question: **does the payload the human read describe
-the action that then runs?** The framework replays the call from its own checkpoint, and whether
-that replay is faithful is the framework's property and not the kernel's.
+the action that then runs?** The framework replays the call from its own checkpoint (§3.2.1), and
+whether that replay is faithful is the framework's property and not the kernel's.
 
-So the rule is split, and each half says which kind of guard it is:
+**The check, and it is mandatory.** `FrameworkInterrupt.carries_approved_arguments` is a
+required attribute of the Protocol, and it declares what the framework can do — not what the
+adapter would like to check:
 
-- **Where the framework's resumption returns a value the adapter can inspect**, the adapter MUST
-  put the `action_hash` in the interrupt payload — it is a field of `PendingApproval`, so this
-  costs nothing — and the provider MUST refuse an `ApprovalAnswer` whose `action_hash` is set
-  and does not equal the request's: `ApprovalMismatch(reason="mismatch")`, `APPROVAL_INVALIDATED`,
-  nothing granted. **This is prevention**, and it is checked in core (§2.4 step 4) rather than
-  in each adapter.
-- **Where the framework's resumption carries no value the adapter can inspect**,
-  `ApprovalAnswer.action_hash` is `None` and the binding across the interrupt is **the
-  framework's checkpoint, not CTRLRun's hash**. That is *attribution*: evidence will show what
-  was approved and what ran, and a divergence is findable afterwards, not refused beforehand.
-  The adapter's README MUST say so, in the §7 section that names every place its framework's
-  behaviour is visible through this contract, and MUST NOT describe it as prevention.
+- **`True`.** The answer MUST carry `approved_arguments`: the arguments the human's answer was
+  given against, recovered from the framework's own record of it — LangGraph's resume value, the
+  Agents SDK's `ToolApprovalItem`. The provider compares them to `pending.arguments` with the
+  type-strict equality of `v0.1 §3.2`, and refuses on any difference:
+  `ApprovalMismatch(reason="mismatch")`, nothing granted, the request left `pending`. An answer
+  that omits them when the adapter declared it would carry them is refused the same way — a
+  declaration is not a hint. **This is prevention**, it is performed in core, and it is the same
+  check `WebhookApprovalProvider` makes on an inbound answer, which is mandatory there too.
+- **`False`.** The framework's resumption carries nothing the adapter can inspect. The binding
+  across the interrupt is then **the framework's checkpoint, not CTRLRun's**: that is
+  *attribution*, evidence will show what was approved and what ran, and a divergence is findable
+  afterwards rather than refused beforehand. The adapter's README MUST say so in those words
+  (§7 item 4) and MUST NOT describe it as prevention, and the kit reports
+  `binding: not_applicable` with the adapter's reason — **never `pass`**.
 
-A `None` is therefore a declaration, not an omission, and the conformance kit treats it as one:
-the mutation suite is reported `not_applicable` with the reason `the framework's resumption
-carries no action_hash`, never `pass`. `v0.4 §1`'s rule holds one level up — **not applicable
-is not a pass** — and a kit that reported a green mutation suite for an adapter that cannot
-check it would be the false-green problem in its purest form.
+**Why arguments and not the hash.** The webhook's answerer echoes the `action_hash` it was shown,
+because it was shown one. A framework's approval item was not: it records the arguments the model
+proposed and knows nothing of CTRLRun's canonical form, and an adapter that computed a hash to
+echo would have to build an `Action`, which needs a `Principal`, which §4.2 forbids — the same
+hole `needs_approval` closed in §2.2. So the carried value is the one a framework actually holds.
+It is not a weaker check: within one framework call the action's name and environment come from
+the `Control`, its `resource` is a template over its arguments (`v0.1 §5.1`) and its principal
+from the `IdentityProvider`, so **the arguments are the only component of the canonical form a
+replay can change**, and comparing them is comparing the hash for everything at risk.
 
-An `ApprovalAnswer` whose `action_hash` is set and *matches* is the ordinary case and needs no
-comment. An adapter MUST NOT set it to the request's hash when the framework did not carry one
-back: that is manufacturing the check, and it is the one way to turn attribution into a lie
-about prevention.
+**An adapter MUST NOT synthesize `approved_arguments` from `pending.arguments`.** Handing back a
+copy of what it was just given makes every comparison trivially pass; it is manufacturing the
+check, and it is the one way to turn attribution into a lie about prevention. §5.4's
+`echoes-the-payload` fixture is that adapter, and the kit fails it.
+
+**Why the declaration is not a §3.8 flag.** `carries_approved_arguments` cannot make a check that
+would otherwise have run not run: it states a fact about the framework, it is required rather
+than defaulted, and `False` is not free — it puts `binding: not_applicable` in the kit's report
+and in the adapter's README, permanently and where a reviewer reads first. A flag hides a
+weakening; this publishes one.
 
 ### 3.5 The two framework shapes
 
@@ -423,20 +571,21 @@ which costs a row and nothing else. The adapter needs nothing but the provider.
 
 **Decided before invocation** (OpenAI Agents SDK). The framework asks whether a tool call needs
 approval *before* it invokes the tool, surfaces its own approval item, and invokes the tool only
-after a human answers. The adapter answers that question with **`Control.evaluate(action)` and
-nothing else**: `APPROVE` → yes, anything else → no. `evaluate` is the right call and the only
-one — it returns the combined `v0.3 §4.6` decision, it reads the store, and it **writes
-nothing**, so a predicate the framework may call more than once leaves no events behind and
-creates no request.
+after a human answers. The adapter answers that question with **`ctrlrun.adapter.needs_approval`
+and nothing else**: `True` where the combined `v0.3 §4.6` decision is `APPROVE`, `False`
+otherwise. The function is core's rather than each adapter's for the reason §2.2 records — the
+only way to write it in an adapter was to invent a `Principal` — and it writes nothing and
+creates no request, so a predicate the framework may call more than once leaves nothing behind.
 
 A `DENY` at that predicate returns "no approval needed" and lets the tool be invoked, so that
 `Control.execute` denies it with a receipt, an `ACTION_DENIED` and the exception the caller
 catches. Refusing inside the predicate would refuse without evidence, and `v0.3 §4.3` is
 explicit that a denial with a principal to attribute it to belongs in the evidence log.
 
-Nothing in either shape needs a new kernel entry point, and that is a deliberate outcome rather
-than a happy accident: the surface v1.0 freezes is one Protocol, one dataclass pair and one
-provider, and every check that matters is `Control.execute`'s, unchanged.
+Neither shape needs a new **entry point** — no new way to reach an effect, no path that reserves
+or commits or grants outside `Control`. Both needed one new **reader**: `needs_approval`, which
+resolves a principal and evaluates, and writes nothing. The distinction is the one `v0.3 §4.3.1`
+draws, and §4.1 puts `needs_approval` in that table and says what it does about each column.
 
 ### 3.6 `mode: observe`
 
@@ -460,11 +609,15 @@ forget. `ctrlrun.adapter.banner(control)` does it — once per `Control` object,
 `v0.3 §6.5` fixed, so no adapter has to remember the sentence and no two adapters say it
 differently. It is a no-op under `mode: enforce`.
 
-**The conformance kit refuses an observing `Control`** and reports every approval-routing suite
-`not_applicable — mode: observe`, with the reason on the report. Running the suites in a
-synthetic enforce mode would report guarantees about a configuration nobody deployed —
-`v0.4 §3.8`'s decision, one level up — and running them as-is would report a wall of failures
-that are true and useless.
+**The conformance kit refuses an observing `Control`**, and refusing is all it does: the report
+carries `status: "refused"`, `reason: "mode: observe"`, no suites and no denominator, and it is
+**not a success**. `v0.4 §3.8` is the model and this follows it exactly — verify refuses, prints
+and exits 2 under `mode: observe`, and it names *zero applicable guarantees* as its own exit-2
+condition because `0/0` reported as a pass is the same false green as `8/8` with five N/As. An
+all-`not_applicable` report with an empty denominator is that degenerate report, so the kit does
+not produce one. Running the suites in a synthetic enforce mode would report guarantees about a
+configuration nobody deployed; running them as-is would report a wall of failures that are true
+and useless.
 
 ### 3.7 An adapter reaches no network of its own
 
@@ -489,12 +642,12 @@ CTRLRun check.
 
 ## 4. The entry-point rows
 
-### 4.1 `v0.3 §4.3.1` gains two rows
+### 4.1 `v0.3 §4.3.1` gains three rows
 
 `v0.3 §4.3.1` exists because the expired-credential hole was a **missing enumeration**, not a
 missing check, and it says so: *"A new entry point is a specification amendment before it is
-code."* An adapter is a new way in. Two adapter kinds, two rows, each stating what it does about
-each column **before** a line of either is written.
+code."* An adapter is a new way in. Three rows, each stating what it does about each column
+**before** a line of code is written.
 
 The rule the table fixes is restated as binding here, unchanged: **principal validity and
 expiry, then authority, then policy.**
@@ -502,16 +655,35 @@ expiry, then authority, then policy.**
 | Entry point | Builds an `Action` | Resolves identity | Evaluates authority |
 |---|---|---|---|
 | An adapter's protected tool → `@protect` → `Control.execute` | yes — `@protect` does, from the bound call | yes (`v0.3 §3.2`), from the `Control`'s provider | yes, before the approval gate |
-| An adapter's pre-invocation predicate → `Control.evaluate` | no — the adapter builds it, or `@protect` does | no; it is the in-process trust boundary (`v0.3 §3.1`), exactly as a directly-built `Action` is | yes — the combined `v0.3 §4.6` decision, and it writes nothing |
+| `ctrlrun.adapter.needs_approval` → `Control.evaluate` | yes — **core** builds it, from the `Control`'s principal and the framework's arguments; the adapter supplies neither a principal nor an `Action` | yes (`v0.3 §3.2`), by `Control.resolve_principal`; an expired credential is a `DENY` here, as it is for `evaluate` (`v0.3 §2.3`) | yes — the combined `v0.3 §4.6` decision, and it writes nothing |
+| `InterruptApprovalProvider.wait` → `store.grant_approval` / `deny_approval` | no — it records an answer about an action that already exists | no — the principal was resolved when the request was created, and is on the stored action | **no, and here is why that is safe** |
 
-Neither row is a new *check*. Both are existing rows of that table reached through a framework,
-and that is the point: an adapter's only route to an effect is `Control.execute`, so an adapter
-that skipped a check would have to have reimplemented the kernel to do it. §8's T126–T128 assert
-the order **by observation** — the events an action leaves — and not by reading the source.
+The first row is `v0.3 §4.3.1`'s `@protect` row reached through a framework, and is listed
+because a reader looking for "what does an adapter do" must find it in the table rather than
+infer it. The second and third are new paths.
 
-`InterruptApprovalProvider` is deliberately **not** a row. It creates no action and evaluates
-nothing; it records a human's answer, which is what `ctrlrun approve` does, and `ctrlrun approve`
-is not a row either.
+**Why the third row evaluates no authority, argued rather than asserted.** An independent review
+declined this row's first draft — which omitted it entirely, on the grounds that "it records a
+human's answer, which is what `ctrlrun approve` does, and `ctrlrun approve` is not a row either"
+— and the decline is recorded here because the reasoning belongs in the document.
+
+The argument was unsound in its comparison. `ctrlrun approve` takes its input from an operator's
+shell; `wait()` takes its input from a framework checkpoint, and whatever influences the agent's
+state can influence that. The comparable out-of-band path is `WebhookApprovalProvider`'s inbound
+handler, which is guarded by a signature check **and** a **mandatory** `action_hash` check
+against the stored request — and the adapter path's binding check is now mandatory too, on the
+same rule, which is §3.4's `carries_approved_arguments`.
+
+What makes evaluating authority in `wait()` unnecessary — rather than merely inconvenient — is
+that a grant authorizes nothing on its own. The action is decided **again**, in full, at step 13:
+`Control.execute` runs principal expiry, then authority, then policy, and only then consumes the
+approval atomically with the reservation. An authority revoked while the human deliberated
+refuses the action there. Evaluating it in `wait()` as well would be a guard that can only fire
+where a later guard fires with the same observable result, which this project treats as
+documentation rather than defence.
+
+So the row is in the table with three explicit cells, which is what `v0.3 §4.3.1` asks for. An
+omitted row is the failure mode; a row saying "no, and here is why" is not.
 
 ### 4.2 An adapter sees the principal and never supplies it
 
@@ -523,12 +695,31 @@ puts one back in.
 
 An adapter that accepted a principal argument is `--principal-from-client-info` reborn, which
 `v0.3 §8.1` removed by name and `v0.3 §8.4` then removed again from the ACS hook after it turned
-up there wearing different clothes. A framework's session object knows a user id; that is the
-framework's word for it, and a self-reported name cannot be an authorization input. An operator
-who wants the framework's identity to count wires an `IdentityProvider` that reads it —
-explicitly, at the one seam that exists for it, where it is visible in the deployment.
+up there wearing different clothes. **It turned up a third time in this document's first draft**,
+in §3.5's instruction to answer the pre-invocation predicate with `Control.evaluate(action)`:
+`Action.principal` has no default, so the only way to obey was to build one from the framework's
+session, and an independent review found it there. `needs_approval` is core's because of that,
+and this paragraph is the record.
+
+A framework's session object knows a user id; that is the framework's word for it, and a
+self-reported name cannot be an authorization input. An operator who wants the framework's
+identity to count wires an `IdentityProvider` that reads it — explicitly, at the one seam that
+exists for it, on the `Control` **they** construct (§2.3), where it is visible in the deployment.
 
 `PendingApproval.agent` and `.user` are there so a human sees who is asking. They are outputs.
+
+**What T129 actually asserts**, since the structural half is easy to write as theatre:
+
+1. No **public callable** in `ctrlrun.adapter` — every function, and every `__init__` — accepts a
+   parameter named `principal`, `agent`, `user` or `claims`, or annotated `Principal`. Scoped to
+   callables, because `PendingApproval` has fields named `agent` and `user` on purpose and they
+   are read-only fields of a frozen dataclass.
+2. `ctrlrun.adapter` exposes no way to **construct a `Control`** and no parameter named
+   `identity`, `authority` or `environment` — which is the route a `Principal` would actually
+   take, and the one a signature scan over `ctrlrun.adapter` alone would miss.
+3. Behaviourally: a `Control` whose `StaticIdentityProvider` resolves `A`, driven by an adapter
+   whose framework session says `B`, produces receipts naming `A` — and the adapter's attempt to
+   assert `B` is one of §5.4's fixtures, so the assertion has a subject.
 
 ---
 
@@ -584,8 +775,51 @@ class ConformanceAdapter(Protocol):
     def invoke(self, request: CallRequest) -> Any: ...
 
 
-def run(adapter: ConformanceAdapter) -> ConformanceReport: ...
+class SuiteStatus(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    id: str                                  # "T1", "T66" — the acceptance test it comes from
+    title: str
+    status: SuiteStatus
+    reason: str | None = None                # required for FAIL and NOT_APPLICABLE
+    detail: Mapping[str, Any] = ...
+
+
+@dataclass(frozen=True)
+class SuiteResult:
+    name: str                                # "kernel", "binding", ...
+    status: SuiteStatus                      # FAIL if any case failed; N/A if every case is
+    reason: str | None = None
+    cases: tuple[CaseResult, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConformanceReport:
+    framework: str
+    status: Literal["ok", "refused"]         # "refused" is §3.6's observing Control
+    reason: str | None = None                # why, when refused
+    suites: tuple[SuiteResult, ...] = ()
+
+    @property
+    def applicable(self) -> int: ...         # suites that are not NOT_APPLICABLE
+    @property
+    def passed(self) -> int: ...
+    @property
+    def ok(self) -> bool: ...                # status "ok", applicable > 0, passed == applicable
+    def to_text(self) -> str: ...            # "4/4 (2 not applicable)", never "6/6"
+
+
+def run(adapter: ConformanceAdapter, control: Control) -> ConformanceReport: ...
 ```
+
+`ok` is `False` for a refused report and `False` for `applicable == 0`, on `v0.4 §3.8`'s rule:
+`0/0` reported as success is the same false green as `6/6` with two N/As. `reason` is required
+on every `FAIL` and every `NOT_APPLICABLE` — an N/A without one is an N/A nobody can check.
 
 `invoke` runs **one** protected call end to end through the framework and returns the executor's
 value. Every CTRLRun exception propagates: the kit asserts on `ApprovalMismatch`,
@@ -602,20 +836,36 @@ allowed outright.
 
 ### 5.3 The suites
 
-Each is a named group, reported per suite and per test.
+Each is a named group, reported per suite and per case.
 
 | Suite | From | What it drives through the adapter |
 |---|---|---|
 | `kernel` | `v0.1 §7` T1, T4, T5, T6, T8 | Lost response blocks a blind retry · replayed approval · expired approval · unknown action fails closed · `FAILED` permits retry |
-| `binding` | `v0.1 §7` T2 | An approval granted for one action does not authorize a mutated one (§3.4; `not_applicable` where the framework carries no `action_hash` back) |
-| `concurrency` | `v0.1 §7` T3 | Two attempts on one effect key: exactly one commits |
+| `binding` | §3.4 | An answer whose `approved_arguments` differ from the proposal's is refused, and nothing is granted. `not_applicable` where `carries_approved_arguments` is `False`, with the adapter's reason |
+| `duplicate` | `v0.1 §7` T3, in one process | Two `invoke` calls on one effect key: exactly one commits and one is refused |
 | `authority` | `v0.3 §10` T66, T70, T74, T78 | No grant · expired grant · a denial by authority leaves no pending approval · delegation escalation |
 | `identity` | `v0.3 §10` T60, T63 | No principal, no action · the provider wins over anything the calling code says (§4.2) |
-| `observe` | `v0.3 §10` T82 | Refused: every suite `not_applicable — mode: observe` (§3.6) |
+
+**`binding` is sourced from §3.4 and not from `v0.1 §7` T2**, and the distinction matters. T2
+mutates the action *between* a human's grant and its presentation, which through
+`@protect(wait=True)` is unreachable: the request is created and consumed inside one call. What
+an adapter can get wrong is the other half — carrying back an answer that was given against a
+different proposal — and that is what this suite drives. T2 itself is unchanged and still runs
+against the kernel, where it belongs.
+
+**`duplicate` is not `v0.1 §7` T3**, and says so. T3 uses `multiprocessing` and is a statement
+about SQLite's `BEGIN IMMEDIATE` across OS processes (`v0.1 §5.3 E1`); a framework
+runtime driven across `spawn`ed processes measures the framework's process model and not the
+adapter. What this suite catches is an adapter that cached a decision, reused a request id, or
+memoized a receipt — all of which show up as two commits on one key in one process. Cross-process
+reservation stays the kernel's guarantee and the kernel's test.
 
 A suite reports `pass`, `fail` or `not_applicable` **with a reason**, and the report's
 denominator counts applicable suites only. `v0.4 §4.1`'s output rules are the model, and there
 is no flag that folds a `not_applicable` into the count.
+
+**`mode: observe` is not a suite.** It is a precondition: `run()` on an observing `Control`
+returns a refused report and no suites at all (§3.6).
 
 ### 5.4 The broken-adapter fixtures, and why they are written first
 
@@ -625,12 +875,26 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 
 | Fixture | What it does wrong | Fails |
 |---|---|---|
-| `never-executes` | Returns a plausible value without calling `request.executor` | every suite whose control counts executor calls |
-| `swallows-not-executed` | Catches `NotExecuted` and returns `None` | `kernel` — T8's retry, and the whole of `v0.1 §5.5`'s asymmetry |
-| `replays-approval` | Keeps the `request_id` and presents it again on the next call | `kernel` — T4 |
-| `self-asserts-principal` | Builds a `Principal` from the framework's session and passes it | `identity` — §4.2 |
-| `swallows-denial` | Catches `ActionDenied` and returns a value | `kernel` — T6 |
-| `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` — an approval nobody asked for |
+| `never-executes` | Returns a plausible value without calling `request.executor` | `kernel` |
+| `swallows-not-executed` | Catches `NotExecuted` and returns `None` | `kernel` |
+| `replays-approval` | Keeps a `request_id` and presents it again on the next call | `kernel` |
+| `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
+| `swallows-denial` | Catches `ActionDenied` and returns a value | `kernel` |
+| `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` |
+| `grants-for-itself` | Calls `store.grant_approval` rather than returning an `ApprovalAnswer` | `kernel` — an approval no interrupt produced |
+| `echoes-the-payload` | Declares `carries_approved_arguments = True` and returns `pending.arguments` as the answer's `approved_arguments` | `binding` — §3.4's manufactured check |
+| `caches-the-decision` | Memoizes the first call's result and returns it for the second | `duplicate` |
+
+`grants-for-itself` and `echoes-the-payload` exist because the document's second rule and its
+mutation check were the two claims with no fixture behind them. "Never a second approval path"
+and "this is prevention, not attribution" are the sentences a security reviewer reads first, and
+a rule with no broken fixture is a rule the kit cannot tell you about.
+
+Each fixture fails **the suite named in its row**. Several also fail others incidentally — an
+adapter that never reaches the executor fails anything whose control counts executor calls — and
+the assertion is on the named suite rather than on an exclusive one, because "and no other" is
+false of a fixture broken badly enough. What T130 forbids is a fixture that fails *nothing* and a
+fixture whose named suite passes.
 
 These are written **before** the reference adapters (build-list order: item 3 precedes items 4
 and 5), because "two adapters pass the suites" is this milestone's exit criterion and it means
@@ -706,14 +970,20 @@ Each adapter's README, and this list is normative:
    for it, and the date read. Not "LangGraph's interrupt support" but `interrupt()` and
    `Command(resume=...)`.
 3. **Which framework shape it is** — resumed in place, or decided before invocation (§3.5).
-4. **Whether the framework's resumption carries an `action_hash` back**, and therefore whether
-   §3.4's mutation check is prevention or attribution **in this adapter**. If attribution, the
-   README says so in those words. This is the sentence a security reviewer reads first, and an
-   adapter that buried it would be the false-green problem in prose.
-5. **Every place the framework's behaviour is visible through the contract.** Retry defaults,
-   what the framework does with a tool that raised, whether it replays a checkpointed call with
-   identical arguments, whether the interrupt payload is persisted and where. Item 1 measures
-   the first two for the two reference adapters; an adapter written later cites its framework's
+4. **`carries_approved_arguments`, its value, and what that makes the binding.** `True` means
+   §3.4's check runs in core on every answer: *prevention*. `False` means the framework's
+   resumption carries nothing the adapter can inspect, the binding across the interrupt is the
+   framework's checkpoint, and the README says **attribution** in that word — with the reason
+   the kit will print beside `binding: not_applicable`. This is the sentence a security reviewer
+   reads first, an adapter that buried it would be the false-green problem in prose, and T137b
+   asserts it.
+5. **Every place the framework's behaviour is visible through the contract.** Retry defaults;
+   what the framework does with a tool that raised; whether it replays a checkpointed call with
+   identical arguments; whether the interrupt payload is persisted and where; **how long its
+   primitive can hold an interrupt open, and therefore whether the approval TTL bounds the
+   human's deliberation at all** (§3.2.1); and, for a resumed-in-place adapter, that
+   `PendingApproval.action_id` is not the `action_id` on the receipt. Item 1 measures the first
+   two for the two reference adapters; an adapter written later cites its framework's
    documentation and says what it did not establish, exactly as the probe's README does.
 6. **What it does not do**: it is not a second approval path, it grants nothing, and it is not
    required for a framework with no HITL primitive (§1.1).
@@ -730,104 +1000,175 @@ documents MUST still pass.
 
 ### Item 2 — The adapter surface and the entry-point rows (§2, §4)
 
+Every test below that asserts a refusal uses an interrupt **double that counts its calls**, and
+asserts the count. A refusal is satisfied just as well by a run in which the adapter was never
+reached, and that run passes against a surface with the guard deleted (`v0.4 §1.3`).
+
 #### T126 — The order is asserted by observation, not by reading the source
 A `Control` with an expired principal, an authority section that would deny, and a policy that
 would deny, driven through an adapter. The events are `ACTION_PROPOSED` then `ACTION_DENIED`
 with `reason="principal_expired"`, and there is **no** `AUTHORITY_DENIED` and **no**
-`POLICY_EVALUATED`. Removing the expiry check makes the next reason appear, which is what the
-test distinguishes.
+`POLICY_EVALUATED`. Its **control**: the same `Control` with the principal's `expires_at` moved
+into the future reaches `AUTHORITY_DENIED` instead — so the test distinguishes which guard ran
+and not merely that something refused. And the interrupt double was called **zero** times, with
+a mutant that proves the double can be called: the same adapter against a policy that approves.
 
 #### T127 — An adapter that skips authority is refused
-An adapter that builds an `Action` and hands it to a `Control` with an `authority:` section
-gets `AuthorityDenied` for a principal with no grant, and the receipt is `denied` with **no**
-`POLICY_EVALUATED` (`v0.3 §4.3`). There is no path through §2's surface that reaches an
-executor without it.
+An adapter that reaches a `Control` with an `authority:` section gets `AuthorityDenied` for a
+principal with no grant, and the receipt is `denied` with **no** `POLICY_EVALUATED`
+(`v0.3 §4.3`). The adapter-specific half, without which this is a v0.3 regression relabelled:
+the kit's executor was called **zero** times, and an adapter that reached the executor directly
+— §5.4's `never-executes` inverted, one that runs the function without `Control` — fails this
+test. There is no path through §2's surface that reaches an executor without `Control.execute`,
+and this is what says so.
 
 #### T128 — An authority denial through an adapter leaves no pending approval
-`v0.3 §10` T74 driven through the surface: `AUTHORITY_DENIED`, no `APPROVAL_REQUESTED`, and
-`store.approvals_for(hash)` is empty. A human is never asked about an action that could not run.
+`v0.3 §10` T74 driven through the surface: `AUTHORITY_DENIED`, no `APPROVAL_REQUESTED`,
+`store.approvals_for(action_hash)` empty, and the interrupt double called zero times. A human is
+never asked about an action that could not run.
+
+#### T128b — `needs_approval` resolves the principal and evaluates both axes
+`ctrlrun.adapter.needs_approval` returns `True` only where the combined `v0.3 §4.6` decision is
+`APPROVE`; `False` for `ALLOW` and for `DENY` — including a `DENY` that came from **authority**,
+so the tool is invoked and `Control.execute` denies it with a receipt and an `ACTION_DENIED`
+rather than the predicate refusing silently. It **writes nothing**: the store's events, receipts
+and effects are byte-identical before and after, across every decision. And the principal on the
+Action it builds is `Control.resolve_principal`'s, asserted against a `Control` whose provider
+resolves someone other than the ambient `context()`.
 
 #### T129 — An adapter cannot supply a principal
-Asserted structurally: no name in `ctrlrun.adapter`'s public surface accepts a `Principal`, an
-`agent`, a `user` or a `claims` argument, checked by `inspect.signature` over every public
-callable and dataclass field of the module. `PendingApproval.agent` and `.user` are read-only
-strings on a frozen dataclass. And behaviourally: a `Control` with a `StaticIdentityProvider`
-resolving `A`, driven by an adapter whose framework session says `B`, produces receipts naming
-`A`.
+The three assertions of §4.2, each separately: no public callable in `ctrlrun.adapter` takes a
+`principal`, `agent`, `user` or `claims` parameter or a `Principal` annotation (by
+`inspect.signature`, scoped to callables); `ctrlrun.adapter` exposes no way to construct a
+`Control` and no `identity`, `authority` or `environment` parameter; and behaviourally, a
+`Control` whose provider resolves `A`, driven by an adapter whose framework session says `B`,
+produces receipts naming `A`.
 
 #### T129b — The provider is the only thing that grants
-`ctrlrun.adapter`'s public surface contains no call to `grant_approval` or `deny_approval`
-outside `InterruptApprovalProvider`, and an adapter that calls either directly is one of §5.4's
-broken fixtures. Asserted by driving a fixture that grants for itself and confirming the
-`replays-approval` suite fails.
+§5.4's `grants-for-itself` fixture — an adapter that calls `store.grant_approval` rather than
+returning an `ApprovalAnswer` — fails the `kernel` suite. Its control: the same adapter returning
+the answer instead passes. Without the pair, the assertion is that something failed rather than
+that this is what the kit catches.
 
 #### T129c — A framework error is never an answer
 An `interrupt()` that raises `RuntimeError` leaves the request `pending`, writes no receipt,
-appends no `APPROVAL_GRANTED` and no `APPROVAL_DENIED`, and the exception propagates. An
-`interrupt()` that raises `GraphInterrupt`-shaped control flow does the same and is not caught.
+appends no `APPROVAL_GRANTED` and no `APPROVAL_DENIED`, and the exception propagates unwrapped.
+A control-flow exception of the shape LangGraph's `GraphInterrupt` has does the same and is not
+caught, asserted with a custom `BaseException` subclass so the test does not depend on the
+framework being installed.
 
-#### T129d — An expired request is not put to a human
-A request whose `expires_at` has passed raises `ApprovalTimeout` from `wait()` **without**
-calling `interrupt()` at all (the double counts calls), and one that expires *while* the human
-deliberates raises `ApprovalTimeout` and writes no grant.
+#### T129d — An expired request is not put to a human, and a late answer is not recorded
+Two halves, and the second is what pins §2.4's step order. A request whose `expires_at` has
+passed raises `ApprovalTimeout` from `wait()` with the interrupt double called **zero** times.
+A request that expires *while* the double deliberates raises `ApprovalTimeout`, writes no grant,
+**and leaves the record `pending`** — not `expired`, which is what `grant_approval`'s own refusal
+would have left behind. Both the exception type and the record's status are asserted, so removing
+step 5 fails rather than passing on the backstop.
+
+#### T129e — An answer with no approver is refused
+`ApprovalAnswer(granted=True, approver="")` raises `InvalidArgument` from `wait()`, and nothing
+is written. Its control: a non-empty approver grants, and the string reaches
+`APPROVAL_CONSUMED.data.approver` and the receipt's `approver` field.
+
+#### T129f — `PendingApproval` survives a checkpoint
+`to_dict()` round-trips through `json.dumps`/`json.loads` for an action carrying every argument
+type `v0.1 §2.3` allows, at depth, and the result compares equal to the original. A framework
+checkpoints this payload, and a payload that would not serialize is one that works until the
+first restart.
+
+#### T129g — The banner is logged once per Control, and printed never
+`ctrlrun.adapter.banner` on a `Control` built from `mode: observe` logs `v0.3 §6.5`'s wording on
+the `ctrlrun` logger at `WARNING`, **once** for ten calls with the same `Control` and again for a
+second `Control`; it writes nothing to stdout or stderr (captured), and it is a no-op under
+`mode: enforce`. `caplog` and `capsys` together, because "logs" and "does not print" are two
+claims and one of them is the one an adapter inside somebody else's loop would break.
+
+#### T129h — The surface has no flag that relaxes a check
+No public callable in `ctrlrun.adapter` takes a parameter whose name matches
+`auto_approve|skip|bypass|dry_run|force|insecure|allow_|disable_`, and no module-level name in
+`ctrlrun.adapter` reads an environment variable. `v0.4`'s equivalent for verify, asserted the
+same way (§3.8).
 
 ### Item 3 — The conformance kit (§5)
 
 #### T130 — The kit fails a broken adapter, per suite and by name
-Each of §5.4's six fixtures is driven through `conformance.run`, and each fails **the suite
-named in that table** and no other. A fixture that failed everything would prove as little as
-one that failed nothing.
+Each of §5.4's nine fixtures is driven through `conformance.run`, and each fails **the suite
+named in its row**. A fixture that failed nothing, or whose named suite passed, is the failure
+this test catches; incidental failures of other suites are permitted and asserted as such,
+because "and no other" is false of an adapter broken badly enough.
 
 #### T131 — The kit passes a correct adapter
-A minimal in-process reference adapter — no framework, just the surface — passes every suite.
-Without it, T130 is satisfied by a kit that fails everything.
+A minimal in-process reference adapter — no framework, just the surface — passes every suite,
+with `binding` a genuine `pass` rather than an N/A. Without it, T130 is satisfied by a kit that
+fails everything.
 
 #### T132 — Not applicable is not a pass, one level up
-An adapter whose `ApprovalAnswer.action_hash` is always `None` reports `binding:
-not_applicable` with the reason, is excluded from the denominator, and is listed separately.
-There is no flag that folds it in.
+An adapter declaring `carries_approved_arguments = False` reports `binding: not_applicable` with
+**its own reason**, is excluded from the denominator, is listed separately, and `report.ok`
+remains `True` on the strength of the suites that did run. `to_text()` renders
+`4/4 (1 not applicable)` and never `5/5`. There is no flag that folds it in.
 
 #### T132b — The kit refuses an observing Control
-A policy with `mode: observe` gives every suite `not_applicable — mode: observe`, the report's
-denominator is zero, and the run does not report success.
+`run()` against a `Control` built from `mode: observe` returns `status="refused"`,
+`reason="mode: observe"`, **no suites**, and `report.ok is False`. Not an all-N/A report with a
+zero denominator, which is the degenerate `0/0` `v0.4 §3.8` refuses by name.
 
-#### T133 — The kit reaches no network
-The whole kit runs in a subprocess whose `sitecustomize` replaces `socket.socket`,
-`create_connection` and `getaddrinfo` with a refusal (`v0.4 §3.7`'s discipline), and passes.
+#### T132c — A zero denominator is not a pass
+A report whose every suite is `not_applicable` has `report.ok is False`. Asserted directly on
+`ConformanceReport`, because it is the rule and not a consequence of any particular adapter.
+
+#### T133 — Neither the kit nor an adapter reaches the network
+The kit's own run and **each reference adapter's kit run** (T135) happen in a subprocess whose
+`sitecustomize` replaces `socket.socket`, `create_connection` and `getaddrinfo` with a refusal
+(`v0.4 §3.7`'s discipline). Its **precondition**, without which the negative test proves nothing:
+the same subprocess is first shown to fail when a deliberate `urlopen` is added, so the guard is
+known to be able to see a socket. The in-process adapter of T131 would open none either way; the
+reference adapters, with a framework SDK loaded, are where this test has a subject.
 
 #### T134 — `import ctrlrun` imports neither `verify` nor `conformance`
 `v0.4`'s T125b, extended: a subprocess imports `ctrlrun` and asserts `ctrlrun.conformance` is
 absent from `sys.modules`, beside `ctrlrun.verify`, `httpx`, `jwt` and every `opentelemetry`
-module.
+module. `ctrlrun.adapter` **is** present: it is core and in the action path, and this test says
+which side of that line each module is on.
 
 #### T134b — Core installs no conformance dependency
 `pip install ctrlrun` installs `pyyaml` and `click` and nothing else; `import
-ctrlrun.conformance` without the extra raises `MissingDependency` naming
-`pip install ctrlrun[conformance]` (`v0.2 §10` T30's shape).
+ctrlrun.conformance` without `pytest` raises `MissingDependency` naming
+`pip install ctrlrun[conformance]` (`v0.2 §10` T30's shape). The module ships inside the core
+wheel, as `gateway/` does; only its dependency is behind the extra.
 
 ### Items 4 and 5 — The reference adapters (§3.5, §6, §7)
 
 #### T135 — Each reference adapter passes the kit
 `ctrlrun.conformance.run` against each, with every suite `pass` or `not_applicable` with a
-reason, and the results in each adapter's README (§7 item 7). Run with the framework installed;
-skipped **by name** where it is not, so a green run with a missing framework cannot look like a
-pass (`v0.4 §7` T123's rule).
+reason, `report.ok is True`, and the results in each adapter's README (§7 item 7). Run with the
+framework installed; skipped **by name** where it is not, so a green run with a missing framework
+cannot look like a pass (`v0.4 §7` T123's rule).
 
-#### T135b — Each reference adapter reuses its framework's primitive and reimplements none
-Asserted by inspection of the adapter's own source: it imports the framework's primitive by
-name, and it contains no prompt, no queue, no polling loop and no token of its own. And
-behaviourally: the human's answer arrives through the framework's documented resumption API and
-through no other channel.
+#### T135b — The human's answer arrives through the framework's primitive and no other channel
+Behavioural, because the source-inspection version of this is unfalsifiable. The adapter is
+driven with the framework's resumption API **not** invoked: no answer arrives, no grant is
+written, the request stays `pending`, and the executor is never called. Then the same run with
+the framework's own resumption invoked: the answer arrives and the action commits. An adapter
+that had grown a second path — a prompt, a queue, a poll — passes the first half only if that
+path is also idle, and the two halves together are what no second channel can satisfy.
 
-#### T136 — `adapters/` is not packaged
-`python -m build --wheel` for `ctrlrun` produces a wheel containing no `adapters/` path and no
-`ctrlrun_langgraph` or `ctrlrun_openai_agents` module, and `research` stays unimportable
-(`v0.4 §8` T124b, unchanged).
+#### T136 — `adapters/` is packaged by neither the wheel nor the sdist
+`python -m build` for `ctrlrun` produces a wheel **and an sdist** containing no `adapters/` path
+and no `ctrlrun_langgraph` or `ctrlrun_openai_agents` module, and `research` stays unimportable
+(`v0.4 §8` T124b, unchanged). The sdist half is not symmetry: v0.2 shipped four files it should
+not have precisely because `MANIFEST.in` resolves against the working tree, and `prune adapters`
+is added beside the prunes that are already there.
 
 #### T137 — Each adapter's declared ranges are what its CI ran
 The kernel range and framework range in each adapter's README parse as version specifiers, match
 its `pyproject.toml` `dependencies`, and contain the versions its CI job installed. A version
 somebody typed is a version that was true once.
+
+#### T137b — Each adapter's README says which kind of guard its binding is
+§7 item 4, asserted: the README states `carries_approved_arguments` and, where it is `False`,
+contains the word "attribution" and does not describe the binding as prevention. The sentence a
+security reviewer reads first is the one a test keeps honest.
 
 ### Item 6 — The blind implementation (§8)
 
@@ -859,6 +1200,7 @@ from .adapter import (
     InterruptApprovalProvider,
     PendingApproval,
     banner,
+    needs_approval,
 )
 # ctrlrun[conformance], lazily importable, NOT re-exported at package import:
 #   ctrlrun.conformance.run
@@ -866,6 +1208,8 @@ from .adapter import (
 #   ctrlrun.conformance.ConformanceAdapter
 #   ctrlrun.conformance.ConformanceReport
 #   ctrlrun.conformance.SuiteResult
+#   ctrlrun.conformance.CaseResult
+#   ctrlrun.conformance.SuiteStatus
 ```
 
 ```python
@@ -885,13 +1229,14 @@ class PendingApproval:                       # §2.2
     def to_dict(self) -> dict[str, Any]: ...
 
 @dataclass(frozen=True)
-class ApprovalAnswer:                        # §2.2
+class ApprovalAnswer:                        # §2.2, §3.4
     granted: bool
     approver: str
-    action_hash: str | None = None
+    approved_arguments: Mapping[str, Any] | None = None
 
 class FrameworkInterrupt(Protocol):          # §2.1 — a Protocol, not a base class
     framework: str
+    carries_approved_arguments: bool         # §3.4 — a declaration, not a setting
     def interrupt(self, pending: PendingApproval) -> ApprovalAnswer: ...
 
 class InterruptApprovalProvider:             # satisfies v0.1 §4.3's ApprovalProvider
@@ -899,13 +1244,28 @@ class InterruptApprovalProvider:             # satisfies v0.1 §4.3's ApprovalPr
     def request(self, action: Action, ttl: timedelta) -> ApprovalRequest: ...
     def wait(self, request_id: str, timeout: timedelta | None) -> Approval | None: ...
 
-def banner(control: Control) -> None: ...    # §3.6
+def needs_approval(control: Control, action: str, arguments: Mapping[str, Any], *,
+                   resource: str | None = None) -> bool: ...     # §3.5
+def banner(control: Control) -> None: ...                        # §3.6
 ```
 
-**And no other public name.** No `Control` method, no `StateStore` method, no event type, no
-error type, no schema, no CLI command and no policy key. That an adapter needs none of those is
-§3.5's finding and the strongest evidence the contract is the right size: a surface that had
-required a new entry point would have been a surface that reached past `Control`.
+**Promoted.** `Control._resolve_principal` becomes **`Control.resolve_principal(action_name:
+str) -> Principal`**. `needs_approval` builds an `Action` and `Action.principal` has no default,
+so the principal has to come from somewhere; the only alternative was for an adapter to invent
+one, which is the hole §4.2 records. Its behaviour is `v0.3 §3.2` unchanged — the provider wins
+where it answers, a decline is refused rather than backfilled once an `authority:` section is
+loaded, a refusal is never backfilled — and it is a **reader**: it writes nothing, appends
+nothing, and creates no request. It is the seam an adapter may read and may not supply, and
+§4.1's second row is where it appears in `v0.3 §4.3.1`'s enumeration.
+
+`clock` on `InterruptApprovalProvider` is `LocalApprovalProvider`'s testing seam and nothing
+more, and it is not a §3.8 relaxation for a structural reason rather than a promise: **an adapter
+does not construct the provider**. The operator does (§2.3), on the line where they choose the
+policy, the store and the identity provider.
+
+**And no other public name.** No new event type, no new error type, no new schema, no new CLI
+command, no new policy key, and no `Control` method beyond the promotion above — which adds no
+capability, since `@protect` has resolved principals this way since v0.3.
 
 **Nothing is removed and nothing changes meaning.** `v0.1 §8`, `v0.2 §11`, `v0.3 §11` and
 `v0.4 §9` are untouched. No schema version changes: `ctrlrun.policy/v3`, `ctrlrun.receipt/v2`,
@@ -918,38 +1278,60 @@ stand, and **v0.5 adds no table and no column to any store** — an adapter writ
 
 | Module | Owns | Must not know about |
 |---|---|---|
-| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `banner` | policy, authority, effect state, executors, any framework |
+| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | policy internals, authority, effect state, executors, sinks, any framework |
 | `conformance/` | the suites, the fixtures, the report — `ctrlrun[conformance]` | the gateway, `otel`, `jwt_identity`; anything from another extra |
 
-`adapter.py` imports `action.py` and `approval.py` and nothing else from the kernel; `banner`
-takes a `Control` and reads `control.policy.mode`, which is a read. `conformance/` sits **above**
-`control.py`, beside `verify/` and `cli/`: it composes the kernel the way an application does,
-and nothing in the kernel imports it.
+`adapter.py` imports `action.py` and `approval.py`, and takes a `Control` as a *parameter* in
+`needs_approval` and `banner` without importing it at module scope — the same shape `verify/`
+has, one layer down. It appends no event and owns no sink: `Control` is still the only thing
+that fans evidence out (§2.4). `conformance/` sits **above** `control.py`, beside `verify/` and
+`cli/`: it composes the kernel the way an application does, and nothing in the kernel imports it.
 
 **`docs/ROADMAP.md` is corrected** in the same commit as this document (§3.1): the v0.5 bullet's
 `Suspended` / `Control.resume` sentence becomes `ApprovalRequired` / `with_approval`. This is the
 `v0.4 §9.4` treatment, and it is recorded here so the correction is findable from the spec rather
 than only from a diff.
 
----
+### 9.1 What the independent review of this document changed
+
+A review in a session that did not write this document found five defects that would each have
+produced an insecure or unimplementable adapter. They are recorded because this project
+requires a declined finding's reasoning to live in the document it declines a change to — and an
+*accepted* finding that silently rewrote a section leaves the next reader unable to tell which
+sentences were argued and which were repaired.
+
+| Found | Where it is now |
+|---|---|
+| §3.5's predicate told an adapter to call `Control.evaluate(action)`, and `Action.principal` has no default — so the only way to obey was to build a `Principal` from the framework's session. `--principal-from-client-info`'s third costume, mandated by the spec. | `needs_approval` is core's, and `Control.resolve_principal` is promoted for it (§2.2, §3.5, §4.2, §9) |
+| The provider was required to append `APPROVAL_INVALIDATED` and `APPROVAL_GRANTED`, which no `ApprovalProvider` can do: it is constructed with an `ApprovalStore` and has no sink. | Withdrawn and stated as a limitation; `approver` reaches evidence by `Control`'s existing path (§2.2, §2.4) |
+| "Steps 1 to 15 happen twice" and "step 12 re-presents the same `Action`" cannot both be true: the replayed pass builds a new `action_id` and a new request, so the approval TTL bounds nothing in that shape. | §3.2.1, which states all three costs and why step 13 is what makes it safe |
+| Nobody was named as the party that wires the provider into `Control`, so the adapter would — and would then choose `identity=`, which is §4.2 by another route. | §2.3: the operator constructs the `Control`, and constructing one is on the never-list |
+| §4.1's two rows duplicated `v0.3 §4.3.1`'s, and the genuinely new path — `wait()` → `grant_approval` — was argued away by comparison to `ctrlrun approve`, whose input comes from an operator's shell rather than a framework checkpoint. | §4.1's third row, with the comparison corrected to `WebhookApprovalProvider`'s mandatory hash check, and §3.4's check made mandatory to match |
+
+Twelve further findings tightened §2.4's step order, `timeout`'s meaning, the observe-mode
+contradiction across four sections, the missing never-list entries, three fixtures, and eight
+acceptance tests that would have proved nothing. The tests are where most of it landed:
+`v0.4 §1.3`'s positive-control rule applies to every refusal in §8, and the first draft asserted
+refusals without establishing that the adapter had been reached at all.
 
 ## 10. Fail-closed table for v0.5
 
 | Condition | Result |
 |---|---|
-| `interrupt()` raises anything | Propagates. No grant, no denial, no receipt. The request stays `pending` (§2.4) |
-| `ApprovalAnswer.action_hash` set and mismatched | `ApprovalMismatch(reason="mismatch")`, `APPROVAL_INVALIDATED`, approval untouched (§3.4) |
-| `ApprovalAnswer.approver` empty | `InvalidArgument`. An approval with no approver is evidence that answers the wrong question (§2.2) |
-| The request expired before the interrupt | `ApprovalTimeout`; `interrupt()` is not called (§2.4) |
-| The request expired during the interrupt | `ApprovalTimeout`; nothing is written (§2.4) |
+| `interrupt()` raises anything | Propagates unwrapped. No grant, no denial, no receipt. The request stays `pending` (§2.4) |
+| `carries_approved_arguments` is `True` and the answer's differ from the proposal's | `ApprovalMismatch(reason="mismatch")`, nothing granted, request left `pending` (§3.4) |
+| `carries_approved_arguments` is `True` and the answer omits them | Refused the same way. A declaration is not a hint (§3.4) |
+| `carries_approved_arguments` is `False` | No check. `binding` is `not_applicable` with the adapter's reason, and **never `pass`** (§3.4, §5.3) |
+| `ApprovalAnswer.approver` empty or not a string | `InvalidArgument`. An approval with no approver is evidence that answers the wrong question (§2.2) |
+| The deadline has passed before the interrupt | `ApprovalTimeout`; `interrupt()` is not called (§2.4 step 2) |
+| The deadline passes during the interrupt | `ApprovalTimeout`; nothing written, record left `pending` (§2.4 step 5) |
 | The request is not `pending` | `v0.1 §4.3`'s rule, unchanged: `None` for anything that will never be granted |
 | An adapter reaches an executor without `Control.execute` | Impossible through §2's surface; a broken fixture, and the kit fails it (§5.4) |
-| `mode: observe` | The interrupt is never reached; the banner is logged once; the kit reports every suite `not_applicable` (§3.6) |
-| The framework carries no `action_hash` back | `binding` is `not_applicable` with the reason. **Never `pass`** (§3.4, §5.3) |
+| An adapter constructs a `Control` | On §2.3's never-list. The operator constructs it and hands it over |
+| `mode: observe` | The interrupt is never reached; the banner is logged once per `Control`; `run()` returns a **refused** report with no suites, and `ok` is `False` (§3.6) |
+| Every suite `not_applicable` | `report.ok` is `False`. `0/0` reported as success is `v0.4 §3.8`'s false green |
 | A framework is not installed | Its adapter's kit run is skipped **by name**, and the skip is in the report (T135) |
-| An adapter tries to supply a principal | There is no name on the surface that takes one (§4.2, T129) |
-
----
+| An adapter tries to supply a principal | There is no name on the surface that takes one, and none that builds a `Control` (§4.2, T129) |
 
 ## 11. Explicitly out of scope for v0.5
 
@@ -966,6 +1348,12 @@ specifically:
 - **Binding an approval across a framework's checkpoint by any mechanism the framework does not
   already provide.** §3.4 says which half is prevention and which is attribution, and inventing
   a token to close the gap is the second approval path under another name.
+- **An expiry on the human's deliberation in a resumed-in-place shape.** §3.2.1 states the cost
+  and does not fix it: the framework owns the checkpoint's lifetime, and a CTRLRun timer that
+  refused a resumption would be refusing an action the kernel re-decides in full at step 13
+  anyway.
+- **Appending an event from an approval provider.** §2.4 states the limitation; giving
+  `adapter.py` a sink would make it a second thing fanning out evidence.
 - **Authority propagation across agent hops, A2A, or a task-bound delegation an adapter creates.**
   v0.7.
 - **`Suspended` / `Control.resume` for an approval.** §3.1.

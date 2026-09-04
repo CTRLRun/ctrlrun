@@ -32,9 +32,19 @@ somebody tries it.
   A sixth was open and is settled in §3.6: an adapter **never interrupts in observe mode**,
   **never prints** — it is inside somebody else's loop and may have nowhere to print — and
   **logs the `SPEC-v0.3.md` §6.5 banner once per `Control`**, which `ctrlrun.adapter.banner`
-  does so no two adapters word it differently. The conformance kit refuses an observing
-  `Control` and reports every suite `not_applicable`, on `SPEC-v0.4.md`'s rule: not applicable
-  is not a pass.
+  does so no two adapters word it differently. The conformance kit **refuses** an observing
+  `Control` — a refused report with no suites, which is not a success — rather than producing
+  an all-`not_applicable` report with a zero denominator, because `0/0` reported as a pass is
+  the false green `SPEC-v0.4.md` §3.8 refuses by name.
+
+  **An independent review in a session that did not write the document found five defects that
+  would each have produced an insecure or unimplementable adapter, and §9.1 records them.** The
+  worst was `--principal-from-client-info`'s third costume: §3.5 told an adapter to answer its
+  framework's pre-invocation predicate with `Control.evaluate(action)`, and `Action.principal`
+  has no default — so the only way to obey was to build a principal from the framework's
+  session. `ctrlrun.adapter.needs_approval` is core's because of that, and
+  `Control.resolve_principal` is promoted from private for it: the identity seam an adapter may
+  **read** and may not supply.
 
 - **`conformance` extra** in `pyproject.toml` (`pytest`). `dependencies` is unchanged:
   `pyyaml` and `click`.
