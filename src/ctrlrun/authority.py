@@ -24,19 +24,23 @@ single.
 
 from __future__ import annotations
 
+import itertools
+import json
 import re
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+import secrets
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import yaml
 
 from .action import Action, Principal
-from .errors import InvalidArgument, PolicyError
+from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
 from .policy import SUPPORTED_SCHEMAS, Condition, parse_conditions, require_v3
-from .state import StateStore
+from .policy import _equal as _type_strict_equal
+from .state import DelegationRecord, StateStore
 
 #: SPEC-v0.3 §4.4 — an action name is dotted (`v0.1 §2.1`) and a resource is `type:id`.
 ACTION_SEPARATOR: Final = "."
@@ -78,6 +82,42 @@ _GRANT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 #: §5.2 mints delegation ids in this namespace, and one namespace addresses both kinds.
 DELEGATION_ID_PREFIX: Final = "dlg_"
+
+#: §5.2 — enforced on the way *out* of the store as well as on the way in. A row that does not
+#: match is a corrupted record, never a grant: without this a hand-inserted row named
+#: `head-of-finance` could shadow the root grant of that name.
+_DELEGATION_ID = re.compile(r"^dlg_[0-9a-f]{32}$")
+_ID_HEX_BYTES: Final = 16  # "dlg_" + 32 hex chars
+
+#: §5.2, §5.7 — `api` for `Control.delegate`, where `by` came from wherever the application's
+#: identity came from, and `cli` for `ctrlrun delegate`, where it came from a shell. A reader of
+#: the evidence can tell an act from an assertion, which is the whole reason the field exists.
+_CREATED_VIA: Final[Mapping[str, Literal["api", "cli"]]] = {"api": "api", "cli": "cli"}
+
+#: SPEC-v0.3 §5.3 — the creation-time vocabulary. Disjoint from the evaluation reasons above,
+#: and never used interchangeably with them: a test asserting `authority_escalation` on a
+#: creation is asserting a value that creation never produces.
+UNKNOWN_PARENT: Final = "unknown_parent"
+PARENT_NOT_DELEGABLE: Final = "parent_not_delegable"
+PARENT_NOT_VALID: Final = "parent_not_valid"
+NOT_THE_SUBJECT: Final = "not_the_subject"
+MAX_DEPTH: Final = "max_depth"
+CONTAINMENT: Final = "containment"
+
+#: §5.4's rows, in the order they are checked. Each is separately testable and separately
+#: mutable; T76 breaks each one alone.
+DIMENSIONS: Final = ("subject", "actions", "resources", "constraints", "environments", "expires_at")
+
+#: §5.4 — how a child operand must compare with its parent's, per operator. `neq` is equality
+#: rather than the superset a deny-list would need: `v0.1 §3.2` has no deny-list operator and a
+#: `when:` mapping holds at most one `neq` per argument, so "the parent's exclusions plus more"
+#: is not expressible even in principle.
+_STRICTER: Final = {
+    "lt": lambda child, parent: child <= parent,
+    "lte": lambda child, parent: child <= parent,
+    "gt": lambda child, parent: child >= parent,
+    "gte": lambda child, parent: child >= parent,
+}
 
 _AUTHORITY_KEY: Final = "authority"
 _AUTHORITY_KEYS: Final = frozenset({"max_delegation_depth", "grants"})
@@ -369,14 +409,338 @@ class Grant:
 
 
 @dataclass(frozen=True)
+class Delegation:
+    """A grant created at runtime by a principal who already holds one (SPEC-v0.3 §5.1).
+
+    The parsed form of a `DelegationRecord`: `state.py` persists rows with `grant_json` as a
+    string, and this module is what parses a `Grant` out of one. `grant.id` **is** the
+    `delegation_id` — one namespace addresses root grants and delegations, and `--parent`
+    takes either (§5.2).
+    """
+
+    delegation_id: str
+    parent_id: str
+    depth: int
+    grant: Grant
+    created_by: Principal
+    created_via: Literal["api", "cli"]
+    created_at: datetime
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+
+    @property
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    def to_record(self) -> DelegationRecord:
+        """The row `StateStore.put_delegation` writes (§5.2)."""
+        return DelegationRecord(
+            delegation_id=self.delegation_id,
+            parent_id=self.parent_id,
+            depth=self.depth,
+            grant_json=grant_to_json(self.grant),
+            created_by_agent=self.created_by.agent,
+            created_by_user=self.created_by.user,
+            created_via=self.created_via,
+            created_at=self.created_at,
+            revoked_at=self.revoked_at,
+            revoked_by=self.revoked_by,
+        )
+
+
+@dataclass(frozen=True)
 class AuthorityResult:
-    """What the authority axis decided, and which grant it decided on (§4.8)."""
+    """What the authority axis decided, and which grant it decided on (§4.8).
+
+    The four trailing fields carry §7's `AUTHORITY_DENIED` evidence: the `dimension` a §5.6
+    rule-4 step failed on, the `missing_parent_id` of rule 1, the `expired_parent_id` of rule
+    3, and rule 5's `depth_exceeded` or `cycle_at`. They exist because rules 1, 3, 4, 5 and 6
+    all report `authority_escalation`, so without them five guards would be indistinguishable
+    in evidence and no test could tell which had run.
+    """
 
     passed: bool
     reason: str
     grant_id: str | None = None
     delegation_id: str | None = None
     depth: int = 0
+    dimension: str | None = None
+    missing_parent_id: str | None = None
+    expired_parent_id: str | None = None
+    depth_exceeded: int | None = None
+    cycle_at: str | None = None
+
+
+# --- serialization and containment (SPEC-v0.3 §5.2, §5.4, §5.5) -------------------------
+
+
+class _UnreadableError(Exception):
+    """A stored delegation that could not be read, parsed or addressed (§5.2).
+
+    Internal: `evaluate` turns it into `authority_unreadable`, which is first in §4.3's
+    precedence order and therefore denies the action outright. It is never skipped in favour
+    of another matching grant — that is how a principal holding both a broad root grant and a
+    narrow delegation ends up authorized by the broad one because the narrow one was
+    corrupted (§4.6).
+    """
+
+    def __init__(self, delegation_id: str, detail: str) -> None:
+        super().__init__(f"delegation {delegation_id!r} is unreadable: {detail}")
+        self.delegation_id = delegation_id
+
+
+def new_delegation_id() -> str:
+    """`"dlg_" + 32 hex`, the shape of `act_` and `ctr_` (SPEC-v0.3 §5.2)."""
+    return f"{DELEGATION_ID_PREFIX}{secrets.token_hex(_ID_HEX_BYTES)}"
+
+
+def grant_to_json(grant: Grant) -> str:
+    """A grant as the `grant_json` column of §5.2.
+
+    A **storage encoding**, deliberately not called canonical: nothing hashes it, and
+    `v0.1 §2.3`'s canonical form is a versioned security primitive that a change here must not
+    be read as touching. `expires_at` keeps the offset it was written with rather than being
+    normalized to UTC, so a grant round-trips to an equal `Grant`.
+    """
+    document = {
+        "subject": {"agent": grant.subject.agent, "user": grant.subject.user},
+        "actions": list(grant.actions),
+        "resources": None if grant.resources is None else list(grant.resources),
+        "constraints": {key: condition.operand for key, condition in grant.constraints.items()},
+        "environments": None if grant.environments is None else list(grant.environments),
+        "expires_at": None if grant.expires_at is None else grant.expires_at.isoformat(),
+        "delegable": grant.delegable,
+    }
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def grant_from_json(text: str, *, delegation_id: str) -> Grant:
+    """Parse a stored grant, validating it exactly as the YAML loader would (§5.2).
+
+    A store is not more trusted than a file. A delegation whose stored form no longer parses
+    is a refusal naming it, never a grant with a field quietly defaulted.
+    """
+    try:
+        document = json.loads(text)
+    except ValueError as exc:
+        raise _UnreadableError(delegation_id, f"grant_json is not JSON: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise _UnreadableError(
+            delegation_id, f"grant_json is {_type_name(document)}, not an object"
+        )
+    subject = document.get("subject")
+    if not isinstance(subject, Mapping):
+        raise _UnreadableError(delegation_id, "grant_json has no 'subject' object")
+    expires_at = document.get("expires_at")
+    constraints = document.get("constraints")
+    if not isinstance(constraints, Mapping):
+        raise _UnreadableError(delegation_id, "grant_json has no 'constraints' object")
+    try:
+        return Grant(
+            id=delegation_id,
+            subject=Subject(agent=subject.get("agent"), user=subject.get("user")),
+            # A list or nothing, never a coercion: `"actions": "stripe.refund"` would
+            # otherwise become thirteen single-character patterns, every one of them
+            # grammar-valid. §5.2 requires reading a grant back to validate exactly what
+            # loading one from YAML validates, and `_parse_patterns` refuses a non-list.
+            actions=_optional_tuple(document.get("actions"), delegation_id) or (),
+            resources=_optional_tuple(document.get("resources"), delegation_id),
+            constraints=(
+                parse_conditions(constraints, where=f"delegation {delegation_id}")
+                if constraints
+                else NO_CONSTRAINTS
+            ),
+            environments=_optional_tuple(document.get("environments"), delegation_id),
+            expires_at=None if expires_at is None else datetime.fromisoformat(str(expires_at)),
+            delegable=bool(document.get("delegable", False)),
+        )
+    except (InvalidArgument, PolicyError, TypeError, ValueError) as exc:
+        raise _UnreadableError(delegation_id, str(exc)) from exc
+
+
+def _optional_tuple(value: object, delegation_id: str) -> tuple[str, ...] | None:
+    """A list of strings, or `None`. Takes the row's id because it raises past
+    `grant_from_json`'s `except` clause, and evidence that cannot name the corrupted row is
+    evidence an operator cannot act on — §13 ships no way to list delegations."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise _UnreadableError(delegation_id, f"expected a list or null, got {_type_name(value)}")
+    return tuple(str(item) for item in value)
+
+
+def _delegation_from_record(record: DelegationRecord) -> Delegation:
+    """Parse a row into a `Delegation`, refusing an id outside the namespace (§5.2)."""
+    if not _DELEGATION_ID.match(record.delegation_id):
+        # Enforcing the namespace on the way in only would leave the other side open: a
+        # hand-inserted row named `head-of-finance` would otherwise shadow the root grant of
+        # that name, and quietly disconnect the one lever §5.6 offers against a compromised
+        # root grant.
+        raise _UnreadableError(record.delegation_id, f"an id must match {_DELEGATION_ID.pattern}")
+    via = _CREATED_VIA.get(record.created_via)
+    if via is None:
+        # §5.2 — the column tells an act from an assertion, so a value outside the two is a
+        # record whose provenance cannot be read.
+        raise _UnreadableError(record.delegation_id, f"unknown created_via {record.created_via!r}")
+    return Delegation(
+        delegation_id=record.delegation_id,
+        parent_id=record.parent_id,
+        depth=record.depth,
+        grant=grant_from_json(record.grant_json, delegation_id=record.delegation_id),
+        created_by=Principal(agent=record.created_by_agent, user=record.created_by_user),
+        created_via=via,
+        created_at=record.created_at,
+        revoked_at=record.revoked_at,
+        revoked_by=record.revoked_by,
+    )
+
+
+def contained_dimension(parent: Grant, child: Grant) -> str | None:
+    """The first §5.4 row `child` violates, or `None` where it is contained on every one.
+
+    Checked at creation *and* again at every evaluation (§5.6). **Omission is never
+    "unlimited"**: a child that drops a dimension its parent constrains is rejected, not
+    treated as inheriting the parent's limit and certainly not as unconstrained. Inheritance
+    would be worse than rejection, because a child that silently inherits looks, in the file
+    and in the receipt, like a child that was authorized for what it says.
+    """
+    if not _subject_contained(parent.subject, child.subject):
+        return "subject"
+    if not _patterns_contained(parent.actions, child.actions, separator=ACTION_SEPARATOR):
+        return "actions"
+    if parent.resources is not None and (
+        child.resources is None
+        or not _patterns_contained(parent.resources, child.resources, separator=RESOURCE_SEPARATOR)
+    ):
+        return "resources"
+    if not _constraints_contained(parent.constraints, child.constraints):
+        return "constraints"
+    if parent.environments is not None and (
+        child.environments is None or not set(child.environments) <= set(parent.environments)
+    ):
+        return "environments"
+    if parent.expires_at is not None and (
+        child.expires_at is None or child.expires_at > parent.expires_at
+    ):
+        return "expires_at"
+    return None
+
+
+def _subject_contained(parent: Subject, child: Subject) -> bool:
+    """§5.4's `subject` row: two things that look like naming the grantee are widening.
+
+    *Dropping the parent's `user`* turns authority to act **for alice** into authority for the
+    agent acting alone. *An unbounded grantee* — `agent: "*"`, or an omitted `agent`, which
+    §4.2 makes match any agent — hands the parent's authority to every agent in the
+    deployment, and with it the right to delegate onward. Which concrete agent the child names
+    is otherwise unconstrained; that is what delegation is for.
+    """
+    if child.agent is None or "*" in child.agent:
+        return False
+    if parent.user is not None:
+        if child.user is None or "*" in child.user:
+            return False
+        return matches(parent.user, child.user, separator=None)
+    # SPEC: §5.4's row conditions the `user` rule on the parent declaring one, and its second
+    # bullet argues only about `agent`. A wildcard `user` under a parent that declares none is
+    # the same unbounded grantee spelled on the other field, so the fail-closed reading — the
+    # design note's "a delegation's subject may carry no wildcard" — applies to both.
+    return child.user is None or "*" not in child.user
+
+
+def _patterns_contained(
+    parent: Sequence[str], child: Sequence[str], *, separator: str | None
+) -> bool:
+    """Every child pattern is contained in **some** parent pattern (§5.4)."""
+    return all(
+        any(contains(outer, inner, separator=separator) for outer in parent) for inner in child
+    )
+
+
+def _constraints_contained(parent: Mapping[str, Condition], child: Mapping[str, Condition]) -> bool:
+    """For every `(argument, op)` the parent declares, the child declares it at least as strict.
+
+    The child may add constraints the parent does not have. It may **not** discharge the
+    parent's by omitting it, nor by constraining a different operator: a child bounding
+    `amount_lt` where the parent bounds `amount_lte` may hold that *as well*, but the parent's
+    key must be present. Requiring the same operator keeps containment decidable; a solver
+    reasoning across operators would be a second policy engine.
+    """
+    for key, outer in parent.items():
+        inner = child.get(key)
+        if inner is None or not _operand_at_least_as_strict(outer, inner):
+            return False
+    return True
+
+
+def _operand_at_least_as_strict(parent: Condition, child: Condition) -> bool:
+    """§5.4's operand table. The key is `f"{argument}_{op}"`, so the ops are already equal."""
+    compare = _STRICTER.get(parent.op)
+    if compare is not None:
+        return bool(compare(child.operand, parent.operand))
+    if parent.op == "in":
+        return all(
+            any(_type_strict_equal(item, other) for other in parent.operand)
+            for item in child.operand
+        )
+    # `eq` and `neq`: equal to the parent's, type-strictly. See §5.4 on why `neq` is not
+    # inverted here — `v0.1 §3.2` has no deny-list operator, so "the parent's exclusions plus
+    # more" is not expressible and equality is the only rule there is.
+    return _type_strict_equal(child.operand, parent.operand)
+
+
+@dataclass(frozen=True)
+class _Walk:
+    """What walking a delegation to its root found (SPEC-v0.3 §5.5).
+
+    Depth is **recomputed, never trusted**: the `depth` column is recorded for reading, so a
+    row edited directly in the database cannot assert its way to a shorter chain.
+    """
+
+    nodes: tuple[Delegation, ...]  # leaf first
+    root: Grant | None = None
+    root_id: str | None = None
+    missing_parent_id: str | None = None
+    cycle_at: str | None = None
+    depth_exceeded: int | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.root is not None
+
+    @property
+    def ancestors(self) -> tuple[Grant, ...]:
+        """Every grant above the leaf, root first — the root grant and the delegations."""
+        above: list[Grant] = [] if self.root is None else [self.root]
+        above.extend(node.grant for node in reversed(self.nodes[1:]))
+        return tuple(above)
+
+    @property
+    def ancestor_ids(self) -> tuple[str, ...]:
+        above: list[str] = [] if self.root_id is None else [self.root_id]
+        above.extend(node.delegation_id for node in reversed(self.nodes[1:]))
+        return tuple(above)
+
+    @property
+    def steps(self) -> tuple[tuple[Grant, Grant], ...]:
+        """Every parent→child pair, root first, for §5.4's containment re-check."""
+        chain = [*self.ancestors, self.nodes[0].grant]
+        return tuple(itertools.pairwise(chain))
+
+
+@dataclass(frozen=True)
+class _ChainCheck:
+    """The walked depth, and the §5.6 rule that failed — or `None` where none did."""
+
+    depth: int
+    failure: AuthorityResult | None
+
+
+def _by_grant_id(result: AuthorityResult) -> str:
+    """§4.3, §4.6 — ties break on simple codepoint order, a property of the set of matching
+    grants rather than of the document. Reordering the file changes neither the decision nor
+    the id."""
+    return result.grant_id or ""
 
 
 class Authority:
@@ -443,33 +807,316 @@ class Authority:
         fixed precedence order — so the evidence for one configuration does not depend on the
         order grants appear in the document.
 
-        `store` is required and unused while every grant is a root grant: build-list item 3
-        walks a delegation's chain through it on every evaluation, and an optional store would
-        give an implementation a fail-open reading in which a revoked delegation stays valid.
+        `store` is required, not optional: §5.6 re-checks a delegation's whole chain on every
+        evaluation and that walk reads the store. An optional one would give an implementation
+        a fail-open reading in which a revoked delegation evaluates as valid, and "a chain of
+        any depth is cut by one write" would stop being true.
         """
-        passed: list[str] = []
-        failed: dict[str, list[str]] = {}
-        for grant_id, grant in self._grants.items():
+        passed: list[AuthorityResult] = []
+        failed: dict[str, list[AuthorityResult]] = {}
+        try:
+            candidates = self._candidates(store)
+        except _UnreadableError as unreadable:
+            return AuthorityResult(
+                False, AUTHORITY_UNREADABLE, delegation_id=unreadable.delegation_id
+            )
+        for grant_id, grant, delegation in candidates:
             if not grant.matches_shape(action):
                 continue
-            reasons: list[str] = []
+            outcomes: list[AuthorityResult] = []
+            depth = 0
+            if delegation is not None:
+                try:
+                    chain = self._check_chain(delegation, store=store, now=now)
+                except _UnreadableError as unreadable:
+                    return AuthorityResult(
+                        False, AUTHORITY_UNREADABLE, delegation_id=unreadable.delegation_id
+                    )
+                depth = chain.depth
+                if chain.failure is not None:
+                    outcomes.append(chain.failure)
             if grant.is_expired(now):
-                reasons.append(AUTHORITY_EXPIRED)
+                outcomes.append(AuthorityResult(False, AUTHORITY_EXPIRED))
             if not grant.constraints_hold(action):
-                reasons.append(AUTHORITY_CONSTRAINT)
-            if reasons:
-                for reason in reasons:
-                    failed.setdefault(reason, []).append(grant_id)
+                outcomes.append(AuthorityResult(False, AUTHORITY_CONSTRAINT))
+            named = None if delegation is None else grant_id
+            if outcomes:
+                # §4.3 — every reason a grant failed for, collected rather than
+                # short-circuited, so the reported one is a property of the configuration and
+                # not of the order an implementation happened to check things in.
+                for outcome in outcomes:
+                    failed.setdefault(outcome.reason, []).append(
+                        replace(outcome, grant_id=grant_id, delegation_id=named, depth=depth)
+                    )
             else:
-                passed.append(grant_id)
+                passed.append(
+                    AuthorityResult(
+                        True,
+                        AUTHORITY_GRANT,
+                        grant_id=grant_id,
+                        delegation_id=named,
+                        depth=depth,
+                    )
+                )
         if passed:
             # §4.6 — holding two permissions is never worse than holding one, and the grant
             # named is a property of the set rather than of the document.
-            return AuthorityResult(True, AUTHORITY_GRANT, grant_id=min(passed))
+            return min(passed, key=_by_grant_id)
         for reason in REASON_PRECEDENCE:
             if reason in failed:
-                return AuthorityResult(False, reason, grant_id=min(failed[reason]))
+                return min(failed[reason], key=_by_grant_id)
         return AuthorityResult(False, NO_AUTHORITY)
+
+    # --- delegation (SPEC-v0.3 §5) -----------------------------------------------------
+
+    def plan_delegation(
+        self, parent_id: str, grant: Grant, *, by: Principal, store: StateStore, now: datetime
+    ) -> Delegation:
+        """The delegation `Control.delegate` would write, or a refusal (SPEC-v0.3 §5.3).
+
+        Pure: it reads the store, writes nothing, and appends no event. `Control` performs the
+        write and the §7 events, which is what keeps `ARCHITECTURE.md` §6's single composer
+        single (§4.8).
+
+        The six checks run **in the order §5.3 lists** and the first that fails is the
+        refusal's reason — fixed, so the evidence for one attempted creation does not depend on
+        the order an implementation happens to check things in.
+
+        `# SPEC:` §5.2 says `Control.delegate` mints the id. §11 freezes this signature without
+        one, and a `Delegation` is frozen and complete, so the mint happens here, where the
+        record is constructed. `Control` is still the only thing that writes it.
+        """
+        # Rule 0. Scoped to `Control.execute`, §2.3's expiry check would leave this path open:
+        # an agent whose token lapsed five minutes ago, and whose every proposed action is now
+        # refused, could still write a permanent, re-delegable grant for an agent of its
+        # choosing. A delegation is the most durable thing a principal can create.
+        if by.expires_at is not None and now > by.expires_at:
+            raise IdentityError(
+                f"the delegating principal's credential expired at {by.expires_at}; an expired "
+                "credential may not create authority (SPEC-v0.3 §5.3 rule 0)"
+            )
+        if grant.id:
+            raise InvalidArgument(
+                f"the grant passed to delegate() carries id {grant.id!r}; a delegation's id is "
+                "assigned, not chosen (SPEC-v0.3 §5.2)"
+            )
+        parent, parent_depth = self._parent_for_creation(parent_id, store=store, now=now)
+        # Rule 4. You may only delegate authority you hold; a process that could delegate from
+        # a grant addressed to somebody else would make the subject field decorative.
+        if not parent.subject.matches(by):
+            raise AuthorityEscalation(
+                f"{by.agent!r} does not match the subject of {parent_id!r}",
+                reason=NOT_THE_SUBJECT,
+                parent_id=parent_id,
+            )
+        depth = parent_depth + 1
+        if depth > self._max_delegation_depth:
+            raise AuthorityEscalation(
+                f"a delegation of {parent_id!r} would be at depth {depth}, beyond "
+                f"max_delegation_depth {self._max_delegation_depth}",
+                reason=MAX_DEPTH,
+                parent_id=parent_id,
+            )
+        dimension = contained_dimension(parent, grant)
+        if dimension is not None:
+            raise AuthorityEscalation(
+                f"the child grant is not contained in {parent_id!r} on {dimension!r}; "
+                "omission never means unlimited (SPEC-v0.3 §5.4)",
+                reason=CONTAINMENT,
+                parent_id=parent_id,
+                dimension=dimension,
+            )
+        delegation_id = new_delegation_id()
+        return Delegation(
+            delegation_id=delegation_id,
+            parent_id=parent_id,
+            depth=depth,
+            grant=replace(grant, id=delegation_id),
+            created_by=by,
+            created_via="api",
+            created_at=now,
+        )
+
+    def plan_revocation(
+        self, delegation_id: str, *, by: str | None, store: StateStore, now: datetime
+    ) -> Delegation:
+        """The delegation `Control.revoke` would revoke (SPEC-v0.3 §5.7). Reads only."""
+        record = store.get_delegation(delegation_id)
+        if record is None:
+            raise InvalidArgument(f"no delegation {delegation_id}")
+        try:
+            return _delegation_from_record(record)
+        except _UnreadableError as unreadable:
+            raise InvalidArgument(str(unreadable)) from unreadable
+
+    def _parent_for_creation(
+        self, parent_id: str, *, store: StateStore, now: datetime
+    ) -> tuple[Grant, int]:
+        """§5.3 rules 1 to 3, and the walked depth rule 5 needs."""
+        # §5.2 — a root grant wins any collision: an id is resolved against the document first
+        # and the store second.
+        root = self._grants.get(parent_id)
+        if root is not None:
+            if not root.delegable:
+                raise AuthorityEscalation(
+                    f"{parent_id!r} is not delegable",
+                    reason=PARENT_NOT_DELEGABLE,
+                    parent_id=parent_id,
+                )
+            if root.is_expired(now):
+                raise AuthorityEscalation(
+                    f"{parent_id!r} expired at {root.expires_at}",
+                    reason=PARENT_NOT_VALID,
+                    parent_id=parent_id,
+                )
+            return root, 0
+        record = store.get_delegation(parent_id)
+        if record is None or record.is_revoked:
+            # Rule 1 — "a root grant or a *live* delegation". A revoked one is neither, and
+            # saying so here rather than in rule 3 keeps rule 3 about the *chain above* it.
+            raise AuthorityEscalation(
+                f"no live grant or delegation {parent_id!r}",
+                reason=UNKNOWN_PARENT,
+                parent_id=parent_id,
+            )
+        try:
+            parent = _delegation_from_record(record)
+        except _UnreadableError as unreadable:
+            raise AuthorityEscalation(
+                str(unreadable), reason=PARENT_NOT_VALID, parent_id=parent_id
+            ) from unreadable
+        if not parent.grant.delegable:
+            raise AuthorityEscalation(
+                f"{parent_id!r} is not delegable",
+                reason=PARENT_NOT_DELEGABLE,
+                parent_id=parent_id,
+            )
+        if parent.grant.is_expired(now):
+            raise AuthorityEscalation(
+                f"{parent_id!r} expired at {parent.grant.expires_at}",
+                reason=PARENT_NOT_VALID,
+                parent_id=parent_id,
+            )
+        try:
+            walk = self._walk(parent, store=store)
+        except _UnreadableError as unreadable:
+            raise AuthorityEscalation(
+                str(unreadable), reason=PARENT_NOT_VALID, parent_id=parent_id
+            ) from unreadable
+        # Rule 3 covers `delegable` and revocation across the whole chain, not just the
+        # immediate parent, so an operator who sets `delegable: false` on a root grant stops
+        # new delegations appearing anywhere beneath it rather than only one level down.
+        invalid = walk.missing_parent_id is not None or walk.cycle_at is not None
+        if not invalid:
+            invalid = any(node.is_revoked for node in walk.nodes[1:]) or any(
+                ancestor.is_expired(now) or not ancestor.delegable for ancestor in walk.ancestors
+            )
+        if invalid:
+            raise AuthorityEscalation(
+                f"the chain above {parent_id!r} is no longer valid",
+                reason=PARENT_NOT_VALID,
+                parent_id=parent_id,
+            )
+        if walk.depth_exceeded is not None:
+            return parent.grant, walk.depth_exceeded
+        return parent.grant, len(walk.nodes)
+
+    def _candidates(self, store: StateStore) -> list[tuple[str, Grant, Delegation | None]]:
+        """Every grant this principal could hold: the document's, then the store's (§4.3)."""
+        found: list[tuple[str, Grant, Delegation | None]] = [
+            (grant_id, grant, None) for grant_id, grant in self._grants.items()
+        ]
+        for record in store.delegations(include_revoked=True):
+            delegation = _delegation_from_record(record)
+            found.append((delegation.delegation_id, delegation.grant, delegation))
+        return found
+
+    def _walk(self, leaf: Delegation, *, store: StateStore) -> _Walk:
+        """Walk a delegation to its root, bounded and cycle-checked (SPEC-v0.3 §5.5).
+
+        Bounded at `max_delegation_depth + 1` steps and refusing a chain that revisits an id.
+        A cycle is not reachable through `Control.delegate` — a parent exists before its child
+        — but it is reachable with `sqlite3` and a text editor.
+        """
+        nodes = [leaf]
+        seen = {leaf.delegation_id}
+        while True:
+            parent_id = nodes[-1].parent_id
+            root = self._grants.get(parent_id)
+            if root is not None:
+                return _Walk(tuple(nodes), root=root, root_id=parent_id)
+            if parent_id in seen:
+                return _Walk(tuple(nodes), cycle_at=parent_id)
+            record = store.get_delegation(parent_id)
+            if record is None:
+                return _Walk(tuple(nodes), missing_parent_id=parent_id)
+            if len(nodes) >= self._max_delegation_depth:
+                # One more node would put the chain past the bound, and the bound is what
+                # stops an edited store hanging the process.
+                return _Walk(tuple(nodes), depth_exceeded=len(nodes) + 1)
+            seen.add(parent_id)
+            nodes.append(_delegation_from_record(record))
+
+    def _check_chain(self, leaf: Delegation, *, store: StateStore, now: datetime) -> _ChainCheck:
+        """§5.6's six rules, evaluated 1 → 6, the first failure naming the refusal.
+
+        Fixed order, because rules 1, 3, 4, 5 and 6 all yield `authority_escalation` while
+        carrying different `data` — so a chain that is both orphaned above and non-contained
+        below would otherwise record implementation-defined evidence for one configuration.
+
+        Re-checking is not belt-and-braces. It is what makes revocation transitive, what makes
+        an expiring parent stop authorizing without anyone finding its children, and what makes
+        a narrowed root grant narrow everything beneath it.
+        """
+        walk = self._walk(leaf, store=store)
+        depth = walk.depth_exceeded if walk.depth_exceeded is not None else len(walk.nodes)
+        if walk.missing_parent_id is not None:
+            return _ChainCheck(
+                depth,
+                AuthorityResult(
+                    False, AUTHORITY_ESCALATION, missing_parent_id=walk.missing_parent_id
+                ),
+            )
+        if any(node.is_revoked for node in walk.nodes):
+            return _ChainCheck(depth, AuthorityResult(False, AUTHORITY_REVOKED))
+        for ancestor_id, ancestor in zip(walk.ancestor_ids, walk.ancestors, strict=True):
+            if ancestor.is_expired(now):
+                # Attribution rather than prevention (§9): §5.4's `expires_at` row already
+                # makes the leaf expired, so §4.3 would refuse it either way. What this adds is
+                # the name of the ancestor that lapsed, which is the thing an operator fixes.
+                return _ChainCheck(
+                    depth,
+                    AuthorityResult(False, AUTHORITY_ESCALATION, expired_parent_id=ancestor_id),
+                )
+        for parent, child in walk.steps:
+            dimension = contained_dimension(parent, child)
+            if dimension is not None:
+                return _ChainCheck(
+                    depth, AuthorityResult(False, AUTHORITY_ESCALATION, dimension=dimension)
+                )
+        if walk.cycle_at is not None:
+            # A chain that loops is a store somebody has edited by hand, and it belongs with
+            # the other unreadable-record cases rather than with the ordinary escalations.
+            return _ChainCheck(
+                depth, AuthorityResult(False, AUTHORITY_UNREADABLE, cycle_at=walk.cycle_at)
+            )
+        if depth > self._max_delegation_depth:
+            # Compared here rather than inferred from `_walk` truncating. The walk returns as
+            # soon as it reaches a root grant, *before* it consults the bound, so a chain that
+            # completes in one step is never measured against anything — and
+            # `max_delegation_depth: 0`, which §5.5 offers as the legible way to switch
+            # delegation off, would leave every existing depth-1 delegation authorizing while
+            # appearing to work, because deeper chains truncate and deny. A guard that is a
+            # side effect of a bound is not a guard.
+            return _ChainCheck(
+                depth, AuthorityResult(False, AUTHORITY_ESCALATION, depth_exceeded=depth)
+            )
+        if any(not ancestor.delegable for ancestor in walk.ancestors):
+            # Rule 6 exists because `delegable` is not a §5.4 row and rule 4 would therefore
+            # never see it. An operator setting `delegable: false` on a root grant is shutting
+            # down a chain they believe is compromised.
+            return _ChainCheck(depth, AuthorityResult(False, AUTHORITY_ESCALATION))
+        return _ChainCheck(depth, None)
 
 
 # --- loading (SPEC-v0.3 §4.1, §4.2) ----------------------------------------------------
@@ -552,7 +1199,36 @@ def _from_section(section: object, source: str) -> Authority:
     return Authority(grants, max_delegation_depth=depth, source=source)
 
 
-def _parse_grant(entry: object, where: str) -> Grant:
+def grant_from_yaml(text: str, *, source: str = "<string>") -> Grant:
+    """One grant with the keys of §4.2 **minus `id`** — `ctrlrun delegate --file` (§5.7).
+
+    An `id:` key is a `PolicyError` naming the rule: a delegation's id is assigned, not
+    chosen (§5.2). The returned grant carries `id=""`, which is legal only on the
+    `Control.delegate` path and only until the call returns.
+    """
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise PolicyError(
+            f"{source}: a delegated grant must be a mapping of the keys of SPEC-v0.3 §4.2 "
+            f"minus 'id', got {_type_name(document)}"
+        )
+    if "id" in document:
+        raise PolicyError(
+            f"{source}: a delegated grant may not carry 'id'; the id is assigned, not chosen "
+            "(SPEC-v0.3 §5.2)"
+        )
+    return _parse_grant({**document, "id": _UNASSIGNED}, source, unassigned=True)
+
+
+#: A placeholder `id` for the `--file` path: `_parse_grant` requires a non-empty string, and
+#: `Grant` accepts `""` only on the `Control.delegate` path. Never stored, never compared.
+_UNASSIGNED: Final = "unassigned"
+
+
+def _parse_grant(entry: object, where: str, *, unassigned: bool = False) -> Grant:
     if not isinstance(entry, Mapping):
         raise PolicyError(f"{where}: a grant must be a mapping, got {_type_name(entry)}")
     _reject_unknown_keys(entry, _GRANT_KEYS, where)
@@ -570,7 +1246,7 @@ def _parse_grant(entry: object, where: str) -> Grant:
 
     try:
         return Grant(
-            id=grant_id,
+            id="" if unassigned else grant_id,
             subject=_parse_subject(entry.get("subject"), where),
             actions=_parse_patterns(entry.get("actions"), "actions", where),
             resources=(
@@ -689,15 +1365,28 @@ __all__ = [
     "AUTHORITY_GRANT",
     "AUTHORITY_REVOKED",
     "AUTHORITY_UNREADABLE",
+    "CONTAINMENT",
     "DEFAULT_MAX_DELEGATION_DEPTH",
     "DELEGATION_ID_PREFIX",
+    "DIMENSIONS",
+    "MAX_DEPTH",
+    "NOT_THE_SUBJECT",
     "NO_AUTHORITY",
+    "PARENT_NOT_DELEGABLE",
+    "PARENT_NOT_VALID",
     "RESOURCE_SEPARATOR",
+    "UNKNOWN_PARENT",
     "Authority",
     "AuthorityResult",
+    "Delegation",
     "Grant",
     "Subject",
+    "contained_dimension",
     "contains",
+    "grant_from_json",
+    "grant_from_yaml",
+    "grant_to_json",
     "matches",
+    "new_delegation_id",
     "validate_pattern",
 ]

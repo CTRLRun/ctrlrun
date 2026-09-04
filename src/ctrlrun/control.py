@@ -14,10 +14,10 @@ import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
+from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
@@ -27,7 +27,7 @@ from .approval import (
     ApprovalStatus,
     LocalApprovalProvider,
 )
-from .authority import Authority, AuthorityResult, _optional_from_yaml
+from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
     DEFAULT_LEASE,
     RECONCILED_STATES,
@@ -46,6 +46,7 @@ from .errors import (
     ApprovalMismatch,
     ApprovalRequired,
     AuthorityDenied,
+    AuthorityEscalation,
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
@@ -364,6 +365,15 @@ class Control:
         if result.delegation_id is not None:
             data["delegation_id"] = result.delegation_id
             data["depth"] = result.depth
+        # SPEC-v0.3 §7 — the keys that tell §5.6's rules apart. Rules 1, 3, 4, 5 and 6 all
+        # report `authority_escalation`, so without these five guards would be one guard as
+        # far as any reader or test could tell.
+        for key in ("dimension", "missing_parent_id", "expired_parent_id", "cycle_at"):
+            value = getattr(result, key)
+            if value is not None:
+                data[key] = value
+        if result.depth_exceeded is not None:
+            data["depth_exceeded"] = result.depth_exceeded
         return data
 
     def _refuse_authority(
@@ -1148,6 +1158,113 @@ class Control:
             return None
         record = self._store.get_approval(approval_id)
         return None if record is None else record.approver
+
+    # --- delegation (SPEC-v0.3 §5) ------------------------------------------------------
+
+    def delegate(self, parent_id: str, grant: Grant, *, by: Principal) -> Delegation:
+        """Create a delegated grant beneath `parent_id`, or refuse (SPEC-v0.3 §5.3).
+
+        `by` is the principal creating it, and §5.3 rule 4 checks it against the parent grant's
+        subject: you may only delegate authority you hold. It is checked, not authenticated —
+        on the `ctrlrun delegate` path it came from a shell, which is why the record carries
+        `created_via` (§5.7).
+
+        Every refusal writes no record and appends `DELEGATION_REJECTED`; a success writes the
+        row and appends `DELEGATION_CREATED`, which fans out to every registered sink. Creation
+        is deliberately **not** idempotent: two identical calls make two delegations, each
+        revocable on its own, because a delegation is an act and collapsing two acts into one
+        record would lose which one a receipt refers to (§5.2).
+        """
+        return self._delegate(parent_id, grant, by=by, via="api")
+
+    def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
+        """Revoke one delegation (SPEC-v0.3 §5.7).
+
+        Transitive **by structure**: nothing is rewritten and no children are visited, because
+        §5.6 rule 2 walks to the root on every evaluation. A chain of any depth is cut by one
+        write. Not reversible — there is no `unrevoke` — and idempotent: revoking an
+        already-revoked delegation logs and appends no second event.
+        """
+        authority = self._require_authority("revoke")
+        now = self._clock()
+        delegation = authority.plan_revocation(delegation_id, by=by, store=self._store, now=now)
+        if not self._store.revoke_delegation(delegation_id, by=by, at=now):
+            _LOG.info(
+                "delegation %s was already revoked at %s",
+                delegation_id,
+                delegation.revoked_at,
+            )
+            return
+        self._append_delegation(
+            EventType.DELEGATION_REVOKED,
+            {"delegation_id": delegation_id, "revoked_by": by},
+        )
+
+    def _delegate(
+        self, parent_id: str, grant: Grant, *, by: Principal, via: Literal["api", "cli"]
+    ) -> Delegation:
+        """The one implementation behind `Control.delegate` and `ctrlrun delegate`.
+
+        `via` is not on the public signature `SPEC-v0.3 §11` freezes; it is the one thing the
+        CLI path needs to say that the API path does not, and §5.7 requires the record to keep
+        the two apart so a reader of the evidence can tell an act from an assertion.
+        """
+        authority = self._require_authority("delegate")
+        try:
+            planned = authority.plan_delegation(
+                parent_id, grant, by=by, store=self._store, now=self._clock()
+            )
+        except IdentityError:
+            # §5.3 rule 0 — recorded with the reason `Control.execute` uses for the same fact.
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {"reason": PRINCIPAL_EXPIRED, "parent_id": parent_id},
+            )
+            raise
+        except AuthorityEscalation as escalation:
+            data: dict[str, Any] = {"reason": escalation.reason, "parent_id": parent_id}
+            if escalation.dimension is not None:
+                # §7 — present *only* for a rule-6 containment refusal. The other five name no
+                # §5.4 row, and inventing a dimension for them would make two distinguishable
+                # guards report the same shape.
+                data["dimension"] = escalation.dimension
+            self._append_delegation(EventType.DELEGATION_REJECTED, data)
+            raise
+        delegation = replace(planned, created_via=via)
+        self._store.put_delegation(delegation.to_record())
+        self._append_delegation(
+            EventType.DELEGATION_CREATED,
+            {
+                "delegation_id": delegation.delegation_id,
+                "parent_id": delegation.parent_id,
+                "depth": delegation.depth,
+                "created_by_agent": by.agent,
+                "created_by_user": by.user,
+                "created_via": via,
+            },
+        )
+        return delegation
+
+    def _require_authority(self, what: str) -> Authority:
+        if self._authority is None:
+            raise InvalidArgument(
+                f"this Control has no authority section, so there is nothing to {what}; "
+                "load a document with an 'authority:' key (SPEC-v0.3 §4.1)"
+            )
+        return self._authority
+
+    def _append_delegation(self, type_: EventType, data: Mapping[str, Any]) -> None:
+        """Append one of §7's three action-less events and fan it out.
+
+        `action_id` is `None`: these are about an authority record, created and revoked outside
+        any action's life. `Control` appends them and calls every sink, for `v0.2 §4.1`'s
+        reason — the highest-privilege operations in the release must not be the only ones
+        missing from the export path.
+        """
+        stored = self._store.append_event(
+            Event(type=type_, action_id=None, ts=self._clock(), data=data)
+        )
+        self._fan_out("on_event", stored, str(stored.type))
 
     # --- evidence ---------------------------------------------------------------------
 

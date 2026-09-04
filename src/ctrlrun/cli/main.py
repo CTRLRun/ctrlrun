@@ -22,9 +22,10 @@ import click
 
 from ..action import Principal
 from ..approval import ApprovalRecord
-from ..control import DEFAULT_STATE_DIR, state_path
+from ..authority import Delegation, grant_from_yaml
+from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
-from ..errors import CTRLRunError
+from ..errors import AuthorityEscalation, CTRLRunError
 from ..policy import DEFAULT_POLICY_FILENAME
 from ..receipt import Event, EventType, Receipt, iso_timestamp
 from ..state import RESOLUTIONS, SQLiteStateStore
@@ -451,6 +452,91 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
         "expires_at": iso_timestamp(record.expires_at),
         "granted_at": None if record.granted_at is None else iso_timestamp(record.granted_at),
         "consumed_at": None if record.consumed_at is None else iso_timestamp(record.consumed_at),
+    }
+
+
+@main.command()
+@click.option("--parent", required=True, help="The grant or delegation being narrowed.")
+@click.option(
+    "--file",
+    "grant_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="A one-grant YAML document, with the keys of SPEC-v0.3 §4.2 minus 'id'.",
+)
+@click.option(
+    "--as",
+    "as_who",
+    required=True,
+    help="The delegating principal: AGENT or AGENT/USER. Split on the first '/'.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
+    """Create a delegated grant beneath an existing one.
+
+    `--as` is an **assertion**, not an authentication: it supplies the creating principal for
+    SPEC-v0.3 §5.3 rule 4, and it is free text typed by whoever runs the command. The record
+    keeps `created_via="cli"` so a reader of the evidence can tell an act from an assertion.
+    An agent name containing '/' cannot be written here, because `--as a/b` would otherwise be
+    ambiguous between the agent `a/b` acting alone and the agent `a` acting for `b`.
+    """
+    agent, _, user = as_who.partition("/")
+    if not agent:
+        raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
+    try:
+        control = Control.from_file()
+        grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
+        created = control._delegate(
+            parent, grant, by=Principal(agent=agent, user=user or None), via="cli"
+        )
+    except AuthorityEscalation as exc:
+        # §5.7 — a refusal here exits non-zero and **names the rule that failed**, which is the
+        # §5.3 reason rather than the prose. The two vocabularies are disjoint, so an operator
+        # reading `containment` knows to look at §5.4 and not at an evaluation-time denial.
+        raise click.ClickException(f"{exc.reason}: {exc}") from exc
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(_delegation_dict(created), ensure_ascii=False))
+        return
+    click.echo(f"created {created.delegation_id}")
+    click.echo(f"parent {created.parent_id} at depth {created.depth}")
+    click.echo(f"revoke it with: ctrlrun revoke {created.delegation_id}")
+
+
+@main.command()
+@click.argument("delegation_id")
+@click.option("--by", "by", default=CLI_APPROVER, show_default=True, help="Who revoked it.")
+def revoke(delegation_id: str, by: str) -> None:
+    """Revoke a delegation, and with it every delegation beneath it.
+
+    Transitive by structure and not reversible: there is no `unrevoke`, because the operation
+    whose safety matters is the one taken in a hurry (SPEC-v0.3 §5.7). Revoking an
+    already-revoked delegation is idempotent and exits 0.
+    """
+    try:
+        control = Control.from_file()
+        before = control.store.get_delegation(delegation_id)
+        control.revoke(delegation_id, by=by)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if before is not None and before.revoked_at is not None:
+        click.echo(f"{delegation_id} was already revoked at {iso_timestamp(before.revoked_at)}")
+        return
+    click.echo(f"revoked {delegation_id} by {by}")
+    click.echo("every delegation beneath it is denied from the next evaluation")
+
+
+def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
+    """One delegation as portable JSON, for `ctrlrun delegate --json` (SPEC-v0.3 §5.2)."""
+    return {
+        "delegation_id": delegation.delegation_id,
+        "parent_id": delegation.parent_id,
+        "depth": delegation.depth,
+        "created_by_agent": delegation.created_by.agent,
+        "created_by_user": delegation.created_by.user,
+        "created_via": delegation.created_via,
+        "created_at": iso_timestamp(delegation.created_at),
     }
 
 

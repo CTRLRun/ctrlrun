@@ -14,6 +14,35 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **Delegation with attenuation** (build-list item 3, SPEC-v0.3 §5). A principal who holds a
+  `delegable` grant can create a narrower one at runtime — `Control.delegate`, `ctrlrun
+  delegate` — and revoke it — `Control.revoke`, `ctrlrun revoke`. A delegated grant is valid
+  only if it is provably a subset of its parent on every dimension, checked **at creation and
+  again at every evaluation**: a check performed only at creation would leave every delegation
+  exactly as wide as the file used to be, which is the shape of every stale-permission incident
+  there has ever been.
+- **Omission never means unlimited.** A child that drops a dimension its parent constrains is
+  rejected, not treated as inheriting the parent's limit and certainly not as unconstrained —
+  including a child subject that carries a wildcard, omits `agent`, or drops the parent's
+  `user`, each of which hands the grant to a wider population rather than a narrower one.
+- **Revocation is transitive by structure.** Nothing is rewritten and no children are visited:
+  a chain of any depth is cut by one write, because every evaluation walks to the root. Chain
+  depth is **recomputed, never read** from the stored column, the walk is bounded and refuses a
+  chain that revisits an id, and a stored delegation that cannot be read denies the action
+  outright rather than being skipped in favour of a broader grant that happens to match.
+- **A `delegations` table in both stores**, and `DelegationRecord` with it. A **new** table, so
+  `CREATE TABLE IF NOT EXISTS` adds it to a database that already exists and v0.3 still needs
+  no migration story; no existing table gains a column. `put_delegation` is an `INSERT` and
+  never an upsert — an upsert on an existing id would clear `revoked_at`, which is `unrevoke`
+  by another door in a release that says there is no such thing.
+- **Three delegation event types**, `DELEGATION_CREATED`, `DELEGATION_REVOKED` and
+  `DELEGATION_REJECTED`. They are about an authority record rather than an action, so
+  `Event.action_id` becomes `str | None` and they carry `null`; `OTelEventSink` emits a
+  standalone span for each rather than dropping them, because the highest-privilege operations
+  in the release must not be the only ones missing from the export path.
+- **An expired credential mints nothing.** `Control.delegate` refuses a `by` whose credential
+  has lapsed, before it looks at the parent at all — a delegation is the most durable thing a
+  principal can create, and it is the last place a stale credential should still work.
 - **The `authority:` section: grants, patterns and evaluation** (build-list item 2,
   SPEC-v0.3 §4). A second axis, and it is **opt-in and then fail-closed**: a document with no
   `authority:` key behaves exactly as v0.2, and the moment one exists every principal needs a

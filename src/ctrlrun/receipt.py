@@ -118,10 +118,15 @@ class Event:
     """One ordered step in the life of an action (SPEC-v0.1 §6.2).
 
     `event_id` is assigned by the StateStore on append, not by the caller.
+
+    `action_id` is `None` for the three `DELEGATION_*` types (SPEC-v0.3 §7): they are about an
+    authority record, created and revoked outside any action's life, and they name the
+    delegation in `data.delegation_id`. Inventing a synthetic `action_id` would put a value in
+    a field every reader takes to name a real proposal.
     """
 
     type: EventType
-    action_id: str
+    action_id: str | None
     ts: datetime
     data: Mapping[str, Any] = field(default_factory=dict)
     effect_key: str | None = None

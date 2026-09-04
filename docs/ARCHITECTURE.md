@@ -126,7 +126,20 @@ approvals(
 );
 receipts(receipt_id TEXT PRIMARY KEY, action_id TEXT, effect_key TEXT, result TEXT, json TEXT, ts TEXT);
 events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, action_id TEXT, effect_key TEXT, approval_id TEXT, data_json TEXT);
+delegations(                      -- v0.3; a NEW table, so no migration story is needed
+  delegation_id TEXT PRIMARY KEY, -- "dlg_" + 32 hex
+  parent_id TEXT NOT NULL,        -- a root grant's id, or another delegation_id
+  depth INTEGER NOT NULL,         -- recorded, never trusted: evaluation walks to the root
+  grant_json TEXT NOT NULL,       -- the child grant; `state.py` stores the string, `authority.py` parses it
+  created_by_agent TEXT NOT NULL, created_by_user TEXT,
+  created_via TEXT NOT NULL,      -- api|cli: an act, or an assertion at a terminal
+  created_at TEXT NOT NULL, revoked_at TEXT, revoked_by TEXT
+);
 ```
+
+`delegations` holds rows, not grants. `grant_json` stays a string in `state.py` so the store does
+not import `authority.py` and transitively acquire `policy.py`, which is the edge §6 puts in
+`state.py`'s "must not know about" column.
 
 Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 

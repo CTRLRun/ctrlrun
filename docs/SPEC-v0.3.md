@@ -1241,6 +1241,19 @@ gateway's approval path (§8.3), and `ctrlrun.acs`'s hook. Reading `Policy.evalu
 a decision is a defect after v0.3, and the two places in shipped code that do it are named in
 §8.3 so item 5 cannot miss them.
 
+**What §4.6's blast radius costs, stated because item 3 made it real.** A single unreadable
+`delegations` row denies **every** action for **every** principal, root-grant holders included,
+and it is not recoverable from the CLI: `ctrlrun revoke` refuses the row for the same reason
+evaluation does, and revoking would not help anyway because evaluation enumerates revoked rows
+too (§5.6 rule 2 has to be able to report `authority_revoked`). The recovery is deleting the row
+with `sqlite3`, which §5.5 already concedes is how such a row arrives. This is the fail-closed
+direction and it is what the paragraph below asks for; it is recorded here so that an operator
+meets it in the specification rather than during an incident, and so that a future release
+proposing to relax it — skipping a row that is *both* revoked and unreadable, say, which can
+never contribute a pass — is amending a stated position rather than a silent one. The one thing
+item 3 does fix is the evidence: `AUTHORITY_DENIED.data.delegation_id` names the row, because
+§13 ships no way to list delegations and an operator who cannot name the row cannot delete it.
+
 **A record that cannot be read denies the action outright.** A stored delegation whose
 `grant_json` no longer parses (§5.2), or whose chain cannot be walked (§5.5), MUST NOT be skipped
 in favour of some other grant that happens to match — it is `authority_unreadable`, first in the
@@ -1324,6 +1337,12 @@ Control(..., authority: Authority | None = None)
 Control.delegate(parent_id: str, grant: Grant, *, by: Principal) -> Delegation
 Control.revoke(delegation_id: str, *, by: str | None = None) -> None
 ```
+
+`AuthorityResult` carries four further optional fields, added by build-list item 3 and listed
+here rather than left to be inferred: `dimension`, `missing_parent_id`, `expired_parent_id`,
+`depth_exceeded` and `cycle_at`. They are §7's `AUTHORITY_DENIED` evidence, and they exist because
+§5.6's rules 1, 3, 4, 5 and 6 all report `authority_escalation` — without them five guards would
+be one guard as far as any reader or test could tell.
 
 `Subject.__post_init__` refuses both fields `None`, and **`Grant.__post_init__` validates
 everything the YAML loader validates** — every pattern against §4.4's grammar, every condition key
@@ -1782,6 +1801,16 @@ Revoking an already-revoked delegation is idempotent: it logs, appends no second
 validates it, runs every check of §5.3, and prints the new `delegation_id`. Its refusals exit
 non-zero and name the rule that failed.
 
+**Rule 4 has no evaluation-time counterpart, and that is deliberate.** §5.6 re-checks
+containment, revocation, expiry, `delegable` and the walk on every evaluation, but not §5.3 rule
+4: nothing at evaluation asks whether whoever created a delegation held its parent. A writer to
+the `delegations` table can therefore mint a fully-contained delegation from any `delegable` root
+grant to an agent of its choosing without ever holding it. It cannot exceed the parent — every
+other rule still applies — so the escalation available is in *population*, not in powers, and
+`docs/THREAT_MODEL.md` puts store write access out of scope. It is stated because §5.6's list of
+six rules is where a reader looks for "you may only delegate authority you hold", and finding it
+absent should read as a decision rather than as an omission.
+
 **§5.3's order tells a caller which grants exist.** Rules 1 to 3 — `unknown_parent`,
 `parent_not_delegable`, `parent_not_valid` — run before rule 4's `not_the_subject`, so in-process
 code can call `Control.delegate` with a junk child against a guessed `parent_id` and learn from
@@ -1803,6 +1832,13 @@ rather than by being it. That is why the record carries `created_via` (§5.2): `
 `Control.delegate`, where `by` came from wherever the application's identity came from, and `cli`
 for this command, where it came from a shell. A reader of the evidence can tell an act from an
 assertion, which is the whole reason the field exists.
+
+**How `created_via` reaches the record.** §11 freezes `Control.delegate(parent_id, grant, *, by)`
+with no `via` argument, and `ctrlrun delegate` needs to say `cli`. It therefore goes through a
+package-private `Control._delegate(..., via=...)` that the public method calls with `"api"`. This
+is recorded because the alternative — widening a frozen signature so the CLI can pass one value —
+would put a caller-supplied provenance field on the public API, and a `created_via` a caller
+chooses says nothing at all.
 
 CLI delegation is an operator act inside the trust boundary, exactly as `ctrlrun approve` is
 (`docs/THREAT_MODEL.md`: "A compromised approver … is out of scope"). §13 records that v0.3 does
@@ -2084,7 +2120,7 @@ DELEGATION_REJECTED
 | Type | `data` |
 |---|---|
 | `AUTHORITY_RESOLVED` | `reason` (`authority_grant`), `grant_id`, and for a delegated grant `delegation_id` and `depth` |
-| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for rule 1; `depth_exceeded` or `cycle_at` for rule 5 |
+| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for rule 1; `expired_parent_id` for rule 3; `depth_exceeded` or `cycle_at` for rule 5 |
 | `DELEGATION_CREATED` | `delegation_id`, `parent_id`, `depth`, `created_by_agent`, `created_by_user`, `created_via` |
 | `DELEGATION_REVOKED` | `delegation_id`, `revoked_by` |
 | `DELEGATION_REJECTED` | `reason` and `parent_id`; `dimension` **only** for a §5.3 rule-6 containment refusal |
@@ -2097,6 +2133,14 @@ argument `v0.2 §2.5` makes for appending `RECONCILIATION_RESOLVED` on `"unknown
 `dimension` is present only where a §5.4 row failed. The other refusals of §5.3 — `unknown_parent`,
 `parent_not_delegable`, `parent_not_valid`, `not_the_subject`, `max_depth` — name no row, and
 inventing a dimension for them would make two distinguishable guards report the same shape.
+
+`expired_parent_id` was added by build-list item 3, and the amendment is recorded rather than
+silent. §5.6 rule 3 says its whole contribution is that "the denial names the ancestor that
+lapsed rather than the leaf that inherited its deadline"; §5.6's ordering paragraph then lists the
+`data` shapes as "`missing_parent_id`, `dimension`, or neither", which would leave rule 3 carrying
+nothing and therefore indistinguishable in evidence from rule 6. A guard no reader and no test can
+tell has run is the subsumed guard this document keeps refusing to ship, so the key exists and
+T77 asserts it. The ordering paragraph's list is illustrative; this table is the closed one.
 
 **`Event.action_id` becomes `str | None`.** The three delegation events are not about an action:
 they are about an authority record, created and revoked outside any action's life. They carry

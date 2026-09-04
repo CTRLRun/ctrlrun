@@ -11,7 +11,7 @@ from .approval import (
     LocalApprovalProvider,
     ScriptedApprovalProvider,
 )
-from .authority import Authority, AuthorityResult, Grant, Subject
+from .authority import Authority, AuthorityResult, Delegation, Grant, Subject
 from .control import Control, context, protect, with_approval
 from .effect import EffectRecord, EffectState, ReconcileOutcome
 from .errors import (
@@ -40,7 +40,7 @@ from .identity import (
 )
 from .policy import Condition, Decision, Policy, parse_conditions
 from .receipt import Event, EventSink, JSONLEventSink, Receipt
-from .state import InMemoryStateStore, SQLiteStateStore, StateStore
+from .state import DelegationRecord, InMemoryStateStore, SQLiteStateStore, StateStore
 from .webhook import WebhookApprovalProvider
 
 __all__ = [
@@ -61,6 +61,8 @@ __all__ = [
     "Condition",
     "Control",
     "Decision",
+    "Delegation",
+    "DelegationRecord",
     "DuplicateEffect",
     "EffectKeyError",
     "EffectRecord",

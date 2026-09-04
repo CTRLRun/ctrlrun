@@ -7,16 +7,23 @@ never a failed action.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from ctrlrun import (
     ApprovalRequired,
+    Authority,
     Control,
+    Grant,
     InMemoryStateStore,
     MissingDependency,
     NotExecuted,
     Policy,
+    Principal,
+    Subject,
     context,
+    parse_conditions,
     protect,
 )
 
@@ -41,6 +48,23 @@ actions:
       - when: { amount_lte: 5000 }
         decision: approve
       - decision: deny
+"""
+
+
+#: SPEC-v0.3 §7 — a document with an `authority:` section, so the delegation events exist.
+AUTHORITY_DOCUMENT = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: head-of-support
+      subject: { agent: "support-lead", user: "alice@example.com" }
+      actions: ["stripe.**"]
+      constraints: { amount_lte: 5000 }
+      expires_at: "2027-01-01T00:00:00+00:00"
+      delegable: true
+actions:
+  stripe.refund:
+    decision: allow
 """
 
 
@@ -522,3 +546,43 @@ def test_T30_a_missing_otel_extra_raises_MissingDependency(monkeypatch):
 
     assert "pip install 'ctrlrun[otel]'" in str(raised.value)
     assert not isinstance(raised.value, ImportError)
+
+
+# --- SPEC-v0.3 §7: an action-less event gets a standalone span -------------------------
+
+
+@pytest.mark.authority
+def test_a_delegation_event_becomes_a_standalone_span(store, exporter):
+    """SPEC-v0.3 §7 — the v0.2 sink would look for a span it will never find and drop these.
+
+    The three `DELEGATION_*` types carry `action_id: null`, so `_span_for` returns `None` for
+    every one of them and an operator whose evidence pipeline is OTel would watch a delegation
+    chain appear and be revoked with nothing in the trace. The highest-privilege operations in
+    the release must not be the only ones missing from the export path.
+    """
+    export, provider = exporter
+    control = Control(
+        Policy.from_yaml(AUTHORITY_DOCUMENT),
+        store,
+        authority=Authority.from_yaml(AUTHORITY_DOCUMENT),
+        sinks=[OTelEventSink(tracer_provider=provider)],
+    )
+    delegation = control.delegate(
+        "head-of-support",
+        Grant(
+            id="",
+            subject=Subject(agent="refund-agent", user="alice@example.com"),
+            actions=("stripe.refund",),
+            constraints=parse_conditions({"amount_lte": 500}, where="<test>"),
+            expires_at=datetime(2026, 12, 1, tzinfo=UTC),
+        ),
+        by=Principal(agent="support-lead", user="alice@example.com"),
+    )
+    control.revoke(delegation.delegation_id, by="cli:local")
+
+    names = [span.name for span in _spans(export)]
+    assert names == ["DELEGATION_CREATED", "DELEGATION_REVOKED"]
+    created, revoked = (_attrs(span) for span in _spans(export))
+    assert created["ctrlrun.delegation_id"] == delegation.delegation_id
+    assert created["ctrlrun.parent_id"] == "head-of-support"
+    assert revoked["ctrlrun.delegation_id"] == delegation.delegation_id
