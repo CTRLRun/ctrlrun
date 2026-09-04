@@ -532,7 +532,18 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
 
 def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
     """The direction, asserted rather than assumed: `ctrlrun`'s own metadata names no adapter
-    and no framework, in `dependencies` or in any extra."""
+    and no framework, in `dependencies` or in any extra.
+
+    **The kernel half runs everywhere; the adapter half runs where there are adapters.** The
+    sdist job unpacks the distribution and runs this suite from inside it, and `adapters/` is
+    not there -- which is the other half of T136 holding, not a problem. Reading it there was a
+    `FileNotFoundError`, found by that job on this branch's first run.
+
+    The skip is narrow on purpose. It fires only when the directory is absent, and the absence
+    is itself asserted by `test_T136_the_ctrlrun_distributions_contain_no_adapter` in the same
+    file, so there is no configuration in which both halves go unchecked: in a checkout this
+    loop runs, and in an sdist the other test is what proves the directory should be missing.
+    """
     import tomllib
     from pathlib import Path
 
@@ -548,7 +559,13 @@ def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
     for framework in ("langgraph", "langchain", "openai-agents", "crewai", "autogen"):
         assert framework not in lowered, framework
 
-    for adapter in sorted((root / "adapters").iterdir()):
+    adapters = root / "adapters"
+    if not adapters.is_dir():  # pragma: no cover - running from an unpacked sdist
+        pytest.skip("no adapters/ here, which is what the sdist half of T136 asserts")
+
+    found = sorted(path for path in adapters.iterdir() if (path / "pyproject.toml").is_file())
+    assert found, "adapters/ exists but holds no distribution"
+    for adapter in found:
         with (adapter / "pyproject.toml").open("rb") as handle:
             project = tomllib.load(handle)["project"]
         assert any(name.startswith("ctrlrun") for name in project["dependencies"]), (

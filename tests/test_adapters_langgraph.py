@@ -380,11 +380,27 @@ def test_T135b_the_adapter_reimplements_nothing_and_grants_nothing():
 # --- §7's README requirements, and §6.3's two ranges ----------------------------------------
 
 
+def _needs_the_source_tree() -> None:
+    """§7's documentation tests read `adapters/<name>/`, which the sdist does not carry."""
+    if not ADAPTER.is_dir():  # pragma: no cover - running from an unpacked sdist
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+
+
 def readme() -> str:
+    """The adapter's README, or a skip where the adapter's source is not on disk.
+
+    `adapters/` is pruned from the sdist (SPEC-v0.5 §6.1), and the sdist job unpacks the
+    distribution and runs this suite from inside it. The §7 documentation tests read files that
+    are deliberately not there, so they skip -- and only they do: everything that drives the
+    adapter through a framework needs the installed distribution, which `importorskip` above
+    has already established, and keeps running.
+    """
+    _needs_the_source_tree()
     return (ADAPTER / "README.md").read_text(encoding="utf-8")
 
 
 def declared() -> dict[str, str]:
+    _needs_the_source_tree()
     with (ADAPTER / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
     return {name.split(">")[0].split("<")[0].strip(): name for name in project["dependencies"]}
