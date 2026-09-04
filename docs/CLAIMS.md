@@ -8,7 +8,7 @@ removed from the README in the same commit — the README is not allowed to desc
 that no longer ships. If you find a row here that does not hold against the version you
 installed, that is a bug: please open an issue.
 
-Regenerated for: **v0.2.0**. Line numbers refer to that tag.
+Regenerated for: **v0.3.0**. Line numbers refer to that tag.
 
 ## The opening paragraph
 
@@ -50,6 +50,47 @@ Every sentence the README gained in this release, mapped the same way.
 | "and only in the direction its answer points" | `"unknown"` is absent from `RECONCILED_STATES` — `effect.py` | `test_T15_a_hook_that_cannot_answer_leaves_the_record_ambiguous` |
 | "one OpenTelemetry span per action, one span event per step" | `OTelEventSink` — `otel.py:45` | `test_T29_one_action_produces_one_span_named_for_the_action`, `test_T29_every_event_becomes_a_span_event_named_by_its_type` |
 | "Argument values stay out of it unless you ask for them" | `OTelEventSink(arguments=...)` — `otel.py:45` | `test_T29_argument_values_are_not_attributes_by_default` |
+
+## What v0.3 adds to the README
+
+The authority section, observe mode and the identity extra. Every sentence, mapped the same
+way — and the four the README deliberately *does not* say are below.
+
+| Claim | Code | Proof |
+|---|---|---|
+| "A policy … cannot see who is asking — deliberately, since v0.1" | `Policy.evaluate` still takes only the action's name and arguments; `RESERVED_ARGUMENTS` — `policy.py:104` — refuses `agent_eq` and every other principal-addressing condition at load, in a document of **every** schema version | `test_T74b_a_reserved_name_in_a_policy_rule_is_a_load_error`, `test_T74b_a_reserved_name_in_a_grant_constraint_is_a_load_error` |
+| "`authority:` is the second axis" | `Authority.evaluate` — `authority.py:807`; `Control._authority_result` — `control.py:394` | `test_T67_a_principal_with_no_grant_is_denied` |
+| "opt-in, and then fail-closed" | `_optional_authority` returns `None` for a document with no section — `control.py`; `Control.authority is None` is v0.2 behaviour exactly | `test_T66_a_document_with_no_authority_section_leaves_control_authority_none`, `test_T66_no_authority_event_is_appended_without_a_section`, and T66's session-wide guard in `tests/conftest.py` |
+| "every principal needs a grant and no grant means denied" | `NO_AUTHORITY` — the fail-closed default of `Authority.evaluate` (`authority.py:807`), reached for reads and for actions with no effect key alike | `test_T67_an_action_the_policy_allows_outright_still_needs_a_grant` |
+| "A grant carries no `decision:`" | `_GRANT_KEYS` — `authority.py` — is a closed set that does not contain `decision` | `test_T73b_grant_refuses_what_the_loader_refuses` |
+| "the two axes … combine as the stricter of the two" | `Control.evaluate` returns the combined result — `control.py`; a denial on either axis is a denial | `test_T70_the_stricter_of_the_two_wins` |
+| "authority first" | `Control.execute` evaluates authority before policy and a denial appends `AUTHORITY_DENIED` and never `POLICY_EVALUATED` — `control.py:425` | `test_T74_a_denial_leaves_no_pending_approval_request` |
+| "narrow it at runtime with `ctrlrun delegate`" | `Control.delegate` — `control.py:1460`; `Authority.plan_delegation` — `authority.py:878`; `ctrlrun delegate` — `cli/main.py:675` | `test_t75_the_delegation_authorizes_an_action_within_its_limits` |
+| "provably a subset of its parent on every dimension, at creation and again at every evaluation" | `contained_dimension` — `authority.py:604` — runs from `plan_delegation` (`authority.py:878`) **and** from the chain walk in `Authority.evaluate` (`authority.py:807`) | `test_t76_each_dimension_violated_alone`, `test_t77b_a_narrowed_parent_narrows_its_children` |
+| "Omitting a dimension the parent constrains is rejected, not inherited" | `contained_dimension` treats an absent child dimension as unconstrained and therefore wider — `authority.py:604`; the subject half is `_subject_contained` (`authority.py:635`) | `test_t81_omission_is_not_unlimited`, `test_T73b_a_subject_addressed_to_every_principal_is_refused`, `test_t76_each_dimension_violated_alone` |
+| "`ctrlrun revoke` cuts a chain of any depth with one write" | `Control.revoke` — `control.py:1476` — writes one row (`state.py:529`) and visits no children; every evaluation walks to the root | `test_t78_a_revoked_parent_denies_its_grandchild`, `test_put_delegation_is_never_an_upsert` |
+| "`mode: observe` … records what *would* have been blocked, without blocking anything" | `_parse_mode` — `policy.py:405`; `Control._observed` — `control.py:693`; `_WouldHave` — `receipt.py:180`; `ReceiptResult.OBSERVED` — `receipt.py:101` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_a_duplicate_is_recorded_and_still_runs` |
+| "One top-level line" | `mode:` is refused anywhere but the top level — `reject_nested_mode`, `policy.py:424` | `test_T84_mode_is_refused_anywhere_but_the_top_level` |
+| "`ctrlrun stats` gives you the numbers" | `stats` — `cli/main.py:500`; counted from `would_have.blocked_reason` and nothing else | `test_T86_stats_counts_what_observe_mode_recorded`, `test_T86_stats_reaches_no_network` |
+| "It is not a dry run: it executes" | `_observed` runs the executor on every path, including the ones enforce mode would have refused — `control.py:693` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_an_executor_that_fails_on_a_held_key_still_writes_the_record` |
+| "verifies a bearer token against a JWKS or a pinned key" | `JWTIdentityProvider._verified` — `jwt_identity.py:175`; the algorithm comes from the configured list and never from the token | `test_T88_a_valid_token_becomes_a_principal`, `test_T89_every_invalid_token_is_refused_by_cause` |
+| "maps the verified claims onto a principal" | `_principal` — `jwt_identity.py` — copies only the claims named in `claim_names` | `test_T88_only_the_named_claims_reach_the_principal` |
+| "`pip install \"ctrlrun[identity]\"`" | `identity = ["pyjwt[crypto]>=2.8"]` in `pyproject.toml`; imported lazily by `_jwt()` — `jwt_identity.py` | `test_T92_constructing_without_the_extra_names_the_install_command`, `test_T92_importing_ctrlrun_pulls_in_no_jwt_module` |
+| "CTRLRun issues no credential and defines no identity format" | There is no minting, signing or issuing code path in the package: `jwt_identity.py` calls `decode` and never `encode` | `test_the_package_never_encodes_a_token` |
+
+### Four claims the v0.3 README deliberately does not make
+
+- **Nothing about compliance, conformance or alignment**, with any standard, in the README, in
+  a docstring or in CLI output. `authority:` is an authorization model; it is not an ACS, an
+  OAuth or an OIDC claim, and none of those words appears as an assertion about CTRLRun.
+- **Nothing about issuing identity.** The README says "consumed, never invented" and means it:
+  no token minting, no OAuth flow, no authorization server, no introspection, no revocation
+  list. A `Principal` is a *reading* of somebody else's credential.
+- **Nothing about revoking a token.** A verified token is valid until its `exp`, which is why
+  one without an `exp` is refused. Shared-signals mechanisms exist and v0.3 implements none.
+- **Nothing about hot-reloading a grant.** Revocation and expiry are live; an edit to the file
+  takes effect when the process next loads it. `docs/authority.md` says so, and the README does
+  not imply otherwise.
 
 ### Two claims the README deliberately does not make
 

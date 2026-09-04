@@ -43,16 +43,38 @@ one arrived that it did not list:
 
 Standards: OpenTelemetry export (code), MCP gateway. The OWASP ACS adapter shipped in v0.2 (see `docs/ACS.md`); "ACS-compatible" is still unearned and waits on an ACS conformance suite to measure against.
 
-## v0.3 — Authority
+## v0.3 — Authority ✅ shipped
 
-- Principal abstraction and `IdentityProvider` interface.
-- Authority grants: subject, permitted actions, resource patterns, constraints (limits, currency, environment), expiry.
-- Delegation with attenuation: `child ⊆ parent`, enforced; escalation → DENY.
-- Fourth signature demo: authority escalation.
+- Principal abstraction and `IdentityProvider` interface — `StaticIdentityProvider`,
+  `HeaderIdentityProvider` in core, `JWTIdentityProvider` in `ctrlrun[identity]`.
+- Authority grants: subject, permitted actions, resource patterns, constraints, environments,
+  expiry. Opt-in, then fail-closed.
+- Delegation with attenuation: `child ⊆ parent`, at creation **and** at every evaluation;
+  escalation → DENY. Omission is rejected rather than inherited.
+- Fifth signature demo: authority escalation, plus `examples/authority-escalation/` and
+  `examples/authority/`.
 
-This is the first point at which `VISION.md` may be opened for design input.
+**Two things were delivered that this line did not anticipate**, and they are recorded here
+rather than left as a surprise in the changelog:
 
-Standards: align principal/delegation semantics with NIST agent identity work and OAuth-based agent identity. Wording is "consumes identities from", never "implements". `--principal-from-client-info` is removed here: it exists in v0.2 only because a v0.1 policy cannot address the principal at all, and the authority model makes a self-reported name an authorization input.
+- **Observe mode and `ctrlrun stats`.** An enforcement kernel nobody dares turn on is not
+  enforcement, so v0.3 ships the rollout path with the model: `mode: observe` runs every real
+  decision and records what *would* have been blocked. It was scoped as build-list item 4 once
+  the shape of the authority denial made it obvious that operators would need the numbers
+  before they would accept the refusals.
+- **`ctrlrun verify` exists as a stub that exits 2.** It runs nothing and claims nothing. It is
+  here because observe mode's whole purpose is to lead somewhere, and the command an operator
+  reaches for next should not be a `No such command` error that suggests they mistyped. The
+  real one is v0.4, below, unchanged.
+
+This is the first point at which `VISION.md` was opened for design input, and only §5's
+authority-grant shape was taken from it.
+
+Standards: v0.3 **consumes** identities and issues none — no token minting, no OAuth flow, no
+authorization server, no introspection. It verifies a JWT (RFC 7519) against a JWKS (RFC 7517)
+with RFC 8725's algorithm and explicit-typing rules applied, and it claims no conformance with
+any of them. `--principal-from-client-info` is removed, and `AcsControlHook` gained the same
+requirement for the same reason: a self-reported name cannot be an authorization input.
 
 ## v0.4 — Verification
 
