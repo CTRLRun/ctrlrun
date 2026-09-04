@@ -323,6 +323,19 @@ class InterruptApprovalProvider:
                 f"{self._interrupt.framework}: interrupt() must return an ApprovalAnswer, "
                 f"got {type(answer).__name__}"
             )
+        if not isinstance(answer.granted, bool):
+            # The one field carrying the decision, and it was the only one on this surface not
+            # type-checked. An adapter that handed a framework's raw resume value through --
+            # `ApprovalAnswer(granted="no", ...)`, which is exactly what LangGraph's
+            # `interrupt()` returns -- would have granted on a truthy string. A human's *no*
+            # becoming a grant is the worst failure available here, and `bool` is not something
+            # to be lenient about for the same reason `v0.1 §3.2` refuses to let `True` compare
+            # equal to `1`.
+            raise InvalidArgument(
+                f"{self._interrupt.framework}: ApprovalAnswer.granted must be a bool, got "
+                f"{type(answer.granted).__name__} -- a framework's raw resume value is not a "
+                "verdict, and any truthy one would be a grant"
+            )
         if not isinstance(answer.approver, str) or not answer.approver.strip():
             raise InvalidArgument(
                 f"{self._interrupt.framework}: an ApprovalAnswer must name an approver; "

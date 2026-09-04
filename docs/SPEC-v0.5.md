@@ -295,6 +295,8 @@ tool (§3.5). Nothing else in the kernel is required of an adapter.
 | `StateStore.reserve_effect`, `consume_approval`, `consume_approval_and_reserve`, `begin_execution`, `commit_effect`, `fail_effect`, `mark_ambiguous`, `resolve_effect`, `extend_lease` | Reservation and outcome are `v0.1 §5.5`'s asymmetry. A second implementation of it is the one drift this codebase must not have. |
 | `StateStore.grant_approval`, `deny_approval` | The grant is written in exactly one place, and it is core's (§2.4). |
 | `StateStore.put_approval_request` | Creating a request out of band is the first half of a second approval path, and the second half is answering it. |
+| `StateStore.append_event`, `put_receipt` | These attack the **evidence** rather than the decision, which is the product's whole output. An adapter holding only `control` can reach `control.store.append_event(Event(type=APPROVAL_GRANTED, data={"approver": "the-cfo"}))` and put a grant nobody made into the log. Every other writer on the protocol was enumerated; these two were the omission, and an independent review found them by trying. |
+| `Control.approvals`, and anything reached through it | `control.approvals.wait(<any pending request id>)` drives the provider for a request the adapter was **not handed** — one created by another agent's action, or waiting in an operator's queue — and an adapter's own `interrupt()` answers it. The `may call` list is read-only accessors; this one is not read-only, and it is named here rather than left to the general clause. |
 | `StateStore.hold_continuation`, `take_continuation` | The elicitation machinery is reachable without `Control.resume`, so naming only `resume` would be the missing enumeration this project keeps finding (`v0.3 §4.3.1`). |
 | `StateStore.put_delegation`, `revoke_delegation`, `Control.delegate`, `Control.revoke` | An adapter creates no authority. |
 | `Control.resume`, and raising `Suspended` | That is the *elicitation* round trip, and an approval is not one (§3.1). |
@@ -303,8 +305,15 @@ tool (§3.5). Nothing else in the kernel is required of an adapter.
 | `Policy.evaluate` in isolation | `v0.3 §11` — the combined `§4.6` decision or nothing. `needs_approval` and `Control.evaluate` are that. |
 
 **May call.** `ctrlrun.adapter.needs_approval`, `ctrlrun.adapter.banner`, `Control.evaluate`,
-and the read-only accessors `Control.policy`, `Control.store`, `Control.environment`,
-`Control.resolve_principal`. Reading is not the problem; writing is.
+`Control.resolve_principal`, and the accessors `Control.policy`, `Control.environment`,
+`Control.store` **for reads only** — `get_effect`, `get_approval`, `receipts`, `events`.
+
+`Control.store` is on this list and `StateStore` is a mutable object, so "reading is not the
+problem; writing is" is a rule about *calls* and not about *reachability*: the never-list above
+is what makes it checkable, and every writer on the protocol is on it. The general clause
+—*directly or through any object it can reach*— is not enough on its own, because a rule that
+names no methods is a rule the conformance kit cannot check and a reviewer cannot mutation-test.
+That is the missing-enumeration shape §4.1 exists to prevent, one level down.
 
 **Who wires it up.** The operator, in the same breath as the policy and the store:
 
@@ -591,6 +600,28 @@ A `DENY` at that predicate returns "no approval needed" and lets the tool be inv
 `Control.execute` denies it with a receipt, an `ACTION_DENIED` and the exception the caller
 catches. Refusing inside the predicate would refuse without evidence, and `v0.3 §4.3` is
 explicit that a denial with a principal to attribute it to belongs in the evidence log.
+
+**`needs_approval` and `@protect` do not always build the same `Action`, and the divergence is
+stated rather than discovered.** `@protect` binds the call to the wrapped function's signature
+and applies defaults (`v0.1 §8`), and its `resource` template comes from the decorator first and
+the policy second; `needs_approval` gets the framework's raw arguments and cannot see the
+decorator. So two things can differ: an argument the function defaults and the framework omitted,
+and a `resource` declared only on the decorator.
+
+Both directions are **safe**, and that is why this is a documented divergence rather than a
+defect. A wrong `False` means the framework does not pre-ask, and `Control.execute` then raises
+`ApprovalRequired`, `@protect(wait=True)` routes it through the interrupt, and the human is asked
+anyway — the resumed-in-place shape, reached from the other one. A wrong `True` means a human is
+asked about an action the policy would have allowed, which costs attention and authorizes
+nothing. **In neither direction does an action execute that would not have.** An adapter whose
+framework omits defaulted arguments should say so under §7 item 5.
+
+`needs_approval` can also **raise** rather than return: `resolve_principal` refuses an
+unattributable call (`ActionDenied(reason="no_principal")`) or a rejected credential
+(`IdentityError`), and `evaluate` refuses an Action from another deployment's environment. An
+adapter answering a framework predicate must let those propagate — a predicate that swallowed
+them would answer `False` for an action the kernel is about to refuse anyway, which is harmless,
+and `False` for a *credential* problem the operator needs to see, which is not.
 
 Neither shape needs a new **entry point** — no new way to reach an effect, no path that reserves
 or commits or grants outside `Control`. Both needed one new **reader**: `needs_approval`, which
@@ -1332,6 +1363,7 @@ refusals without establishing that the adapter had been reached at all.
 | `carries_approved_arguments` is `True` and the answer's differ from the proposal's | `ApprovalMismatch(reason="mismatch")`, nothing granted, request left `pending` (§3.4) |
 | `carries_approved_arguments` is `True` and the answer omits them | Refused the same way. A declaration is not a hint (§3.4) |
 | `carries_approved_arguments` is `False` | No check. `binding` is `not_applicable` with the adapter's reason, and **never `pass`** (§3.4, §5.3) |
+| `ApprovalAnswer.granted` not a `bool` | `InvalidArgument`. A framework's raw resume value is not a verdict, and any truthy one would be a grant — a human's *no* becoming a yes is the worst failure available here (§2.2) |
 | `ApprovalAnswer.approver` empty or not a string | `InvalidArgument`. An approval with no approver is evidence that answers the wrong question (§2.2) |
 | The deadline has passed before the interrupt | `ApprovalTimeout`; `interrupt()` is not called (§2.4 step 2) |
 | The deadline passes during the interrupt | `ApprovalTimeout`; nothing written, record left `pending` (§2.4 step 5) |

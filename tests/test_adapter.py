@@ -27,6 +27,7 @@ from ctrlrun import (
     ApprovalTimeout,
     AuthorityDenied,
     Control,
+    IdentityError,
     InvalidArgument,
     Principal,
     StaticIdentityProvider,
@@ -45,7 +46,7 @@ from ctrlrun.approval import ApprovalStatus, build_request
 from ctrlrun.authority import Authority
 from ctrlrun.policy import Policy
 from ctrlrun.receipt import EventType
-from ctrlrun.state import InMemoryStateStore
+from ctrlrun.state import InMemoryStateStore, SQLiteStateStore
 
 REFUND = "stripe.refund"
 
@@ -117,10 +118,12 @@ class CountingInterrupt:
             self._before()
         if self._raises is not None:
             raise self._raises
-        assert self._answer is not None
-        if self._answer.approved_arguments is _ECHO:
+        # Whatever it was handed, unchanged: a faithful courier hands its framework's reply
+        # through, and a double that quietly coerced one would be a double that refuses less
+        # than the real thing.
+        if isinstance(self._answer, ApprovalAnswer) and self._answer.approved_arguments is _ECHO:
             return replace(self._answer, approved_arguments=dict(pending.arguments))
-        return self._answer
+        return self._answer  # type: ignore[return-value]
 
 
 #: Sentinel for "hand back whatever you were given" -- SPEC-v0.5 §3.4's manufactured check.
@@ -209,13 +212,17 @@ def test_T126_an_expired_principal_refuses_before_authority_and_before_policy():
     control, store, _ = build(AUTHORITY_NONE, double, identity=StaticIdentityProvider("x"))
     control = replace_identity(control, EXPIRED_PRINCIPAL)
 
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(IdentityError):
         refund_tool(control)(payment_id="txn_1", amount=2000)
 
-    assert "principal_expired" in str(raised.value) or "expired" in str(raised.value)
+    # The event sequence, and the reason on the event -- not a substring of a message. A
+    # disjunction over "expired" is satisfied by an *approval* expiring, which is a different
+    # guard at a different point in the order.
     seen = events(store)
-    assert str(EventType.AUTHORITY_DENIED) not in seen
-    assert str(EventType.POLICY_EVALUATED) not in seen
+    assert seen == [str(EventType.ACTION_PROPOSED), str(EventType.ACTION_DENIED)], seen
+    denied = [e for e in store.events() if e.type is EventType.ACTION_DENIED]
+    assert [e.data["reason"] for e in denied] == ["principal_expired"]
+    assert [r.decision_reason for r in store.receipts()] == ["principal_expired"]
     assert double.calls == []
 
 
@@ -436,11 +443,37 @@ def test_T129_the_module_exposes_no_way_to_construct_a_control():
     """The route a `Principal` would actually take, and the one a scan of parameter names alone
     would miss: `Control(identity=...)` is §4.2 defeated in a constructor keyword."""
     assert "Control" not in adapter_module.__all__
-    source = inspect.getsource(adapter_module)
-    assert not re.search(r"^\s*Control\(", source, re.MULTILINE), "adapter.py constructs a Control"
+    # By the module's own code objects rather than by a regex over its text: a source scan for
+    # `Control(` misses `Control.from_file()`, `Control (`, `type(control)(...)` and every
+    # indirection, and a test that can be evaded by whitespace is a test nobody has to satisfy.
+    # The `Control` import is under `TYPE_CHECKING`, so no runtime name in this module resolves
+    # to the class -- and that is what is asserted.
+    assert "Control" not in vars(adapter_module)
+    for name in _referenced_names(adapter_module):
+        assert name not in {"Control", "from_file"}, f"adapter.py reaches {name}"
     for name, func in public_callables():
         for parameter in inspect.signature(func).parameters.values():
             assert parameter.name not in CONTROL_NAMES, f"{name}({parameter.name}=...)"
+
+
+def _referenced_names(module) -> set[str]:
+    """Every global and attribute name the module's compiled code can reach."""
+    import types
+
+    seen: set[str] = set()
+    stack = [obj.__code__ for obj in vars(module).values() if isinstance(obj, types.FunctionType)]
+    stack += [
+        method.__code__
+        for value in vars(module).values()
+        if inspect.isclass(value)
+        for method in vars(value).values()
+        if isinstance(method, types.FunctionType)
+    ]
+    while stack:
+        code = stack.pop()
+        seen |= set(code.co_names)
+        stack += [const for const in code.co_consts if isinstance(const, types.CodeType)]
+    return seen
 
 
 def test_T129_pending_approval_carries_the_principal_as_read_only_strings():
@@ -736,9 +769,13 @@ def test_T129g_the_banner_is_logged_once_per_control_and_printed_never(caplog, c
             banner(control)
         banner(other)
 
-    lines = [record.message for record in caplog.records if "OBSERVE MODE" in record.message]
-    assert len(lines) == 2, lines
-    assert all("nothing is enforced" in line for line in lines)
+    records = [record for record in caplog.records if "OBSERVE MODE" in record.getMessage()]
+    assert len(records) == 2, records
+    # The logger and the level, both of which §3.6 states: a banner on a different logger would
+    # still reach caplog through root propagation and pass a message-only assertion.
+    assert {record.name for record in records} == {"ctrlrun"}
+    assert {record.levelno for record in records} == {logging.WARNING}
+    assert all("nothing is enforced" in record.getMessage() for record in records)
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""
 
@@ -912,3 +949,208 @@ def test_an_interrupt_with_no_framework_name_is_refused_at_construction():
 
     with pytest.raises(InvalidArgument):
         InterruptApprovalProvider(InMemoryStateStore(), Nameless())
+
+
+# --- What the independent review found untested (SPEC-v0.5 §2.4 step 1, §2.2) -----------
+
+# Five live guards had no test at all, and the mutation table did not contain them: deleting
+# each left all 49 green. Three of them are the whole of §2.4's **step 1** -- the step with the
+# most explicit language in the section -- and §10's row "the request is not `pending`" had no
+# test either. A guard nothing exercises is a guard nobody can tell you about.
+
+
+def test_an_unknown_request_is_refused_and_no_human_is_asked():
+    """§2.4 step 1, first branch. `LocalApprovalProvider` does exactly this, and so must a
+    provider that would otherwise put an invented request in front of somebody."""
+    double = CountingInterrupt(granted())
+    provider = InterruptApprovalProvider(InMemoryStateStore(), double)
+
+    with pytest.raises(ApprovalMismatch) as raised:
+        provider.wait("apr_no_such_request", None)
+
+    assert raised.value.reason == "unknown"
+    assert double.calls == []
+
+
+def test_an_already_granted_request_is_returned_without_asking_again():
+    """§2.4 step 1, second branch.
+
+    Correct, and worth a test precisely because it looks like a hole: a request granted out of
+    band -- by `ctrlrun approve`, or by a webhook -- is a real answer from a real human, and a
+    provider never invents one and never re-asks about one (v0.1 §4.3). What it *does* mean is
+    that an adapter which granted for itself would never reach its own interrupt, which is why
+    the conformance kit counts interrupt calls rather than trusting this branch to notice.
+    """
+    store = InMemoryStateStore()
+    double = CountingInterrupt(granted())
+    provider = InterruptApprovalProvider(store, double)
+    request = provider.request(_action(), timedelta(minutes=15))
+    store.grant_approval(request.request_id, "cli:local")
+
+    approval = provider.wait(request.request_id, None)
+
+    assert approval is not None
+    assert approval.approver == "cli:local"
+    assert double.calls == [], "a request a human already answered was put to them again"
+
+
+@pytest.mark.parametrize("answered", ["deny", "consume"])
+def test_a_request_that_will_never_be_granted_returns_none(answered):
+    """§2.4 step 1, third branch, and §10's "the request is not `pending`" row.
+
+    `None` means *answered, no* and never *still waiting* (v0.1 §4.3). Returning the record, or
+    interrupting again, would ask a human to reconsider a decision the store has already made.
+    """
+    store = InMemoryStateStore()
+    double = CountingInterrupt(granted())
+    provider = InterruptApprovalProvider(store, double)
+    action = _action()
+    request = provider.request(action, timedelta(minutes=15))
+    if answered == "deny":
+        store.deny_approval(request.request_id, "cli:local")
+    else:
+        store.grant_approval(request.request_id, "cli:local")
+        store.consume_approval(request.request_id, action.action_hash)
+
+    assert provider.wait(request.request_id, None) is None
+    assert double.calls == []
+
+
+def test_an_interrupt_that_returns_something_other_than_an_answer_is_refused():
+    """§2.4 step 4. A framework whose resume value is a dict, or `True`, or `None` reaches here
+    unchanged if the adapter is a faithful courier -- and none of those is a verdict."""
+    for returned in ({"approved": True}, True, None, "yes"):
+        store = InMemoryStateStore()
+        double = CountingInterrupt(returned)  # type: ignore[arg-type]
+        provider = InterruptApprovalProvider(store, double)
+        request = provider.request(_action(), timedelta(minutes=15))
+
+        with pytest.raises(InvalidArgument) as raised:
+            provider.wait(request.request_id, None)
+
+        assert "ApprovalAnswer" in str(raised.value), returned
+        record = store.get_approval(request.request_id)
+        assert record is not None and record.status is ApprovalStatus.PENDING
+
+
+@pytest.mark.parametrize("granted_value", ["no", "yes", 1, 0, None, [], object()])
+def test_granted_must_be_a_bool_and_a_truthy_value_is_not_a_yes(granted_value):
+    """The hole an independent review found. `granted` is the one field carrying the decision
+    and it was the only one on this surface not type-checked, so an adapter handing a
+    framework's raw resume value through -- `granted="no"`, which is what LangGraph's
+    `interrupt()` returns -- produced a real `Approval`. A human's *no* became a grant."""
+    store = InMemoryStateStore()
+    double = CountingInterrupt(
+        ApprovalAnswer(granted=granted_value, approver="double", approved_arguments=_ECHO)  # type: ignore[arg-type]
+    )
+    provider = InterruptApprovalProvider(store, double)
+    request = provider.request(_action(), timedelta(minutes=15))
+
+    with pytest.raises(InvalidArgument) as raised:
+        provider.wait(request.request_id, None)
+
+    assert "granted" in str(raised.value)
+    record = store.get_approval(request.request_id)
+    assert record is not None and record.status is ApprovalStatus.PENDING
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_its_control_a_real_bool_is_recorded_either_way(verdict):
+    """Without the pair, the test above passes against a provider that refuses every answer."""
+    store = InMemoryStateStore()
+    answer = (
+        granted() if verdict else ApprovalAnswer(granted=False, approver="double:interrupt")
+    )
+    double = CountingInterrupt(answer, carries=verdict)
+    provider = InterruptApprovalProvider(store, double)
+    request = provider.request(_action(), timedelta(minutes=15))
+
+    result = provider.wait(request.request_id, None)
+
+    record = store.get_approval(request.request_id)
+    assert record is not None
+    assert (result is not None) is verdict
+    assert str(record.status) == ("granted" if verdict else "denied")
+
+
+def test_an_interrupt_with_no_interrupt_method_is_refused_at_construction():
+    class Mute:
+        framework = "mute"
+        carries_approved_arguments = True
+
+    with pytest.raises(InvalidArgument) as raised:
+        InterruptApprovalProvider(InMemoryStateStore(), Mute())  # type: ignore[arg-type]
+
+    assert "interrupt()" in str(raised.value)
+
+
+def test_the_binding_check_survives_a_round_trip_through_sqlite(tmp_path):
+    """The provider is only ever driven against the in-memory store elsewhere, and the binding
+    check compares a hash rebuilt from an Action the store rehydrated. A regression in
+    `_action_from_json` would break every grant in production and no test would see it."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        action = Action(
+            name=REFUND,
+            arguments={"payment_id": "txn_1", "amount": 2000, "flag": True, "tags": ["a"]},
+            principal=Principal(agent="finance-agent", user="ada"),
+            resource="payment:txn_1",
+        )
+        matching = InterruptApprovalProvider(store, CountingInterrupt(granted()))
+        request = matching.request(action, timedelta(minutes=15))
+        assert matching.wait(request.request_id, None) is not None
+
+        mutated = InterruptApprovalProvider(
+            store,
+            CountingInterrupt(
+                ApprovalAnswer(
+                    granted=True,
+                    approver="double",
+                    approved_arguments={"payment_id": "txn_1", "amount": 1, "flag": True,
+                                        "tags": ["a"]},
+                )
+            ),
+        )
+        second = mutated.request(action, timedelta(minutes=15))
+        with pytest.raises(ApprovalMismatch) as raised:
+            mutated.wait(second.request_id, None)
+        assert raised.value.reason == "mismatch"
+    finally:
+        store.close()
+
+
+def test_needs_approval_and_protect_can_disagree_and_both_directions_are_safe():
+    """SPEC-v0.5 §3.5's stated divergence, driven rather than asserted in prose.
+
+    `@protect` applies the wrapped function's defaults; `needs_approval` gets the framework's
+    raw arguments. So a framework that omits a defaulted argument gets `False` from the
+    predicate for an action the policy will `APPROVE` -- and the safety is that
+    `Control.execute` then raises `ApprovalRequired` and the interrupt is reached anyway.
+    """
+    document = """
+schema: ctrlrun.policy/v1
+actions:
+  stripe.refund:
+    rules:
+      - when: {mode_eq: live}
+        decision: approve
+      - decision: allow
+"""
+    double = CountingInterrupt(granted())
+    control, _, _ = build(document, double)
+
+    with context("finance-agent"):
+        # The predicate, given what a framework would pass: no `mode`, so the rule misses.
+        assert needs_approval(control, REFUND, {"payment_id": "t", "amount": 1}) is False
+
+        @protect(REFUND, effect="refund:{payment_id}", resource="payment:{payment_id}",
+                 wait=True, control=control)
+        def issue_refund(payment_id: str, amount: int, mode: str = "live") -> str:
+            return "ok"
+
+        # And the call itself, where the default is applied and the rule matches. The human is
+        # asked here instead of before invocation: the other framework shape, reached from this
+        # one, and nothing executed that would not have.
+        assert issue_refund(payment_id="t", amount=1) == "ok"
+
+    assert len(double.calls) == 1
