@@ -4,21 +4,23 @@ One `Agent` with one `function_tool`, run once through `Runner.run_sync`. No
 `failure_error_function` is supplied, so the SDK's default handling of a tool that raised is
 what the row measures.
 
-**Never executed.** Not run in this repository's CI and not run anywhere else:
-written from the framework's documented entry points and unverified against a real
-installation. Nothing this adapter would report is a finding until somebody runs it.
+**Never run against a model.** Not run in this repository's CI and not run against a
+chat model anywhere else. On 2026-09-04 it was executed against a real installation —
+`openai-agents` 0.22.0 — and reached the model call, so its documented entry
+points are known to resolve; no scenario completed and no effect reached the remote.
+Nothing this adapter would report is a finding until somebody runs it with a key.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from ..scenarios import APPROVAL_MUTATION, Scenario
-from ._framework import call_remote, record_approval
+from ._framework import PROBE_MODEL, call_remote, record_approval
 from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
 
-MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
+#: One `CTRLRUN_PROBE_MODEL` for every adapter, unprefixed — see `_framework.PROBE_MODEL`.
+MODEL = PROBE_MODEL
 
 
 @dataclass

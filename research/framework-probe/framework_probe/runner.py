@@ -67,17 +67,38 @@ def run_one(adapter: Adapter, scenario: Scenario) -> dict[str, Any]:
         requests = [request for request in state.requests if "/approve" not in request["path"]]
     else:
         requests = state.requests
+    outcome = outcome_for(scenario, state, attempt.error)
     return {
         "framework": adapter.name,
         "version": read_version(adapter.distribution),
         "adapter": f"research/framework-probe/framework_probe/adapters/{_module(adapter)}.py",
         "scenario": scenario.name,
-        "outcome": outcome_for(scenario, state, attempt.error),
+        "outcome": outcome,
         "effects_observed": len(state.effects),
         "requests_observed": len(requests),
         "config_deviation": adapter.config_deviation,
-        "notes": attempt.notes,
+        "notes": _notes(attempt, outcome),
     }
+
+
+def _notes(attempt: Attempt, outcome: str) -> str:
+    """What the adapter can say about its own run, with the failure kept where it is the story.
+
+    An `error` row used to say nothing: the exception decided `outcome` and was then
+    discarded, so a reader saw "error" with an empty notes column and had no way to tell a
+    missing credential from a framework that had genuinely broken. That is the same defect as
+    a framework skipped without being named, and it was found by running the harness rather
+    than by reading it.
+
+    It is appended only for an `error` row. A run that reached the remote — a stub whose
+    response was deliberately lost, the MCP client doing the same — has an exception too, and
+    it is the scenario working rather than a failure, so repeating it beside `executed_once`
+    would make every successful row read like a broken one. `outcome` still comes from the
+    remote and never from the adapter (§7.2).
+    """
+    if attempt.error is None or outcome != ERROR:
+        return attempt.notes
+    return f"{attempt.notes}; {attempt.error}" if attempt.notes else attempt.error
 
 
 def _module(adapter: Adapter) -> str:

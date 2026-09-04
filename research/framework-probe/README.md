@@ -8,17 +8,24 @@ of these projects, none of which claims to solve this problem.
 It answers a question CTRLRun has so far only asserted: *what actually happens when the
 response is lost and the framework retries?*
 
-> **The four framework adapters have never been executed.** They are written against each
-> framework's documented entry points and have not been run against a real installation or a
-> real model, so nothing here is a finding about LangGraph, CrewAI, the OpenAI Agents SDK or
-> AutoGen — and no README, changelog entry or post may say otherwise. The only true statement
-> today is *"adapters written from documented APIs, unexecuted"*. What **has** run, in this
-> repository's CI, is the harness itself: the fake remote, the two stubs and the plain MCP
-> client, end to end over a loopback socket.
+> **The four framework adapters have never been run against a model.** Nothing here is a
+> finding about LangGraph, CrewAI, the OpenAI Agents SDK or AutoGen — and
+> no README, changelog entry or post may say otherwise. The only true statement today is
+> *"adapters written from documented APIs, never run against a model"*. What **has** run, in
+> this repository's CI, is the harness itself: the fake remote, the two stubs and the plain
+> MCP client, end to end over a loopback socket.
 >
-> Before any results are published, each adapter has to be run against a real model, its
-> framework version recorded, and whatever the documented APIs got wrong fixed. Until then
-> there are no results, and `results/` is empty on purpose.
+> **What has now been executed, precisely.** On **2026-09-04** the LangGraph and OpenAI Agents
+> SDK adapters were run against real installations — `langgraph` 1.2.11 with `langchain` 1.4.0,
+> and `openai-agents` 0.22.0 — and reached the model call, which is as far as an unkeyed run
+> goes. That is enough to say their documented entry points resolve, and it is **not** enough
+> to say anything about either framework's behaviour: no scenario completed, no effect reached
+> the remote, and `results/` is still empty. Three defects the run found are fixed below.
+> CrewAI and AutoGen were not installed and remain unexecuted in every sense.
+>
+> Before any results are published, each adapter has to be run against a real model with a
+> budget set, its framework version recorded, and the table read by the maintainer — these are
+> published findings about other projects, under this project's name.
 
 ---
 
@@ -42,11 +49,23 @@ results file — a table with four rows where five were expected has to say whic
 missing. To measure a framework, install it and set `OPENAI_API_KEY`:
 
 ```console
-$ pip install langgraph langchain crewai openai-agents autogen-agentchat autogen-ext[openai]
+$ pip install langgraph langchain langchain-openai crewai openai-agents \
+      autogen-agentchat autogen-ext[openai]
 ```
 
+`langchain-openai` is not optional and was missing from this line until the LangGraph adapter
+was actually run: `create_react_agent` resolves its model string through
+`langchain.chat_models.init_chat_model`, which imports the provider package lazily and raises
+`ImportError` at agent construction — after the harness has already started a fake remote, and
+reported as an `error` row rather than as a missing dependency.
+
 `CTRLRUN_PROBE_MODEL` picks the model. One model for every framework, so the table compares
-frameworks and not models.
+frameworks and not models — and it is **one unprefixed string**, shared by every adapter in
+`adapters/_framework.py`. It was `openai:gpt-4o-mini` in the LangGraph adapter and
+`gpt-4o-mini` in the Agents SDK's until the two were run side by side, which meant a single
+`CTRLRUN_PROBE_MODEL` could not satisfy both and setting it broke whichever adapter did not
+match its own default. `init_chat_model` resolves a bare `gpt-*` to `ChatOpenAI` — checked
+against langchain 1.4.0, not assumed — so one string serves both.
 
 ## The scenarios
 
@@ -97,11 +116,25 @@ points and left at its defaults.
 
 | Framework | Distribution | Documentation | What it says about a tool that raised |
 |---|---|---|---|
-| LangGraph | `langgraph` | <https://langchain-ai.github.io/langgraph/> | Retry is explicit and opt-in: a node takes a `RetryPolicy`, and failures are routed in the graph. No policy is attached here, so the row measures the prebuilt ReAct agent's default. |
+| LangGraph | `langgraph` | <https://langchain-ai.github.io/langgraph/> | Retry is explicit and opt-in: a node takes a `RetryPolicy`, and failures are routed in the graph. No policy is attached here, so the row measures the prebuilt agent's default. The entry point is `langchain.agents.create_agent`: on langgraph 1.2.11 `langgraph.prebuilt.create_react_agent` raises `LangGraphDeprecatedSinceV10` naming that replacement and saying it goes in V2.0. |
 | CrewAI | `crewai` | <https://docs.crewai.com/> | An agent retries a failed tool call as part of its own loop, bounded by `max_retry_limit`. Left at its default. |
 | OpenAI Agents SDK | `openai-agents` | <https://openai.github.io/openai-agents-python/> | A tool that raises is surfaced to the model through `failure_error_function`, which defaults to a message the model can act on. None is supplied here. |
 | AutoGen (AgentChat) | `autogen-agentchat` | <https://microsoft.github.io/autogen/stable/> | Retry is conversational: the agent sees the failure and may try again. Nothing is configured here. |
 | A plain MCP client | — | <https://modelcontextprotocol.io/> | The control row: no framework at all, no retry, so a reader can tell what a framework contributed from what the protocol does on its own. |
+
+## What running it found
+
+Four defects, each found by executing an adapter against a real installation rather than by
+reading it, and each fixed above. They are listed because the point of running the harness
+before publishing anything is to find out what the documented APIs got wrong, and a fix with
+no record of what it fixed is a fix the next reader cannot check.
+
+| # | Found | Fix |
+|---|---|---|
+| 1 | `langchain-openai` was missing from the install line. `create_react_agent` resolves its model string through `init_chat_model`, which imports the provider package lazily and raises `ImportError` at agent construction — reported as an `error` row, not as a missing dependency. | Named in the install line, with the reason. |
+| 2 | Two different model defaults for one env var: `openai:gpt-4o-mini` in the LangGraph adapter, `gpt-4o-mini` in the Agents SDK's. A maintainer setting `CTRLRUN_PROBE_MODEL` broke whichever adapter did not match its own default, and §7.3 rule 2 asks for the same text everywhere the API admits it. | One unprefixed `PROBE_MODEL`, shared in `adapters/_framework.py`. `init_chat_model` resolves a bare `gpt-*` to `ChatOpenAI` — checked, not assumed. |
+| 3 | An `error` row said nothing about what had gone wrong: the exception decided `outcome` and was then discarded. | The exception is kept in `notes` for an `error` row, and only for one. |
+| 4 | `langgraph.prebuilt.create_react_agent` is deprecated on langgraph 1.2.11 and raises `LangGraphDeprecatedSinceV10` naming `langchain.agents.create_agent` and V2.0. Measuring a retiring entry point would report a path no reader would write today, under a row that still says "langgraph". | The adapter uses `langchain.agents.create_agent`. |
 
 **What could not be established from primary documentation**, said plainly rather than
 implied: none of these projects publishes a single normative "this is the default retry count"
@@ -129,6 +162,12 @@ them out of a publishable table.
 `results/<YYYY-MM-DD>.json`, schema `ctrlrun.framework-probe/v1`. `outcome` is a closed set:
 `executed_once`, `executed_twice`, `refused`, `error`. The Markdown table is rendered from the
 JSON and never written by hand.
+
+An `error` row carries the exception that produced it in `notes`. It did not until the harness
+was run: the exception decided `outcome` and was then discarded, so a reader saw `error` beside
+an empty notes column and could not tell a missing credential from a framework that had broken.
+It is appended for an `error` row only — a stub whose response was deliberately lost has an
+exception too, and that one is the scenario working.
 
 **No results are checked in.** The runs are made and published by the maintainer; a commit
 carrying findings about other projects that nobody had reviewed is not a commit this

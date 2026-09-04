@@ -4,9 +4,11 @@ One agent, one task, one tool, `Crew.kickoff()` with the scenario prompt as the 
 description. `max_retry_limit` is left at its default: CrewAI's documented behaviour when a
 tool raises is what the row measures.
 
-**Never executed.** Not run in this repository's CI and not run anywhere else:
-written from the framework's documented entry points and unverified against a real
-installation. Nothing this adapter would report is a finding until somebody runs it.
+**Never run against a model, and never executed at all.** Not run in this repository's
+CI and not run anywhere else: written from the framework's documented entry points and
+unverified against a real installation, which is a weaker position than the LangGraph and
+Agents SDK adapters are in — those two at least reached a model call against a real
+install. Nothing this adapter would report is a finding until somebody runs it.
 """
 
 from __future__ import annotations

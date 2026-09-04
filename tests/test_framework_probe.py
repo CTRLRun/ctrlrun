@@ -383,20 +383,47 @@ def test_the_scenario_text_is_shared_and_not_per_adapter():
 
 # --- nothing anywhere claims the harness has been run against a real framework ---------------
 
-#: The four whose adapters have never been executed. The stubs and the MCP client have — they
-#: run in this repository's CI, end to end over a loopback socket.
+#: The four whose adapters have never been run against a model. The stubs and the MCP client
+#: have — they run in this repository's CI, end to end over a loopback socket.
+#:
+#: "Run against a model" and not "executed": on 2026-09-04 the LangGraph and Agents SDK
+#: adapters were executed against real installations and reached the model call, which is as
+#: far as an unkeyed run goes. That is why the wording moved. It is a narrower claim than the
+#: one it replaces, and it is the one that is true — a sentence that has quietly become
+#: imprecise is the shape of an overclaim, whichever direction it drifted in.
 UNEXECUTED = ("langgraph", "crewai", "openai-agents", "autogen")
 
+#: The two that reached the model call, with the version each was executed against. Read at
+#: runtime everywhere else (T123); written here because the *claim* in the README is about a
+#: specific past run, and a claim about a past run cannot be re-derived from what happens to be
+#: installed now.
+REACHED_THE_MODEL_CALL = {"langgraph": "1.2.11", "openai-agents": "0.22.0"}
 
-def test_the_readme_says_the_framework_adapters_have_never_been_executed():
+
+def test_the_readme_says_the_framework_adapters_have_never_been_run_against_a_model():
     """The study means nothing until the adapters have run, so the sentence that says they have
     not is at the top of the harness README rather than in a per-adapter docstring nobody
     reads. `results/` is empty for the same reason."""
     readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
 
-    assert "The four framework adapters have never been executed" in readme
-    assert "adapters written from documented APIs, unexecuted" in readme
+    assert "The four framework adapters have never been run against a model" in readme
+    assert "adapters written from documented APIs, never run against a model" in readme
     assert "no README, changelog entry or post may say otherwise" in readme
+
+
+def test_the_readme_says_exactly_how_far_the_two_executed_adapters_got():
+    """The partial run is stated with its limit attached, in the same paragraph.
+
+    "Reached the model call" is a much weaker claim than "executed", and the two are one word
+    apart in a README somebody will quote. So the sentence that makes the claim is required to
+    carry the sentence that bounds it: no scenario completed, and `results/` is still empty."""
+    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+
+    assert "reached the model call" in readme
+    assert "no scenario completed" in readme
+    assert "`results/` is still empty" in readme
+    for framework, version in REACHED_THE_MODEL_CALL.items():
+        assert version in readme, framework
 
 
 @pytest.mark.parametrize("framework", UNEXECUTED)
@@ -407,8 +434,26 @@ def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
 
     docstring = " ".join((module.__doc__ or "").lower().split())
 
-    assert "never executed" in docstring, framework
+    assert "never run against a model" in docstring, framework
     assert "not run in this repository's ci" in docstring, framework
+
+
+@pytest.mark.parametrize("framework", sorted(REACHED_THE_MODEL_CALL))
+def test_an_adapter_that_reached_the_model_call_says_which_version_it_reached_it_on(framework):
+    """A partial execution is a claim about a specific installation, so the docstring names it.
+
+    Without the version the sentence reads as a standing property of the adapter, and it is
+    not: the next breaking release of either framework can invalidate it, and then the only
+    thing that says so is the version that is no longer the one installed."""
+    module = __import__(
+        f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
+    )
+
+    docstring = " ".join((module.__doc__ or "").split())
+
+    assert "reached the model call" in docstring, framework
+    assert REACHED_THE_MODEL_CALL[framework] in docstring, framework
+    assert "no scenario completed" in docstring, framework
 
 
 def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
