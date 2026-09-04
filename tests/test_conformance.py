@@ -169,6 +169,29 @@ def test_T132_the_binding_suite_is_the_mutation_check_alone():
     assert {case.id for case in SUITES["kernel"]} >= {"B2"}
 
 
+def test_T130_the_denial_fixtures_fail_B3_for_different_reasons():
+    """B3 has two checks and `expect` returns at the first unmet one, so one fixture exercises
+    exactly one of them. Asserting only that `denial` failed is the subsumed-guard shape:
+    delete either check and the other still fails the suite, and the mutation table reads green
+    for a check nothing reached. So each fixture is pinned to the reason it is aimed at."""
+    reasons = {}
+    for name in ("denial-as-error", "denies-for-itself"):
+        broken, _ = BROKEN[name]
+        report = run(broken(framework=name))
+        suite = next(s for s in report.suites if s.name == "denial")
+        case = next(c for c in suite.cases if c.id == "B3")
+        assert case.status is SuiteStatus.FAIL, name
+        reasons[name] = case.reason or ""
+
+    # A no reported as a fault: the wrong exception reaches the caller.
+    assert "expected ActionDenied" in reasons["denial-as-error"], reasons["denial-as-error"]
+    assert "APPROVAL_DENIED" not in reasons["denial-as-error"]
+
+    # A no the adapter answered on the human's behalf: the right exception, no evidence.
+    assert "APPROVAL_DENIED" in reasons["denies-for-itself"], reasons["denies-for-itself"]
+    assert "expected ActionDenied" not in reasons["denies-for-itself"]
+
+
 def test_T132_the_denial_suite_is_the_refusal_case_alone():
     """B3 was in `kernel` until the second reference adapter: a framework that refuses *before*
     it invokes proposes no action, so there is nothing to deny, and B3 folded into `kernel`

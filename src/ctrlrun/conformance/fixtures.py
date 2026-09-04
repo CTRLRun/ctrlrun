@@ -162,16 +162,56 @@ class DenialIsAnError(Reference):
     (`v0.1 §6.2`, SPEC-v0.5 §2.4). Under this adapter a human's answer is indistinguishable
     from the primitive having crashed -- §10's row for that says the request stays `pending`
     with no grant, no denial and no receipt, which is right for a crash and a silent loss of
-    the record for an answer. So B3 fails on both halves: what propagates is not
-    `ActionDenied`, and there is no `APPROVAL_DENIED` behind it.
+    the record for an answer.
+
+    It fails B3 on the **first** of that case's two checks -- what propagates is not
+    `ActionDenied` -- and `DeniesForItself` is the pair that fails it on the second, because
+    `expect` returns as soon as one is unmet and a single fixture therefore exercises exactly
+    one. Two checks with one fixture between them is a subsumed guard: remove either and the
+    other still fails the suite, and a test asserting only that the suite failed cannot tell
+    which ran.
 
     It reaches the primitive, which is the point. The count cannot tell this from a correct
-    adapter -- a human *was* asked and did answer -- so only the case's own two checks can.
+    adapter -- a human *was* asked and did answer -- so only the case's own checks can.
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.interrupt = _RaisesOnRefusal(carries=self.interrupt.carries_approved_arguments)
+        self.interrupt.framework = self.framework
+
+
+class _DeniesByRaising(Courier):
+    """A `Courier` that translates a refusal into `ActionDenied` itself."""
+
+    def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
+        answer = super().interrupt(pending)
+        if not answer.granted:
+            # The reason it picks is its own guess, and that is part of the mistake: the
+            # kernel's would have come from the record `deny_approval` wrote.
+            raise ActionDenied("the user rejected this tool call", reason="approval_denied")
+        return answer
+
+
+class DeniesForItself(Reference):
+    """Raises `ActionDenied` itself instead of returning the human's `no` to the provider.
+
+    `GrantsForItself` at the other end of the answer. That one writes the grant and never asks;
+    this one asks, gets an answer, and then writes the *consequence* of the answer rather than
+    handing the answer over -- which §2.4 forbids in one sentence covering both: an adapter
+    returns an `ApprovalAnswer` and `InterruptApprovalProvider` records it. An author writes
+    this because the caller sees exactly what a correct adapter produces: `ActionDenied`, no
+    execution, the primitive reached once. Every check but one is satisfied.
+
+    The one is the evidence. `deny_approval` was never called, so the request is still `pending`
+    and the log has no `APPROVAL_DENIED` -- a human said no and CTRLRun cannot show it. That is
+    B3's second check, and this fixture is the only thing that reaches it: `DenialIsAnError`
+    fails the first and `expect` returns there.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.interrupt = _DeniesByRaising(carries=self.interrupt.carries_approved_arguments)
         self.interrupt.framework = self.framework
 
 
@@ -373,6 +413,7 @@ BROKEN: dict[str, tuple[type[Reference], str]] = {
     "interrupts-only-when-unasked": (InterruptsOnlyWhenUnasked, "kernel"),
     "grants-for-itself": (GrantsForItself, "kernel"),
     "denial-as-error": (DenialIsAnError, "denial"),
+    "denies-for-itself": (DeniesForItself, "denial"),
     "ignores-authority": (IgnoresAuthority, "authority"),
     "self-asserts-principal": (SelfAssertsPrincipal, "identity"),
     "echoes-the-payload": (EchoesThePayload, "binding"),

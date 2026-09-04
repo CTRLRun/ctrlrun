@@ -980,7 +980,8 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 | `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` |
 | `interrupts-only-when-unasked` | Correct wherever a human is expected, and interrupts on exactly the calls where none is | `kernel` — **A1 alone** |
 | `grants-for-itself` | Takes `ApprovalRequired` with `wait=False`, writes the grant itself, and re-presents. The framework's primitive is never reached | `kernel` |
-| `denial-as-error` | Raises its framework's rejection error instead of carrying the human's `no` back | `denial` |
+| `denial-as-error` | Raises its framework's rejection error instead of carrying the human's `no` back | `denial` — B3's **first** check |
+| `denies-for-itself` | Raises `ActionDenied` itself instead of returning the `no` to the provider: the right exception, and no `APPROVAL_DENIED` behind it | `denial` — B3's **second** check |
 | `ignores-authority` | Catches `AuthorityDenied` and returns a value | `authority` |
 | `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
 | `echoes-the-payload` | Declares `carries_approved_arguments = True` and returns `pending.arguments` as the answer's `approved_arguments` | `binding` — §3.4's manufactured check |
@@ -997,7 +998,18 @@ fails `denial` too, and incidentally again, so the suite that arrived with §12.
 nothing aimed at it. Its mistake is the inverse of `swallows-denial`'s — not a no reported as a
 yes, but a no reported as a *fault*, which is what a framework that raises on a decline invites
 and what leaves a human's answer indistinguishable from a crashed primitive. It reaches the
-primitive, so the interrupt count cannot see it; only B3's own two checks can. `interrupts-only-when-unasked` exists for the same reason one level down:
+primitive, so the interrupt count cannot see it; only B3's own two checks can.
+
+**`denial` has two fixtures because B3 has two checks**, and `expect` returns at the first one
+unmet — so a single fixture exercises exactly one and the other is a subsumed guard: remove
+either and the suite still fails, and a mutation table reads green for a check nothing reached.
+`denies-for-itself` is `grants-for-itself` at the other end of the answer. That one writes the
+grant and never asks; this one asks, gets the answer, and writes the *consequence* of it rather
+than handing it over — which §2.4 forbids in the sentence that covers both, an adapter returns
+an `ApprovalAnswer` and `InterruptApprovalProvider` records it. Everything a caller can see is
+correct: `ActionDenied`, nothing executed, the primitive reached. What is missing is the
+evidence that a human answered at all. T130 pins each fixture to the **reason** its case
+failed, because a test asserting only that `denial` failed cannot tell which check ran. `interrupts-only-when-unasked` exists for the same reason one level down:
 `interrupts-on-allow` bumps the interrupt count on T4, B2 and B3 as well, so deleting A1's own
 count left the kit still failing it — a **subsumed** check, found by mutation. This one is
 invisible to every other case.
@@ -1219,7 +1231,7 @@ same way (§3.8).
 ### Item 3 — The conformance kit (§5)
 
 #### T130 — The kit fails a broken adapter, per suite and by name
-Each of §5.4's twelve fixtures is driven through `conformance.run`, and each fails **the suite
+Each of §5.4's thirteen fixtures is driven through `conformance.run`, and each fails **the suite
 named in its row**. A fixture that failed nothing, or whose named suite passed, is the failure
 this test catches; incidental failures of other suites are permitted and asserted as such,
 because "and no other" is false of an adapter broken badly enough.
