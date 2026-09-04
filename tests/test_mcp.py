@@ -241,18 +241,118 @@ def test_an_Mcp_Param_agreeing_with_the_body_is_accepted():
     assert not isinstance(parse_request(_body(), headers), Refusal)
 
 
-def test_an_Mcp_Param_integer_is_compared_numerically():
-    """§6.4 — `2000` in a header is a string; the body's is an int. Comparing them as text
-    would refuse every well-formed request that annotated a numeric parameter."""
+def test_an_Mcp_Param_integer_agrees_with_its_canonical_spelling():
+    """§6.4 — `2000` in a header is text and the body's is an `int`, so the comparison is
+    against what JSON writes for it. This is also the control for the parametrization below:
+    without it, an implementation that refused every integer header would pass those."""
     headers = _headers()
     headers["Mcp-Param-amount"] = "2000"
 
     assert not isinstance(parse_request(_body(), headers), Refusal)
 
 
-def test_an_Mcp_Param_integer_that_differs_numerically_is_refused():
+def test_an_Mcp_Param_integer_that_differs_is_refused():
     headers = _headers()
     headers["Mcp-Param-amount"] = "2001"
+
+    assert isinstance(parse_request(_body(), headers), Refusal)
+
+
+#: Spellings that Python's `int()` accepts and that no JSON serializer produces. Each is a
+#: header whose text differs from the body's value, so an intermediary that parses it with a
+#: different set of rules reads a different number — the split-brain §6.4 exists to prevent.
+#: JavaScript's `parseInt("4_2")` is 4, Go's `strconv.Atoi("4_2")` is an error, and Python's
+#: `int("4_2")` is 42.
+_LENIENT_INTEGER_SPELLINGS = [
+    "2_000",  # PEP 515 underscore; JS parseInt reads 2
+    "+2000",  # leading plus
+    " 2000",  # leading whitespace
+    "2000 ",  # trailing whitespace
+    "2000\n",  # trailing newline
+    "02000",  # leading zero
+    "\u0662\u0660\u0660\u0660",  # arabic-indic digits for 2000
+    "\uff12\uff10\uff10\uff10",  # fullwidth digits for 2000
+]
+
+
+@pytest.mark.parametrize("declared", _LENIENT_INTEGER_SPELLINGS)
+def test_an_Mcp_Param_integer_must_be_the_body_value_as_text(declared):
+    """§6.4 — the header must be the body value's canonical rendering, not merely something
+    Python's `int()` maps onto it. Each of these parses to 2000 under `int()` and to something
+    else, or to nothing, under another parser."""
+    headers = _headers()
+    headers["Mcp-Param-amount"] = declared
+
+    refusal = parse_request(_body(), headers)
+
+    assert isinstance(refusal, Refusal), f"{declared!r} was accepted"
+    assert (refusal.http_status, refusal.code) == (400, -32020)
+
+
+@pytest.mark.parametrize("declared", ["TRUE", "True", "tRuE", "1", "yes"])
+def test_an_Mcp_Param_boolean_must_be_its_json_spelling(declared):
+    """§6.4 — `true` and `false`, as JSON writes them. A case-insensitive match accepts four
+    spellings of one value, and an intermediary comparing bytes sees four different headers."""
+    document = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "create_refund", "arguments": {"partial": True}},
+    }
+    headers = _headers()
+    headers["Mcp-Param-partial"] = declared
+
+    refusal = parse_request(_body(document), headers)
+
+    assert isinstance(refusal, Refusal), f"{declared!r} was accepted"
+    assert (refusal.http_status, refusal.code) == (400, -32020)
+
+
+def test_the_canonical_boolean_spelling_is_still_accepted():
+    document = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "create_refund", "arguments": {"partial": True}},
+    }
+    headers = _headers()
+    headers["Mcp-Param-partial"] = "true"
+
+    assert not isinstance(parse_request(_body(document), headers), Refusal)
+
+
+@pytest.mark.parametrize("value", [None, [1, 2], {"a": 1}], ids=["null", "list", "object"])
+def test_an_Mcp_Param_naming_a_non_primitive_argument_is_refused(value):
+    """§6.4 — the revision defines an encoding for exactly three types: string, integer and
+    boolean. It permits `x-mcp-header` on nothing else, and a `null` parameter omits the header
+    entirely. So no header value can agree with any of these, and comparing against a rendering
+    CTRLRun invented would certify an agreement under nobody's rules but its own.
+
+    The header carries the compact rendering the old code compared against, so each case fails
+    on the rule rather than on a stray space. A float is not here: §6.6 refuses one in the body
+    outright with `-41008`, so it never reaches this comparison.
+    """
+    document = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "create_refund", "arguments": {"extra": value}},
+    }
+    headers = _headers()
+    headers["Mcp-Param-extra"] = json.dumps(value, separators=(",", ":"))
+
+    refusal = parse_request(_body(document), headers)
+
+    assert isinstance(refusal, Refusal), f"{value!r} was accepted"
+    assert (refusal.http_status, refusal.code) == (400, -32020)
+
+
+def test_a_float_spelling_of_an_integer_is_refused():
+    """§6.4 declines the revision's numeric-leniency SHOULD (`42.0` equals `42`). v0.1 §2.3
+    refuses a float in the body outright, so the leniency has no legitimate case here, and
+    honouring it would mean accepting a header spelling other parsers read differently."""
+    headers = _headers()
+    headers["Mcp-Param-amount"] = "2000.0"
 
     assert isinstance(parse_request(_body(), headers), Refusal)
 
