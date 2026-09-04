@@ -104,6 +104,51 @@ actions:
 Everything but `tools/call` is relayed untouched. A lost response over the wire blocks the
 retry exactly as it does in-process — that is the whole point of putting it here.
 
+## Who is acting, and what are they entitled to?
+
+A policy decides how much autonomy an *action* has. It cannot see who is asking — deliberately,
+since v0.1. That answers "may a €50,000 refund run without a human" and not "may *this agent*
+propose a €50,000 refund at all", and a system that can only ask the first will eventually
+answer the second by accident.
+
+`authority:` is the second axis. It is **opt-in, and then fail-closed**: a policy with no
+`authority:` section behaves exactly as it did before, and the moment one exists every
+principal needs a grant and no grant means denied.
+
+```yaml
+schema: ctrlrun.policy/v3
+
+authority:
+  grants:
+    - id: head-of-support
+      subject: { agent: "head-of-support", user: "dana@example.com" }
+      actions: ["stripe.refund"]
+      constraints: { amount_lte: 10000000 }   # €100,000.00
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+```
+
+A grant carries no `decision:`. How much autonomy `stripe.refund` has is the same for
+everybody; what differs is whether they may ask. The two axes are evaluated separately,
+authority first, and combine as the **stricter of the two** — so neither can loosen the other.
+
+A principal holding a `delegable` grant can narrow it at runtime with `ctrlrun delegate`, and
+a delegated grant is valid only if it is **provably a subset of its parent on every dimension,
+at creation and again at every evaluation**. A check performed only at creation would leave
+every delegation exactly as wide as the file used to be, which is the shape of every
+stale-permission incident there has ever been. **Omitting a dimension the parent constrains is
+rejected, not inherited** — a child that drops `resources:` would authorize resources its
+parent never could. `ctrlrun revoke` cuts a chain of any depth with one write.
+
+**Roll it out with `mode: observe` first.** One top-level line runs every real decision against
+real traffic and records what *would* have been blocked, without blocking anything — then
+`ctrlrun stats` gives you the numbers before you enforce them. It is not a dry run: it
+executes, and effects land at remotes. It is a way to learn what enforcement will cost.
+
+**Identity is consumed, never invented.** `pip install "ctrlrun[identity]"` adds a
+`JWTIdentityProvider` that verifies a bearer token against a JWKS or a pinned key and maps the
+verified claims onto a principal. CTRLRun issues no credential and defines no identity format.
+
 ## Two more things
 
 **Resolving an unknown outcome without a human.** `@protect(..., reconcile=...)` takes a
@@ -173,7 +218,7 @@ Every executed action produces a portable JSON receipt: who, what, arguments, de
 
 ## What CTRLRun is not
 
-CTRLRun does not host models, plan, prompt, retrieve, route, remember, or orchestrate. It is not a guardrail library, an IAM system, a workflow engine, or a compliance product. If an agent only reads and answers, you don't need CTRLRun. The moment it can **send, pay, refund, delete, deploy, grant, revoke, approve, submit, purchase, or cancel**, you do.
+CTRLRun does not host models, plan, prompt, retrieve, route, remember, or orchestrate. It is not a guardrail library, an IAM system, a workflow engine, or a compliance product. It issues no credential: `authority:` decides what an identity somebody else vouched for is entitled to do, and CTRLRun runs no authorization server, mints no token, and performs no OAuth flow. If an agent only reads and answers, you don't need CTRLRun. The moment it can **send, pay, refund, delete, deploy, grant, revoke, approve, submit, purchase, or cancel**, you do.
 
 CTRLRun cannot guarantee exactly-once execution against external systems it doesn't control. It guarantees that it will not *knowingly* execute the same logical effect twice, and that it will never treat an unknown outcome as a failure.
 
@@ -183,6 +228,8 @@ CTRLRun cannot guarantee exactly-once execution against external systems it does
 |---|---|
 | [`docs/SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md) | The v0.1 contract: models, invariants, acceptance tests |
 | [`docs/SPEC-v0.2.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) | The v0.2 delta: gateway, sinks, reconciliation, webhooks |
+| [`docs/SPEC-v0.3.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) | The v0.3 delta: identity, authority, delegation, observe mode |
+| [`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) | Grants, delegation and the omission rule, in plain language |
 | [`docs/ACS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ACS.md) | The OWASP Agent Control Standard: what maps, and where it is silent |
 | [`docs/ARCHITECTURE.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ARCHITECTURE.md) | Kernel design and key decisions |
 | [`docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ROADMAP.md) | v0.1 → v1.0 |

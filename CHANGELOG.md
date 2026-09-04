@@ -9,8 +9,29 @@ any change to one appears here.
 
 ## [Unreleased]
 
-Work towards **0.3.0 — Authority**. Version is `0.3.0.dev0`; nothing in this section has
-shipped, and the only thing in the tree today is the contract.
+Nothing yet.
+
+## [0.3.0] — 2026-09-04 — Authority
+
+**Who is acting, and what are they entitled to?** v0.1 built the kernel and v0.2 put it in the
+network path; both could see the action and nothing else. This release adds a second axis —
+identity, grants and delegation — that policy never learns to read, plus the mode you roll it
+out in and the command that tells you what it would have cost.
+
+Three sentences govern everything below.
+
+**Authority is opt-in, then fail-closed.** No `authority:` section is v0.2 behaviour, exactly.
+An `authority:` section means every principal needs a grant and no grant means denied. There is
+no half-way and no flag that makes a missing grant permissive.
+
+**Attenuation is structural.** A delegated grant is valid only if it is provably a subset of
+its parent, on every dimension, at creation *and* at every evaluation. Omission never means
+unlimited: a child that drops a dimension its parent constrains is rejected.
+
+**Identity is consumed, not invented.** CTRLRun verifies tokens it is handed and maps verified
+claims onto a `Principal`. It issues nothing and defines no identity format. Claims are receipt
+data rather than action identity — they are not in the canonical form, so an approval survives
+a token rotation.
 
 ### Added
 
