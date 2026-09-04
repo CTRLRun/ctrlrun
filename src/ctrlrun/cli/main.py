@@ -25,7 +25,7 @@ from ..approval import ApprovalRecord
 from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
-from ..errors import AuthorityEscalation, CTRLRunError
+from ..errors import AuthorityEscalation, CTRLRunError, PolicyError
 from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Decision, Policy
 from ..receipt import (
     BLOCKED_APPROVAL_REQUIRED,
@@ -640,20 +640,80 @@ def _breakdown(counts: Mapping[str, int]) -> list[str]:
 
 
 @main.command()
-def verify() -> None:
-    """Not yet: verification of an evidence file lands in v0.4.
+@click.option(
+    "--authority",
+    "authority_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="A standalone authority document, as `ctrlrun gateway --authority` takes.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one ctrlrun.verify/v1 document.")
+@click.option(
+    "--junit",
+    "junit_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Also write a JUnit XML file for CI.",
+)
+@click.option("--only", default="", help="Comma-separated guarantee ids, e.g. G1,G3.")
+@click.option("--store-url", "store_url", default=None, help="Reserved; v0.4 accepts 'sqlite'.")
+def verify(
+    authority_path: Path | None,
+    as_json: bool,
+    junit_path: Path | None,
+    only: str,
+    store_url: str | None,
+) -> None:
+    """Run the declared guarantees against this configuration (SPEC-v0.4).
 
-    It exists here because observe mode's whole purpose is to lead somewhere, and the command
-    an operator reaches for next should not be a `No such command` error that suggests they
-    mistyped (SPEC-v0.3 §6.5). It runs nothing, checks nothing, and claims nothing.
+    Every scenario runs against a scratch store created and destroyed for the run. The store
+    an agent is using is not opened, not read and not created.
+
+    Exit codes: 0 every applicable guarantee passed and at least one was applicable; 1 a
+    guarantee FAILED; 2 the configuration was refused or is unusable — which includes
+    `mode: observe` and a configuration in which nothing could be exercised; 3 an internal
+    error in verify itself.
     """
-    _loaded_policy()
-    click.echo(
-        "ctrlrun verify lands in 0.4. It does not exist yet: nothing was checked and nothing "
-        "is claimed about this store.",
-        err=True,
-    )
-    raise SystemExit(2)
+    # Imported here, not at module scope: verify is an operator's tool and not part of the
+    # action path, and `import ctrlrun` must not reach it (SPEC-v0.4 §1, T125b).
+    from ..verify import VerifyInternalError, VerifyRefused
+    from ..verify import run as run_verify
+
+    try:
+        # The banner first, for every invocation, exactly as SPEC-v0.3 §6.5 requires — and
+        # then, under observe mode, `run` refuses. `ctrlrun verify` stays in the left column.
+        _loaded_policy()
+    except PolicyError as exc:
+        click.echo(f"ctrlrun verify: {exc}", err=True)
+        raise SystemExit(2) from exc
+
+    try:
+        report = run_verify(
+            None,
+            authority=authority_path,
+            only=(only,) if only else (),
+            store_url=store_url,
+        )
+    except VerifyRefused as refused:
+        click.echo(f"ctrlrun verify: {refused}", err=True)
+        raise SystemExit(2) from refused
+    except VerifyInternalError as internal:
+        click.echo(f"ctrlrun verify: internal error: {internal}", err=True)
+        raise SystemExit(3) from internal
+
+    if junit_path is not None:
+        junit_path.write_text(report.to_junit(), encoding="utf-8")
+    click.echo(report.to_json() if as_json else report.to_text())
+    if report.exit_code == 2:
+        # §3.8 — the only exit-2 the report itself can produce. Said on stderr, so a `--json`
+        # stdout stays parseable: `0/0` reported as success is the same false green as `8/8`
+        # with five N/As.
+        click.echo(
+            "ctrlrun verify: no guarantee in the catalogue is applicable to this "
+            "configuration, so nothing was checked and nothing is claimed.",
+            err=True,
+        )
+    raise SystemExit(report.exit_code)
 
 
 @main.command()

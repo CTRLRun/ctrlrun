@@ -156,9 +156,15 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
 | `control.py` | `Control` orchestration, decorator, context, suspend/resume | CLI |
 | `receipt.py` | Receipt/Event models, `EventSink`, JSONL sink | everything else |
+| `verify/` | the guarantee registry, scenario derivation, the scratch store, reporting | the gateway, `otel`, `jwt_identity`; anything from an extra |
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.
+
+`verify/` (v0.4) sits **above** `control.py`, beside `cli/`: it composes `Control`, `Policy` and
+`Authority` the way an application does, and nothing in the kernel imports it. `import ctrlrun`
+does not import `ctrlrun.verify`, which is asserted in a subprocess — a verification tool in the
+execution path is a dependency nobody meant to take.
 
 The gateway (v0.2) does not change this. It builds an Action and calls `Control` — including
 `Control.resume` for an elicitation's second leg — rather than reserving and committing for

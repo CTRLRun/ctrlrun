@@ -143,6 +143,12 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # importing it at module scope. The claims themselves are untyped JSON off somebody else's
 # wire, validated at the boundary before anything reaches a `Principal`.
 "src/ctrlrun/jwt_identity.py" = ["ANN401"]
+# `verify` drives the kernel with values it synthesized from somebody's YAML: an argument is
+# `str | int | bool | None` by SPEC-v0.1 §2.3 and nothing narrower, and a fake executor's
+# return value has no type at all — the same reasoning that exempts `state.py`. N818: the
+# refusal names follow this codebase's convention (DuplicateEffect, AmbiguousEffect), not the
+# suffix rule, as `errors.py` already does.
+"src/ctrlrun/verify/*.py" = ["ANN401", "N818"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]
