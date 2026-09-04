@@ -1047,12 +1047,15 @@ gateway's approval path (§8.3), and `ctrlrun.acs`'s hook. Reading `Policy.evalu
 a decision is a defect after v0.3, and the two places in shipped code that do it are named in
 §8.3 so item 5 cannot miss them.
 
-**Where several grants match**, the action passes on the first that does; a grant is a
-permission, and holding two permissions must never be worse than holding one. Denial arises from
-the absence of a matching grant, never from the presence of a stricter one.
-`AuthorityResult.grant_id` names the grant that produced the pass, and the result MUST NOT depend
-on the order grants appear in the document — evaluation over a set of matching grants has one
-answer, and T70b pins it by permuting the file.
+**Where several grants match**, the action passes; a grant is a permission, and holding two
+permissions must never be worse than holding one. Denial arises from the absence of a matching
+grant, never from the presence of a stricter one.
+
+Which grant is *named* then needs a rule, because any of them authorizes the action and evidence
+must not turn on incidental file order — the same standard §4.3 applies to deny reasons.
+`AuthorityResult.grant_id` is therefore the matching grant whose `id` sorts first by simple
+codepoint order, which is a property of the set rather than of the document. Reordering the
+grants in the file changes neither the decision nor the id, and T70b pins both by permuting it.
 
 ### 4.7 What does not change
 
@@ -1266,7 +1269,7 @@ testable and separately mutable; T76 breaks each one alone.
 
 | Dimension | Child is contained iff |
 |---|---|
-| `subject` | The child's subject contains **no wildcard**, and where the parent declares `user`, the child MUST declare a `user` that the parent's pattern matches. The child's `agent` is otherwise unconstrained |
+| `subject` | The child MUST declare a concrete `agent` — present, and containing no wildcard — and, where the parent declares `user`, a concrete `user` the parent's pattern matches. Which concrete agent it names is otherwise unconstrained |
 | `actions` | **Every** child pattern is contained in **some** parent pattern (§5.5) |
 | `resources` | Parent omits → child may declare anything, or omit. Parent declares → child MUST declare, and every child pattern is contained in some parent pattern |
 | `constraints` | For **every** `(argument, op)` the parent declares, the child declares the **same** `(argument, op)` with an operand at least as strict. The child may add constraints the parent does not have |
@@ -1282,15 +1285,22 @@ because two things that look like "naming the grantee" are actually widening:
   human attached — §4.2 spends a paragraph making that impossible for the parent, and one
   delegation would undo it. So where the parent names a user, the child must too, and the child's
   user pattern must be one the parent's admits. Omission is rejection, like every other omission.
-- *A wildcard grantee.* `subject: {agent: "*"}` in a delegation hands the parent's authority to
-  every agent in the deployment — and, since §5.3 rule 4 checks the *child's* subject for the next
-  hop, hands every one of them the right to delegate it onward. `max_delegation_depth` bounds
-  chain length, not grantee population, and nothing else would bound it. A wildcard subject is an
-  operator's decision in a reviewed file (§4.2); it is exactly what a runtime-created grant must
-  not be able to write.
+- *An unbounded grantee.* `subject: {agent: "*"}` in a delegation hands the parent's authority
+  to every agent in the deployment — and, since §5.3 rule 4 checks the *child's* subject for the
+  next hop, hands every one of them the right to delegate it onward. `max_delegation_depth`
+  bounds chain length, not grantee population, and nothing else would bound it. A wildcard
+  subject is an operator's decision in a reviewed file (§4.2); it is exactly what a
+  runtime-created grant must not be able to write.
 
-What is *not* constrained is the child's `agent` name. It may be any concrete agent, which is the
-whole point of the chain in §5.6.
+  **Omitting `agent` is the same escalation spelled differently**, and it is why the row demands
+  the key rather than merely banning the character. §4.2 makes an absent `subject.agent` match
+  *any* agent, so a child of `{agent: finance-agent, user: alice}` declaring only
+  `{user: alice@example.com}` carries no wildcard, satisfies the `user` rule, and still hands
+  the grant to every agent acting for alice. §5.4's own rule decides it: omission is never
+  "unlimited".
+
+What is *not* constrained is *which* concrete agent the child names. It may be any of them,
+which is the whole point of the chain in §5.6.
 
 **Operand strictness**, per operator, for the `constraints` row:
 
@@ -1633,7 +1643,7 @@ prevents. It is in the table because a reader will look for it.
 - **`would_have.blocked_reason`** is `null` when the action would have run unimpeded, and
   otherwise names what would have stopped it: `approval_required`, `duplicate`, `in_progress`,
   `ambiguous`, `approval_mismatch`, `principal_expired`, `unknown_action`, `no_matching_rule`, or
-  one of §4.3's authority reasons. It is separate from `decision` because "the policy said allow
+  one of §4.3's five **deny** reasons — never `authority_grant`, which records a pass. It is separate from `decision` because "the policy said allow
   and the effect was already committed" is a real and common answer, and a single field could not
   hold both halves.
 
@@ -1957,6 +1967,7 @@ is individually configurable**, and there is no flag that makes any single one o
 | `authority:` present, every matching grant expired | `AuthorityDenied(reason="authority_expired")` | ⚠ |
 | Delegated grant no longer contained in its parent | `AuthorityDenied(reason="authority_escalation")` | ⚠ |
 | A delegation in the chain is revoked | `AuthorityDenied(reason="authority_revoked")` | ⚠ |
+| An ancestor of a delegated grant has expired | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 3) | ⚠ |
 | A parent grant has been deleted from the document | `AuthorityDenied(reason="authority_escalation")`, `missing_parent_id` | ⚠ |
 | An ancestor is no longer `delegable` | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 6) | ⚠ |
 | A chain walk revisits a delegation, or exceeds the depth bound | `AuthorityDenied(reason="authority_escalation")` (§5.5) | ⚠ |
@@ -1964,7 +1975,7 @@ is individually configurable**, and there is no flag that makes any single one o
 | Delegation creation: parent unknown / not `delegable` / not valid | `AuthorityEscalation` naming which (§5.3) | |
 | Delegation creation: creator is not the parent's subject | `AuthorityEscalation(reason="not_the_subject")` | |
 | Delegation creation: depth would exceed the maximum | `AuthorityEscalation(reason="max_depth")` | |
-| Delegation creation: child subject carries a wildcard, or drops the parent's `user` | `AuthorityEscalation(reason="containment")`, `dimension="subject"` | |
+| Delegation creation: child subject carries a wildcard, omits `agent`, or drops the parent's `user` | `AuthorityEscalation(reason="containment")`, `dimension="subject"` | |
 | A stored delegation whose `grant_json` no longer parses | `AuthorityDenied`; never a grant with a field defaulted (§5.2) | ⚠ |
 | `authority:` present but malformed, or `grants` missing | `PolicyError` at load; no `Control` | |
 | A pattern outside §4.4's grammar | `PolicyError` at load | |
@@ -2104,9 +2115,10 @@ the axis §4.6 says it should. `Control.evaluate` is asserted to return the same
 one `Control.execute` acts on, in every cell.
 
 #### T70b — Several matching grants, and order does not matter
-Two grants match the same action; the action passes, `AUTHORITY_RESOLVED.grant_id` names one of
-them, and swapping the two in the document yields the identical decision and the identical
-`grant_id`.
+Two grants match the same action; the action passes and `AUTHORITY_RESOLVED.grant_id` is the
+one whose `id` sorts first (§4.6), not the one written first. Swapping the two in the document
+yields the identical decision and the identical `grant_id` — the only assertion that can catch
+an implementation that returned whichever grant it happened to reach first.
 
 #### T71 — An expired grant denies
 The only matching grant's `expires_at` is in the past under a fake clock.
@@ -2179,7 +2191,8 @@ additionally records `created_via="cli"` while the API path records `"api"`.
 Parametrized, one dimension at a time, everything else contained: a wider `actions` pattern; a wider
 `resources` pattern; each constraint operator loosened (`lte` raised, `gte` lowered, `eq` changed,
 `neq` changed, `in` widened); an `environments` entry the parent lacks; an `expires_at` later than
-the parent's; a child subject carrying a wildcard; a child subject dropping the parent's `user`.
+the parent's; a child subject carrying a wildcard; a child subject omitting `agent` altogether;
+a child subject dropping the parent's `user`.
 Each → `AuthorityEscalation(reason="containment")`, `DELEGATION_REJECTED` whose `data.dimension`
 names the row, and no record written.
 
@@ -2239,7 +2252,8 @@ different guards refuse them: `finance-agent` delegating €50,000 under its €
 #### T81 — Omission is not "unlimited"
 A parent with `amount_lte: 25000`; a child with **no** `amount` constraint. The delegation is
 **rejected at creation** — not accepted-and-inherited, not accepted-and-unconstrained. Repeated for
-`resources`, `environments`, `expires_at`, and the parent's `user`. The `else` branch, in which the
+`resources`, `environments`, `expires_at`, the parent's `user`, and the child's own `agent` —
+the last two being the cases where an omitted key means "anyone" rather than "nothing". The `else` branch, in which the
 delegation was created, fails the test with the delegation id it should not have got.
 
 ### Item 4 — Observe mode (§6)
