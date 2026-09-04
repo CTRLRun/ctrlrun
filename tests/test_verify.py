@@ -405,6 +405,40 @@ def test_T104_a_kernel_with_the_duplicate_guard_deleted_fails_G3_and_G4(tmp_path
     assert results["G6"].status is Status.PASS, results["G6"].reason
 
 
+def test_a_synthesized_vector_landing_in_the_wrong_rule_is_an_internal_error(tmp_path, monkeypatch):
+    """SPEC-v0.4 §3.3 - "the vector is checked before it is used".
+
+    Having built one, the engine evaluates the action it just constructed and asserts the
+    decision is the one it was aiming for. A scenario built on a vector that landed in a
+    different rule is the "window not actually reproduced" failure in its purest form: it
+    would run, refuse something, and report a guarantee that was never exercised. So it is an
+    **internal error** - exit 3 - and never a FAIL and never an N/A.
+
+    Written because the mutation table found the guard load-bearing on nothing: T116 reaches
+    exit 3 by replacing `_checked` outright, so removing the raise *inside* it left the suite
+    green. A check nothing exercises is not a check.
+    """
+    from ctrlrun.policy import Evaluation, Policy
+    from ctrlrun.verify.scenarios import VerifyInternalError
+
+    path = _write(tmp_path, WITH_EFFECTS)
+    original = Policy.evaluate
+
+    def lands_elsewhere(self, action):
+        evaluation = original(self, action)
+        # Same decision, different rule: the vector satisfies a rule the engine was not
+        # aiming at, which is exactly the case §3.3 refuses to build a scenario on.
+        return Evaluation(evaluation.decision, "rule[99]")
+
+    monkeypatch.setattr(Policy, "evaluate", lands_elsewhere)
+
+    with pytest.raises(VerifyInternalError) as raised:
+        run(path)
+
+    assert "rule[99]" in str(raised.value)
+    assert "§3.3" in str(raised.value)
+
+
 # --- T105: determinism ---------------------------------------------------------------------
 
 
