@@ -41,6 +41,11 @@ dev = [
     "pytest>=8",
     "mypy>=2.3",
     "ruff>=0.16",
+    # SPEC-v0.4 §4.3 - T115 validates `ctrlrun verify --junit` against the checked-in
+    # `tests/data/junit-10.xsd`. JUnit XML has no normative schema, so the schema is a
+    # de-facto one and the test asserts structurally as well; `xmlschema` is used by that
+    # test and by nothing else, and `ctrlrun` never imports it.
+    "xmlschema>=3",
 ]
 # SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
 # third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.

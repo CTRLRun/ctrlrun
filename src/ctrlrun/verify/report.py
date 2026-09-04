@@ -14,7 +14,7 @@ import json
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 
@@ -272,20 +272,49 @@ class Report:
         return summary
 
     def to_junit(self) -> str:
-        """§4.3. N/A is `<skipped>` — reported as skipped and never as a pass."""
+        """§4.3. One `<testsuite>`, one `<testcase>` per guarantee.
+
+        **N/A is `<skipped>`** — reported as skipped and never as a pass, which is the same
+        rule as everywhere else expressed in the vocabulary a CI dashboard already has. A
+        dashboard that showed five N/As as five green ticks would be the false green this
+        release exists to prevent, wearing somebody else's colours.
+
+        JUnit XML has **no normative schema** (§1.4). The element order and the required
+        attributes below follow the de-facto `junit-10.xsd` checked in beside T115 — hence
+        `properties` first and `system-out`/`system-err` last, and hence `timestamp` carrying
+        no offset, which is what that schema's `ISO8601_DATETIME_PATTERN` permits.
+
+        `hostname` is the literal `localhost`, which the schema names as the value to use
+        where the host cannot be determined. Reading the real one would put the operator's
+        machine name in a file they may attach to a ticket, and would make two runs of the
+        same configuration differ (§3.6).
+        """
         duration = (self.finished_at - self.started_at).total_seconds()
         suite = ElementTree.Element(
             "testsuite",
             {
                 "name": SUITE_NAME,
+                "hostname": "localhost",
+                "timestamp": self.started_at.astimezone(UTC)
+                .replace(tzinfo=None, microsecond=0)
+                .isoformat(),
                 "tests": str(len(self.guarantees)),
                 "failures": str(self.failed),
                 "errors": "0",
                 "skipped": str(self.not_applicable + self.skipped),
                 "time": f"{duration:.3f}",
-                "timestamp": self.started_at.replace(tzinfo=None).isoformat(),
             },
         )
+        properties = ElementTree.SubElement(suite, "properties")
+        for name, value in (
+            ("catalogue", CATALOGUE),
+            ("ctrlrun_version", self.ctrlrun_version),
+            ("policy", str(self.policy["path"])),
+            ("policy_sha256", str(self.policy["sha256"])),
+            ("applicable", str(self.applicable)),
+            ("not_applicable", str(self.not_applicable)),
+        ):
+            ElementTree.SubElement(properties, "property", {"name": name, "value": value})
         for result in self.guarantees:
             case = ElementTree.SubElement(
                 suite,
@@ -305,18 +334,9 @@ class Report:
                 ElementTree.SubElement(
                     case, "skipped", {"message": result.reason or str(result.status)}
                 )
-        suites = ElementTree.Element(
-            "testsuites",
-            {
-                "name": SUITE_NAME,
-                "tests": str(len(self.guarantees)),
-                "failures": str(self.failed),
-                "errors": "0",
-                "time": f"{duration:.3f}",
-            },
-        )
-        suites.append(suite)
-        return ElementTree.tostring(suites, encoding="unicode", xml_declaration=True)
+        ElementTree.SubElement(suite, "system-out").text = ""
+        ElementTree.SubElement(suite, "system-err").text = ""
+        return ElementTree.tostring(suite, encoding="unicode", xml_declaration=True)
 
     def job_summary(self) -> str:
         """§5.4 — a Markdown table, with the N/A rows in full."""

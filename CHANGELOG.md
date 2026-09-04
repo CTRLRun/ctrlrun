@@ -41,6 +41,21 @@ any change to one appears here.
   applicable, 1 a guarantee failed, 2 the configuration was refused or is unusable, 3 an
   internal error in verify itself.
 
+- **Reporting** (SPEC-v0.4 §4). The human report is one line per guarantee in catalogue order,
+  every N/A carrying the reason that made it one, with the summary as the last line so a
+  `tail -1` is meaningful. `--json` emits one `ctrlrun.verify/v1` document carrying the SHA-256
+  of both documents verify read — a report and a policy that do not hash the same are a report
+  about something else — and a `counterexample` **only** on a `fail`, because a counterexample
+  on a pass would be evidence of a failure that did not happen. `--junit PATH` writes a JUnit
+  XML file in which an N/A is `<skipped>` and never a pass, which is the same rule as
+  everywhere else expressed in the vocabulary a CI dashboard already has.
+
+  JUnit XML has no normative schema, and the report says so rather than implying one: T115
+  validates against `tests/data/junit-10.xsd`, a checked-in copy of the de-facto Windy Road
+  schema with its provenance and Apache-2.0 licence recorded beside it, and asserts the
+  document structurally as well — a permissive schema is not a check. `xmlschema` joins the
+  **dev** extra for that test and for nothing else.
+
 ### Changed
 
 - **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the
