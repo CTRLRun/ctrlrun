@@ -13,6 +13,7 @@ non-execution, and it is only provable if no request byte can have been written.
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
@@ -48,7 +49,12 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     http_client()
     from ..control import Control
     from ..webhook import WebhookApprovalProvider, webhook_secret
-    from .server import Gateway, GatewayConfig, httpx_forwarder, serve_forever
+    from .server import (
+        Gateway,
+        GatewayConfig,
+        httpx_forwarder,
+        serve_forever,
+    )
 
     otel = bool(options.pop("otel", False))
     otel_arguments = bool(options.pop("otel_arguments", False))
@@ -57,6 +63,7 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     secret_file = options.pop("webhook_secret_file", None)
     allow_insecure = bool(options.pop("allow_insecure_webhook", False))
     secret = webhook_secret(secret_file) if secret_file else webhook_secret()
+    authority_path = options.pop("authority", None)
 
     # SPEC-v0.3 §2.5 — `--environment` is rank 1 on the Control, not a second value the
     # gateway stamps for itself. Where it is absent the Control resolves ranks 2 to 4, so
@@ -64,37 +71,112 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     environment = options.pop("environment", None)
     config = GatewayConfig(upstream=upstream, alias=alias, webhook_secret=secret, **options)
     control = Control.from_file(environment=environment)
+    authority = _authority(control, authority_path)
+    sinks = list(control.sinks)
+    approvals = control.approvals
     if otel:
         # §8 — one more sink beside the JSONL one `from_file` installed. It never blocks and
         # never raises into the kernel (§4.2), so adding it changes no decision.
         from ..otel import OTelEventSink
 
-        control = Control(
-            control.policy,
-            control.store,
-            control.approvals,
-            sinks=[*control.sinks, OTelEventSink(arguments=otel_arguments)],
-            environment=control.environment,
-        )
+        sinks.append(OTelEventSink(arguments=otel_arguments))
     if webhook_url:
         # §7 — the provider notifies; the gateway's endpoint receives. Both need the same
         # secret, and neither takes it from a command-line argument (§7.3).
-        control = Control(
-            control.policy,
+        approvals = WebhookApprovalProvider(
             control.store,
-            WebhookApprovalProvider(
-                control.store,
-                url=webhook_url,
-                secret=secret,
-                public_url=public_url,
-                allow_insecure=allow_insecure,
-            ),
-            sinks=[],
-            environment=control.environment,
+            url=webhook_url,
+            secret=secret,
+            public_url=public_url,
+            allow_insecure=allow_insecure,
         )
+    # SPEC-v0.3 §8.3 — one rebuild, carrying **everything**. Two successive rebuilds each
+    # naming a subset is how `authority` and the JSONL sink went missing from a gateway
+    # started with `--otel` and a webhook: each was correct about the field it was changing
+    # and silent about the ones it dropped.
+    control = Control(
+        control.policy,
+        control.store,
+        approvals,
+        sinks=sinks,
+        authority=authority,
+        environment=control.environment,
+    )
     forwarder = httpx_forwarder(config)
+    gateway = Gateway(config, control, forwarder)
+    _announce(control, config, gateway.identity, authority_path)
     try:
-        serve_forever(Gateway(config, control, forwarder))
+        serve_forever(gateway)
     finally:
         forwarder.close()
         control.store.close()
+
+
+def _authority(control: Any, path: str | None) -> Any:
+    """The grants this gateway enforces, from the policy file or from `--authority` (§8.3).
+
+    `--authority` exists because the person who writes grants and the person who writes
+    per-action autonomy are often not the same person, and a gateway is where that separation
+    shows up first. The document it names is **not** a policy document: its top-level key set
+    is closed at `schema` and `authority`, so `actions:` or `mode:` in it is a load error.
+
+    Where both the policy file and `--authority` declare a section, the gateway refuses to
+    start naming both paths. Two sources for one section is the ambiguity `v0.1 §5.1` refuses
+    for `{resource}`: pick one, or say which. Silently preferring either would mean an
+    operator who edited the wrong file saw no effect and no error.
+    """
+    from ..authority import Authority
+    from ..errors import InvalidArgument
+
+    if path is None:
+        return control.authority
+    loaded = Authority.from_yaml(
+        Path(path).read_text(encoding="utf-8"), source=path, standalone=True
+    )
+    if control.authority is not None:
+        raise InvalidArgument(
+            f"authority is declared twice: in the policy at {control.policy.source} and in "
+            f"--authority {path}. Two sources for one section is an ambiguity nobody can "
+            "resolve later; remove the 'authority:' key from one of them (SPEC-v0.3 §8.3)"
+        )
+    return loaded
+
+
+def _announce(control: Any, config: Any, identity: Any, authority_path: str | None) -> None:
+    """The startup block of SPEC-v0.3 §8.4, printed before the socket opens.
+
+    Everything here is something an operator can get wrong in a way that is invisible until an
+    incident: an action with no effect key, an environment they did not choose, a header they
+    trust more than they meant to, an `authority:` section that is not loaded at all. It goes
+    on the line that starts the process rather than into a receipt three weeks later.
+
+    The observe banner is **not** printed here: `ctrlrun gateway` prints it before anything
+    else, along with every other command that loads the operator's policy (§6.5), and a second
+    copy would read as two switches.
+
+    `print` rather than the logger, because this is the CLI's own output and a logger with no
+    configured handler would swallow it — which is the failure mode the block exists to
+    prevent, in miniature.
+    """
+    lines: list[str] = []
+    lines.append(f"environment  {control.environment}")
+    lines.append(f"identity     {type(identity).__name__}")
+    if config.principal_header is not None:
+        lines.append(
+            f"             trusts the header {config.principal_header!r}: it is worth what "
+            "the proxy that sets it is worth, and must be overwritten on every request"
+        )
+    if control.authority is None:
+        lines.append("no authority: section — every principal is unrestricted")
+    else:
+        where = authority_path or control.policy.source
+        lines.append(f"authority    {len(control.authority.grants)} grant(s) from {where}")
+    keyless = sorted(
+        name for name in control.policy.actions if control.policy.effect_template(name) is None
+    )
+    if keyless:
+        lines.append(f"{len(keyless)} action(s) have no effect: template and get no reservation:")
+        lines += [f"  {name}" for name in keyless]
+        lines.append("That is right for a read, and wrong for anything that changes the world.")
+    for line in lines:
+        print(line)

@@ -64,13 +64,47 @@ JSON-RPC error in ACS's reserved range rather than an opinion.
 
 | ACS field | CTRLRun |
 |---|---|
-| `params.metadata.agent_id` | `Principal.agent` |
-| `params.metadata.user_context.user_id` | `Principal.user` |
-| `params.metadata.environment` | `Action.environment` (ACS's enum passes through; v0.1 §2.1 takes any non-empty string) |
+| `params.metadata.agent_id` | `Principal.agent` — **only where no `identity` provider is configured**. With one it is **ignored**: not merged, not a fallback, not compared (SPEC-v0.3 §8.4) |
+| `params.metadata.user_context.user_id` | `Principal.user`, under the same rule |
+| `params.metadata.environment` | **ignored.** `Action.environment` is the hook's own configuration (SPEC-v0.3 §2.5, §8.4) |
+| the transport's request headers | `IdentityContext.headers`, which is what an `identity` provider reads. `AcsControlHook.handle(envelope, headers=...)` |
 | `payload.tool.name`, `payload.tool.provider`, `payload.operation` | `Action.name`, as `<prefix>.<provider>.<tool>[.<operation>]` |
 | `payload.arguments` | `Action.arguments`, unwrapped from `{name: {value, provenance}}` to `{name: value}` |
 | — *(ACS has no resource field)* | `Action.resource`, from the policy's `resource:` template (SPEC-v0.2 §3) |
 | `params.request_id` | the continuation that joins this hook to its result |
+
+**Two fields stopped being read, and it is worth saying why.** Under v0.2 both `agent_id` and
+`environment` came off the envelope, on exactly the argument `v0.2 §6.5` made for MCP's
+`clientInfo`: a policy could not address the principal, so a self-reported one misattributed a
+receipt and could not widen an outcome. SPEC-v0.3 §4 ends that — the principal is an
+authorization input now, and a grant may scope to an environment — so a value the caller sets
+would let the caller choose what it is authorized as and where. §8.1 removes
+`ctrlrun gateway --principal-from-client-info` over the same sentence; the ACS hook was that
+flag in a different module.
+
+The consequence is a **required argument**: an `AcsControlHook` built against a `Control` that
+holds an `Authority`, with no `identity` provider, raises `InvalidArgument` at construction.
+A hook with **no provider** still reads `agent_id`, unchanged, because there is then no
+authorization decision for it to widen — and a hook holding an `Authority` cannot be in that
+state. The branch is on the *provider*, not on the authority section: configuring one without
+an `authority:` section also stops `agent_id` being read, which is the less surprising of the
+two possible rules and the one that makes "with a provider, `agent_id` is display data" true
+without a footnote.
+
+A configured provider that names nobody is a **refusal** — `deny`,
+`reason_codes: ["no_principal"]`, no receipt and no events — and never a fall back to the
+envelope: falling back would reach `agent_id` by an easier route than forging a credential. A
+credential that was verified and has since **lapsed** is a different refusal and says so:
+`reason_codes: ["principal_expired"]`, matching the `decision_reason` on the receipt
+`Control` has already written. The two are told apart structurally — one is raised while the
+Action is being built, the other by `Control.execute` — and never by reading a message.
+
+**One rule of §8.2 the hook does not import.** §3.1's repeated-identity-header refusal is the
+gateway's, and it lives in `do_POST` because that is where a repeated HTTP field is still
+visible. `AcsControlHook.handle(envelope, headers=...)` is handed a `Mapping[str, str]`, which
+holds one value per name — so whatever built that mapping already chose. A deployment putting
+this hook behind an HTTP server is responsible for that check, exactly as it is responsible
+for the transport. Stated because it is a real gap rather than an argued omission.
 
 `operation` is part of the name because two verbs on one tool are two actions, and a policy has
 to be able to say different things about `create` and `void`.
@@ -85,6 +119,8 @@ The decision maps out:
 | `DuplicateEffect` | `deny`, `reason_codes: ["ctrlrun.duplicate_effect", <state>]` |
 | `AmbiguousEffect` | `deny`, `reason_codes: ["ctrlrun.ambiguous_effect"]` |
 | `ApprovalMismatch` | `deny`, `reason_codes: ["ctrlrun.blocked", <reason>]` |
+| `AuthorityDenied` | `deny`, `reason_codes: [<§4.3 reason>]` — it subclasses `ActionDenied`, and the reason is what tells the two apart |
+| `IdentityError` | `deny`, `reason_codes: ["no_principal"]`. Deliberately a decision and not a protocol `error`: an error envelope says "the Guardian could not answer", and a platform is free to decide what to do with that |
 
 `ask_details` carries `approver` (`{type: "human", id}`), a `question` naming the request id a
 human answers with `ctrlrun approve`, and `timeout_seconds`. All three are required by

@@ -42,10 +42,14 @@ def test_T30_a_subprocess_importing_ctrlrun_pulls_in_no_module_from_an_extra():
         [
             sys.executable,
             "-c",
+            # SPEC-v0.3 §1.1 — `jwt` joins the list with build-list item 5. T92 asserts the
+            # same thing from the identity tests' side; this is the one place that names
+            # every extra at once, so a fourth cannot be added without editing it.
             "import ctrlrun, sys;"
             "print(sorted(n for n in sys.modules"
-            " if n.split('.')[0] in ('httpx', 'opentelemetry')"
-            " or n in ('ctrlrun.gateway', 'ctrlrun.otel', 'ctrlrun.acs')))",
+            " if n.split('.')[0] in ('httpx', 'opentelemetry', 'jwt')"
+            " or n in ('ctrlrun.gateway', 'ctrlrun.otel', 'ctrlrun.acs',"
+            " 'ctrlrun.jwt_identity')))",
         ],
         capture_output=True,
         text=True,
@@ -60,6 +64,12 @@ def test_T30_a_subprocess_importing_ctrlrun_pulls_in_no_module_from_an_extra():
     [
         ("from ctrlrun.gateway import serve; serve(upstream='http://x', alias='a')", "gateway"),
         ("from ctrlrun.otel import OTelEventSink; OTelEventSink()", "otel"),
+        (
+            "from ctrlrun.jwt_identity import JWTIdentityProvider;"
+            "JWTIdentityProvider(secret='s', algorithms=['HS256'], issuer='i', audience='a',"
+            " token_type='at+jwt')",
+            "identity",
+        ),
     ],
 )
 def test_T30_a_missing_extra_says_which_one_to_install(factory, extra, tmp_path):
@@ -69,7 +79,7 @@ def test_T30_a_missing_extra_says_which_one_to_install(factory, extra, tmp_path)
         "import sys, importlib.abc\n"
         "class Block(importlib.abc.MetaPathFinder):\n"
         "    def find_spec(self, name, path=None, target=None):\n"
-        f"        if name.split('.')[0] in ('httpx', 'opentelemetry'):\n"
+        f"        if name.split('.')[0] in ('httpx', 'opentelemetry', 'jwt'):\n"
         "            raise ImportError(name)\n"
         "        return None\n"
         "sys.meta_path.insert(0, Block())\n"
@@ -87,6 +97,25 @@ def test_T30_a_missing_extra_says_which_one_to_install(factory, extra, tmp_path)
 
     assert f"pip install 'ctrlrun[{extra}]'" in finished.stdout, finished.stdout
     assert "WRONG" not in finished.stdout
+
+
+def test_the_identity_extra_declares_pyjwt_with_its_crypto_extra():
+    """§3.4 — without `[crypto]`, PyJWT can only do `HS*`, and every asymmetric algorithm
+    raises at verification time rather than at install time. An extra that installs cleanly
+    and then cannot verify an RS256 token is worse than one that names its dependency."""
+    declared = " ".join(_pyproject()["project"]["optional-dependencies"]["identity"])
+
+    assert "pyjwt" in declared.lower()
+    assert "crypto" in declared.lower()
+
+
+def test_the_core_dependencies_have_not_grown():
+    """§1.1 — `pip install ctrlrun` installs `pyyaml` and `click`, and v0.3 changes that by
+    exactly nothing: the whole authority model is stdlib plus the YAML parser already there."""
+    declared = _pyproject()["project"]["dependencies"]
+    names = {re.split(r"[<>=!~\[ ]", line.strip())[0].lower() for line in declared}
+
+    assert names == CORE_DEPENDENCIES
 
 
 def test_the_otel_extra_declares_the_api_sdk_and_exporter():

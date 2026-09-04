@@ -14,6 +14,79 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **`JWTIdentityProvider`** (build-list item 5, SPEC-v0.3 §3.4), in `ctrlrun[identity]`
+  (`pyjwt[crypto]`), imported by naming it. It reads a bearer token from a header, verifies it
+  against a JWKS or a static key, and maps the verified claims onto a `Principal`. **It issues
+  nothing**: no OAuth flow, no refresh, no token exchange, no introspection, no dynamic client
+  registration. An absent header is a *decline*; a present and invalid one is a *refusal*, and
+  `Control` never backfills from one.
+- **Configuration is refused before any token is seen.** More or fewer than one key source; an
+  `HS*` algorithm with `jwks_url` or `public_key`; an asymmetric algorithm with `secret`; an
+  empty `algorithms`; `none` in any casing; `token_type` not passed at all. The
+  `HS*`-with-a-public-key case is key confusion in its plainest form — RS256→HS256 is literally
+  "HMAC the token using the PEM of the public key as the secret" — and it is refused at the
+  *configuration* end, which is the end that can be refused.
+- **`token_type` is required, and it is the whole cross-JWT defence.** Without it an OIDC ID
+  token from the same issuer, signed with the same key, carrying the configured `aud`, passes
+  every other check (RFC 8725 §2). Passing `None` explicitly is permitted and warns at
+  construction naming exactly what it gives up.
+- **`aud` by membership on either wire shape**, never a raw `in`: on the string shape that is
+  substring matching, and it accepts `https://ctrlrun.example` for a configured `ctrl`. `exp`
+  is **required** — a credential with no expiry cannot be revoked by waiting, and v0.3 has no
+  revocation channel — and `exp`/`nbf` are compared against the provider's injected clock, so
+  an expiry boundary is tested exactly rather than raced.
+- **JWKS handling that cannot be turned into a load generator.** An unknown `kid` triggers at
+  most one refresh and then a refusal; a second such token inside `jwks_min_refresh_interval`
+  is refused with no fetch at all. A set with two entries sharing a `kid` is refused rather
+  than resolved by first match; a key whose `use` is not `sig` or whose `key_ops` excludes
+  verification is ignored; a key carrying its own `alg` constrains itself. A failed fetch is a
+  refusal that discards nothing, and **nothing is followed**: the fetch refuses a redirect
+  outright and re-checks the scheme of the URL that actually answered. `urllib`'s
+  `build_opener` keeps its `HTTPRedirectHandler` unless an argument subclasses it, so an
+  opener built the obvious way follows a 302 — including one to plaintext `http://` on
+  another host. An open redirect on the issuer's domain would otherwise have this process
+  fetch its signing keys in cleartext from wherever it pointed, cache them for the life of
+  the process, and verify every token the attacker then signed.
+- **Two limits stated rather than configured around.** `issuer` is an exact string, so a
+  tenant-templated issuer cannot be configured correctly here — pointing it at a multi-tenant
+  endpoint without pinning the tenant makes every tenant on that platform a valid issuer. And
+  there is no revocation channel: short token lifetimes are the whole of the story.
+- **Gateway identity selection** (§8.2). `--principal` and `--principal-header` are understood
+  as constructors now — `StaticIdentityProvider` and `HeaderIdentityProvider` — and
+  `--identity-jwt` is a third, with its own flags. Exactly one is required, still with no
+  default; every `--identity-jwt-*` flag is an error without `--identity-jwt`, because a flag
+  that cannot take effect is a flag the operator believes took effect — and the test for that
+  reads the flag list off the command itself rather than off the check, because a list copied
+  from the code under test cannot fail for the flag the code forgot. The shared secret is
+  read from a **file**, never from a flag value: a secret on a command line is in every process
+  listing on the host. `--identity-jwt-http-timeout` bounds the JWKS fetch and is **its own
+  flag**: the fetch runs on the request thread before any decision is made, so borrowing
+  `--upstream-timeout` would have coupled two unrelated knobs in the fail-slow direction.
+- **`ctrlrun gateway --authority PATH`** (§8.3), because the person who writes grants and the
+  person who writes per-action autonomy are often not the same person. That document is not a
+  policy document — its top-level key set is closed at `schema` and `authority`, so `actions:`
+  or `mode:` in it is a load error naming the file and the key. Declaring `authority:` in both
+  the policy and `--authority` refuses to start, naming both paths.
+- **`-41012` `ctrlrun.unauthorized`** (§8.4). A tool call outside the principal's grant returns
+  it, HTTP 403, upstream untouched; `v0.2 §6.10`'s `-41001` now means a **policy** denial. The
+  gateway catches `AuthorityDenied` **before** `ActionDenied`, which it subclasses — the other
+  order makes the new code unreachable while every test asserting only "it was refused" stays
+  green, so both halves are pinned by name.
+- **No refusal reaches a client as a dropped connection.** `do_POST` has no top-level
+  handler, and an escaping exception makes `socketserver` close the socket with nothing
+  written — which a client reads as a transport failure, and a transport failure is the one
+  signal it retries on. Three v0.3 paths landed there and each now answers: an authority
+  denial or an expired credential on a **continuation** (`-41012` / `-41007`), an expired
+  principal in `Control.execute` (`-41007`, and `IdentityError` is deliberately not an
+  `ActionDenied`, so it needs its own clause), and an identity provider raising anything at
+  all, which §3.2 makes an `IdentityError` in-process and now does at the gateway too. The
+  expired-principal path is routine rather than adversarial: the JWT provider admits a token
+  up to `leeway` past its `exp`, so every token in that 60-second window was affected.
+- **A startup block that says what is in force** (§8.4): the environment, the identity provider
+  by name and the header it trusts, whether an `authority:` section is loaded and how many
+  grants it holds — or the single line `no authority: section — every principal is
+  unrestricted`, so an operator who believes they configured authority finds out on the line
+  that starts the process.
 - **Observe mode** (build-list item 4, SPEC-v0.3 §6). A top-level `mode: observe` runs every
   real decision against real traffic and records what *would* have been blocked, without
   blocking anything: no `ActionDenied`, no `AuthorityDenied`, no `ApprovalRequired`, no
@@ -142,6 +215,20 @@ shipped, and the only thing in the tree today is the contract.
   splitter, which runs for every condition in every document, and gating it on `v3` would leave
   the same name meaning two things in two files. A `v1` policy whose protected function takes an
   argument called `claims` stops loading until the argument is renamed; the load error says so.
+- **BREAKING: `AcsControlHook` takes an `identity` provider, and ignores the envelope's
+  `agent_id` and `environment` when it has one** (§8.4). Under v0.2 both came off the wire, on
+  exactly the argument `v0.2 §6.5` made for `clientInfo`: a policy could not address the
+  principal. §4 ends that, and §8.1 removes `--principal-from-client-info` over the same
+  sentence — the ACS hook was that flag in a different module. A hook built against a `Control`
+  holding an `Authority` with no provider raises `InvalidArgument` at construction. With a
+  provider, `agent_id` is ignored — not merged, not a fallback, not compared — and a provider
+  that names nobody is a denial with `reason_codes: ["no_principal"]`, never a fall back to the
+  envelope. `handle()` gains an optional `headers=` for the transport's own headers, which is
+  what a provider reads. `docs/ACS.md`'s mapping table is amended in the same change.
+- **All three v0.2 call sites now use the combined decision** (§8.3): the gateway's `tools/call`
+  path, `ctrlrun.acs`'s request hook, and `Control.resume`. Left as `Policy.evaluate`, an action
+  a grant forbids outright would still have its approval flow run, and a human would be paged
+  about a call that could never happen.
 - **`Control.evaluate` returns the combined decision**, not the policy axis alone. Its signature
   and `Evaluation`'s two fields are unchanged, and it still writes nothing — it would simply
   stop answering "what will happen to this action" if it reported one axis while `Control.execute`
@@ -150,10 +237,6 @@ shipped, and the only thing in the tree today is the contract.
   recorded, not re-decided: the reservation is held and the remote may already be acting on it.
   A lease extension is the other way round — refused where authority no longer covers the
   action, so the lease lapses and the record becomes `AMBIGUOUS` by the ordinary path.
-- **`AcsControlHook` refuses a `Control` that holds an `Authority`** (§8.4). It reads
-  `params.metadata.agent_id` off the inbound envelope, and an authorization decision may not be
-  made against a principal the caller asserted — the same sentence that removed
-  `--principal-from-client-info`. It gains an `identity` provider of its own with item 5.
 - **`policy._Condition` is now `policy.Condition`, and `policy.parse_conditions` is public.**
   A grant's `constraints:` is in exactly a rule's `when:` syntax and is parsed by the same code:
   a second condition evaluator would be a second place for `True` to start comparing equal to

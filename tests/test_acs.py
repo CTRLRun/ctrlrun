@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -500,8 +501,7 @@ def test_an_authority_holding_control_is_refused_at_construction(store):
     the principal an authorization input. A self-reported name cannot be one, which is the same
     sentence that removes `--principal-from-client-info` (§8.1); the ACS hook is that flag in a
     different module, and removing one while leaving the other would make the removal a
-    gesture. T91d asserts the item-5 form of this, where the hook takes an `identity` of its
-    own; until then it has none, so an `Authority` is refused outright."""
+    gesture. The item-5 form is T91d below, where the hook takes an `identity` of its own."""
     from ctrlrun import Authority, InvalidArgument
 
     authority = Authority.from_yaml(
@@ -523,3 +523,244 @@ def test_a_control_with_no_authority_still_constructs(control):
     """The control for the refusal above: without it, an implementation that refused every
     Control would satisfy the first half."""
     assert AcsControlHook(control, prefix="acs") is not None
+
+
+# --- T91d: the ACS hook refuses a self-asserted principal (SPEC-v0.3 §8.4) --------------
+
+
+def _authority(agent="verified-agent"):
+    from ctrlrun import Authority
+
+    return Authority.from_yaml(
+        "schema: ctrlrun.policy/v3\n"
+        "authority:\n"
+        "  grants:\n"
+        "    - id: g\n"
+        f'      subject: {{ agent: "{agent}" }}\n'
+        '      actions: ["**"]\n',
+        standalone=True,
+    )
+
+
+@pytest.mark.authority
+def test_T91d_an_authority_holding_control_with_no_identity_is_refused(store):
+    """§8.4, by name: the argument, not merely "some error"."""
+    from ctrlrun import InvalidArgument
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority())
+
+    with pytest.raises(InvalidArgument, match="identity"):
+        AcsControlHook(control, prefix="acs")
+
+
+@pytest.mark.authority
+def test_T91d_with_a_provider_the_envelopes_agent_id_is_ignored(store):
+    """§8.4 — not merged, not a fallback, not compared. It is display data, like `clientInfo`,
+    and a value that is only sometimes authoritative is one nobody can reason about."""
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority())
+    hook = AcsControlHook(
+        control,
+        prefix="acs",
+        identity=HeaderIdentityProvider(agent_header="X-Agent"),
+    )
+
+    # The envelope says `impostor`; the transport says `verified-agent`, and only the second
+    # holds a grant. If `agent_id` were read, or merged, or compared, this would be denied.
+    envelope = _call(amount=200)
+    answer = hook.handle(envelope, headers={"X-Agent": "verified-agent"})
+
+    assert answer["result"]["decision"] == "allow"
+    # The reservation is held open across the two hooks, so the receipt lands on the result
+    # leg. Closing it is the only way to read the principal that was actually recorded, and a
+    # disjunction that tolerated "no receipt" would pass whether or not one was ever written.
+    hook.handle(_result(envelope["params"]["request_id"]))
+    assert store.receipts()[-1].principal.agent == "verified-agent"
+
+
+@pytest.mark.authority
+def test_T91d_the_provider_is_what_decides_not_the_envelope(store):
+    """The control for the test above. The envelope names the *granted* agent and the
+    transport names an ungranted one: if `agent_id` were read the call would be allowed, so
+    the denial is what proves the provider won."""
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority())
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+    envelope = _call(amount=200)
+    envelope["params"]["metadata"]["agent_id"] = "verified-agent"
+
+    answer = hook.handle(envelope, headers={"X-Agent": "impostor"})
+
+    assert answer["result"]["decision"] == "deny"
+    assert "no_authority" in answer["result"]["reason_codes"]
+    assert store.receipts()[-1].principal.agent == "impostor"
+
+
+@pytest.mark.authority
+def test_T91d_a_declining_provider_is_refused_and_never_backfilled(store):
+    """§8.4 — falling back to `agent_id` would reach it by an easier route than forging a
+    credential, which is the hole §3.2 closes for `context()`, in a different module."""
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority())
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+    envelope = _call(amount=200)
+    envelope["params"]["metadata"]["agent_id"] = "verified-agent"
+
+    answer = hook.handle(envelope, headers={})
+
+    assert answer["result"]["decision"] == "deny"
+    assert answer["result"]["reason_codes"] == ["no_principal"]
+    assert store.receipts() == ()
+    assert store.events() == ()
+
+
+@pytest.mark.authority
+def test_T91d_the_envelopes_environment_is_ignored_in_favour_of_the_configuration(store):
+    """§8.4 — an environment named in an authorization decision cannot come off the wire from
+    the caller: a grant may scope to it, so the caller would choose what it is authorized in."""
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(
+        Policy.from_yaml(POLICY), store, authority=_authority(), environment="staging"
+    )
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+    envelope = _call(amount=200)
+    envelope["params"]["metadata"]["environment"] = "production"
+
+    hook.handle(envelope, headers={"X-Agent": "verified-agent"})
+    # The environment reaches the receipt only when the action closes, and the result hook is
+    # what closes it — which is also the leg that writes the only receipt an ACS action gets.
+    hook.handle(_result(envelope["params"]["request_id"]))
+
+    assert store.receipts()[-1].environment == "staging"
+
+
+@pytest.mark.authority
+def test_T91b_the_acs_approval_gate_uses_the_combined_decision(store):
+    """§8.3 — `ctrlrun.acs`'s request hook is the second of the three places that read
+    `Policy.evaluate` directly. An action a grant forbids must not reach the approval flow."""
+    from ctrlrun import Authority, HeaderIdentityProvider
+
+    narrow = Authority.from_yaml(
+        "schema: ctrlrun.policy/v3\n"
+        "authority:\n"
+        "  grants:\n"
+        "    - id: small-only\n"
+        '      subject: { agent: "verified-agent" }\n'
+        '      actions: ["**"]\n'
+        "      constraints: { amount_lte: 20000 }\n",
+        standalone=True,
+    )
+    control = Control(Policy.from_yaml(POLICY), store, authority=narrow)
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+
+    answer = hook.handle(_call(amount=500000), headers={"X-Agent": "verified-agent"})
+
+    assert answer["result"]["decision"] == "deny"
+    assert "authority_constraint" in answer["result"]["reason_codes"]
+    assert "APPROVAL_REQUESTED" not in [str(e.type) for e in store.events()]
+
+
+@pytest.mark.authority
+def test_the_acs_hook_spends_no_approval_on_an_action_the_grant_forbids(store):
+    """A granted approval survives an authority denial — and **not** because of §8.3.
+
+    Stated plainly, because the mutation table says so: swapping this hook's
+    `Control.evaluate` back to `Policy.evaluate` changes nothing any assertion here can see.
+    `Control.execute` evaluates authority *before* the approval gate (§4.3), so the approval
+    is never reached whichever decision sent the hook looking for one. §8.3's change is still
+    right — it keeps one rule in one place and saves a pointless store read — but at this hook
+    it is **not independently observable**, and the mutation table records it as an equivalent
+    mutant rather than pretending a test isolates it.
+
+    The gateway is the asymmetric case: there, the policy axis alone lets an action the grant
+    forbids reach `_before_asking_a_human`, which answers `-41004` off the effect record
+    before authority is ever consulted. That one *is* isolated, in `test_gateway_server.py`.
+    """
+    from ctrlrun import Authority, HeaderIdentityProvider
+
+    narrow = Authority.from_yaml(
+        "schema: ctrlrun.policy/v3\n"
+        "authority:\n"
+        "  grants:\n"
+        "    - id: small-only\n"
+        '      subject: { agent: "verified-agent" }\n'
+        '      actions: ["**"]\n'
+        "      constraints: { amount_lte: 20000 }\n",
+        standalone=True,
+    )
+    control = Control(Policy.from_yaml(POLICY), store, authority=narrow)
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+    # A human has already granted this exact action: policy says `approve` for the amount.
+    envelope = _call(amount=500000)
+    action = hook._action(
+        envelope["params"], envelope["params"]["payload"], {"x-agent": "verified-agent"}
+    )
+    request = control.approvals.request(action, timedelta(hours=1))
+    store.grant_approval(request.request_id, "human:test")
+
+    answer = hook.handle(envelope, headers={"X-Agent": "verified-agent"})
+
+    assert answer["result"]["decision"] == "deny"
+    record = store.get_approval(request.request_id)
+    assert record.consumed_at is None, "an approval was spent on an action the grant forbids"
+    assert str(record.status) == "granted"
+
+
+@pytest.mark.authority
+def test_an_expired_credential_is_answered_principal_expired_not_no_principal(store):
+    """§2.3, §8.4 — the ACS answer and the evidence for the same action must agree.
+
+    `Control.execute` refuses a lapsed credential with `IdentityError` and writes a receipt
+    saying `principal_expired`. Answering `no_principal` would leave a platform reading one
+    story and an auditor reading another. The two are told apart **structurally** — "the
+    provider named nobody" is raised while the Action is being built, outside the try that
+    wraps `execute` — and never by matching on a message.
+    """
+    from datetime import UTC, datetime
+
+    from ctrlrun import StaticIdentityProvider
+
+    lapsed = datetime(2020, 1, 1, tzinfo=UTC)
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority("verified-agent"))
+    hook = AcsControlHook(
+        control,
+        prefix="acs",
+        identity=StaticIdentityProvider(agent="verified-agent", expires_at=lapsed),
+    )
+
+    answer = hook.handle(_call(amount=200), headers={})
+
+    assert answer["result"]["decision"] == "deny"
+    assert answer["result"]["reason_codes"] == ["principal_expired"]
+    assert store.receipts()[-1].decision_reason == "principal_expired"
+
+
+@pytest.mark.authority
+def test_a_provider_that_names_nobody_is_still_answered_no_principal(store):
+    """The control for the test above: the two refusals keep different codes. Without it, a
+    hook that reported `principal_expired` for everything would satisfy the first half."""
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_authority("verified-agent"))
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+
+    answer = hook.handle(_call(amount=200), headers={})
+
+    assert answer["result"]["reason_codes"] == ["no_principal"]
+    assert store.receipts() == ()

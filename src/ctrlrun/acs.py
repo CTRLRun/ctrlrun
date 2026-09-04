@@ -37,10 +37,12 @@ from .errors import (
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
+    IdentityError,
     InvalidArgument,
     NotExecuted,
     Suspended,
 )
+from .identity import IdentityContext, IdentityProvider
 
 _LOG = logging.getLogger(__name__)
 
@@ -67,6 +69,14 @@ BLOCKED: Final = "blocked"
 METHOD_NOT_ANSWERED: Final = -32001
 MALFORMED_ENVELOPE: Final = -32002
 
+#: SPEC-v0.3 §8.4 — the reason code on a denial where no principal could be resolved. The
+#: same string `v0.1 §2.1` uses, so one vocabulary covers both paths.
+NO_PRINCIPAL_CODE: Final = "no_principal"
+
+#: And the reason code where a credential was produced and had already lapsed (§2.3). It is
+#: the string `Control` writes on the receipt, so the answer and the evidence agree.
+PRINCIPAL_EXPIRED_CODE: Final = "principal_expired"
+
 #: How long an `ask` says a human has. `ask-details.json` requires a positive integer.
 DEFAULT_ASK_TIMEOUT_SECONDS: Final = 900
 
@@ -86,32 +96,39 @@ class AcsControlHook:
         prefix: str = "acs",
         approver_id: str = "cli:local",
         ask_timeout_seconds: int = DEFAULT_ASK_TIMEOUT_SECONDS,
+        identity: IdentityProvider | None = None,
     ) -> None:
-        if control.authority is not None:
-            # SPEC-v0.3 §8.4 — this hook reads `params.metadata.agent_id` straight off the
-            # inbound envelope, and §4 makes the principal an authorization input. A
-            # self-reported name cannot be one, which is the same sentence that removes the
-            # gateway's `--principal-from-client-info` (§8.1); leaving the ACS hook alone would
-            # make that removal a gesture. §8.4 requires the hook to take an
-            # `identity: IdentityProvider` of its own, which lands with build-list item 5 — so
-            # until then it has none, and an `Authority` cannot be enforced against a principal
-            # nobody verified. Refused at construction rather than per call: a deployment finds
-            # out at startup.
+        if control.authority is not None and identity is None:
+            # SPEC-v0.3 §8.4 — without a provider this hook reads `params.metadata.agent_id`
+            # straight off the inbound envelope, and §4 makes the principal an authorization
+            # input. A self-reported name cannot be one, which is the same sentence that
+            # removes the gateway's `--principal-from-client-info` (§8.1); leaving the ACS hook
+            # alone would make that removal a gesture. Refused at construction rather than per
+            # call: a deployment finds out at startup, not during an incident.
             raise InvalidArgument(
-                "AcsControlHook needs an `identity` provider for a Control that holds an "
-                "Authority, and does not take one before build-list item 5. This hook reads "
-                "params.metadata.agent_id off the envelope, and an authorization decision may "
-                "not be made against a principal the caller asserted (SPEC-v0.3 §8.4)"
+                "AcsControlHook(identity=...) is required for a Control that holds an "
+                "Authority. Without one this hook reads params.metadata.agent_id off the "
+                "envelope, and an authorization decision may not be made against a principal "
+                "the caller asserted (SPEC-v0.3 §8.4)"
             )
         self._control = control
         self._prefix = prefix
         self._approver_id = approver_id
         self._ask_timeout = max(1, ask_timeout_seconds)
+        self._identity = identity
 
     # --- the ACS surface ----------------------------------------------------------------
 
-    def handle(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
-        """One ACS request envelope in, one response envelope out."""
+    def handle(
+        self, envelope: Mapping[str, Any], *, headers: Mapping[str, str] | None = None
+    ) -> dict[str, Any]:
+        """One ACS request envelope in, one response envelope out.
+
+        `headers` is the transport's, and it is what an `identity` provider reads (§8.4): an
+        ACS envelope arrives over HTTP, and the credential is in the request rather than in
+        the JSON. Optional, because a hook with no provider has nothing to read them with —
+        and a hook *with* one and no headers resolves nobody, which is a refusal.
+        """
         if (
             not isinstance(envelope, Mapping)
             or envelope.get("jsonrpc") != "2.0"
@@ -129,12 +146,31 @@ class AcsControlHook:
 
         try:
             if method == TOOL_CALL_REQUEST:
-                return self._on_request(rpc_id, request_id, params)
+                return self._on_request(rpc_id, request_id, params, headers or {})
             if method == TOOL_CALL_RESULT:
                 return self._on_result(rpc_id, request_id, params)
         except InvalidArgument as refused:
             # A malformed payload is not a decision about an action: there is no action.
             return _error(rpc_id, MALFORMED_ENVELOPE, str(refused))
+        except IdentityError as refused:
+            # SPEC-v0.3 §8.4 — a credential offered and rejected, or a provider that named
+            # nobody. Answered as `deny` rather than as a protocol `error`: an error envelope
+            # says "the Guardian could not answer", and a platform is free to decide what to
+            # do with that. A denial says what CTRLRun means, which is that the tool must not
+            # run.
+            #
+            # The reason code is **not** always `no_principal`. This clause spans the whole of
+            # `_on_request`, so it also catches §2.3's expired-principal refusal from
+            # `Control.execute` — which has already written a receipt saying
+            # `principal_expired`. Answering `no_principal` there would make the ACS answer
+            # and the evidence disagree about the same action, so the code follows the
+            # refusal: `principal_expired` where the credential lapsed, `no_principal` where
+            # the provider named nobody (and *that* path writes no receipt and no events, for
+            # `v0.1 §2.1`'s reason — there is nobody to attribute one to).
+            _LOG.warning("refused an ACS envelope: %s", refused)
+            return _final(
+                rpc_id, request_id, DENY, reasoning=str(refused), codes=[NO_PRINCIPAL_CODE]
+            )
         return _error(
             rpc_id,
             METHOD_NOT_ANSWERED,
@@ -144,11 +180,15 @@ class AcsControlHook:
     # --- steps/toolCallRequest ----------------------------------------------------------
 
     def _on_request(
-        self, rpc_id: Any, request_id: str, params: Mapping[str, Any]
+        self,
+        rpc_id: Any,
+        request_id: str,
+        params: Mapping[str, Any],
+        headers: Mapping[str, str],
     ) -> dict[str, Any]:
         """Decide the call, take the reservation, and hold it for the result hook."""
         payload = _mapping(params.get("payload"), "params.payload")
-        action = self._action(params, payload)
+        action = self._action(params, payload, headers)
         effect_key = self._effect_key(action)
 
         # SPEC-v0.2 §6.10's rule, in ACS's shape: a client comes back by re-sending the
@@ -156,9 +196,12 @@ class AcsControlHook:
         # is what authorizes it. Matching on the hash is safe for the reason v0.1 §4.2 A1
         # exists — the hash covers the principal, the arguments, the resource and the
         # environment — and it is still single-use, consumed atomically with the reservation.
+        # SPEC-v0.3 §8.3 — the **combined** decision of §4.6, not the policy axis alone. One
+        # of the three places in shipped v0.2 code that read `Policy.evaluate` directly, named
+        # in the spec so this item could not miss it.
         granted = (
             self._control.store.find_granted_approval(action.action_hash)
-            if self._control.policy.evaluate(action).decision.value == "approve"
+            if self._control.evaluate(action).decision.value == "approve"
             else None
         )
 
@@ -177,6 +220,22 @@ class AcsControlHook:
                 self._control.execute(action, suspend_holding_the_reservation, effect_key)
         except Suspended:
             return _final(rpc_id, request_id, ALLOW)
+        except IdentityError as refused:
+            # SPEC-v0.3 §2.3 — the credential lapsed between being verified and being acted
+            # on. `Control` has already written a receipt saying `principal_expired`, so the
+            # answer says that too: an ACS decision and the evidence for the same action must
+            # not disagree about why it was refused.
+            #
+            # Told apart from "the provider named nobody" **structurally**, not by reading the
+            # message: that one is raised by `_action` above, outside this `try`, and is
+            # answered by `handle`'s own clause. Two refusals, two places, one code each.
+            return _final(
+                rpc_id,
+                request_id,
+                DENY,
+                reasoning=str(refused),
+                codes=[PRINCIPAL_EXPIRED_CODE],
+            )
         except ActionDenied as refused:
             return _final(rpc_id, request_id, DENY, reasoning=str(refused), codes=[refused.reason])
         except ApprovalRequired as pending:
@@ -284,22 +343,20 @@ class AcsControlHook:
 
     # --- building the Action (tool-call-request.json) -----------------------------------
 
-    def _action(self, params: Mapping[str, Any], payload: Mapping[str, Any]) -> Action:
+    def _action(
+        self,
+        params: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        headers: Mapping[str, str],
+    ) -> Action:
         tool = _mapping(payload.get("tool"), "payload.tool")
-        metadata = _mapping(params.get("metadata"), "params.metadata")
-        agent = metadata.get("agent_id")
-        if not isinstance(agent, str) or not agent:
-            raise InvalidArgument("params.metadata.agent_id is required")
-        user_context = metadata.get("user_context")
-        user = user_context.get("user_id") if isinstance(user_context, Mapping) else None
-
         name = self._action_name(tool, payload.get("operation"))
         arguments = _arguments(payload.get("arguments"))
         resource_template = self._control.policy.resource_template(name)
         return Action(
             name=name,
             arguments=arguments,
-            principal=Principal(agent=agent, user=user if isinstance(user, str) else None),
+            principal=self._principal(params, name, headers),
             resource=(
                 None
                 if resource_template is None
@@ -314,6 +371,46 @@ class AcsControlHook:
             # `Control(environment="staging")` fronting ACS would refuse every call.
             environment=self._control.environment,
         )
+
+    def _principal(
+        self, params: Mapping[str, Any], action_name: str, headers: Mapping[str, str]
+    ) -> Principal:
+        """Who is acting, from the provider where there is one (SPEC-v0.3 §8.4).
+
+        Where a provider is configured, `params.metadata.agent_id` is **ignored**: not merged,
+        not used as a fallback, and not compared. It is display data, like MCP's `clientInfo`
+        — and a value that is only sometimes authoritative is one nobody can reason about.
+        `params.metadata.environment` is ignored for the same reason, in `_action`.
+
+        Where none is configured the envelope's own `agent_id` is read, exactly as v0.2 did.
+        That is survivable only because a `Control` holding an `Authority` cannot be given to
+        this hook without a provider (checked at construction): a self-reported name still
+        misattributes a receipt, and still cannot widen an outcome.
+
+        A declining provider is refused rather than backfilled from the envelope. Falling back
+        there would reach `agent_id` by an easier route than forging a credential, which is
+        the hole §3.2 closes for `context()` and the same hole in a different module.
+        """
+        metadata = _mapping(params.get("metadata"), "params.metadata")
+        if self._identity is not None:
+            context = IdentityContext(
+                action=action_name,
+                environment=self._control.environment,
+                headers={name.lower(): value for name, value in headers.items()},
+            )
+            resolved = self._identity.resolve(context)
+            if resolved is None:
+                raise IdentityError(
+                    f"{action_name}: the identity provider named nobody for this envelope, and "
+                    "params.metadata.agent_id is not a fallback (SPEC-v0.3 §8.4)"
+                )
+            return resolved
+        agent = metadata.get("agent_id")
+        if not isinstance(agent, str) or not agent:
+            raise InvalidArgument("params.metadata.agent_id is required")
+        user_context = metadata.get("user_context")
+        user = user_context.get("user_id") if isinstance(user_context, Mapping) else None
+        return Principal(agent=agent, user=user if isinstance(user, str) else None)
 
     def _action_name(self, tool: Mapping[str, Any], operation: object) -> str:
         name = tool.get("name")
