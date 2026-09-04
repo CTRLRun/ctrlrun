@@ -142,7 +142,10 @@ def _refused(call: Callable[[], Any], expected: type[_Refusal]) -> _Refusal:
 
 
 def run_demo(root: Path) -> None:
-    """Run the four scenarios under `root`, printing what each one blocks (SPEC §7 T11)."""
+    """Run the five scenarios under `root`, printing what each one blocks (SPEC §7 T11).
+
+    Four failure scenarios from `v0.2 §1.1` and, since `v0.3 §1.2`, the authority escalation
+    that answers a different question from the other four."""
     evidence = _fresh_evidence_dir(root)
     store = SQLiteStateStore(evidence / "state.db")
     remote = FakeStripe()
