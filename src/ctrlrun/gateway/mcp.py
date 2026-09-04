@@ -291,10 +291,17 @@ def _agrees(declared: str, value: object) -> bool:
     which `2000.0` equals `2000`. v0.1 §2.3 refuses a float in the body outright (§6.6), so the
     leniency has no legitimate case here; taking it would mean accepting a spelling of a number
     that the body could never hold.
+
+    Anything that is not a string, an integer or a boolean has **no** header encoding at all:
+    the revision permits `x-mcp-header` only on those three, and says a `null` parameter omits
+    its header entirely. So a header naming an argument of any other type cannot agree with it,
+    and the answer is `False` rather than a comparison against a rendering CTRLRun made up.
     """
     if isinstance(value, str):
         return declared == value
-    return declared == json.dumps(value, separators=(",", ":"))
+    if isinstance(value, int):  # bool included, and JSON writes it as `true` / `false`
+        return declared == json.dumps(value)
+    return False
 
 
 def find_unrepresentable(arguments: object, pointer: str = "") -> str | None:

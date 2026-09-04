@@ -515,9 +515,14 @@ for. So:
   `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-{Name}` against it,
   decoding the `=?base64?…?=` sentinel before comparing. A mismatch, or a missing required
   header, is HTTP 400 with `-32020`.
-- **A header value MUST be the body value's canonical rendering**, compared as text: a string's
-  own characters, and for everything else exactly what JSON writes — `2000`, `true`, `null`.
-  One rendering per value, and it is the one the body already went through a serializer to get.
+- **A header value MUST be the body value's canonical rendering**, compared as text, and only
+  three types have one. The revision's Value Encoding is exact: *"`string`: Use the value
+  as-is"*, *"`integer`: Convert to decimal string representation (e.g., `42`, `-7`)"*,
+  *"`boolean`: Convert to lowercase `"true"` or `"false"`"* — and `x-mcp-header` *"**MUST**
+  only be applied to parameters with primitive types (integer, string, boolean)"*, with a
+  `null` parameter omitting its header entirely. A `Mcp-Param-{Name}` naming an argument of any
+  other type — a list, a mapping, a `null` — therefore cannot agree with it, and is refused
+  rather than compared against a rendering CTRLRun invented for it.
 
   This is stricter than the revision's *"servers SHOULD compare the header value and the body
   value numerically rather than as strings (e.g., `42.0` and `42` are considered equal)"*, and

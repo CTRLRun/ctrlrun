@@ -321,6 +321,32 @@ def test_the_canonical_boolean_spelling_is_still_accepted():
     assert not isinstance(parse_request(_body(document), headers), Refusal)
 
 
+@pytest.mark.parametrize("value", [None, [1, 2], {"a": 1}], ids=["null", "list", "object"])
+def test_an_Mcp_Param_naming_a_non_primitive_argument_is_refused(value):
+    """§6.4 — the revision defines an encoding for exactly three types: string, integer and
+    boolean. It permits `x-mcp-header` on nothing else, and a `null` parameter omits the header
+    entirely. So no header value can agree with any of these, and comparing against a rendering
+    CTRLRun invented would certify an agreement under nobody's rules but its own.
+
+    The header carries the compact rendering the old code compared against, so each case fails
+    on the rule rather than on a stray space. A float is not here: §6.6 refuses one in the body
+    outright with `-41008`, so it never reaches this comparison.
+    """
+    document = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "create_refund", "arguments": {"extra": value}},
+    }
+    headers = _headers()
+    headers["Mcp-Param-extra"] = json.dumps(value, separators=(",", ":"))
+
+    refusal = parse_request(_body(document), headers)
+
+    assert isinstance(refusal, Refusal), f"{value!r} was accepted"
+    assert (refusal.http_status, refusal.code) == (400, -32020)
+
+
 def test_a_float_spelling_of_an_integer_is_refused():
     """§6.4 declines the revision's numeric-leniency SHOULD (`42.0` equals `42`). v0.1 §2.3
     refuses a float in the body outright, so the leniency has no legitimate case here, and

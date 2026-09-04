@@ -26,7 +26,10 @@ any change to one appears here.
   costs an intermediary's correctness rather than an approval binding.
 
   A header value must now be the body value's canonical rendering, compared as text, with no
-  parser in the comparison. This also declines the revision's SHOULD that servers compare
+  parser in the comparison — and only a string, an integer or a boolean has one. The revision
+  permits `x-mcp-header` on those three types alone and omits the header for a `null`, so a
+  header naming an argument of any other type is refused rather than compared against a
+  rendering CTRLRun invented for it. This also declines the revision's SHOULD that servers compare
   integers numerically (`42.0` equals `42`): v0.1 §2.3 refuses a float in the body outright, so
   the leniency has no legitimate case here. SPEC-v0.2 §6.4 states both rules and the reasoning.
 
