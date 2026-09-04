@@ -31,6 +31,56 @@ jobs:
       - name: check
         run: ./scripts/check.sh
 
+  # SPEC-v0.4 §5, T118. The composite action, run against this repository's own
+  # configurations, with `install: .` so it dogfoods the checkout rather than the last
+  # release. Two runs, because the second is the one that matters: the N/A path has to be
+  # dogfooded and not merely described.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 10/10. Effect templates, three grants, a delegable parent — the only configuration in
+      # the repository that can exercise the whole catalogue.
+      - name: Verify examples/authority/payments.yaml
+        id: authority
+        uses: ./
+        with:
+          policy: examples/authority/payments.yaml
+          install: .
+          badge-path: verify-badge.json
+          artifact-name: ctrlrun-verify-authority
+
+      # 5/5, 5 not applicable. A `ctrlrun.policy/v1` document with no effect templates and no
+      # grants, and the assertion is on **that shape**: a change that made verify silently
+      # count N/As as passes is caught here rather than in a badge.
+      - name: Verify examples/policies/payments.yaml
+        id: templates
+        uses: ./
+        with:
+          policy: examples/policies/payments.yaml
+          install: .
+          badge-path: verify-badge-templates.json
+          artifact-name: ctrlrun-verify-templates
+
+      - name: The reported shapes are the ones the specification names
+        env:
+          AUTHORITY: ${{ steps.authority.outputs.badge-message }}
+          AUTHORITY_NA: ${{ steps.authority.outputs.not-applicable }}
+          TEMPLATES: ${{ steps.templates.outputs.badge-message }}
+          TEMPLATES_NA: ${{ steps.templates.outputs.not-applicable }}
+        run: |
+          set -eu
+          echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
+          echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
+          test "$AUTHORITY" = "verified 10/10"
+          test "$AUTHORITY_NA" = "0"
+          test "$TEMPLATES" = "verified 5/5"
+          test "$TEMPLATES_NA" = "5"
+          test -s verify-badge.json
+          test -s verify-report.json
+          test -s verify-report.xml
+
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being
   # true. This job runs them against an installed wheel, the way a new user meets them.
