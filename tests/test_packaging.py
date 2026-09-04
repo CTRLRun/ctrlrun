@@ -466,3 +466,76 @@ def test_every_test_docs_claims_cites_exists():
     assert not cited - defined, (
         f"CLAIMS.md cites tests that do not exist: {sorted(cited - defined)}"
     )
+
+
+# --- T136: `adapters/` is packaged by neither the wheel nor the sdist -----------------------
+
+
+def test_T136_the_ctrlrun_distributions_contain_no_adapter():
+    """SPEC-v0.5 §6.1. `pip install ctrlrun` must not grow, and an adapter is a **separate**
+    distribution that depends on the kernel rather than the reverse.
+
+    The sdist half is not symmetry. v0.2 shipped four policy files it should not have,
+    precisely because `MANIFEST.in` resolves against the working tree — so the prune and the
+    assertion are both here, and both halves are checked.
+    """
+    import subprocess
+    import sys
+    import tarfile
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as area:
+        built = subprocess.run(
+            [sys.executable, "-m", "build", "--outdir", area, str(root)],
+            capture_output=True,
+            text=True,
+        )
+        if built.returncode != 0:  # pragma: no cover - `build` is a dev dependency
+            pytest.skip(f"python -m build is unavailable: {built.stderr[-300:]}")
+
+        names: list[str] = []
+        for artifact in Path(area).iterdir():
+            if artifact.suffix == ".whl":
+                names += zipfile.ZipFile(artifact).namelist()
+            elif artifact.name.endswith(".tar.gz"):
+                with tarfile.open(artifact) as archive:
+                    names += archive.getnames()
+
+    assert names, "nothing was built"
+    offending = [
+        name
+        for name in names
+        if "adapters/" in name
+        or "ctrlrun_langgraph" in name
+        or "ctrlrun_openai_agents" in name
+    ]
+    assert not offending, offending
+
+
+def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
+    """The direction, asserted rather than assumed: `ctrlrun`'s own metadata names no adapter
+    and no framework, in `dependencies` or in any extra."""
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        kernel = tomllib.load(handle)["project"]
+
+    declared = list(kernel["dependencies"])
+    for extra in kernel.get("optional-dependencies", {}).values():
+        declared += list(extra)
+    lowered = " ".join(declared).lower()
+
+    for framework in ("langgraph", "langchain", "openai-agents", "crewai", "autogen"):
+        assert framework not in lowered, framework
+
+    for adapter in sorted((root / "adapters").iterdir()):
+        with (adapter / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        assert any(
+            name.startswith("ctrlrun") for name in project["dependencies"]
+        ), f"{adapter.name} does not depend on ctrlrun"

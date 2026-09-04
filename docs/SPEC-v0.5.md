@@ -1094,9 +1094,14 @@ Each adapter's README, and this list is normative:
    `PendingApproval.action_id` is not the `action_id` on the receipt. Item 1 measures the first
    two for the two reference adapters; an adapter written later cites its framework's
    documentation and says what it did not establish, exactly as the probe's README does.
-6. **What it does not do**: it is not a second approval path, it grants nothing, and it is not
+6. **Whether the kernel's exceptions arrive as themselves**, and what an operator must call if
+   they do not. A framework that swallows or wraps what a tool raised takes `v0.1 §8`'s explicit
+   exceptions away from the call site, and an operator's `except DuplicateEffect` silently stops
+   firing (§12.7). Where the adapter ships a helper for it, the README names it and says what
+   happens without it.
+7. **What it does not do**: it is not a second approval path, it grants nothing, and it is not
    required for a framework with no HITL primitive (§1.1).
-7. **`ctrlrun.conformance` results** — which suites pass, and which are `not_applicable` with
+8. **`ctrlrun.conformance` results** — which suites pass, and which are `not_applicable` with
    the reason. Never a bare "conformant".
 
 ---
@@ -1251,7 +1256,7 @@ line that installs nothing and a `MissingDependency` that can never fire.
 
 #### T135 — Each reference adapter passes the kit
 `ctrlrun.conformance.run` against each, with every suite `pass` or `not_applicable` with a
-reason, `report.ok is True`, and the results in each adapter's README (§7 item 7). Run with the
+reason, `report.ok is True`, and the results in each adapter's README (§7 item 8). Run with the
 framework installed; skipped **by name** where it is not, so a green run with a missing framework
 cannot look like a pass (`v0.4 §7` T123's rule).
 
@@ -1559,3 +1564,62 @@ framework the refund went through. It is in the `kernel` suite.
 The general lesson is worth more than the case. A claim that something is untestable is a claim
 that ages badly, because the next thing built is often the thing that makes it testable — and
 nobody re-reads a paragraph that says "not reachable" to check whether it still is.
+
+### 12.6 The two reference adapters needed three different things from the contract, and each
+was a defect in it
+
+This is what having two is for. The first adapter is shaped by whoever wrote the contract; the
+second is where the contract gets tested. All three changed `SPEC-v0.5.md` rather than being
+worked around in an adapter.
+
+**The interrupt count was `== 1` and had to be `>= 1`.** LangGraph replays the node, so
+`@protect(wait=True)` raises `ApprovalRequired` again on the resumed pass and reaches the
+framework's primitive a **second** time — once to ask, once to receive (§3.2.1 predicted the
+replay and the kit did not follow it through). A correct adapter scored 4/5. Demanding an exact
+count is asserting a *framework's* shape rather than an adapter's behaviour; what the count is
+for is telling "the framework was asked" from "it was not", and `>= 1` does that. A1 keeps
+`== 0`.
+
+**`B2` asserted the kit's own approver, and the Agents SDK cannot carry one.** That SDK records
+*that* a call was approved and not by whom, so its adapter writes the channel name —
+`"openai-agents:tool-approval"` — which §2.2 explicitly blesses. The kit now asserts a
+**non-empty** approver, and the exact-match check lives in the LangGraph adapter's own tests,
+which is its right home: only they know the framework can carry it.
+
+**A framework that refuses *before* invoking produces no denial to observe.** The Agents SDK
+does not call a tool whose approval was declined, so no CTRLRun action is proposed: no
+`APPROVAL_DENIED`, no `ACTION_DENIED`, no receipt. The refusal is real and it is in the
+framework's own output; CTRLRun was simply never asked. `B3` is therefore its own suite,
+`denial`, reported `not_applicable` for such a framework with the reason on the report and in
+the adapter's README — never a pass, and never folded into the count. `ConformanceAdapter` gains
+`refuses_before_invoking`, which defaults to `False` because that is the shape most frameworks
+have and a declaration nobody needs to make is one nobody gets wrong.
+
+### 12.7 An adapter may have to restore the kernel's exception taxonomy
+
+The OpenAI Agents SDK does two things to an exception a tool raised, and an adapter that left
+either alone cannot pass the `kernel` suite — nor should it.
+
+**`failure_error_function` swallows it by default.** `default_tool_error_function` catches the
+exception and returns *"An error occurred while running the tool. Please try again."* **to the
+model**. Under that default an `ActionDenied`, a `DuplicateEffect` or an `AmbiguousEffect`
+reaches an agent as a suggestion to retry — which is exactly the failure `v0.2 §6.10` argues
+about in the gateway, one layer up: *a refusal by CTRLRun is not an outcome of the tool, it is
+the statement that the tool did not run*, and a channel whose contents reach the model as text
+invites the retry the refusal exists to prevent.
+
+**What survives is wrapped.** With the default off, the SDK raises `UserError("Error running
+tool ...")` and chains the original as `__cause__` — so `except DuplicateEffect` at a call site
+does not fire, and `v0.1 §8`'s preference for explicit exceptions over return codes stops
+holding across the framework boundary.
+
+So the contract gains a sentence: **an adapter is responsible for the kernel's exceptions
+arriving as themselves**, and where its framework prevents that, it ships whatever it takes —
+`ctrlrun-openai-agents` ships `protected_tool` (which sets `failure_error_function=None`) and
+`run` / `run_sync` / `unwrap` (which walk the chain). Neither decides anything, holds anything or
+grants anything: they are couriers restoring what the framework obscured, and §7 item 5 requires
+the README to say which one an operator must use and what happens if they do not.
+
+The LangGraph adapter needs none of this: LangGraph propagates a node's exception unchanged. The
+difference between the two is the finding, and it is the sort a single reference adapter would
+never have produced.

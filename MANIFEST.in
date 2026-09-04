@@ -21,7 +21,11 @@ recursive-include tests *.md
 
 # `examples/` travels because T31 runs every script and loads every sector template out of
 # the source tree (SPEC-v0.2 §1.1). Without these the sdist would ship a test suite that
-# fails on a fresh checkout, which is the failure `prune internal` exists to avoid.
+# fails on a fresh checkout, which is the failure `prune internal
+# SPEC-v0.5 §6.1 — an adapter is a separate distribution. `MANIFEST.in` resolves against the
+# working tree rather than the index, which is how v0.2 shipped four files it should not have,
+# so the prune and T136's sdist assertion are both here.
+prune adapters` exists to avoid.
 recursive-include examples *.py
 recursive-include examples *.yaml
 # And the READMEs. `examples/authority/` is two documents to *read*, so its README is the

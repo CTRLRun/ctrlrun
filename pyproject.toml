@@ -159,6 +159,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # `state.py`'s `commit_effect(result: Any)`. `ConformanceAdapter.invoke -> Any` is frozen in
 # SPEC-v0.5 §9 for that reason.
 "src/ctrlrun/conformance/*.py" = ["ANN401"]
+# An adapter's subject matter is whatever its framework hands back: LangGraph's resume value is
+# `Any` by that framework's own signature, and narrowing it to a lie would be worse than saying
+# `Any` and validating at the boundary — which is exactly what `LangGraphInterrupt.answer` does.
+"adapters/*/src/**/*.py" = ["ANN401"]
 # The research harness is outside `src/` and outside the package (SPEC-v0.4 §7.1). It keeps
 # the line length and the import rules, because those are about reading it — but it is not
 # held to the kernel's typing discipline: its subject matter is a `BaseHTTPRequestHandler`
