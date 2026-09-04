@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Final
 
 from .guarantees import CATALOGUE, EFFECT_TEMPLATE_NOTE, GUARANTEES
@@ -272,20 +273,49 @@ class Report:
         return summary
 
     def to_junit(self) -> str:
-        """§4.3. N/A is `<skipped>` — reported as skipped and never as a pass."""
+        """§4.3. One `<testsuite>`, one `<testcase>` per guarantee.
+
+        **N/A is `<skipped>`** — reported as skipped and never as a pass, which is the same
+        rule as everywhere else expressed in the vocabulary a CI dashboard already has. A
+        dashboard that showed five N/As as five green ticks would be the false green this
+        release exists to prevent, wearing somebody else's colours.
+
+        JUnit XML has **no normative schema** (§1.4). The element order and the required
+        attributes below follow the de-facto `junit-10.xsd` checked in beside T115 — hence
+        `properties` first and `system-out`/`system-err` last, and hence `timestamp` carrying
+        no offset, which is what that schema's `ISO8601_DATETIME_PATTERN` permits.
+
+        `hostname` is the literal `localhost`, which the schema names as the value to use
+        where the host cannot be determined. Reading the real one would put the operator's
+        machine name in a file they may attach to a ticket, and would make two runs of the
+        same configuration differ (§3.6).
+        """
         duration = (self.finished_at - self.started_at).total_seconds()
         suite = ElementTree.Element(
             "testsuite",
             {
                 "name": SUITE_NAME,
+                "hostname": "localhost",
+                "timestamp": self.started_at.astimezone(UTC)
+                .replace(tzinfo=None, microsecond=0)
+                .isoformat(),
                 "tests": str(len(self.guarantees)),
                 "failures": str(self.failed),
                 "errors": "0",
                 "skipped": str(self.not_applicable + self.skipped),
                 "time": f"{duration:.3f}",
-                "timestamp": self.started_at.replace(tzinfo=None).isoformat(),
             },
         )
+        properties = ElementTree.SubElement(suite, "properties")
+        for name, value in (
+            ("catalogue", CATALOGUE),
+            ("ctrlrun_version", self.ctrlrun_version),
+            ("policy", str(self.policy["path"])),
+            ("policy_sha256", str(self.policy["sha256"])),
+            ("applicable", str(self.applicable)),
+            ("not_applicable", str(self.not_applicable)),
+        ):
+            ElementTree.SubElement(properties, "property", {"name": name, "value": value})
         for result in self.guarantees:
             case = ElementTree.SubElement(
                 suite,
@@ -305,34 +335,95 @@ class Report:
                 ElementTree.SubElement(
                     case, "skipped", {"message": result.reason or str(result.status)}
                 )
-        suites = ElementTree.Element(
-            "testsuites",
-            {
-                "name": SUITE_NAME,
-                "tests": str(len(self.guarantees)),
-                "failures": str(self.failed),
-                "errors": "0",
-                "time": f"{duration:.3f}",
-            },
-        )
-        suites.append(suite)
-        return ElementTree.tostring(suites, encoding="unicode", xml_declaration=True)
+        ElementTree.SubElement(suite, "system-out").text = ""
+        ElementTree.SubElement(suite, "system-err").text = ""
+        return ElementTree.tostring(suite, encoding="unicode", xml_declaration=True)
 
     def job_summary(self) -> str:
-        """§5.4 — a Markdown table, with the N/A rows in full."""
-        lines = [
-            f"### CTRLRun verify — {self.policy['path']}",
-            "",
-            "| id | guarantee | status | action | reason |",
-            "| --- | --- | --- | --- | --- |",
-        ]
-        for result in self.guarantees:
-            lines.append(
-                f"| {result.id} | {result.title} | `{result.status}` | "
-                f"{result.action or ''} | {result.reason or ''} |"
-            )
-        lines += ["", self.summary_line()]
-        return "\n".join(lines)
+        """§5.4 - a Markdown table, with the N/A rows in full.
+
+        Rendered from this report's own document, which is the same one the GitHub Action
+        reads (§5.1): the summary and the badge come from the report rather than from a second
+        run, so they can never disagree about what happened.
+        """
+        return summary_from_document(self.to_dict())
+
+
+# --- rendering from a `ctrlrun.verify/v1` document (§5.1, §5.2, §5.4) --------------------
+#
+# The Action reads the JSON `ctrlrun verify --json` wrote and renders the job summary and the
+# badge from it. It does not run verify a second time, so the badge and the uploaded artifact
+# cannot disagree; and it does not reimplement the rules, so "no badge for a partial run" is
+# written once and holds in both places.
+
+
+def badge_from_document(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The Shields endpoint document, or `None` where §5.2 forbids one.
+
+    `N` is passes and `M` is **applicable**, never the catalogue size. `color` is
+    `brightgreen` when nothing failed and `red` otherwise; there is no amber for N/A, because
+    the badge's colour is about failures and the N/A count lives in the report the badge links
+    to.
+
+    `None` for a partial run and for a run that could not produce a usable answer at all. A
+    fraction computed over a subset somebody chose is the false green this release exists to
+    prevent, wearing a different costume.
+    """
+    if document.get("partial"):
+        return None
+    summary = document["summary"]
+    applicable = int(summary["applicable"])
+    failed = int(summary["failed"])
+    if applicable == 0:
+        # Zero applicable is an exit of 2 (§3.8), and an exit of 2 writes no badge.
+        return None
+    return {
+        "schemaVersion": 1,
+        "label": BADGE_LABEL,
+        "message": f"verified {int(summary['passed'])}/{applicable}",
+        "color": BADGE_PASS_COLOR if failed == 0 else BADGE_FAIL_COLOR,
+    }
+
+
+def summary_line_from_document(document: Mapping[str, Any]) -> str:
+    """§4.1's last line, from the document. Passes over applicable, N/A named separately."""
+    summary = document["summary"]
+    rows = document["guarantees"]
+    na = [row["id"] for row in rows if row["status"] == Status.NOT_APPLICABLE.value]
+    line = f"{summary['passed']}/{summary['applicable']} declared guarantees pass."
+    line += f" {len(na)} not applicable"
+    line += f": {', '.join(na)}." if na else "."
+    skipped = [row["id"] for row in rows if row["status"] == Status.SKIPPED.value]
+    if skipped:
+        line += f" {len(skipped)} not selected: {', '.join(skipped)}."
+    return line
+
+
+def summary_from_document(document: Mapping[str, Any]) -> str:
+    """§5.4 - the job summary: a Markdown table, id, title, status, action, reason.
+
+    It carries the N/A rows **in full**. A summary that listed only failures would make an
+    all-N/A run look like a clean one, which is the same false green in the one place an
+    operator is most likely to read it and nowhere else.
+    """
+    policy = document["policy"]
+    lines = [
+        f"### CTRLRun verify - `{policy['path']}`",
+        "",
+        f"{policy['schema']}, mode `{policy['mode']}`, {policy['actions']} actions, "
+        f"catalogue `{document['catalogue']}`, ctrlrun {document['ctrlrun_version']}",
+        "",
+        "| id | guarantee | status | subject | reason |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in document["guarantees"]:
+        subject = row["grant_id"] or row["action"] or ""
+        lines.append(
+            f"| {row['id']} | {row['title']} | `{row['status']}` | "
+            f"{subject} | {row['reason'] or ''} |"
+        )
+    lines += ["", summary_line_from_document(document)]
+    return "\n".join(lines)
 
 
 def _subject(result: GuaranteeResult) -> str:
@@ -400,3 +491,63 @@ __all__ = [
     "Status",
     "catalogue_ids",
 ]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """`python -m ctrlrun.verify.report`, the renderer the GitHub Action calls (§5.1).
+
+    Reads one `ctrlrun.verify/v1` document on stdin and writes the job summary and the badge
+    from **that document** — never from a second verify run, so the badge, the job summary and
+    the uploaded artifact cannot disagree about what happened.
+
+    `--badge PATH` writes the Shields endpoint JSON, and writes **nothing** where §5.2 forbids
+    a badge: a partial run, or a run with no applicable guarantee. It says which on stderr and
+    still exits 0, because "no badge was written" is the correct outcome there and not a
+    failure of the renderer.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(prog="ctrlrun.verify.report", description=str(main.__doc__))
+    parser.add_argument("--badge", type=Path, default=None)
+    parser.add_argument("--summary", type=Path, default=None)
+    parser.add_argument("--report", type=Path, default=None)
+    arguments = parser.parse_args(argv)
+
+    raw = (
+        arguments.report.read_text(encoding="utf-8")
+        if arguments.report is not None
+        else sys.stdin.read()
+    )
+    document = json.loads(raw)
+    if document.get("schema") != REPORT_SCHEMA:
+        print(
+            f"not a {REPORT_SCHEMA} document: schema is {document.get('schema')!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    rendered = summary_from_document(document)
+    if arguments.summary is not None:
+        with arguments.summary.open("a", encoding="utf-8") as handle:
+            handle.write(rendered + "\n")
+    else:
+        print(rendered)
+
+    if arguments.badge is not None:
+        badge = badge_from_document(document)
+        if badge is None:
+            print(
+                "no badge written: a partial run and a run with no applicable guarantee do "
+                "not produce one (SPEC-v0.4 §5.2)",
+                file=sys.stderr,
+            )
+        else:
+            arguments.badge.write_text(
+                json.dumps(badge, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the composite action
+    raise SystemExit(main())

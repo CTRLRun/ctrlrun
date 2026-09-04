@@ -13,6 +13,11 @@ include SECURITY.md
 include VISION.md
 recursive-include docs *.md
 recursive-include tests *.py
+# SPEC-v0.4 §4.3 — T115 validates `--junit` against a checked-in schema, and reads the README
+# beside it for the schema's provenance and licence. A test that ships without its data is a
+# test the sdist cannot run.
+recursive-include tests *.xsd
+recursive-include tests *.md
 
 # `examples/` travels because T31 runs every script and loads every sector template out of
 # the source tree (SPEC-v0.2 §1.1). Without these the sdist would ship a test suite that

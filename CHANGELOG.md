@@ -41,6 +41,52 @@ any change to one appears here.
   applicable, 1 a guarantee failed, 2 the configuration was refused or is unusable, 3 an
   internal error in verify itself.
 
+- **Reporting** (SPEC-v0.4 §4). The human report is one line per guarantee in catalogue order,
+  every N/A carrying the reason that made it one, with the summary as the last line so a
+  `tail -1` is meaningful. `--json` emits one `ctrlrun.verify/v1` document carrying the SHA-256
+  of both documents verify read — a report and a policy that do not hash the same are a report
+  about something else — and a `counterexample` **only** on a `fail`, because a counterexample
+  on a pass would be evidence of a failure that did not happen. `--junit PATH` writes a JUnit
+  XML file in which an N/A is `<skipped>` and never a pass, which is the same rule as
+  everywhere else expressed in the vocabulary a CI dashboard already has.
+
+  JUnit XML has no normative schema, and the report says so rather than implying one: T115
+  validates against `tests/data/junit-10.xsd`, a checked-in copy of the de-facto Windy Road
+  schema with its provenance and Apache-2.0 licence recorded beside it, and asserts the
+  document structurally as well — a permissive schema is not a check. `xmlschema` joins the
+  **dev** extra for that test and for nothing else.
+
+- **The GitHub Action, the badge and `docs/verify.md`** (SPEC-v0.4 §5). `action.yml` at the
+  repository root is a composite action: it installs `ctrlrun`, runs
+  `ctrlrun verify --json --junit`, renders the job summary and the badge **from that report**
+  rather than from a second run — so the badge, the summary and the uploaded artifact can never
+  disagree about what happened — and uploads the three files as one artifact.
+
+  It fails the job when a guarantee failed and when the configuration was refused, and succeeds
+  when guarantees are N/A. **There is no input that makes a failure not fail the job**: a
+  `continue-on-error`-shaped flag here would be a flag that makes a consequential thing
+  permissive by default, and a workflow that wants to tolerate a failure has
+  `continue-on-error` on the step already, where it is visible.
+
+  The badge is a Shields endpoint JSON the action **writes and never publishes**. Committing it
+  would need `contents: write` in every consumer's workflow, and asking for write access to a
+  repository as the price of a verification badge is a bad trade for a tool whose subject is
+  least privilege; `docs/verify.md` shows the one-job publishing pattern once, with its cost
+  visible. Rendered, it reads exactly `CTRLRun verified N/M`, where `M` is **applicable**
+  guarantees and never the catalogue size. A partial run and a run that exited 2 or 3 write no
+  badge at all.
+
+  The badge means **"declared guarantees pass"** — that phrase, on the badge's link target, and
+  no other. Not secure, not safe, not compliant, not certified, not audited.
+  `docs/verify.md#what-the-badge-means` says it in its first sentence and, on the same screen,
+  what verify cannot see: the operator's executors, their `reconcile` hooks, where they put the
+  decorator, their deployment, and whether the policy is the right policy.
+
+  This repository's CI runs the action against `examples/authority/payments.yaml` (10/10) and
+  against `examples/policies/payments.yaml` (5/5, 5 not applicable), asserting **both shapes** —
+  so a change that made verify silently count N/As as passes is caught in CI rather than in a
+  badge.
+
 ### Changed
 
 - **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the

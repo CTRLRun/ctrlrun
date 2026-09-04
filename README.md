@@ -1,5 +1,7 @@
 # CTRLRun
 
+[![CTRLRun verified](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json)](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
+
 **Transaction safety for AI-agent actions.**
 
 > Agents can retry. Your refund shouldn't.
@@ -149,6 +151,56 @@ executes, and effects land at remotes. It is a way to learn what enforcement wil
 `JWTIdentityProvider` that verifies a bearer token against a JWKS or a pinned key and maps the
 verified claims onto a principal. CTRLRun issues no credential and defines no identity format.
 
+## Does it hold in *your* setup?
+
+Everything above is proven by this repository's tests against this repository's configurations.
+That is the right place to start and the wrong place to stop, because what you deploy is *your*
+policy, *your* grants and *your* store.
+
+```console
+$ ctrlrun verify
+CTRLRun verify — ctrlrun 0.4.0, catalogue ctrlrun.guarantees/v1
+policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
+authority  same document, 3 grants
+store      sqlite, scratch (created and destroyed for this run)
+
+G1   mutated approval refused         PASS  stripe.refund
+G2   replayed approval refused        PASS  stripe.refund
+G3   duplicate effect refused         PASS  stripe.refund
+G4   one winner under concurrency     PASS  stripe.refund (8 processes)
+G5   ambiguous blocks a blind retry   PASS  stripe.refund
+G6   unknown action refused           PASS
+G7   no principal refused             PASS  stripe.refund
+G8   expired authority refused        PASS  head-of-support
+G9   delegation cannot escalate       PASS  head-of-support (6 of 6 dimensions)
+G10  unknown exception is ambiguous   PASS  stripe.refund
+
+10/10 declared guarantees pass. 0 not applicable.
+```
+
+It runs the kernel's own failure scenarios against the configuration in front of it, in a
+scratch store, with fake executors, and no network. Your `.ctrlrun/state.db` is byte-identical
+before and after.
+
+**Not applicable is not a pass.** A policy with no `approve` rule cannot exercise the
+approval-binding guarantees, so they are reported `N/A` with the reason, excluded from the
+denominator and listed separately — `5/5 (5 not applicable)`, never `10/10`. There is no flag
+that folds one into the count.
+
+The badge means the **declared guarantees pass** — every guarantee this configuration can
+exercise was exercised, and none of them failed. It does not mean secure, safe, compliant,
+certified or audited, and [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
+says on the same screen what verify cannot see: your executors, your `reconcile` hooks, where
+you put the decorator, your deployment, and whether your policy is the right policy.
+
+There is a [GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#in-ci):
+
+```yaml
+      - uses: CTRLRun/ctrlrun@main
+        with:
+          policy: ctrlrun.yaml
+```
+
 ## Two more things
 
 **Resolving an unknown outcome without a human.** `@protect(..., reconcile=...)` takes a
@@ -229,6 +281,9 @@ CTRLRun cannot guarantee exactly-once execution against external systems it does
 | [`docs/SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md) | The v0.1 contract: models, invariants, acceptance tests |
 | [`docs/SPEC-v0.2.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) | The v0.2 delta: gateway, sinks, reconciliation, webhooks |
 | [`docs/SPEC-v0.3.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) | The v0.3 delta: identity, authority, delegation, observe mode |
+| [`docs/SPEC-v0.4.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.4.md) | The v0.4 delta: the guarantee catalogue, the scenario engine, the badge |
+| [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md) | `ctrlrun verify`, the guarantees, the N/A rule, and what the badge means |
+| [`docs/OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/OWASP-AGENTIC-TOP10.md) | A reading of the OWASP Top 10 for Agentic Applications against the guarantees |
 | [`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) | Grants, delegation and the omission rule, in plain language |
 | [`docs/ACS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ACS.md) | The OWASP Agent Control Standard: what maps, and where it is silent |
 | [`docs/ARCHITECTURE.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ARCHITECTURE.md) | Kernel design and key decisions |
