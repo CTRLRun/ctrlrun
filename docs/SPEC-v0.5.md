@@ -51,7 +51,7 @@ build-list position.
 |---|---|---|---|
 | 1 | The framework probe, executed against LangGraph and the Agents SDK | not packaged | `v0.4 §7` |
 | 2 | The adapter surface `ctrlrun.adapter`, and the `v0.3 §4.3.1` rows | core | §2, §4 |
-| 3 | The conformance kit, `ctrlrun.conformance` | core wheel, `pytest` behind `ctrlrun[conformance]` | §5 |
+| 3 | The conformance kit, `ctrlrun.conformance` | core, stdlib only (§12.1) | §5 |
 | 4 | The LangGraph reference adapter, `ctrlrun-langgraph` | a separate distribution | §6 |
 | 5 | The OpenAI Agents SDK reference adapter, `ctrlrun-openai-agents` | a separate distribution | §6 |
 | 6 | A third adapter, written against this document alone | disposable | §8 |
@@ -61,10 +61,8 @@ The dependency rule of `v0.2 §1.1`, `v0.3 §1` and `v0.4 §1` is unchanged and 
 install ctrlrun` MUST continue to install nothing but `pyyaml` and `click`. **The adapter
 surface itself is core** — it is in the action path, it is stdlib, and an adapter is a separate
 distribution that depends on `ctrlrun` rather than the other way round. The **conformance kit**
-is not core: it is test machinery, it needs `pytest`, and `v0.4 §1`'s argument for putting
-verify in core does not transfer. Verify is a tool an *operator* runs against a deployment;
-the kit is a tool an *adapter author* runs against an adapter, and there is exactly one of
-those per adapter.
+is core too, and stdlib only. It was planned as an extra on the premise that a kit needs
+`pytest`; building it showed the premise was wrong, and §12.1 records the correction.
 
 ### 1.1 What an adapter is not, stated before anything else
 
@@ -565,6 +563,12 @@ within one framework call the action's name and environment come from the `Contr
 `resource` is a template over its arguments (`v0.1 §5.1`), and its principal from the
 `IdentityProvider`.
 
+**The check applies to a grant and never to a refusal.** An answer of `granted=False`
+authorizes nothing, so there is nothing to bind it to — and requiring `approved_arguments` on
+one would turn a human's *no* into an `ApprovalMismatch`, when §2.4 is explicit that a denial is
+an answer and gets `APPROVAL_DENIED` then `ACTION_DENIED`. The conformance kit found this by
+driving a denial through a declared carrier (§12.2).
+
 **An adapter MUST NOT synthesize `approved_arguments` from `pending.arguments`.** Handing back a
 copy of what it was just given makes every comparison trivially pass; it is manufacturing the
 check, and it is the one way to turn attribution into a lie about prevention. §5.4's
@@ -774,21 +778,22 @@ programme, it certifies nothing, and passing it is not a claim about an adapter'
 answers one question: *does an action driven through this adapter get the same refusals as an
 action driven through `@protect`?*
 
-It ships as **`ctrlrun[conformance]`**, in this repository. The arguments, since a build prompt
-is not where a decision should live:
+It ships in **core**, stdlib only, in this repository. §12.1 records why this changed during
+item 3; the arguments as they now stand:
 
-- **Core must not carry test machinery.** The kit needs `pytest`; `pip install ctrlrun` stays
-  `pyyaml` and `click` (`v0.2 §1.1`).
+- **It needs no third-party library.** The suites drive a `Control` and compare exceptions,
+  which is `assert` and `try`. An adapter author runs the report *inside* their own pytest —
+  `assert run(adapter).ok` — rather than through one.
+- **An extra with nothing behind it is worse than no extra.** `ctrlrun[conformance]` would
+  install nothing, and the `MissingDependency` its install line promised could never fire.
 - **A third distribution would be a third thing to version.** The kit tracks the kernel's
-  semantics — it is the kernel's acceptance tests — so it belongs to the kernel's version, and
-  an adapter author installs one extra rather than tracking a separate release line.
-- **`v0.4 §1`'s argument for core does not transfer.** Verify is run by every operator against
-  every deployment, so an extra would mean half of them never run it. The kit is run by an
-  adapter author, once per adapter, in that adapter's CI. There is no population of people who
-  need it and will not install it.
+  semantics — it *is* the kernel's acceptance tests — so it belongs to the kernel's version.
+- **`v0.4 §1`'s argument applies after all.** A check somebody has to remember to install is a
+  check that does not run, and that is as true of an adapter author's CI as of an operator's.
 
-`import ctrlrun` MUST NOT import `ctrlrun.conformance` (T134), for `v0.4 §1`'s reason: a testing
-tool in the execution path is a dependency nobody meant to take.
+`pip install ctrlrun` is unchanged: `pyyaml` and `click`. `import ctrlrun` MUST NOT import
+`ctrlrun.conformance` (T134), for `v0.4 §1`'s reason: a testing tool in the execution path is a
+dependency nobody meant to take.
 
 ### 5.2 What an adapter hands the kit
 
@@ -812,6 +817,10 @@ class ConformanceAdapter(Protocol):
     """What an adapter implements so the suites can drive it (§5.3)."""
 
     framework: str
+    #: The same `FrameworkInterrupt` an operator would wire into an
+    #: `InterruptApprovalProvider`. **The kit wires it**, because §2.3 says an adapter never
+    #: constructs a `Control` and a kit that let it would be testing a shape that does not ship.
+    interrupt: FrameworkInterrupt
 
     def invoke(self, request: CallRequest) -> Any: ...
 
@@ -855,12 +864,27 @@ class ConformanceReport:
     def to_text(self) -> str: ...            # "4/4 (2 not applicable)", never "6/6"
 
 
-def run(adapter: ConformanceAdapter, control: Control) -> ConformanceReport: ...
+def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> ConformanceReport: ...
 ```
 
 `ok` is `False` for a refused report and `False` for `applicable == 0`, on `v0.4 §3.8`'s rule:
 `0/0` reported as success is the same false green as `6/6` with two N/As. `reason` is required
 on every `FAIL` and every `NOT_APPLICABLE` — an N/A without one is an N/A nobody can check.
+
+**`deployment` is the operator's `Control`, and the suites do not run against it.** They run
+against scratch `Control`s the kit builds — its own policies, its own store, its own clock —
+for the reason `v0.4 §3.5` gives about verify: a kit that reserved a real effect key would be a
+defect of exactly the class it exists to find. The one thing read from `deployment` is the mode,
+and an observing one is refused (§3.6). It is optional because an adapter author's CI has no
+deployment to hand it, and passing one is how the observe-mode refusal reaches anybody at all.
+
+**The kit wraps the adapter's `interrupt` in a counting proxy** before wiring it, and asserts
+the count on every case that expects a human and on every case that does not. That is not
+belt-and-braces: `fixtures.GrantsForItself` grants the request before `@protect` reaches
+`wait()`, so the provider finds the record already `granted` and returns it — correctly, since
+`ctrlrun approve` grants out of band too — and the framework's primitive is never called. Every
+suite passed. A suite asserting a refusal cannot tell *the human said no through the framework*
+from *the framework was never asked*, and only the count can.
 
 `invoke` runs **one** protected call end to end through the framework and returns the executor's
 value. Every CTRLRun exception propagates: the kit asserts on `ApprovalMismatch`,
@@ -879,20 +903,31 @@ allowed outright.
 
 Each is a named group, reported per suite and per case.
 
-| Suite | From | What it drives through the adapter |
+| Suite | Cases | What it drives through the adapter |
 |---|---|---|
-| `kernel` | `v0.1 §7` T1, T4, T5, T6, T8 | Lost response blocks a blind retry · replayed approval · expired approval · unknown action fails closed · `FAILED` permits retry |
-| `binding` | §3.4 | An answer whose `approved_arguments` differ from the proposal's is refused, and nothing is granted. `not_applicable` where `carries_approved_arguments` is `False`, with the adapter's reason |
-| `duplicate` | `v0.1 §7` T3, in one process | Two `invoke` calls on one effect key: exactly one commits and one is refused |
-| `authority` | `v0.3 §10` T66, T70, T74, T78 | No grant · expired grant · a denial by authority leaves no pending approval · delegation escalation |
-| `identity` | `v0.3 §10` T60, T63 | No principal, no action · the provider wins over anything the calling code says (§4.2) |
+| `kernel` | T1, T4, T6, T8, A1, B2, B3 | Lost response blocks a blind retry · a committed effect refuses a second attempt · unknown action fails closed · `NotExecuted` permits a retry · an allowed action is never put to a human · a matching answer authorizes · a refusal is a denial and not an error |
+| `binding` | B1 | An answer given against different arguments authorizes nothing. `not_applicable` where `carries_approved_arguments` is `False`, with the adapter's reason |
+| `duplicate` | D1 | Two `invoke` calls on one effect key: exactly one commits and one is refused |
+| `authority` | T66, T70, T74 | No grant · expired grant · a denial by authority leaves no pending approval |
+| `identity` | T60, T63 | No principal, no action · the provider wins over anything the framework's session says (§4.2) |
 
-**`binding` is sourced from §3.4 and not from `v0.1 §7` T2**, and the distinction matters. T2
-mutates the action *between* a human's grant and its presentation, which through
-`@protect(wait=True)` is unreachable: the request is created and consumed inside one call. What
-an adapter can get wrong is the other half — carrying back an answer that was given against a
-different proposal — and that is what this suite drives. T2 itself is unchanged and still runs
-against the kernel, where it belongs.
+**`binding` is the mutation check alone**, and that is why B2 (its control) and B3 (a denial is
+a denial) are in `kernel`. Both run whatever the framework carries back; a `binding` suite
+containing them would report `pass` for an adapter that cannot perform the one check the suite
+is named for. That is an N/A folded into the count, one level down.
+
+**`binding` is sourced from §3.4 and not from `v0.1 §7` T2.** T2 mutates the action *between* a
+human's grant and its presentation, which through `@protect(wait=True)` is unreachable: the
+request is created and consumed inside one call. What an adapter can get wrong is the other half
+— carrying back an answer that was given against a different proposal — and that is what this
+drives. T2 itself is unchanged and still runs against the kernel, where it belongs.
+
+**Three acceptance tests are deliberately absent, and the absences are stated rather than left
+to be noticed.** `v0.1 §7` T5 (an approval answered after its expiry) is not reachable through a
+single `invoke` for the same reason T2 is not; it is exercised at the provider (T129d, both
+halves) and in the kernel. `v0.3 §10` T78 (delegation escalation) drives `Control.delegate`,
+which §2.3 puts on an adapter's never-list — a suite driving it would test nothing about the
+adapter. Both stay where they are.
 
 **`duplicate` is not `v0.1 §7` T3**, and says so. T3 uses `multiprocessing` and is a statement
 about SQLite's `BEGIN IMMEDIATE` across OS processes (`v0.1 §5.3 E1`); a framework
@@ -918,24 +953,33 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 |---|---|---|
 | `never-executes` | Returns a plausible value without calling `request.executor` | `kernel` |
 | `swallows-not-executed` | Catches `NotExecuted` and returns `None` | `kernel` |
-| `replays-approval` | Keeps a `request_id` and presents it again on the next call | `kernel` |
-| `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
 | `swallows-denial` | Catches `ActionDenied` and returns a value | `kernel` |
+| `replays-approval` | Keeps a `request_id` and presents it again on the next call | `kernel` |
 | `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` |
-| `grants-for-itself` | Calls `store.grant_approval` rather than returning an `ApprovalAnswer` | `kernel` — an approval no interrupt produced |
+| `grants-for-itself` | Takes `ApprovalRequired` with `wait=False`, writes the grant itself, and re-presents. The framework's primitive is never reached | `kernel` |
+| `ignores-authority` | Catches `AuthorityDenied` and returns a value | `authority` |
+| `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
 | `echoes-the-payload` | Declares `carries_approved_arguments = True` and returns `pending.arguments` as the answer's `approved_arguments` | `binding` — §3.4's manufactured check |
 | `caches-the-decision` | Memoizes the first call's result and returns it for the second | `duplicate` |
 
 `grants-for-itself` and `echoes-the-payload` exist because the document's second rule and its
 mutation check were the two claims with no fixture behind them. "Never a second approval path"
 and "this is prevention, not attribution" are the sentences a security reviewer reads first, and
-a rule with no broken fixture is a rule the kit cannot tell you about.
+a rule with no broken fixture is a rule the kit cannot tell you about. `ignores-authority` exists
+because `swallows-denial` failed the `authority` suite only incidentally — `AuthorityDenied`
+subclasses `ActionDenied` — and a suite whose only fixture fails it by accident is a suite
+nothing is aimed at.
+
+**Every suite is named by at least one fixture, and every fixture names a suite that exists.**
+Both directions are asserted (T130), because a fixture pointed at a renamed suite passes its own
+test by never being checked against anything, and a suite no fixture fails would report `pass`
+for every adapter ever written.
 
 Each fixture fails **the suite named in its row**. Several also fail others incidentally — an
 adapter that never reaches the executor fails anything whose control counts executor calls — and
 the assertion is on the named suite rather than on an exclusive one, because "and no other" is
 false of a fixture broken badly enough. What T130 forbids is a fixture that fails *nothing* and a
-fixture whose named suite passes.
+fixture whose named suite passed.
 
 These are written **before** the reference adapters (build-list order: item 3 precedes items 4
 and 5), because "two adapters pass the suites" is this milestone's exit criterion and it means
@@ -1243,7 +1287,7 @@ from .adapter import (
     banner,
     needs_approval,
 )
-# ctrlrun[conformance], lazily importable, NOT re-exported at package import:
+# ctrlrun.conformance — core and stdlib (§12.1), NOT re-exported at package import:
 #   ctrlrun.conformance.run
 #   ctrlrun.conformance.CallRequest
 #   ctrlrun.conformance.ConformanceAdapter
@@ -1319,10 +1363,12 @@ stand, and **v0.5 adds no table and no column to any store** — an adapter writ
 
 | Module | Owns | Must not know about |
 |---|---|---|
-| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | policy internals, authority, effect state, executors, sinks, any framework |
-| `conformance/` | the suites, the fixtures, the report — `ctrlrun[conformance]` | the gateway, `otel`, `jwt_identity`; anything from another extra |
+| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | the policy evaluator, authority, effect state, executors, sinks, any framework |
+| `conformance/` | the suites, the fixtures, the report — core, stdlib only | the gateway, `otel`, `jwt_identity`; anything from an extra |
 
-`adapter.py` imports `action.py` and `approval.py`, and takes a `Control` as a *parameter* in
+`adapter.py` imports `action.py`, `approval.py`, `effect.py` (`resolve_resource`), `errors.py`
+and two names from `policy.py` — `OBSERVE` and `Decision`, which are the mode and the decision
+vocabulary rather than the evaluator — and takes a `Control` as a *parameter* in
 `needs_approval` and `banner` without importing it at module scope — the same shape `verify/`
 has, one layer down. It appends no event and owns no sink: `Control` is still the only thing
 that fans evidence out (§2.4). `conformance/` sits **above** `control.py`, beside `verify/` and
@@ -1408,6 +1454,68 @@ specifically:
 
 ## 12. What building v0.5 settled
 
-*Filled in as items land, in the item that settles each. `SPEC-v0.4.md §12` is the format: one
-subsection per question the drafting could not close, each stating what the code decided and
-which section carries it.*
+*One subsection per question the drafting could not close, each stating what the code decided
+and which section carries it. `SPEC-v0.4.md §12` is the format.*
+
+### 12.1 The conformance kit is core, not an extra
+
+§5.1's first draft made it `ctrlrun[conformance]`, on the stated premise that *"the kit needs
+`pytest`"*. Building it showed the premise was false. The suites drive a `Control` and compare
+exceptions, which is `assert` and `try`; there is nothing in the kit a third-party library does.
+An adapter author runs the result **inside** their own pytest — `assert run(adapter).ok` — and
+never through one.
+
+That leaves an extra with no dependency behind it: an install line that installs nothing, and a
+`MissingDependency` T134b would have asserted about a condition that can never arise. So the kit
+is core and stdlib-only, exactly as `verify/` is, and `v0.4 §1`'s argument turns out to apply
+after all — *a check somebody has to remember to install is a check that does not run* is as
+true of an adapter author's CI as of an operator's deployment.
+
+`pip install ctrlrun` is unchanged: `pyyaml` and `click`. T134b asserts the absence of the extra
+rather than its behaviour, and asserts that nothing under `conformance/` imports from one.
+
+### 12.2 The binding check applies to a grant and never to a refusal
+
+§3.4's first draft made `approved_arguments` mandatory whenever the adapter declared it carried
+them, without qualifying it by the answer's verdict. The kit's `B3` case — a human's *no*,
+driven through a declared carrier — was refused with `ApprovalMismatch` before it could become a
+denial.
+
+That is the exact failure §2.4 forbids in the other direction: *a denial is a human's answer*,
+and it gets `APPROVAL_DENIED` then `ACTION_DENIED`, never the `APPROVAL_INVALIDATED` umbrella. A
+refusal authorizes nothing, so there is nothing for the hash to bind it to. §3.4 now says so, and
+the case that found it is in the `kernel` suite where it will keep saying so.
+
+### 12.3 An already-granted request is a hole the provider cannot close, and the kit must
+
+`fixtures.GrantsForItself` writes the grant itself and then re-presents, so `wait()` finds the
+record already `granted` and returns it without calling `interrupt()`. Every suite passed.
+
+The provider is **right** to return an already-granted record: `ctrlrun approve` grants out of
+band, so does a webhook, and `v0.1 §4.3` says a provider never invents an answer. Refusing there
+would break the legitimate paths. So the hole is not in `wait()` — it is that a suite asserting a
+*refusal* cannot distinguish "the human said no through the framework" from "the framework was
+never asked".
+
+The kit therefore wraps the adapter's `interrupt` in a counting proxy and asserts the count: `1`
+on every case that expects a human, `0` on every case that does not. `v0.4 §1.3` one level up,
+and the reason §5.2 now specifies the proxy rather than leaving it to an implementation.
+
+### 12.4 `ConformanceAdapter` exposes its interrupt, and the kit plays operator
+
+§2.3 says an adapter never constructs a `Control`, so the kit must — and to wire the provider it
+needs the adapter's `FrameworkInterrupt`. The Protocol gained `interrupt` for that. A kit that
+let the adapter build the `Control` would be testing a shape that does not ship, which is the
+same defect as a test double that can grant where the real code would not.
+
+### 12.5 Three acceptance tests are not reachable through a single `invoke`
+
+`v0.1 §7` T2 (mutation between grant and presentation) and T5 (an approval answered after its
+expiry) both need an interval *between* the request being created and being consumed, and
+`@protect(wait=True)` has none: both happen inside one call. `v0.3 §10` T78 (delegation
+escalation) drives `Control.delegate`, which is on §2.3's never-list.
+
+All three stay where they are — in the kernel's suite, and for T5's other half at the provider
+(T129d) — and §5.3 names the absences rather than leaving a reader to wonder why a suite sourced
+from `v0.1 §7` is missing two of its tests. An absence that is not stated reads as an oversight,
+and the next session re-adds it.

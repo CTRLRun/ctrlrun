@@ -26,10 +26,13 @@ which SPEC-v0.3 §8.1 removed from the gateway by name and §8.4 then removed ag
 hook. It reached this document's first draft as well, and an independent review found it; SPEC-v0.5
 §9.1 is the record.
 
-This module imports `action.py` and `approval.py` and nothing else from the kernel. `Control`
-arrives as a *parameter*, never as a module-scope import, so `adapter.py` stays below
-`control.py` in the dependency order of `ARCHITECTURE.md` §6 and `Control` remains the only
-module that composes the others. It appends no event and owns no sink.
+This module imports `action.py`, `approval.py`, `effect.py` and `errors.py`, and two names
+from `policy.py`: `OBSERVE`, which is the mode the banner reads, and `Decision`, which is the
+vocabulary the predicate answers in. Neither is the evaluator, which is what the module map
+means by policy internals. `Control` arrives as a *parameter*, never as a module-scope
+import, so `adapter.py` stays below `control.py` in the dependency order of
+`ARCHITECTURE.md` §6 and `Control` remains the only module that composes the others. It
+appends no event and owns no sink.
 """
 
 from __future__ import annotations
@@ -341,6 +344,13 @@ class InterruptApprovalProvider:
                 f"{self._interrupt.framework}: an ApprovalAnswer must name an approver; "
                 "an approval with no approver is evidence that answers the wrong question"
             )
+        if not answer.granted:
+            # A refusal authorizes nothing, so there is nothing to bind it to. Requiring
+            # `approved_arguments` here would turn a human's *no* into an `ApprovalMismatch`,
+            # and §2.4 is explicit that a denial is an answer: it gets `APPROVAL_DENIED` then
+            # `ACTION_DENIED`, never the `APPROVAL_INVALIDATED` umbrella. The conformance kit
+            # found this by driving a denial through a declared carrier (SPEC-v0.5 §12.2).
+            return
         if not self._interrupt.carries_approved_arguments:
             # SPEC-v0.5 §3.4's second bullet. The binding across the interrupt is the
             # framework's checkpoint, not this hash -- attribution, declared, and reported as
