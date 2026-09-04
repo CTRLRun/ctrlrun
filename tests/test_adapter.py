@@ -180,8 +180,13 @@ def build(
 def refund_tool(control: Control):
     calls: list[dict[str, Any]] = []
 
-    @protect(REFUND, effect="refund:{payment_id}", resource="payment:{payment_id}", wait=True,
-             control=control)
+    @protect(
+        REFUND,
+        effect="refund:{payment_id}",
+        resource="payment:{payment_id}",
+        wait=True,
+        control=control,
+    )
     def issue_refund(payment_id: str, amount: int) -> str:
         calls.append({"payment_id": payment_id, "amount": amount})
         return "ok"
@@ -372,8 +377,11 @@ def test_T128b_needs_approval_writes_nothing():
 def test_T128b_the_principal_is_the_controls_and_not_the_contexts():
     """SPEC-v0.5 §4.2 -- `needs_approval` resolves identity the way every entry point does."""
     seen: list[Action] = []
-    control, _, _ = build(POLICY_APPROVE, CountingInterrupt(granted()),
-                          identity=StaticIdentityProvider("provider-agent"))
+    control, _, _ = build(
+        POLICY_APPROVE,
+        CountingInterrupt(granted()),
+        identity=StaticIdentityProvider("provider-agent"),
+    )
     original = control.policy.evaluate
 
     def spy(action: Action):
@@ -401,7 +409,9 @@ def test_T128b_the_resource_template_is_resolved_the_way_protect_resolves_it():
     object.__setattr__(control.policy, "evaluate", spy)
     with context("finance-agent"):
         needs_approval(
-            control, REFUND, {"payment_id": "txn_9", "amount": 2000},
+            control,
+            REFUND,
+            {"payment_id": "txn_9", "amount": 2000},
             resource="payment:{payment_id}",
         )
 
@@ -522,9 +532,7 @@ def test_T129b_its_control_a_correct_answer_does_grant():
     with context("finance-agent"):
         refund_tool(control)(payment_id="txn_1", amount=2000)
 
-    consumed = [
-        event for event in store.events() if event.type is EventType.APPROVAL_CONSUMED
-    ]
+    consumed = [event for event in store.events() if event.type is EventType.APPROVAL_CONSUMED]
     assert [event.data["approver"] for event in consumed] == ["double:interrupt"]
     assert [receipt.approver for receipt in store.receipts()] == ["double:interrupt"]
 
@@ -562,8 +570,9 @@ def test_T129c_a_denial_is_a_humans_answer_and_not_a_default():
     """The control for the test above: a *stated* refusal is recorded, so the absence of a
     record after a crash is the provider declining to invent one rather than a provider that
     records nothing."""
-    double = CountingInterrupt(ApprovalAnswer(granted=False, approver="double:interrupt"),
-                               carries=False)
+    double = CountingInterrupt(
+        ApprovalAnswer(granted=False, approver="double:interrupt"), carries=False
+    )
     control, store, _ = build(POLICY_APPROVE, double)
 
     with context("finance-agent"), pytest.raises(ActionDenied):
@@ -827,9 +836,7 @@ def test_T129h_the_module_reads_no_environment_variable():
 def test_a_declared_carrier_that_omits_the_arguments_is_refused():
     """§3.4 -- a declaration is not a hint."""
     store = InMemoryStateStore()
-    double = CountingInterrupt(
-        ApprovalAnswer(granted=True, approver="double"), carries=True
-    )
+    double = CountingInterrupt(ApprovalAnswer(granted=True, approver="double"), carries=True)
     provider = InterruptApprovalProvider(store, double)
     request = provider.request(_action(), timedelta(minutes=15))
 
@@ -869,7 +876,8 @@ def test_the_binding_check_is_type_strict():
     )
     double = CountingInterrupt(
         ApprovalAnswer(
-            granted=True, approver="double",
+            granted=True,
+            approver="double",
             approved_arguments={"payment_id": "txn_1", "amount": True},
         )
     )
@@ -885,7 +893,8 @@ def test_an_unrepresentable_answer_is_refused_at_the_gate():
     store = InMemoryStateStore()
     double = CountingInterrupt(
         ApprovalAnswer(
-            granted=True, approver="double",
+            granted=True,
+            approver="double",
             approved_arguments={"payment_id": "txn_1", "amount": 20.0},
         )
     )
@@ -924,9 +933,7 @@ def test_a_refusal_is_never_refused_for_carrying_no_arguments():
 def test_a_non_carrier_is_not_checked_and_says_so():
     """§3.4's second bullet: attribution, declared. The kit turns this into `not_applicable`."""
     store = InMemoryStateStore()
-    double = CountingInterrupt(
-        ApprovalAnswer(granted=True, approver="double"), carries=False
-    )
+    double = CountingInterrupt(ApprovalAnswer(granted=True, approver="double"), carries=False)
     provider = InterruptApprovalProvider(store, double)
     request = provider.request(_action(), timedelta(minutes=15))
 
@@ -1083,9 +1090,7 @@ def test_granted_must_be_a_bool_and_a_truthy_value_is_not_a_yes(granted_value):
 def test_its_control_a_real_bool_is_recorded_either_way(verdict):
     """Without the pair, the test above passes against a provider that refuses every answer."""
     store = InMemoryStateStore()
-    answer = (
-        granted() if verdict else ApprovalAnswer(granted=False, approver="double:interrupt")
-    )
+    answer = granted() if verdict else ApprovalAnswer(granted=False, approver="double:interrupt")
     double = CountingInterrupt(answer, carries=verdict)
     provider = InterruptApprovalProvider(store, double)
     request = provider.request(_action(), timedelta(minutes=15))
@@ -1131,8 +1136,12 @@ def test_the_binding_check_survives_a_round_trip_through_sqlite(tmp_path):
                 ApprovalAnswer(
                     granted=True,
                     approver="double",
-                    approved_arguments={"payment_id": "txn_1", "amount": 1, "flag": True,
-                                        "tags": ["a"]},
+                    approved_arguments={
+                        "payment_id": "txn_1",
+                        "amount": 1,
+                        "flag": True,
+                        "tags": ["a"],
+                    },
                 )
             ),
         )
@@ -1168,8 +1177,13 @@ actions:
         # The predicate, given what a framework would pass: no `mode`, so the rule misses.
         assert needs_approval(control, REFUND, {"payment_id": "t", "amount": 1}) is False
 
-        @protect(REFUND, effect="refund:{payment_id}", resource="payment:{payment_id}",
-                 wait=True, control=control)
+        @protect(
+            REFUND,
+            effect="refund:{payment_id}",
+            resource="payment:{payment_id}",
+            wait=True,
+            control=control,
+        )
         def issue_refund(payment_id: str, amount: int, mode: str = "live") -> str:
             return "ok"
 
