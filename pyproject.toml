@@ -134,6 +134,12 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Error class names are frozen by SPEC-v0.1 §8; no "Error" suffix.
 "src/ctrlrun/errors.py" = ["N818"]
+# An adapter's own refusals follow this codebase's convention and not the suffix rule, for the
+# same reason `errors.py` does: they sit beside `ActionDenied`, `ApprovalRequired` and
+# `DuplicateEffect` in an operator's `except` clause, and `ApprovalNotAskedError` next to those
+# would be the odd one out. Adapters are separate distributions (SPEC-v0.5 §6.1) and are not
+# packaged with the kernel; they are linted here because they live in this repository.
+"adapters/*/src/*/__init__.py" = ["N818"]
 # SPEC-v0.1 §5.3 freezes `commit_effect(effect_key, action_id, result: Any)`. An executor's
 # return value has no narrower type, and the store only serializes it.
 "src/ctrlrun/state.py" = ["ANN401"]

@@ -223,9 +223,10 @@ class Watched:
     there: it is that a suite asserting a *refusal* cannot tell "the human said no through the
     framework" from "the framework was never asked".
 
-    So the kit counts. A case that expects a human asserts the count is 1, and one that expects
-    none asserts it is 0. `v0.4 §1.3` again: a refusal proves nothing unless the thing it
-    forbids would otherwise have been visible.
+    So the kit counts. A case that expects a human asserts the count is **at least 1** -- per
+    the first paragraph, which is the rule -- and one that expects none asserts it is exactly 0.
+    `v0.4 §1.3` again: a refusal proves nothing unless the thing it forbids would otherwise
+    have been visible.
     """
 
     #: The proxy's own attributes. Everything else belongs to the adapter's interrupt and is
@@ -727,17 +728,81 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
     return passed("B2", binding_matching_answer.title)
 
 
+def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
+    """`refuses_before_invoking` is declared true — so check that it is, and then report N/A.
+
+    An unchecked `not_applicable` is a pass an adapter awards itself. `carries_approved_arguments`
+    is enforced by core, which refuses a grant that omits the arguments (§3.4); this declaration
+    had nothing behind it, and an adapter whose `interrupt()` simply had no way to return a
+    refusal could set it and score full marks. §5.3's rule is that N/A is for what an adapter
+    **cannot** do, and the only way to tell that from what it merely did not do is to look.
+
+    What this SDK-shaped adapter cannot produce is `APPROVAL_DENIED`: the tool is never invoked,
+    so no action is proposed and there is nothing in CTRLRun's log to deny. What it can still be
+    held to is everything a refusal must mean — **the executor is not reached, and no grant is
+    recorded** — and that is checkable without a proposed action. So it is checked here, and the
+    N/A is reported only once it holds.
+    """
+    world = World(adapter, APPROVE)
+    executor = Executor()
+    request = CallRequest(
+        world.control,
+        REFUND,
+        {"payment_id": "b3", "amount": 2000},
+        "refund:b3",
+        executor,
+        answer=ApprovalAnswer(granted=False, approver=APPROVER),
+    )
+
+    try:
+        adapter.invoke(request)
+    except ActionDenied:
+        # It produced a real denial after all, so it does not refuse before invoking and the
+        # suite should have run. Reporting N/A here would hide a passing adapter, which is the
+        # milder half of the same defect.
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"{adapter.framework} declares refuses_before_invoking, but a refused answer "
+            "produced ActionDenied — CTRLRun was asked after all, so the suite applies",
+        )
+    except Exception:
+        # A framework may surface its own refusal however it likes -- its own rejection type, a
+        # runner-level error, anything. What it may not do is run the action, and the two
+        # assertions below check that either way, so the exception itself carries no verdict.
+        pass
+
+    if executor.calls:
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"{adapter.framework} declares refuses_before_invoking, but the executor ran "
+            f"{executor.calls} times on a human's no — the declaration is false and the action "
+            "a human refused was performed",
+        )
+    if "APPROVAL_GRANTED" in world.events():
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"{adapter.framework} declares refuses_before_invoking, but a refused answer "
+            "recorded APPROVAL_GRANTED — a human's no became a yes in the evidence log",
+        )
+
+    return na(
+        "B3",
+        binding_denial.title,
+        f"{adapter.framework} refuses before it invokes: a tool whose approval was declined "
+        "is never called, so no CTRLRun action is proposed and there is nothing to deny. "
+        "The refusal is real and it is in the framework's own output; it is not in CTRLRun's "
+        "evidence log, because CTRLRun was never asked. Checked, not taken on trust: the "
+        "executor was not reached and no grant was recorded. The adapter's README says so",
+    )
+
+
 @case("B3", "a refused answer is a denial and not an error")
 def binding_denial(adapter: ConformanceAdapter) -> CaseResult:
     if getattr(adapter, "refuses_before_invoking", False):
-        return na(
-            "B3",
-            binding_denial.title,
-            f"{adapter.framework} refuses before it invokes: a tool whose approval was declined "
-            "is never called, so no CTRLRun action is proposed and there is nothing to deny. "
-            "The refusal is real and it is in the framework's own output; it is not in CTRLRun's "
-            "evidence log, because CTRLRun was never asked. The adapter's README says so",
-        )
+        return _denial_not_applicable(adapter)
     world = World(adapter, APPROVE)
     executor = Executor()
     request = CallRequest(

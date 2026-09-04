@@ -39,7 +39,11 @@ from agents.usage import Usage
 from ctrlrun_openai_agents import (
     CHANNEL,
     AgentsInterrupt,
+    ApprovalNotAsked,
+    _bound_call,
+    approval_gate,
     protected_tool,
+    unwrap,
 )
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -543,8 +547,366 @@ def test_the_adapter_never_hands_back_the_arguments_it_was_given():
         now,
     )
 
-    answer = AgentsInterrupt().interrupt(pending)
+    # A real approved call in scope: `interrupt()` reads the SDK's answer and no longer
+    # invents one, so there has to be one to read.
+    with _bound_call(_tool_context(None, approved=True)):
+        answer = AgentsInterrupt().interrupt(pending)
 
     assert answer.approved_arguments is None
     assert answer.granted is True
     assert answer.approver == CHANNEL
+
+
+# --- `unwrap` restores the taxonomy and must not invent one (§12.7) -------------------------
+
+
+def test_unwrap_does_not_mistake_the_pending_approval_for_the_outcome():
+    """An AMBIGUOUS outcome must not reach the caller wearing `ApprovalRequired`.
+
+    `@protect(wait=True)` runs its approved leg **inside** `except ApprovalRequired as pending:`
+    (`control.py`), so every exception raised on that leg carries `__context__ =
+    ApprovalRequired` -- implicit chaining, which Python sets whenever one exception is raised
+    during the handling of another. It says nothing about causation.
+
+    `unwrap` walking `__context__` therefore finds that `ApprovalRequired` and hands it back for
+    an executor that raised a `TimeoutError` after the request went out: the kernel recorded
+    AMBIGUOUS and re-raised, and the caller is told the action needs approving and then
+    retrying. That is `v0.1 §5.5` inverted -- an ambiguous outcome presented as a definite
+    did-not-run, with retry instructions attached -- and it fires on the approval path, which is
+    the only path this adapter exists for.
+
+    §12.7 says `__cause__`, which is the SDK's explicit chaining and the only link that means
+    "this is the error behind that one".
+    """
+    from ctrlrun import ApprovalRequired
+
+    pending = ApprovalRequired(request_id="apr_1", action_id="act_1")
+    lost = TimeoutError("the response was lost")
+    lost.__context__ = pending  # what the interpreter does on the approved leg
+
+    assert unwrap(lost) is lost
+
+
+def test_unwrap_still_finds_a_ctrlrun_error_the_sdk_wrapped_as_a_cause():
+    """The other half: the case §12.7 is actually about must keep working."""
+    from agents.exceptions import UserError
+
+    denied = ActionDenied(reason="over the ceiling", action_id="act_1")
+    wrapped = UserError("Error running tool issue_refund: over the ceiling")
+    wrapped.__cause__ = denied
+
+    assert unwrap(wrapped) is denied
+
+
+def _pending():
+    """A `PendingApproval` standing in for the one `wait()` builds; its content is irrelevant
+    to these tests, which are about where the *answer* comes from."""
+    from datetime import UTC, datetime
+
+    from ctrlrun.adapter import PendingApproval
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return PendingApproval(
+        "apr_1",
+        "act_1",
+        "stripe.refund",
+        "sha256:x",
+        {"payment_id": "txn_1", "amount": 2000},
+        None,
+        "production",
+        "refund-agent",
+        None,
+        now,
+        now,
+    )
+
+
+def _tool_context(_control, *, approved):
+    """A real `ToolContext` with the SDK's own approval state set the way the SDK sets it.
+
+    `approved=None` is a call the SDK never gated -- which is the state that made the old
+    `interrupt()` grant on nobody's behalf.
+    """
+    from agents import Agent
+    from agents.items import ToolApprovalItem
+    from agents.tool_context import ToolContext
+
+    raw = ResponseFunctionToolCall(
+        arguments='{"payment_id": "txn_1"}',
+        call_id="call_1",
+        name="issue_refund",
+        type="function_call",
+        id="fc_1",
+    )
+    context = ToolContext(
+        context=None,
+        tool_name="issue_refund",
+        tool_call_id="call_1",
+        tool_arguments='{"payment_id": "txn_1"}',
+    )
+    item = ToolApprovalItem(agent=Agent(name="a"), raw_item=raw, tool_name="issue_refund")
+    if approved is True:
+        context.approve_tool(item)
+    elif approved is False:
+        context.reject_tool(item)
+    return context
+
+
+# --- the answer comes from the SDK, and is never assumed (§2.4, §3.8) -----------------------
+#
+# `interrupt()` returned `granted=True` unconditionally. Its premise -- "a tool body that runs
+# *is* the approval" -- holds only when the SDK's pre-invocation gate actually asked and was
+# told yes. These are the paths on which it did not.
+
+
+def test_an_interrupt_outside_a_gated_tool_call_grants_nothing():
+    """The provider hangs off the `Control`, not off the tool. Any `@protect(wait=True)` call on
+    the same `Control` that is not behind `protected_tool` -- a plain `function_tool`, a
+    background job, a webhook handler in the same process -- reaches `interrupt()` with no SDK
+    call in scope and therefore with nobody having been asked.
+
+    §10 row 1: `interrupt()` raises, nothing is written, the request stays `pending`.
+    """
+    control, store = build()
+    calls: list[Any] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", wait=True, control=control)
+    def issue_refund(payment_id: str, amount: int) -> str:
+        calls.append({"payment_id": payment_id, "amount": amount})
+        return "committed"
+
+    with pytest.raises(ApprovalNotAsked):
+        issue_refund(payment_id="txn_1", amount=2000)
+
+    assert calls == [], "the executor ran on an approval nobody gave"
+    events = [event.type.value for event in store.events()]
+    assert "APPROVAL_GRANTED" not in events, events
+    assert "APPROVAL_DENIED" not in events, events
+    assert store.list_effects() == (), "an effect was reserved for an action nobody approved"
+
+
+def test_a_call_the_sdk_never_gated_grants_nothing():
+    """The divergence §3.5 says is harmless, which with a self-granting `interrupt()` is not.
+
+    `needs_approval` sees the arguments the model sent; `@protect` sees the arguments the
+    function was called with, after Python applied its defaults. When the predicate says "no
+    approval needed" and the kernel then decides APPROVE, the SDK never asked -- and the old
+    `interrupt()` answered on the absent human's behalf.
+
+    `is_tool_approved` returns `None` for a call the SDK never gated, which is what makes the
+    two distinguishable at all.
+    """
+    control, _ = build()
+
+    tool_context = _tool_context(control, approved=None)
+    with _bound_call(tool_context), pytest.raises(ApprovalNotAsked) as refused:
+        AgentsInterrupt().interrupt(_pending())
+
+    assert "never gated this call" in str(refused.value)
+
+
+def test_the_sdks_no_is_returned_as_a_denial_and_never_as_a_grant():
+    """A rejection recorded on the run context is a human's answer, and it is `granted=False`."""
+    with _bound_call(_tool_context(None, approved=False)):
+        answer = AgentsInterrupt().interrupt(_pending())
+
+    assert answer.granted is False
+    assert answer.approver == CHANNEL
+
+
+def test_the_sdks_yes_is_the_grant_and_names_the_channel():
+    """The path that always worked, now for the reason it claims: the SDK said yes."""
+    with _bound_call(_tool_context(None, approved=True)):
+        answer = AgentsInterrupt().interrupt(_pending())
+
+    assert answer.granted is True
+    assert answer.approver == CHANNEL
+
+
+BANDS = """
+schema: ctrlrun.policy/v1
+actions:
+  stripe.refund:
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 }
+        decision: approve
+      - decision: deny
+"""
+
+
+def test_the_predicate_and_the_kernel_disagreeing_does_not_execute_unapproved():
+    """§3.5's divergence, end to end through a real `Runner`, with the whole SDK in the path.
+
+    The model calls the tool without `amount`, and the tool body's default supplies it. So the
+    `needs_approval` predicate evaluates `{"payment_id": "txn_1"}` -- no band matches, the rules
+    fall through to `deny`, `needs_approval` is `False` and the SDK does not ask -- while
+    `Control.execute` evaluates `{"payment_id": "txn_1", "amount": 100000}`, which is a $1,000
+    refund and lands squarely in the `approve` band.
+
+    §3.5 argues this direction is harmless *because* "`Control.execute` raises
+    `ApprovalRequired`, `@protect(wait=True)` routes it through the interrupt, and the human is
+    asked anyway". That argument is only true of an `interrupt()` that asks. When it answered
+    itself, this executed a $1,000 refund with no human and wrote a receipt naming
+    `openai-agents:tool-approval` as the approver -- a grant nobody made, in the evidence log.
+
+    Now the SDK holds no answer for a call it never gated, so the refusal is `ApprovalNotAsked`
+    and the request is left `pending` for `ctrlrun approve`.
+    """
+    from agents import Agent, Runner
+
+    control, store = build(BANDS)
+    calls: list[Any] = []
+
+    @protect("stripe.refund", effect="refund:{payment_id}", wait=True, control=control)
+    def issue_refund(payment_id: str, amount: int) -> str:
+        calls.append({"payment_id": payment_id, "amount": amount})
+        return "committed"
+
+    async def tool_body(payment_id: str, amount: int = 100000) -> str:
+        """Issue a refund for a payment. Amounts are in integer minor units."""
+        return issue_refund(payment_id=payment_id, amount=amount)
+
+    tool = protected_tool(control, "stripe.refund", tool_body, name_override="issue_refund")
+    model = FakeModel("issue_refund", '{"payment_id": "txn_1"}')
+    agent = Agent(name="refunds", instructions="You handle refunds.", tools=[tool], model=model)
+
+    # The refusal reaches the caller rather than the model: `protected_tool` sets
+    # `failure_error_function=None` so a CTRLRun refusal is not turned into text an agent can
+    # retry against (§12.7). `unwrap` gives back what was actually raised.
+    with pytest.raises(Exception) as raised:
+        Runner.run_sync(agent, "refund txn_1")
+    assert isinstance(unwrap(raised.value), ApprovalNotAsked), raised.value
+
+    assert calls == [], f"a $1,000 refund executed with no human: {calls}"
+    events = [event.type.value for event in store.events()]
+    assert "APPROVAL_GRANTED" not in events, events
+    assert [record.approver for record in store.receipts() if record.approver] == [], (
+        "a receipt names an approver for an approval nobody gave"
+    )
+
+
+OBSERVING = """
+schema: ctrlrun.policy/v3
+mode: observe
+actions:
+  stripe.refund:
+    decision: approve
+"""
+
+
+def test_the_adapter_logs_the_observe_banner_once_per_control(caplog):
+    """SPEC-v0.5 §3.6. A deployment that has been observing for six months is what the line is
+    for, and an adapter is the quietest place in the system to forget it.
+
+    Logged, never printed: an adapter is inside somebody else's loop and may have no stream that
+    reaches a human. `approval_gate` is the attach point -- the first place this adapter is
+    handed the operator's `Control` -- and `interrupt()` is not, because observe mode never
+    raises `ApprovalRequired` and so never reaches an interrupt at all.
+    """
+    import logging
+
+    control, _ = build(OBSERVING)
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        approval_gate(control, "stripe.refund")
+        approval_gate(control, "stripe.refund")
+
+    banners = [r for r in caplog.records if "OBSERVE MODE" in r.getMessage()]
+    assert len(banners) == 1, [r.getMessage() for r in banners]
+
+
+def test_no_banner_under_enforce(caplog):
+    """A no-op under `mode: enforce`, or the warning is one nobody reads by the third run."""
+    import logging
+
+    control, _ = build()
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        approval_gate(control, "stripe.refund")
+
+    assert [r for r in caplog.records if "OBSERVE MODE" in r.getMessage()] == []
+
+
+# --- T133: the adapter's kit run, with the network taken away -------------------------------
+
+
+def _guarded(tmp_path, script: str):
+    """Run `script` in a subprocess whose `sitecustomize` refuses every socket.
+
+    SPEC-v0.5 §3.7 and T133. `tests/test_conformance.py` runs the in-process `Reference` under
+    the same guard, and T133 says in as many words why that is not enough: *"The in-process
+    adapter of T131 would open none either way; the reference adapters, with a framework SDK
+    loaded, are where this test has a subject."* A framework SDK is exactly the thing that
+    might phone home -- the Agents SDK's tracing exporter is the obvious candidate -- so this is
+    the run the guard exists for.
+    """
+    import subprocess
+    import sys
+
+    from test_conformance import NO_SOCKETS
+
+    (tmp_path / "sitecustomize.py").write_text(NO_SOCKETS, encoding="utf-8")
+    (tmp_path / "script.py").write_text(script, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(tmp_path / "script.py")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            "PYTHONPATH": f"{Path(__file__).resolve().parent}:{tmp_path}",
+            "PATH": "/usr/bin:/bin",
+            # The SDK prints "OPENAI_API_KEY is not set, skipping trace export" and skips the
+            # exporter. Unset here too, so the subprocess cannot take a different path from
+            # this one because of an environment variable the developer happens to have.
+            "OPENAI_API_KEY": "",
+        },
+        timeout=300,
+    )
+
+
+_RUN_UNDER_GUARD = """
+import logging
+logging.disable(logging.CRITICAL)
+import test_adapters_openai_agents as harness
+from ctrlrun.conformance import run
+report = run(harness.AgentsConformanceAdapter())
+assert report.ok, report.to_text()
+print("ok")
+"""
+
+
+def test_T133_the_adapters_kit_run_reaches_no_network(tmp_path):
+    """The whole kit, through a real framework, with every socket refused."""
+    result = _guarded(tmp_path, _RUN_UNDER_GUARD)
+
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "ok" in result.stdout
+
+
+def test_T133_and_the_guard_can_see_a_socket_when_there_is_one(tmp_path):
+    """T133's precondition. Without it this is a negative test
+    against something the environment already prevented -- and it would pass just as well with
+    the `sitecustomize` deleted."""
+    opens_one = (
+        _RUN_UNDER_GUARD
+        + """
+import urllib.request
+urllib.request.urlopen("http://127.0.0.1:1/", timeout=1)
+"""
+    )
+    result = _guarded(tmp_path, opens_one)
+
+    assert result.returncode != 0, "the guard did not notice a deliberate socket"
+
+
+def test_the_readme_says_what_happens_when_the_predicate_and_the_kernel_disagree():
+    """SPEC-v0.5 §7 item 5, and the sentence that was wrong. The README claimed both directions
+    were safe while `interrupt()` granted unconditionally, so it printed the line that says the
+    guard worked for a guard that did not -- which is worse than saying nothing."""
+    text = readme()
+
+    assert "ApprovalNotAsked" in text
+    assert "is_tool_approved" in text
+    assert "must go through `protected_tool`" in text

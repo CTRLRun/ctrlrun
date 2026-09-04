@@ -111,10 +111,30 @@ SPEC-v0.5 §7 item 5.
 **The predicate and `@protect` can disagree.** `approval_gate` answers the SDK's pre-invocation
 question with `ctrlrun.adapter.needs_approval`, which sees the framework's raw arguments — not
 the defaults `@protect` applies, and not a `resource=` template declared only on the decorator.
-Both directions are safe: a wrong `False` means the SDK does not pre-ask and `Control.execute`
-raises `ApprovalRequired`, a wrong `True` asks a human about something harmless, and in neither
-does an action execute that would not have. Pass the same `resource=` to `protected_tool`, and
-give the tool no defaulted parameters, and they agree.
+
+A wrong `True` asks a human about something harmless. A wrong `False` means the SDK does not
+pre-ask, `Control.execute` raises `ApprovalRequired`, and the interrupt finds the SDK holds no
+answer for a call it was never asked about — so **the action is refused** with
+`ApprovalNotAsked`, nothing is written, and the approval request is left `pending` for
+`ctrlrun approve` to answer out of band. In neither direction does an action execute that a
+human did not approve.
+
+That sentence is load-bearing and it was not always true here. `AgentsInterrupt.interrupt()`
+originally returned `granted=True` unconditionally, reasoning that a tool body which runs *is*
+the approval. It is — but only for a call the SDK's gate actually asked about, and on the wrong
+`False` path it had not. An independent review found it: a $1,000 refund executing with no human
+and a receipt naming `openai-agents:tool-approval` as the approver, which is a grant nobody made
+written into the evidence log. `interrupt()` now reads
+`RunContextWrapper.is_tool_approved(tool_name, call_id)` — `True`, `False`, or `None` for a call
+nobody was asked about — and only the first two are answers.
+
+**So `@protect(wait=True)` on this `Control` must go through `protected_tool`.** A plain
+`function_tool`, a background job, or any other protected call on the same `Control` reaches the
+interrupt with no SDK tool call in scope, and is refused the same way. The provider hangs off the
+`Control` and not off the tool; nothing else links the two.
+
+Pass the same `resource=` to `protected_tool`, give the tool no defaulted parameters, and the
+two agree — and then no call is refused this way at all.
 
 **Exceptions are wrapped**, and `failure_error_function` swallows them by default. See above;
 this is the one thing an adapter for this SDK cannot leave alone.

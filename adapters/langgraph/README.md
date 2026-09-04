@@ -145,6 +145,17 @@ drops the connection, the prebuilt agent surfaced the failure and stopped: one e
 request, five runs out of five (`research/framework-probe/results/2026-09-05.json`). That is
 behaviour, not quality, and it is not a promise about your graph.
 
+**The kernel's exceptions arrive as themselves.** SPEC-v0.5 §7 item 6. LangGraph propagates a
+node's exception unchanged, so an `ActionDenied`, a `DuplicateEffect`, an `AmbiguousEffect` or a
+`NotExecuted` raised inside a protected node reaches your `except` clause as itself. **There is
+nothing to call and nothing to unwrap**, and this adapter ships no helper for it.
+
+That is worth saying rather than leaving to be inferred, because the other reference adapter is
+the opposite case: the OpenAI Agents SDK turns a tool's exception into text for the model by
+default, and `ctrlrun-openai-agents` has to ship `protected_tool` and `unwrap` to undo it
+(SPEC-v0.5 §12.7). An operator moving between the two should know which side of that line they
+are on, and "the README said nothing" is not an answer to it.
+
 ## What this adapter does not do
 
 It is **not a second approval path**: it reuses `interrupt()` and reimplements nothing — no

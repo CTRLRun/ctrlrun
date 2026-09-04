@@ -23,25 +23,78 @@ LangGraph's is prevention.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import dataclasses
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from ctrlrun import ApprovalAnswer, PendingApproval
+from ctrlrun.adapter import banner
 from ctrlrun.adapter import needs_approval as _needs_approval
 from ctrlrun.errors import CTRLRunError, InvalidArgument
 
 if TYPE_CHECKING:  # pragma: no cover - an adapter constructs no Control (SPEC-v0.5 §2.3)
+    from agents.tool_context import ToolContext
+
     from ctrlrun import Control
 
 __all__ = [
     "CHANNEL",
     "AgentsInterrupt",
+    "ApprovalNotAsked",
     "approval_gate",
     "protected_tool",
     "run",
     "run_sync",
     "unwrap",
 ]
+
+
+class ApprovalNotAsked(RuntimeError):
+    """`interrupt()` was reached for a call the SDK never put to a human.
+
+    Not a denial: nobody said no, and nobody said yes. SPEC-v0.5 §10's first row is the
+    behaviour -- `interrupt()` raises, nothing is written, no grant and no denial, and the
+    request is left `pending` so `ctrlrun approve` can still answer it out of band.
+
+    It is raised on the two paths where this adapter cannot see an answer:
+
+    * The call reached `Control.execute` without going through `protected_tool`, so no SDK tool
+      call is in scope at all -- a plain `function_tool`, a background job, or any other
+      `@protect(wait=True)` on the same `Control`. The provider hangs off the `Control` and not
+      off the tool, so nothing else links the two.
+    * The SDK's own gate never asked about this call, which `is_tool_approved` reports as
+      `None`. That happens whenever `needs_approval` and the kernel disagree -- the predicate
+      sees the arguments the model sent, `Control.execute` sees the arguments the function was
+      called with after Python applied its defaults (§3.5).
+    """
+
+
+#: The SDK tool call currently being invoked through `protected_tool`, or `None`.
+#:
+#: `FunctionTool.on_invoke_tool` receives the `ToolContext` -- which carries the tool name, the
+#: `call_id` and the SDK's own record of what the human answered -- and a tool *body* does not.
+#: `protected_tool` wraps the former and binds it here for the duration of the call, so
+#: `interrupt()` can ask the SDK rather than assume it.
+#:
+#: A `ContextVar` rather than a module global: `Runner` runs tool calls concurrently, and a
+#: global would let one call read another's answer. Bound and reset around each invocation, so
+#: it is empty everywhere else -- which is what makes the "no SDK call in scope" path detectable
+#: rather than silently stale.
+_CURRENT_CALL: ContextVar[ToolContext | None] = ContextVar(
+    "ctrlrun_openai_agents_current_call", default=None
+)
+
+
+@contextmanager
+def _bound_call(context: ToolContext) -> Iterator[None]:
+    token = _CURRENT_CALL.set(context)
+    try:
+        yield
+    finally:
+        _CURRENT_CALL.reset(token)
+
 
 #: What reaches a receipt's `approver`. It names a **channel**, never a person: the SDK records
 #: that a tool call was approved and not by whom, and inventing a name would be manufacturing
@@ -77,19 +130,61 @@ class AgentsInterrupt:
     carries_approved_arguments = False
 
     def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
-        """Return the answer the SDK already has for this call.
+        """Return the answer **the SDK holds** for this call, and never one of this adapter's.
 
         There is no call out to the framework here, and that is this shape: the SDK asked before
-        it invoked, so by the time the tool body reaches `Control.execute` the human has already
-        answered yes. A tool body that runs *is* the approval, and the adapter's job is to say so
-        rather than to ask again — asking again would be a second approval path.
+        it invoked, so the answer already exists by the time a tool body reaches
+        `Control.execute`. The adapter's job is to *read* it — asking again would be a second
+        approval path.
 
-        A **rejection** never reaches here at all: the SDK does not invoke a tool whose approval
-        was refused, so the run ends with the rejection in its own output and no CTRLRun action
-        is ever proposed. §7 of `README.md` records that, because it is the one place this
-        adapter's evidence differs from `@protect`'s.
+        Reading it is the whole of the job, and this method used to skip it. It returned
+        `granted=True` unconditionally, on the premise that *a tool body that runs is the
+        approval*. That premise holds only when the SDK's gate actually asked and was told yes,
+        and there are reachable paths where it did not:
+
+        * A `@protect(wait=True)` call on the same `Control` that never went through
+          `protected_tool`. The provider hangs off the `Control`, not off the tool.
+        * A call the SDK's gate passed without asking, because `needs_approval` and the kernel
+          saw different arguments — the predicate sees what the model sent, `Control.execute`
+          sees what the function was called with after Python applied its defaults. §3.5 says
+          that divergence is harmless *because the human is asked anyway*; a self-granting
+          `interrupt()` is what made it unsafe, and the fix belongs here rather than in §3.5.
+
+        On both, an `APPROVE` executed with no human and wrote a receipt naming an approver
+        nobody was — a grant fabricated into the evidence log, which is what §2.3's ban on
+        `StateStore.append_event` exists to prevent, reached through the sanctioned door.
+
+        `RunContextWrapper.is_tool_approved(tool_name, call_id)` is the SDK's own record and has
+        exactly the three states this needs: `True` (a human approved), `False` (a human
+        refused) and `None` (this call was never put to anyone). Only the first two are answers.
+
+        A **rejection** normally never reaches here: the SDK does not invoke a tool whose
+        approval was refused, so the run ends with the rejection in its own output and no
+        CTRLRun action is proposed. §7 of `README.md` records that, because it is the one place
+        this adapter's evidence differs from `@protect`'s. `False` is still returned as a
+        denial rather than assumed unreachable — a human's *no* is an answer, and §2.4 says it
+        is recorded by the provider like any other.
         """
-        return ApprovalAnswer(granted=True, approver=CHANNEL)
+        context = _CURRENT_CALL.get()
+        if context is None:
+            raise ApprovalNotAsked(
+                f"{pending.action} reached the approval interrupt outside a tool call driven by "
+                "protected_tool, so the OpenAI Agents SDK was never asked and holds no answer. "
+                "Nothing was granted and the request is still pending: answer it with "
+                "`ctrlrun approve`, or drive the call through protected_tool()."
+            )
+
+        answered = context.is_tool_approved(context.tool_name, context.tool_call_id)
+        if answered is None:
+            raise ApprovalNotAsked(
+                f"{pending.action} needs approval, but the OpenAI Agents SDK never gated this "
+                f"call ({context.tool_name}/{context.tool_call_id}) and so holds no answer. "
+                "The needs_approval predicate and Control.execute disagreed about the "
+                "arguments (SPEC-v0.5 §3.5). Nothing was granted and the request is still "
+                "pending: answer it with `ctrlrun approve`."
+            )
+
+        return ApprovalAnswer(granted=answered, approver=CHANNEL)
 
 
 def protected_tool(
@@ -126,9 +221,30 @@ def protected_tool(
     """
     from agents import function_tool
 
+    if "needs_approval" in options:
+        # `setdefault` here let a caller replace the policy gate with `lambda *a: False` -- one
+        # keyword that turns every APPROVE into an ungated call. SPEC-v0.5 §3.8: an adapter has
+        # no flag that relaxes a check, and a keyword that silently wins over the policy is one.
+        raise InvalidArgument(
+            "protected_tool() sets needs_approval= from the policy and will not take one: a "
+            "predicate that overrode it would be an approval gate the policy does not control. "
+            "Build the tool with agents.function_tool() yourself if that is what you want."
+        )
     options.setdefault("failure_error_function", None)
-    options.setdefault("needs_approval", approval_gate(control, action, resource=resource))
-    return function_tool(function, **options)
+    options["needs_approval"] = approval_gate(control, action, resource=resource)
+    tool = function_tool(function, **options)
+
+    # Bind the SDK's own record of this call so `AgentsInterrupt.interrupt()` can read the
+    # answer instead of assuming one. `on_invoke_tool` is where the `ToolContext` -- tool name,
+    # `call_id`, and what the human answered -- is in scope; a tool *body* never sees it. This
+    # wraps that one call and touches neither the schema the model is shown nor the body.
+    invoke = tool.on_invoke_tool
+
+    async def _invoke_bound(context: ToolContext, arguments: str) -> Any:
+        with _bound_call(context):
+            return await invoke(context, arguments)
+
+    return dataclasses.replace(tool, on_invoke_tool=_invoke_bound)
 
 
 def approval_gate(
@@ -154,16 +270,28 @@ def approval_gate(
     come from the SDK's session. That is `--principal-from-client-info` (`v0.3 §8.1`), and it is
     the hole SPEC-v0.5 §4.2 exists to close.
 
-    **The predicate and `@protect` can disagree**, and §3.5 says why and why it is safe: the
-    decorator applies the function's defaults and reads its own `resource=` template, and this
-    sees neither. A wrong `False` means the SDK does not pre-ask and `Control.execute` raises
-    `ApprovalRequired`, which the SDK surfaces as the tool's own failure; a wrong `True` asks a
-    human about something harmless. In neither direction does an action execute that would not
-    have. Pass the same `resource=` template the decorator has, and give the tool no defaulted
-    parameters, and they agree.
+    **The predicate and `@protect` can disagree**, and §3.5 says why: the decorator applies the
+    function's defaults and reads its own `resource=` template, and this sees neither. A wrong
+    `True` asks a human about something harmless. A wrong `False` means the SDK does not
+    pre-ask, `Control.execute` raises `ApprovalRequired`, and `AgentsInterrupt.interrupt()`
+    finds the SDK holds no answer for a call it never gated -- so the action is **refused** with
+    `ApprovalNotAsked`, nothing is written, and the request is left `pending`.
+
+    In neither direction does an action execute that a human did not approve. That sentence was
+    not true while `interrupt()` granted unconditionally: a wrong `False` executed. It is the
+    interrupt's reading of `is_tool_approved` that makes it true, not this predicate.
+
+    Pass the same `resource=` template the decorator has, and give the tool no defaulted
+    parameters, and the two agree and no call is refused this way.
     """
     if not action:
         raise InvalidArgument("approval_gate(action=...) must be a non-empty action name")
+
+    # SPEC-v0.5 §3.6: logged once per `Control`, never printed, a no-op under `mode: enforce`.
+    # Here rather than in `interrupt()` because observe mode never raises `ApprovalRequired`, so
+    # the interrupt is exactly the place that is never reached in the mode the banner is for.
+    # This is the adapter's attach point -- the first place it is handed the operator's Control.
+    banner(control)
 
     async def gate(context: Any, params: Mapping[str, Any], call_id: str) -> bool:
         return _needs_approval(control, action, dict(params), resource=resource)
@@ -186,12 +314,25 @@ def unwrap(error: BaseException) -> BaseException:
 
     It changes no decision and grants nothing: it re-raises what already happened, in the type
     the kernel raised it as.
+
+    **`__cause__` only, never `__context__`.** `__cause__` is explicit chaining -- `raise X from
+    Y` -- and is the only link that asserts *this error is behind that one*. `__context__` is
+    what the interpreter sets whenever any exception is raised while another is being handled,
+    and it asserts nothing about causation.
+
+    Following it here was a hole rather than a nicety. `@protect(wait=True)` runs its approved
+    leg **inside** `except ApprovalRequired as pending:`, so every exception on that leg carries
+    `__context__ = ApprovalRequired`. An executor that raised a `TimeoutError` after the request
+    went out -- which the kernel records as AMBIGUOUS and re-raises unchanged, `v0.1 §5.5` --
+    was walked back to that `ApprovalRequired` and handed to the caller as *"requires approval,
+    then retry"*. An ambiguous outcome reported as a definite did-not-run, with instructions to
+    do it again, on the one path this adapter exists for.
     """
     seen: BaseException | None = error
     while seen is not None:
         if isinstance(seen, CTRLRunError):
             return seen
-        seen = seen.__cause__ or seen.__context__
+        seen = seen.__cause__
 
     # No `CTRLRunError` in the chain, so this is the other half of `v0.1 §5.5`: an executor that
     # raised something of its own -- a `TimeoutError`, a connection error -- which the kernel

@@ -281,13 +281,31 @@ def test_a_suite_is_not_applicable_only_when_every_case_is():
 # --- T133: neither the kit nor an adapter reaches the network ------------------------------
 
 
+#: Refuses the network and nothing else.
+#:
+#: `AF_UNIX` is allowed **on purpose**, and the exception is what makes this guard usable at
+#: all: `asyncio` builds every event loop with a `socketpair()` for its self-pipe, so a guard
+#: that refused `socket.socket` outright refused the event loop rather than the network. That is
+#: why T133's requirement to run *each reference adapter's* kit under it (§3.7) went
+#: unimplemented -- the `openai-agents` harness drives a real `Runner` through `asyncio.run`,
+#: and the guard stopped it at loop construction with `AF_UNIX, SOCK_STREAM`, one frame inside
+#: `asyncio/selector_events.py:_make_self_pipe`. A local IPC pipe is not reaching the network,
+#: and a test that called it one would be `v0.4 §1.3`'s false positive rather than a finding.
+#:
+#: `AF_INET` and `AF_INET6` are refused, and so are `create_connection` and `getaddrinfo`, which
+#: is the whole of what "an adapter opens no socket" means. The precondition test proves the
+#: narrower guard can still see one.
 NO_SOCKETS = textwrap.dedent(
     """
     import socket
 
+    _ALLOWED = {getattr(socket, "AF_UNIX", None)}
+
     class _Refused(socket.socket):
-        def __init__(self, *args, **kwargs):
-            raise OSError("the conformance kit opened a socket")
+        def __init__(self, family=socket.AF_INET, *args, **kwargs):
+            if family not in _ALLOWED:
+                raise OSError(f"the conformance kit opened a network socket ({family!r})")
+            super().__init__(family, *args, **kwargs)
 
     socket.socket = _Refused
     socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(OSError("no network"))

@@ -497,12 +497,26 @@ def test_a_resume_value_that_states_no_verdict_is_refused(resume):
 
 
 def test_a_declared_carrier_refuses_a_grant_with_no_arguments():
+    """Core refuses this too -- `ApprovalMismatch(reason="mismatch")` from `_check_answer` --
+    so this guard is not what makes the deployment safe. It is kept for its **message**: core
+    can only say the answer did not match the proposal, while this names `resume['approved']`
+    and prints `RESUME_SHAPE`, which is where an operator actually fixes it.
+
+    A guard kept for its message has to be tested by its message. Asserting only the exception
+    type cannot tell which of the two ran, and a mutation that deleted this one would read
+    green because core's refusal has the same shape: a subsumed guard, which is only a
+    guard at all for the message it carries.
+    """
     from ctrlrun import InvalidArgument
 
     carrying = LangGraphInterrupt(carries_approved_arguments=True)
 
-    with pytest.raises(InvalidArgument):
+    with pytest.raises(InvalidArgument) as refused:
         carrying.answer({"approved": True, "approver": "ada"})
+
+    message = str(refused.value)
+    assert "carries_approved_arguments=True" in message
+    assert "resume" in message, "this is core's message, not the adapter's"
 
     # A refusal carries nothing and is not refused for it (SPEC-v0.5 §12.2).
     assert carrying.answer({"approved": False}).granted is False
@@ -578,3 +592,91 @@ def _record(action: Action):
     record = store.get_approval(request.request_id)
     assert record is not None
     return record
+
+
+def test_T137_the_readme_says_whether_the_kernels_exceptions_arrive_as_themselves():
+    """SPEC-v0.5 §7 item 6, which the README did not answer until a review asked for it.
+
+    It is a normative README requirement and it was met by neither reference adapter's README
+    at first: §12.7 states the fact in the specification, and an operator does not read the
+    specification. The two adapters are on opposite sides of it -- LangGraph propagates, the
+    Agents SDK wraps and needs `unwrap` -- so silence here reads as "the same as the other one",
+    which is exactly wrong.
+    """
+    text = readme()
+
+    assert "§7 item 6" in text
+    assert "propagates a" in text and "unchanged" in text
+    assert "nothing to unwrap" in text.lower()
+
+
+# --- T133: the adapter's kit run, with the network taken away -------------------------------
+
+
+def _guarded(tmp_path, script: str):
+    """Run `script` in a subprocess whose `sitecustomize` refuses every socket.
+
+    SPEC-v0.5 §3.7 and T133. `tests/test_conformance.py` runs the in-process `Reference` under
+    the same guard, and T133 says in as many words why that is not enough: *"The in-process
+    adapter of T131 would open none either way; the reference adapters, with a framework SDK
+    loaded, are where this test has a subject."* A framework SDK is exactly the thing that
+    might phone home -- LangGraph's tracing exporter is the obvious candidate -- so this is
+    the run the guard exists for.
+    """
+    import subprocess
+    import sys
+
+    from test_conformance import NO_SOCKETS
+
+    (tmp_path / "sitecustomize.py").write_text(NO_SOCKETS, encoding="utf-8")
+    (tmp_path / "script.py").write_text(script, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(tmp_path / "script.py")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            "PYTHONPATH": f"{Path(__file__).resolve().parent}:{tmp_path}",
+            "PATH": "/usr/bin:/bin",
+            # The SDK prints "OPENAI_API_KEY is not set, skipping trace export" and skips the
+            # exporter. Unset here too, so the subprocess cannot take a different path from
+            # this one because of an environment variable the developer happens to have.
+            "OPENAI_API_KEY": "",
+        },
+        timeout=300,
+    )
+
+
+_RUN_UNDER_GUARD = """
+import logging
+logging.disable(logging.CRITICAL)
+import test_adapters_langgraph as harness
+from ctrlrun.conformance import run
+report = run(harness.LangGraphConformanceAdapter())
+assert report.ok, report.to_text()
+print("ok")
+"""
+
+
+def test_T133_the_adapters_kit_run_reaches_no_network(tmp_path):
+    """The whole kit, through a real framework, with every socket refused."""
+    result = _guarded(tmp_path, _RUN_UNDER_GUARD)
+
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "ok" in result.stdout
+
+
+def test_T133_and_the_guard_can_see_a_socket_when_there_is_one(tmp_path):
+    """T133's precondition. Without it this is a negative test
+    against something the environment already prevented -- and it would pass just as well with
+    the `sitecustomize` deleted."""
+    opens_one = (
+        _RUN_UNDER_GUARD
+        + """
+import urllib.request
+urllib.request.urlopen("http://127.0.0.1:1/", timeout=1)
+"""
+    )
+    result = _guarded(tmp_path, opens_one)
+
+    assert result.returncode != 0, "the guard did not notice a deliberate socket"
