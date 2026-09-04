@@ -51,7 +51,8 @@ Both use **v0.1 primitives only**, which is what lets them land before §3 chang
 schema. A template MUST therefore declare `schema: ctrlrun.policy/v1` and MUST NOT use
 `effect:`, `resource:` or `mcp:`. Templates are starting points; `ROADMAP.md`'s sector rule
 holds, so no template describes itself as compliant with anything, and the depth-first sector
-packs with their `REVIEW.md` files remain a v0.6 item.
+packs with their `REVIEW.md` files ship on their own track, after v0.6 supplies the primitives
+they configure and never as part of a kernel release.
 
 Running every example, and loading every template, is T31.
 

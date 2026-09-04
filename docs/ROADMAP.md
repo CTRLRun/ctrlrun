@@ -6,7 +6,7 @@ Standards rule: integrate first, map second, never claim compliance. A standard 
 
 Sector rule: every pack cites its sources and ships its `REVIEW.md`. No compliance claims.
 
-Track rule: kernel versions ship correctness; content tracks (packs, templates, mappings) ship on their own cadence and never block or share a version with the kernel.
+Track rule: kernel versions ship correctness; the tracks that ship beside it (packs, templates, mappings, adapters) ship on their own cadence and never block or share a version with the kernel.
 
 ## v0.1 — Kernel (current)
 
@@ -62,12 +62,28 @@ Standards: align principal/delegation semantics with NIST agent identity work an
 
 Standards: first mapping doc — each `ctrlrun verify` guarantee mapped to the OWASP Agentic Top 10 entries it mitigates. Entries not covered are listed as not covered.
 
-## v0.5 — Framework ecosystem
+## v0.5 — Adapter contract
 
-- Thin adapters: OpenAI Agents SDK, LangGraph. Reuse each framework's own HITL/approval primitives where they exist; never reimplement them.
-- Adapter contract documented so the community writes the rest (CrewAI, ADK, PydanticAI, TypeScript).
+- The adapter contract, documented. It is one of the six contracts v1.0 freezes, so it is written to be lived with.
+- Two reference adapters, to prove the contract is real rather than aspirational: OpenAI Agents SDK and LangGraph. Each reuses the framework's own HITL primitives — LangGraph's `interrupt()` and checkpointers, the Agents SDK's tool-approval interruption — mapped onto `Suspended` / `Control.resume`, which v0.2 already ships for exactly this shape. Never a second approval path beside the framework's own. They ship on the adapters track under their own versions like every other adapter; what v0.5 owns is the requirement that two exist and that the contract survived writing them.
+- LangGraph and not LangChain, deliberately. LangGraph owns the primitive the adapter reuses, and LangChain's agent path runs on LangGraph, so one adapter covers both. A separate LangChain adapter would buy only the legacy `AgentExecutor` path.
+- An adapter is an entry point, so each one is a `SPEC` §4.3.1 row before it is code: principal validity and expiry, then authority, then policy.
+
+Exit: two adapters pass the v0.1 and v0.3 acceptance suites through the adapter surface; and a third is written against the contract alone, in a session that may not read the kernel, because a contract that only its author can implement is not a contract.
 
 Standards: none new.
+
+## Adapters — their own version line
+
+**Three ways in, and only one of them is an adapter.** `@protect` covers anything running in this process, today, with no adapter and no framework support: a raw OpenAI call or a LangChain tool is a decorated function. The gateway covers anything reaching its tools over MCP, in any language, also with no adapter. An adapter exists for one reason — to route an APPROVE through a framework's own interrupt instead of raising past it — so a framework with no human-in-the-loop primitive of its own has nothing for an adapter to reuse and does not need one. That is the answer to "what about X" for every X, and it is why this list is short rather than growing by one each time a framework is named.
+
+Versioned as `adapters-<framework>-MAJOR.MINOR` — `adapters-crewai-1.0`, `adapters-google-adk-1.0` — and never as a kernel version. An adapter answers to two upstreams and neither is this roadmap: it breaks when its framework makes a breaking release, on that project's schedule, for reasons that have nothing to do with what the kernel is doing. Each adapter's README states a supported kernel range and a supported framework range, and its major version tracks whichever of the two forced the break. Each is reviewed in a session that did not write it, on the rule that covers every adapter already.
+
+**The frameworks.** Every adapter is Python and in-process. OpenAI Agents SDK · LangGraph · Google ADK · Microsoft Agent Framework (Python) · Claude Agent SDK (Python) · PydanticAI · CrewAI · Strands Agents · LlamaIndex. The first two are v0.5's references and arrive with the contract; they are on this track and not in that milestone's version, because an OpenAI or LangGraph breaking release is no more a kernel event than a CrewAI one. Each reuses its framework's own approval and interrupt primitives where they exist and reimplements none of them, ships when its own review is clean, and gates no kernel release. The order they arrive in is demand, not this list.
+
+**Everything else.** The contract, so the community writes the rest.
+
+Standards: none of its own.
 
 ## v0.6 — Durable runtime
 
