@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           # The gateway's tests need its extra; T30 still proves `import ctrlrun` does not
           # touch it, in a subprocess, whether or not it happens to be installed here.
-          pip install -e ".[dev,gateway,otel]"
+          pip install -e ".[dev,gateway,otel,identity]"
 
       - name: pytest
         run: pytest
@@ -64,7 +64,7 @@ jobs:
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
           cd /tmp/sdist
-          pip install ".[dev,gateway,otel]"
+          pip install ".[dev,gateway,otel,identity]"
           pytest -q
 
       - name: The quick start works from the wheel

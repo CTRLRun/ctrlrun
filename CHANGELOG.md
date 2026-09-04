@@ -9,6 +9,49 @@ any change to one appears here.
 
 ## [Unreleased]
 
+Work towards **0.3.0 — Authority**. Version is `0.3.0.dev0`; nothing in this section has
+shipped, and the only thing in the tree today is the contract.
+
+### Added
+
+- **`docs/SPEC-v0.3.md`** — the v0.3 contract, a delta over v0.1 and v0.2. Seven deliverables:
+  an extended `Principal` and the `IdentityProvider` protocol; the `authority:` section with
+  grants, patterns and constraints; delegation with structural attenuation; observe mode and
+  `ctrlrun stats`; a JWT identity provider and the gateway wiring for both; examples and docs;
+  the release. Tests come from §10 (T60–T93).
+- **The `identity` extra**, empty until build-list item 5 adds the JWT verifier and the `pyjwt`
+  line it needs. `pip install ctrlrun` still installs nothing but `pyyaml` and `click`.
+
+### Notes on what the contract decides
+
+Recorded here because each is a decision a reader of the code would otherwise have to
+reconstruct:
+
+- **Authority is opt-in as a section and fail-closed once present.** A file with no
+  `authority:` key behaves exactly as v0.2. With one, every principal needs a grant; no grant
+  means DENY.
+- **Claims are receipt data, not action identity.** The canonical form of an Action is
+  unchanged, so an approval survives a token rotation.
+- **Omission never means unlimited.** A delegated grant that drops a dimension its parent
+  constrains is rejected, not treated as unconstrained.
+- **Observe mode is top-level only.** A partially-enforced configuration is the failure mode
+  that rule exists to prevent.
+- **Policy still cannot see the principal, and a grant carries no decision.** Authority is a
+  second, independent axis that permits or denies; the two results combine as the stricter of
+  the pair. How much autonomy an action has stays the same for every principal.
+- **A delegation may change who acts, not how many.** Its subject must name a concrete agent —
+  present, no wildcard — and a user its parent's pattern admits wherever the parent names one.
+  Otherwise one delegation hands the grant to every agent, or strips the human it was bound to,
+  and omitting the key reaches the same place as an asterisk.
+- **Revocation and expiry are live; an edit to the document is not.** Grants are read when the
+  document is loaded. `ctrlrun revoke` is the runtime kill switch and it covers delegations
+  only; there is no hot reload and no runtime revoke for a root grant.
+
+### Deprecated
+
+- Nothing new. `--principal-from-client-info`, deprecated in 0.2.0, is **removed** in 0.3.0 by
+  build-list item 1; SPEC-v0.3 §8.1 has the replacement.
+
 ### Fixed
 
 - **The gateway compared mirrored header values by re-parsing them, and Python's parser is

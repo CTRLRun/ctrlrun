@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,6 +56,14 @@ otel = [
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
+# SPEC-v0.3 §3.4 — `JWTIdentityProvider` is the only part of the authority model that needs a
+# third party: verifying somebody else's signature. Everything else — grants, containment,
+# delegation, observe mode — is stdlib and the YAML parser that is already a dependency.
+#
+# Empty until build-list item 5, which adds the verifier and the `pyjwt` line it needs. The
+# extra is declared now so `pip install 'ctrlrun[identity]'` names something real for the whole
+# of the 0.3 development series, and so CI installs it without a second edit.
+identity = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
