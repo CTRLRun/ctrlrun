@@ -292,15 +292,16 @@ invention, not as an implementation of anything.
 renamed.
 
 ```python
-_NO_CLAIMS: Final = MappingProxyType({})             # shared; a dataclass default must be immutable
+_NO_CLAIMS: Final = MappingProxyType({})  # shared; a dataclass default must be immutable
+
 
 @dataclass(frozen=True)
 class Principal:
-    agent: str                                       # required, e.g. "refund-agent"
-    user: str | None = None                          # human on whose behalf, if any
-    claims: Mapping[str, str | int | bool] = _NO_CLAIMS   # verified, from the provider (§3)
-    issuer: str | None = None                        # who verified it, e.g. a JWT `iss`
-    expires_at: datetime | None = None               # when the credential stops being valid
+    agent: str  # required, e.g. "refund-agent"
+    user: str | None = None  # human on whose behalf, if any
+    claims: Mapping[str, str | int | bool] = _NO_CLAIMS  # verified, from the provider (§3)
+    issuer: str | None = None  # who verified it, e.g. a JWT `iss`
+    expires_at: datetime | None = None  # when the credential stops being valid
 ```
 
 `Principal` stays `frozen=True` and stays **unhashable**, as it is today: `Mapping` is not
@@ -2386,7 +2387,7 @@ from .identity import (
     HeaderIdentityProvider,
 )
 from .authority import Authority, Grant, Subject, Delegation, AuthorityResult
-from .policy import Condition, parse_conditions       # promoted; see below
+from .policy import Condition, parse_conditions  # promoted; see below
 from .state import DelegationRecord
 from .errors import AuthorityDenied, AuthorityEscalation, IdentityError
 # lazily importable, not re-exported at package import:
@@ -2469,9 +2470,13 @@ with `-41001`'s `data` shape, and `v0.2 §6.10`'s `DENY` row narrowed to policy 
 Errors:
 
 ```python
-class IdentityError(CTRLRunError): ...           # a credential was offered and rejected
-class AuthorityDenied(ActionDenied): ...         # reason: §4.3; grant_id, delegation_id
-class AuthorityEscalation(CTRLRunError): ...     # reason: §5.3; a delegation that may not exist
+class IdentityError(CTRLRunError): ...  # a credential was offered and rejected
+
+
+class AuthorityDenied(ActionDenied): ...  # reason: §4.3; grant_id, delegation_id
+
+
+class AuthorityEscalation(CTRLRunError): ...  # reason: §5.3; a delegation that may not exist
 ```
 
 `AuthorityDenied` subclasses `ActionDenied`: an authority denial *is* the action being denied, and
