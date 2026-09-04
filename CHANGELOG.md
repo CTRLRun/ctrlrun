@@ -24,6 +24,19 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Changed
 
+- **BREAKING: `context(environment=...)` is removed; `Control` takes `environment=` instead.**
+  v0.3 makes the environment an authorization input — a grant may scope to
+  `environments: ["staging"]` — and a dimension the subject sets is not one. On the decorator path
+  the value came from the agent's own call site, so a grant scoped to staging was a real
+  restriction through the gateway and decoration in-process.
+
+  It is now set once per `Control`, from its `environment=` argument, else
+  `$CTRLRUN_ENVIRONMENT`, else the policy document's top-level `environment:`, else
+  `"production"`. The gateway's `--environment` and the ACS hook's configuration are unchanged —
+  they were already this rule. A deployment that ran several environments from one process runs
+  one `Control` each. `SPEC-v0.1.md` §8's frozen signature is amended in the same change, as the
+  rule for a frozen name requires.
+
 - **`docs/SPEC-v0.3.md` amended against an independent review of §4 and §5.** The contract was
   read by two reviewers who had not written it, and they found two authorization holes the
   author's own pass had missed.

@@ -426,6 +426,47 @@ places make opposite trade-offs deliberately.
 The `ctrlrun inspect` and OTel changes above ship with **build-list item 1**, alongside the
 `Principal` fields they display; `ctrlrun.inspection/v1` becomes `v2` there (§12.2).
 
+### 2.5 The environment belongs to the deployment, not to the call
+
+`Action.environment` is an authorization input in v0.3: §4.2 lets a grant scope to
+`environments: ["staging"]`, and §4.3 makes it one of the four things a grant must match on. So it
+comes under the rule §3.2 applies to the principal — **the subject never sets the environment it
+is authorized in** — and v0.1's arrangement, where `context(environment=...)` took it from the
+agent's own call site, cannot survive that.
+
+**`context(environment=...)` is removed.** `context()` takes `agent` and `user` and nothing else.
+The environment is set once, on the `Control`, and every Action inherits it:
+
+```python
+Control(..., environment: str | None = None)
+```
+
+resolved at construction, in this order, and fixed for the life of the object:
+
+1. the `environment=` argument, where one was passed;
+2. `$CTRLRUN_ENVIRONMENT`, where it is set — set but empty is `InvalidArgument`, as
+   `CTRLRUN_CONFIG` and `CTRLRUN_STATE` are (`v0.1 §3.4`, `§8`): a configured-but-blank
+   deployment name is a misconfiguration, and falling back would put actions in an environment
+   nobody chose;
+3. the policy document's top-level `environment:` key (§12.1);
+4. `"production"`.
+
+The gateway keeps `--environment` and the ACS hook keeps its own configuration (§8.4); both are
+this rule already, which is why they needed no change. What changes is that the decorator path now
+agrees with them, so the sentence holds on **every** entry point of §4.3.1 rather than on two of
+three.
+
+This is a **breaking change to a frozen name** (`v0.1 §8`), and it is worth what it costs. An
+authorization dimension the subject can set is not an authorization dimension; keeping the
+parameter would have meant a specification that spends a paragraph explaining when
+`environments:` is real and when it is decoration. A deployment that ran different environments
+from one process — the case the parameter served — runs one `Control` each, which is what "the
+environment is a property of the deployment" means in code.
+
+`ctrlrun.example.yaml` and the sector templates gain no `environment:` key: `"production"` is the
+fail-closed default, and a starting-point policy that named a non-production environment would be
+a starting point that switched a guarantee off.
+
 ---
 
 ## 3. `IdentityProvider`
@@ -853,20 +894,6 @@ think of — the wildcard outcome §5.4's `subject` row forbids, reached in N re
 Requiring an expiry makes §5.4's `expires_at` row bound every descendant in time by construction,
 so an unexpiring delegation minted at runtime becomes unrepresentable. It is one line in the
 document and it is the only dimension that bounds a chain the operator has stopped watching.
-
-**`environments` is an authorization dimension, and v0.3 does not authenticate it.** This is
-stated rather than implied, because the rest of §4 rests on the opposite property for the
-principal. `Action.environment` has three sources: `context(environment=...)`, which is a free
-string from the agent's own call site; `AcsControlHook`, which §8.4 now takes from configuration
-rather than the envelope; and the gateway's `--environment`, which is the operator's. Only the last
-two are worth anything to an authorization decision.
-
-So a grant scoped `environments: ["staging"]` is a real restriction **only where the environment is
-set by something the agent does not control**. In-process, under `@protect` and `context()`, it is
-not: the same code that proposes the action names the environment it is proposed in. An operator
-who needs environment scoping enforced runs the gateway, or supplies the environment from their own
-trusted configuration. `docs/THREAT_MODEL.md` carries this beside the delegator (§5.7) and the
-approver (`v0.1 §4.1`), which are unauthenticated for the same kind of reason. §13 records it.
 
 **Subject matching addresses `agent` and `user`, and nothing else.** Not claims, not the issuer.
 Both fields are part of the action's canonical form (`v0.1 §2.2`), so an authority decision is
@@ -2213,6 +2240,9 @@ is individually configurable**, and there is no flag that makes any single one o
 | A pattern outside §4.4's grammar | `PolicyError` at load | |
 | `mode:` anywhere but the top level of the policy document | `PolicyError` at load | |
 | `mode:` not exactly `observe` or `enforce` | `PolicyError` at load | |
+| `$CTRLRUN_ENVIRONMENT` set but empty | `InvalidArgument`; never a fallback to the default (§2.5) | |
+| `environment:` present and not a non-empty string | `PolicyError` at load | |
+| `context(environment=...)` | `TypeError` — the parameter is gone (§2.5) | |
 | `authority:` or `mode:` in a `v1`/`v2` document | `PolicyError` at load, naming the key and `ctrlrun.policy/v3` | |
 | `actions:` or `mode:` in an `--authority` document | `PolicyError` at load, naming the file and the key | |
 | Gateway: `--principal-from-client-info` | exit non-zero, naming `--principal-header` | |
@@ -2293,6 +2323,16 @@ provider-raises row asserts `IdentityError`, that the executor's call count is 0
 receipt was written — three behaviours, because asserting only the exception class cannot tell a
 refusal from a refusal that already ran the action.
 
+#### T65d — The environment comes from the deployment, not the call
+`context(environment="staging")` raises `TypeError`: the parameter is gone (§2.5), and asserting
+the removal by signature rather than by behaviour is what stops it being quietly reinstated.
+Resolution order is parametrized against a fake environment and a fake document: the
+`Control(environment=...)` argument wins; else `$CTRLRUN_ENVIRONMENT`; else the document's
+`environment:`; else `"production"`. `$CTRLRUN_ENVIRONMENT` set but empty raises `InvalidArgument`
+rather than falling through — asserted, because falling through is the failure that puts actions
+in an environment nobody chose. Every `Action` built under one `Control` carries the same
+environment whatever the calling code does.
+
 #### T65b — `--principal-from-client-info` is gone
 `ctrlrun gateway --principal-from-client-info ...` exits non-zero, and stderr names
 `--principal-header`. The gateway does not start; no socket is bound.
@@ -2326,6 +2366,16 @@ has one → passes; `agent: "*"` against a dotted agent name; a `subject.agent` 
 against a name sharing only the prefix → denied. Each asserts the reason, so deleting the
 `user is not None` check fails a test rather than silently letting an agent inherit a human's
 grant.
+
+#### T67c — A grant scoped to another environment does not match
+A grant with `environments: ["staging"]`, an action that matches it on subject, name and resource
+in every respect, and a `Control` constructed `environment="production"`. Then
+`AuthorityDenied(reason="no_authority")` — by reason — and the executor never ran. The same grant
+under a `Control` constructed `environment="staging"` passes, which is the control: without it an
+implementation that matched no environment at all would satisfy the first half.
+
+The point of the pair is that **no calling code participates**. There is no argument the protected
+function can pass, and no `context()` parameter, that changes which of the two outcomes it gets.
 
 #### T68 — A matching grant passes to policy
 Subject, action, resource and environment all match and the constraints hold. Then
@@ -2692,7 +2742,10 @@ class Principal:                       # extended, v0.1 §2.1
     expires_at: datetime | None = None
 
 Control(..., identity: IdentityProvider | None = None,
-             authority: Authority | None = None)
+             authority: Authority | None = None,
+             environment: str | None = None)          # §2.5
+
+context(agent: str, user: str | None = None)          # `environment` REMOVED — §2.5
 Control.authority -> Authority | None
 Control.delegate(parent_id: str, grant: Grant, *, by: Principal) -> Delegation
 Control.revoke(delegation_id: str, *, by: str | None = None) -> None
@@ -2744,6 +2797,11 @@ deleted from the document cannot be found by walking downward from the ids that 
 - `RESERVED_ARGUMENTS` gains `claims`, `issuer` and `expires_at` (§4.5) — a **breaking** change
   for a protected function taking an argument by one of those names, in documents of every
   schema version (§12.1).
+- **`context(environment=...)` is removed** and `Control` gains `environment=` (§2.5). A
+  **breaking** change to a name `v0.1 §8` froze, made because an authorization dimension the
+  subject can set is not one. `$CTRLRUN_ENVIRONMENT` and the document's top-level `environment:`
+  are the other two sources. `v0.1 §8`'s signature is amended in the same item, as the rule for a
+  frozen name requires.
 
 **Removed.** `ctrlrun gateway --principal-from-client-info`, and the
 `GatewayConfig.principal_from_client_info` field behind it (§8.1).
@@ -2833,8 +2891,10 @@ it on `v3` would leave the same name meaning two things in two files — which i
 and `Control` cannot be constructed until the argument is renamed. The load error says so. T74b
 asserts it against a `v1` document, so the breakage is a tested decision rather than a surprise.
 
-The top-level key set grows to `schema`, `actions`, `mode`, `authority`, and stays closed. An
-`--authority` document has its own, smaller closed set (§8.3).
+The top-level key set grows to `schema`, `actions`, `mode`, `authority` and `environment`, and
+stays closed. `environment:` MUST be a non-empty string; it is the third of §2.5's four sources
+and needs `ctrlrun.policy/v3` like the other two new keys. An `--authority` document has its own,
+smaller closed set (§8.3).
 
 `ctrlrun init` keeps writing `v1`: the smallest working policy is still the right starting point,
 and adding authority means changing the schema line, which is a visible act of opting in.
@@ -2897,10 +2957,6 @@ Everything in `v0.1 §9` and `v0.2 §12` that v0.3 does not deliver, and specifi
   (§5.7, §7).
 - **Authenticating the delegator.** `ctrlrun delegate --as` is an assertion, recorded as one
   (§5.7) — the same position `v0.1 §4.1` takes on the approver, who is also still unauthenticated.
-- **Authenticating the environment.** `environments:` scopes a grant, and in-process the
-  environment is whatever `context()` said (§4.2). It is a real restriction only where something
-  the agent does not control supplies it, which in v0.3 means the gateway or the ACS hook's own
-  configuration.
 - **Sweeping a subtree of delegations.** `ctrlrun revoke` takes one id and v0.3 lists none, so the
   answer to a chain of unknown width is `delegable: false` on the root grant plus a restart
   (§5.6).

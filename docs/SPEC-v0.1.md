@@ -517,7 +517,10 @@ protect(name: str, *, effect: str | None = None, resource: str | None = None,
         wait: bool = False, lease: timedelta | None = None,
         control: Control | None = None) -> Callable
 
-context(agent: str, user: str | None = None, environment: str | None = None) -> ContextManager
+context(agent: str, user: str | None = None) -> ContextManager
+# `environment` was a parameter here until v0.3. SPEC-v0.3 §2.5 removed it: the environment
+# became an authorization input, and a dimension the subject sets is not one. It is set once
+# on the Control instead.
 with_approval(request_id: str) -> ContextManager
 
 Control.from_file(path=None) -> Control
