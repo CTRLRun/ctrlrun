@@ -130,6 +130,51 @@ class SwallowsDenial(Reference):
             return "committed"
 
 
+class FrameworkRejectedError(Exception):
+    """A framework's own "the user rejected this" error, for `DenialIsAnError` to raise."""
+
+
+class _RaisesOnRefusal(Courier):
+    """A `Courier` that carries a grant back and raises on a refusal."""
+
+    def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
+        answer = super().interrupt(pending)
+        if not answer.granted:
+            raise FrameworkRejectedError("the user rejected this tool call")
+        return answer
+
+
+class DenialIsAnError(Reference):
+    """Raises its framework's rejection error instead of carrying the human's `no` back.
+
+    The `denial` suite's own fixture, and it is aimed rather than incidental. `SwallowsDenial`
+    would fail `denial` too -- it catches the `ActionDenied` that a refusal produces -- but it
+    is aimed at `kernel`, where it swallows T6's denial of an unknown action, and §5.4's rule
+    is that a suite whose only fixture fails it by accident is a suite nothing is aimed at.
+    That is why `IgnoresAuthority` exists beside it, and this is the same argument one suite
+    further along.
+
+    The mistake is an authentic one, and it is the opposite of `SwallowsDenial`'s: not a no
+    reported as a yes, but a no reported as a *fault*. An author whose framework raises when a
+    human declines -- most do -- lets that exception stand as the outcome, reasoning that the
+    call did not happen and the framework already said why. It did not happen, and CTRLRun's
+    evidence log is where that has to be visible: `APPROVAL_DENIED` then `ACTION_DENIED`
+    (`v0.1 §6.2`, SPEC-v0.5 §2.4). Under this adapter a human's answer is indistinguishable
+    from the primitive having crashed -- §10's row for that says the request stays `pending`
+    with no grant, no denial and no receipt, which is right for a crash and a silent loss of
+    the record for an answer. So B3 fails on both halves: what propagates is not
+    `ActionDenied`, and there is no `APPROVAL_DENIED` behind it.
+
+    It reaches the primitive, which is the point. The count cannot tell this from a correct
+    adapter -- a human *was* asked and did answer -- so only the case's own two checks can.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.interrupt = _RaisesOnRefusal(carries=self.interrupt.carries_approved_arguments)
+        self.interrupt.framework = self.framework
+
+
 class ReplaysApproval(Reference):
     """Keeps a `request_id` and re-presents it on the next call, reaching past `@protect`.
 
@@ -327,6 +372,7 @@ BROKEN: dict[str, tuple[type[Reference], str]] = {
     "interrupts-on-allow": (InterruptsOnAllow, "kernel"),
     "interrupts-only-when-unasked": (InterruptsOnlyWhenUnasked, "kernel"),
     "grants-for-itself": (GrantsForItself, "kernel"),
+    "denial-as-error": (DenialIsAnError, "denial"),
     "ignores-authority": (IgnoresAuthority, "authority"),
     "self-asserts-principal": (SelfAssertsPrincipal, "identity"),
     "echoes-the-payload": (EchoesThePayload, "binding"),

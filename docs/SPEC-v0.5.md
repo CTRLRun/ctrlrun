@@ -920,16 +920,23 @@ Each is a named group, reported per suite and per case.
 
 | Suite | Cases | What it drives through the adapter |
 |---|---|---|
-| `kernel` | T1, T4, T6, T8, A1, B2, B3 | Lost response blocks a blind retry · a committed effect refuses a second attempt · unknown action fails closed · `NotExecuted` permits a retry · an allowed action is never put to a human · a matching answer authorizes · a refusal is a denial and not an error |
+| `kernel` | T1, T4, T6, T8, A1, B2 | Lost response blocks a blind retry · a committed effect refuses a second attempt · unknown action fails closed · `NotExecuted` permits a retry · an allowed action is never put to a human · a matching answer authorizes |
 | `binding` | B1 | An answer given against different arguments authorizes nothing. `not_applicable` where `carries_approved_arguments` is `False`, with the adapter's reason |
+| `denial` | B3 | A refused answer is a denial and not an error. `not_applicable` where `refuses_before_invoking` is `True`, with the adapter's reason |
 | `duplicate` | D1 | Two `invoke` calls on one effect key: exactly one commits and one is refused |
 | `authority` | T66, T70, T74 | No grant · expired grant · a denial by authority leaves no pending approval |
 | `identity` | T60, T63 | No principal, no action · the provider wins over anything the framework's session says (§4.2) |
 
-**`binding` is the mutation check alone**, and that is why B2 (its control) and B3 (a denial is
-a denial) are in `kernel`. Both run whatever the framework carries back; a `binding` suite
-containing them would report `pass` for an adapter that cannot perform the one check the suite
-is named for. That is an N/A folded into the count, one level down.
+**`binding` is the mutation check alone**, and that is why B2, its control, is in `kernel`:
+it runs whatever the framework carries back, and a `binding` suite containing it would report
+`pass` for an adapter that cannot perform the one check the suite is named for. That is an N/A
+folded into the count, one level down.
+
+**`denial` is B3 alone for the same reason**, and it is a suite because of the second reference
+adapter rather than by foresight — §12.6 has the finding. A framework that refuses *before* it
+invokes never proposes a CTRLRun action, so there is nothing to deny and nothing to log; B3 left
+in `kernel` beside six cases that always run would have reported that adapter `pass` on the one
+case it cannot exercise. The declaration is `refuses_before_invoking`, defaulting to `False`.
 
 **`binding` is sourced from §3.4 and not from `v0.1 §7` T2.** T2 mutates the action *between* a
 human's grant and its presentation, which through `@protect(wait=True)` is unreachable: the
@@ -973,6 +980,7 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 | `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` |
 | `interrupts-only-when-unasked` | Correct wherever a human is expected, and interrupts on exactly the calls where none is | `kernel` — **A1 alone** |
 | `grants-for-itself` | Takes `ApprovalRequired` with `wait=False`, writes the grant itself, and re-presents. The framework's primitive is never reached | `kernel` |
+| `denial-as-error` | Raises its framework's rejection error instead of carrying the human's `no` back | `denial` |
 | `ignores-authority` | Catches `AuthorityDenied` and returns a value | `authority` |
 | `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
 | `echoes-the-payload` | Declares `carries_approved_arguments = True` and returns `pending.arguments` as the answer's `approved_arguments` | `binding` — §3.4's manufactured check |
@@ -984,7 +992,12 @@ and "this is prevention, not attribution" are the sentences a security reviewer 
 a rule with no broken fixture is a rule the kit cannot tell you about. `ignores-authority` exists
 because `swallows-denial` failed the `authority` suite only incidentally — `AuthorityDenied`
 subclasses `ActionDenied` — and a suite whose only fixture fails it by accident is a suite
-nothing is aimed at. `interrupts-only-when-unasked` exists for the same reason one level down:
+nothing is aimed at. `denial-as-error` exists for that reason and no other: `swallows-denial`
+fails `denial` too, and incidentally again, so the suite that arrived with §12.6 arrived with
+nothing aimed at it. Its mistake is the inverse of `swallows-denial`'s — not a no reported as a
+yes, but a no reported as a *fault*, which is what a framework that raises on a decline invites
+and what leaves a human's answer indistinguishable from a crashed primitive. It reaches the
+primitive, so the interrupt count cannot see it; only B3's own two checks can. `interrupts-only-when-unasked` exists for the same reason one level down:
 `interrupts-on-allow` bumps the interrupt count on T4, B2 and B3 as well, so deleting A1's own
 count left the kit still failing it — a **subsumed** check, found by mutation. This one is
 invisible to every other case.
@@ -1206,7 +1219,7 @@ same way (§3.8).
 ### Item 3 — The conformance kit (§5)
 
 #### T130 — The kit fails a broken adapter, per suite and by name
-Each of §5.4's eleven fixtures is driven through `conformance.run`, and each fails **the suite
+Each of §5.4's twelve fixtures is driven through `conformance.run`, and each fails **the suite
 named in its row**. A fixture that failed nothing, or whose named suite passed, is the failure
 this test catches; incidental failures of other suites are permitted and asserted as such,
 because "and no other" is false of an adapter broken badly enough.

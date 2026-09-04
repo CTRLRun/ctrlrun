@@ -103,7 +103,7 @@ def test_T131_a_correct_adapter_passes_every_suite():
     assert report.ok is True
     assert [suite.status for suite in report.suites] == [SuiteStatus.PASS] * len(SUITES)
     assert report.not_applicable == ()
-    assert report.to_text().endswith("reference: 5/5")
+    assert report.to_text().endswith("reference: 6/6")
 
 
 def test_T131_the_reference_adapter_is_the_surface_and_nothing_else():
@@ -145,8 +145,11 @@ def test_T132_the_denominator_counts_applicable_suites_only():
     report = run(Reference(carries=False, framework="no-carry"))
 
     assert len(report.applicable) == len(SUITES) - 1
-    assert report.to_text().endswith("no-carry: 4/4 (1 not applicable)")
-    assert "5/5" not in report.to_text()
+    assert report.to_text().endswith("no-carry: 5/5 (1 not applicable)")
+    # The count an N/A folded in would produce, and the whole point of the case. It moves with
+    # `SUITES`: when `denial` was split out of `kernel` this line still read "5/5", which by
+    # then was the *correct* answer -- the guard had quietly become a guard against nothing.
+    assert "6/6" not in report.to_text()
     assert report.ok is True
 
 
@@ -159,11 +162,20 @@ def test_T132_there_is_no_flag_that_folds_an_na_into_the_count():
 
 
 def test_T132_the_binding_suite_is_the_mutation_check_alone():
-    """Its control and the denial case live in `kernel` on purpose: a `binding` suite containing
-    them would report `pass` for an adapter that cannot perform the one check it is named for,
-    which is an N/A folded into the count one level down."""
+    """Its control lives in `kernel` on purpose: a `binding` suite containing it would report
+    `pass` for an adapter that cannot perform the one check it is named for, which is an N/A
+    folded into the count one level down."""
     assert [case.id for case in SUITES["binding"]] == ["B1"]
-    assert {case.id for case in SUITES["kernel"]} >= {"B2", "B3"}
+    assert {case.id for case in SUITES["kernel"]} >= {"B2"}
+
+
+def test_T132_the_denial_suite_is_the_refusal_case_alone():
+    """B3 was in `kernel` until the second reference adapter: a framework that refuses *before*
+    it invokes proposes no action, so there is nothing to deny, and B3 folded into `kernel`
+    would have reported `pass` on six cases that always run. Same argument as `binding`, one
+    suite along (SPEC-v0.5 §12.6)."""
+    assert [case.id for case in SUITES["denial"]] == ["B3"]
+    assert "B3" not in {case.id for case in SUITES["kernel"]}
 
 
 # --- T132b / T132c: refusal, and a zero denominator ----------------------------------------
