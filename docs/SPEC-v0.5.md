@@ -295,6 +295,8 @@ tool (§3.5). Nothing else in the kernel is required of an adapter.
 | `StateStore.reserve_effect`, `consume_approval`, `consume_approval_and_reserve`, `begin_execution`, `commit_effect`, `fail_effect`, `mark_ambiguous`, `resolve_effect`, `extend_lease` | Reservation and outcome are `v0.1 §5.5`'s asymmetry. A second implementation of it is the one drift this codebase must not have. |
 | `StateStore.grant_approval`, `deny_approval` | The grant is written in exactly one place, and it is core's (§2.4). |
 | `StateStore.put_approval_request` | Creating a request out of band is the first half of a second approval path, and the second half is answering it. |
+| `StateStore.append_event`, `put_receipt` | These attack the **evidence** rather than the decision, which is the product's whole output. An adapter holding only `control` can reach `control.store.append_event(Event(type=APPROVAL_GRANTED, data={"approver": "the-cfo"}))` and put a grant nobody made into the log. Every other writer on the protocol was enumerated; these two were the omission, and an independent review found them by trying. |
+| `Control.approvals`, and anything reached through it | `control.approvals.wait(<any pending request id>)` drives the provider for a request the adapter was **not handed** — one created by another agent's action, or waiting in an operator's queue — and an adapter's own `interrupt()` answers it. The `may call` list is read-only accessors; this one is not read-only, and it is named here rather than left to the general clause. |
 | `StateStore.hold_continuation`, `take_continuation` | The elicitation machinery is reachable without `Control.resume`, so naming only `resume` would be the missing enumeration this project keeps finding (`v0.3 §4.3.1`). |
 | `StateStore.put_delegation`, `revoke_delegation`, `Control.delegate`, `Control.revoke` | An adapter creates no authority. |
 | `Control.resume`, and raising `Suspended` | That is the *elicitation* round trip, and an approval is not one (§3.1). |
@@ -303,8 +305,15 @@ tool (§3.5). Nothing else in the kernel is required of an adapter.
 | `Policy.evaluate` in isolation | `v0.3 §11` — the combined `§4.6` decision or nothing. `needs_approval` and `Control.evaluate` are that. |
 
 **May call.** `ctrlrun.adapter.needs_approval`, `ctrlrun.adapter.banner`, `Control.evaluate`,
-and the read-only accessors `Control.policy`, `Control.store`, `Control.environment`,
-`Control.resolve_principal`. Reading is not the problem; writing is.
+`Control.resolve_principal`, and the accessors `Control.policy`, `Control.environment`,
+`Control.store` **for reads only** — `get_effect`, `get_approval`, `receipts`, `events`.
+
+`Control.store` is on this list and `StateStore` is a mutable object, so "reading is not the
+problem; writing is" is a rule about *calls* and not about *reachability*: the never-list above
+is what makes it checkable, and every writer on the protocol is on it. The general clause
+—*directly or through any object it can reach*— is not enough on its own, because a rule that
+names no methods is a rule the conformance kit cannot check and a reviewer cannot mutation-test.
+That is the missing-enumeration shape §4.1 exists to prevent, one level down.
 
 **Who wires it up.** The operator, in the same breath as the policy and the store:
 
@@ -523,12 +532,21 @@ adapter would like to check:
 
 - **`True`.** The answer MUST carry `approved_arguments`: the arguments the human's answer was
   given against, recovered from the framework's own record of it — LangGraph's resume value, the
-  Agents SDK's `ToolApprovalItem`. The provider compares them to `pending.arguments` with the
-  type-strict equality of `v0.1 §3.2`, and refuses on any difference:
+  Agents SDK's `ToolApprovalItem`. The provider **rebuilds the stored request's `Action` with
+  those arguments and compares `action_hash`**, and refuses on any difference:
   `ApprovalMismatch(reason="mismatch")`, nothing granted, the request left `pending`. An answer
   that omits them when the adapter declared it would carry them is refused the same way — a
-  declaration is not a hint. **This is prevention**, it is performed in core, and it is the same
-  check `WebhookApprovalProvider` makes on an inbound answer, which is mandatory there too.
+  declaration is not a hint. **This is prevention**, it is performed in core, and it is
+  literally `v0.1 §4.2 A1`'s comparison — the same one `WebhookApprovalProvider` makes on an
+  inbound answer, where it is mandatory too.
+
+  Rebuilding rather than comparing the mappings directly is deliberate. `action_hash` excludes
+  `action_id` (`v0.1 §2.2`), so the replica differs from the stored proposal in exactly the
+  dimension under test and in no other; the comparison is over canonical bytes rather than over
+  Python objects, so `True` cannot compare equal to `1`; and `Action.__post_init__` validates
+  the answer's arguments on the way in, so a `float` or a `set` arriving from a framework's JSON
+  is `InvalidArgument` at the gate rather than a silent inequality (`v0.1 §2.3`). A second
+  equality implementation here would be a second place for the binding to drift.
 - **`False`.** The framework's resumption carries nothing the adapter can inspect. The binding
   across the interrupt is then **the framework's checkpoint, not CTRLRun's**: that is
   *attribution*, evidence will show what was approved and what ran, and a divergence is findable
@@ -541,10 +559,11 @@ because it was shown one. A framework's approval item was not: it records the ar
 proposed and knows nothing of CTRLRun's canonical form, and an adapter that computed a hash to
 echo would have to build an `Action`, which needs a `Principal`, which §4.2 forbids — the same
 hole `needs_approval` closed in §2.2. So the carried value is the one a framework actually holds.
-It is not a weaker check: within one framework call the action's name and environment come from
-the `Control`, its `resource` is a template over its arguments (`v0.1 §5.1`) and its principal
-from the `IdentityProvider`, so **the arguments are the only component of the canonical form a
-replay can change**, and comparing them is comparing the hash for everything at risk.
+It is not a weaker check, and the rebuild above is why: what is compared is the full
+`action_hash`, and the arguments are simply the only component of it a framework can hand back —
+within one framework call the action's name and environment come from the `Control`, its
+`resource` is a template over its arguments (`v0.1 §5.1`), and its principal from the
+`IdentityProvider`.
 
 **An adapter MUST NOT synthesize `approved_arguments` from `pending.arguments`.** Handing back a
 copy of what it was just given makes every comparison trivially pass; it is manufacturing the
@@ -581,6 +600,28 @@ A `DENY` at that predicate returns "no approval needed" and lets the tool be inv
 `Control.execute` denies it with a receipt, an `ACTION_DENIED` and the exception the caller
 catches. Refusing inside the predicate would refuse without evidence, and `v0.3 §4.3` is
 explicit that a denial with a principal to attribute it to belongs in the evidence log.
+
+**`needs_approval` and `@protect` do not always build the same `Action`, and the divergence is
+stated rather than discovered.** `@protect` binds the call to the wrapped function's signature
+and applies defaults (`v0.1 §8`), and its `resource` template comes from the decorator first and
+the policy second; `needs_approval` gets the framework's raw arguments and cannot see the
+decorator. So two things can differ: an argument the function defaults and the framework omitted,
+and a `resource` declared only on the decorator.
+
+Both directions are **safe**, and that is why this is a documented divergence rather than a
+defect. A wrong `False` means the framework does not pre-ask, and `Control.execute` then raises
+`ApprovalRequired`, `@protect(wait=True)` routes it through the interrupt, and the human is asked
+anyway — the resumed-in-place shape, reached from the other one. A wrong `True` means a human is
+asked about an action the policy would have allowed, which costs attention and authorizes
+nothing. **In neither direction does an action execute that would not have.** An adapter whose
+framework omits defaulted arguments should say so under §7 item 5.
+
+`needs_approval` can also **raise** rather than return: `resolve_principal` refuses an
+unattributable call (`ActionDenied(reason="no_principal")`) or a rejected credential
+(`IdentityError`), and `evaluate` refuses an Action from another deployment's environment. An
+adapter answering a framework predicate must let those propagate — a predicate that swallowed
+them would answer `False` for an action the kernel is about to refuse anyway, which is harmless,
+and `False` for a *credential* problem the operator needs to see, which is not.
 
 Neither shape needs a new **entry point** — no new way to reach an effect, no path that reserves
 or commits or grants outside `Control`. Both needed one new **reader**: `needs_approval`, which
@@ -1322,6 +1363,7 @@ refusals without establishing that the adapter had been reached at all.
 | `carries_approved_arguments` is `True` and the answer's differ from the proposal's | `ApprovalMismatch(reason="mismatch")`, nothing granted, request left `pending` (§3.4) |
 | `carries_approved_arguments` is `True` and the answer omits them | Refused the same way. A declaration is not a hint (§3.4) |
 | `carries_approved_arguments` is `False` | No check. `binding` is `not_applicable` with the adapter's reason, and **never `pass`** (§3.4, §5.3) |
+| `ApprovalAnswer.granted` not a `bool` | `InvalidArgument`. A framework's raw resume value is not a verdict, and any truthy one would be a grant — a human's *no* becoming a yes is the worst failure available here (§2.2) |
 | `ApprovalAnswer.approver` empty or not a string | `InvalidArgument`. An approval with no approver is evidence that answers the wrong question (§2.2) |
 | The deadline has passed before the interrupt | `ApprovalTimeout`; `interrupt()` is not called (§2.4 step 2) |
 | The deadline passes during the interrupt | `ApprovalTimeout`; nothing written, record left `pending` (§2.4 step 5) |

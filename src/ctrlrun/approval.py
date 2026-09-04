@@ -301,7 +301,13 @@ class ApprovalProvider(Protocol):
         ...
 
 
-def _build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequest:
+def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequest:
+    """Build a request for `action`, validating the ttl. Package-internal, not public API.
+
+    Promoted from `_build_request` in v0.5 so `adapter.py`'s provider builds requests the same
+    way the two shipped providers do. A second copy would be a second place for a non-positive
+    ttl to become a request that expires before it is asked.
+    """
     if ttl <= timedelta(0):
         raise InvalidArgument(f"approval ttl must be positive, got {ttl!r}")
     return ApprovalRequest(
@@ -333,7 +339,7 @@ class LocalApprovalProvider:
         self._poll_interval = poll_interval
 
     def request(self, action: Action, ttl: timedelta = DEFAULT_APPROVAL_TTL) -> ApprovalRequest:
-        request = _build_request(action, ttl, self._clock())
+        request = build_request(action, ttl, self._clock())
         self._store.put_approval_request(request)
         return request
 
@@ -400,7 +406,7 @@ class ScriptedApprovalProvider:
         self.polls = 0
 
     def request(self, action: Action, ttl: timedelta = DEFAULT_APPROVAL_TTL) -> ApprovalRequest:
-        request = _build_request(action, ttl, self._clock())
+        request = build_request(action, ttl, self._clock())
         self._store.put_approval_request(request)
         return request
 

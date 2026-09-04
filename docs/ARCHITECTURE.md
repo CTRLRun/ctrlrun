@@ -152,6 +152,7 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `identity.py` | `IdentityProvider`, `IdentityContext`, static and header providers | policy, authority, storage |
 | `authority.py` | `Grant`, `Subject`, `Authority`, matching, containment, delegation planning | approvals, effect state, executors, sinks |
 | `approval.py` | request/grant/consume, providers | executors |
+| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | policy internals, authority, effect state, executors, sinks, any framework |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
 | `control.py` | `Control` orchestration, decorator, context, suspend/resume | CLI |
@@ -185,6 +186,14 @@ template grammar (`template_placeholders`) from `effect.py`, because SPEC-v0.2 �
 security-critical enough that a second copy of it is worse than the import. Policy still knows
 nothing of effect state — no records, no transitions, no reservations — and `effect.py` does not
 import `policy.py`, so there is no cycle.
+
+v0.5 adds `adapter.py` below `control.py` and does not change the direction. It imports
+`action.py` and `approval.py`, and takes a `Control` as a **parameter** in `needs_approval` and
+`banner` rather than importing it at module scope, so there is no cycle and no second composer:
+it appends no event, owns no sink, and reserves nothing. The one place it writes is
+`grant_approval`/`deny_approval` in `InterruptApprovalProvider.wait`, which is the same call
+`ctrlrun approve` and the webhook make — and it is the *only* place, so no adapter can grow a
+second approval path even by accident (SPEC-v0.5 §2.4).
 
 v0.3 makes the same exception once more, for the same reason: `authority.py` imports the
 condition parser and evaluator (`Condition`, `parse_conditions`) from `policy.py`, because a
