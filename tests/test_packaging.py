@@ -369,7 +369,7 @@ def _manifest_patterns() -> tuple[list[tuple[str, str]], set[str]]:
 
 
 def test_the_sdist_carries_everything_the_tests_read():
-    """Every tracked file under `examples/` and `docs/` matches a `MANIFEST.in` include.
+    """Every tracked non-Python file under `examples/`, `docs/` and `tests/` is shipped.
 
     `MANIFEST.in` has claimed for two releases that a test named this one keeps it honest,
     and there was no such test — so the first file it forgot was found by the CI job that
@@ -379,11 +379,15 @@ def test_the_sdist_carries_everything_the_tests_read():
 
     Checked against **git**, not the filesystem, for the same reason: an untracked file is not
     in a fresh clone whatever this file says about it.
+
+    `tests/` joined the list when `tests/data/junit-10.xsd` did, and it joined it the same way
+    the first two did: the sdist job found the missing file one push after this test could
+    have. `recursive-include tests *.py` had shipped every test and none of its data.
     """
     import fnmatch
 
     tracked = subprocess.run(
-        ["git", "ls-files", "examples", "docs"],
+        ["git", "ls-files", "examples", "docs", "tests"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
