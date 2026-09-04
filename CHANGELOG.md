@@ -645,7 +645,7 @@ reconstruct:
   integers numerically (`42.0` equals `42`): v0.1 §2.3 refuses a float in the body outright, so
   the leniency has no legitimate case here. SPEC-v0.2 §6.4 states both rules and the reasoning.
 
-## [0.2.0] — unreleased
+## [0.2.0] - 2026-09-03
 
 Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml` and
 `click`; the gateway, the ACS hook and the OpenTelemetry sink live in extras.
@@ -819,4 +819,5 @@ until it gets one, which is the point.
 
 [Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.4.0
+[0.2.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0
