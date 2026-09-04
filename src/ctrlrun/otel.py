@@ -82,7 +82,10 @@ class OTelEventSink:
     # --- EventSink ----------------------------------------------------------------------
 
     def on_event(self, event: Event) -> None:
-        span = self._span_for(event)
+        if event.action_id is None:
+            self._standalone(event)
+            return
+        span = self._span_for(event, event.action_id)
         if span is None:
             return
         span.add_event(str(event.type), attributes=self._event_attributes(event))
@@ -111,11 +114,24 @@ class OTelEventSink:
 
     # --- internals ----------------------------------------------------------------------
 
-    def _span_for(self, event: Event) -> Any:
+    def _standalone(self, event: Event) -> None:
+        """One span for an event that belongs to no action (SPEC-v0.3 §7).
+
+        The three `DELEGATION_*` types are about an authority record, created and revoked
+        outside any action's life, so `_span_for` would look for an open span it will never
+        find and drop them — silently, leaving an operator whose evidence pipeline is OTel to
+        watch a delegation chain appear and be revoked with nothing in the trace. The
+        highest-privilege operations in the release must not be the only ones missing from the
+        export path.
+        """
+        span = self._tracer.start_span(str(event.type), attributes=self._event_attributes(event))
+        span.end()
+
+    def _span_for(self, event: Event, action_id: str) -> Any:
         from .receipt import EventType
 
         with self._lock:
-            span = self._open.get(event.action_id)
+            span = self._open.get(action_id)
             if span is not None:
                 return span
             if event.type is not EventType.ACTION_PROPOSED:
@@ -126,9 +142,9 @@ class OTelEventSink:
                 return None
             span = self._tracer.start_span(
                 PENDING_SPAN_NAME,
-                attributes={f"{PREFIX}action_id": event.action_id},
+                attributes={f"{PREFIX}action_id": action_id},
             )
-            self._open[event.action_id] = span
+            self._open[action_id] = span
             self._evict_if_needed()
             return span
 

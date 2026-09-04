@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS events(
   approval_id TEXT,
   data_json TEXT
 );
+CREATE TABLE IF NOT EXISTS delegations(
+  delegation_id TEXT PRIMARY KEY,
+  parent_id TEXT NOT NULL,
+  depth INTEGER NOT NULL,
+  grant_json TEXT NOT NULL,
+  created_by_agent TEXT NOT NULL,
+  created_by_user TEXT,
+  created_via TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  revoked_by TEXT
+);
+CREATE INDEX IF NOT EXISTS delegations_by_parent ON delegations(parent_id);
 """
 
 
@@ -331,6 +344,36 @@ class HeldContinuation:
     rounds: int
 
 
+@dataclass(frozen=True)
+class DelegationRecord:
+    """One row of the `delegations` table (SPEC-v0.3 §5.2).
+
+    **The store persists rows, not grants.** `grant_json` stays a string here and
+    `authority.py` is what parses a `Grant` out of it, so `state.py` does not import
+    `authority.py` and therefore does not transitively acquire `policy.py` —
+    `ARCHITECTURE.md` §6's dependency direction. `Delegation`, the parsed form, lives there.
+
+    `depth` is recorded for reading and never trusted: evaluation derives it by walking to the
+    root (§5.5), so a row edited directly in the database cannot assert its way to a shorter
+    chain.
+    """
+
+    delegation_id: str
+    parent_id: str
+    depth: int
+    grant_json: str
+    created_by_agent: str
+    created_by_user: str | None
+    created_via: str
+    created_at: datetime
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+
+    @property
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None
+
+
 class StateStore(ApprovalStore, Protocol):
     """Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence."""
 
@@ -457,6 +500,43 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
+    def put_delegation(self, record: DelegationRecord) -> None:
+        """Insert one delegation row (SPEC-v0.3 §5.2).
+
+        A plain `INSERT` that raises on a duplicate id, and **never an upsert**: an upsert on
+        an existing id would clear `revoked_at`, which is `unrevoke` by another door in a
+        release that says there is no such thing (§5.7).
+        """
+        ...
+
+    def get_delegation(self, delegation_id: str) -> DelegationRecord | None:
+        """The row with this id, revoked or not, or `None`."""
+        ...
+
+    def delegations_for(self, parent_id: str) -> tuple[DelegationRecord, ...]:
+        """Every row naming this parent, oldest first."""
+        ...
+
+    def delegations(self, *, include_revoked: bool = False) -> tuple[DelegationRecord, ...]:
+        """Every delegation row, oldest first (SPEC-v0.3 §11).
+
+        Evaluation enumerates these because §5.6 walks **upward** from a delegation to its
+        root: a chain whose root grant has been deleted from the document cannot be found by
+        walking downward from the ids that are still in it.
+        """
+        ...
+
+    def revoke_delegation(self, delegation_id: str, *, by: str | None, at: datetime) -> bool:
+        """Revoke one delegation, atomically. `False` if it was already revoked (§5.7).
+
+        The read-then-write happens inside a `BEGIN IMMEDIATE`, as every other read-then-write
+        in this store does (`v0.1 §5.3 E1`), so two concurrent revokes append one
+        `DELEGATION_REVOKED` between them rather than one each. An unknown id is an
+        `InvalidArgument`: there is nothing to revoke, and returning `False` would make that
+        indistinguishable from the idempotent case.
+        """
+        ...
+
     def append_event(self, event: Event) -> Event:
         """Append an event, assigning it the next `event_id`, and return it as stored.
 
@@ -493,6 +573,7 @@ class InMemoryStateStore:
         self._approvals: dict[str, ApprovalRecord] = {}
         self._effects: dict[str, EffectRecord] = {}
         self._continuations: dict[str, tuple[str, Action, int]] = {}
+        self._delegations: dict[str, DelegationRecord] = {}
 
     def close(self) -> None:
         """Nothing to release; here so either store can be closed the same way."""
@@ -518,6 +599,42 @@ class InMemoryStateStore:
         """An immutable snapshot of the receipts, in write order."""
         with self._lock:
             return tuple(self._receipts)
+
+    # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
+
+    def put_delegation(self, record: DelegationRecord) -> None:
+        with self._lock:
+            if record.delegation_id in self._delegations:
+                raise InvalidArgument(f"delegation {record.delegation_id} already exists")
+            self._delegations[record.delegation_id] = record
+
+    def get_delegation(self, delegation_id: str) -> DelegationRecord | None:
+        with self._lock:
+            return self._delegations.get(delegation_id)
+
+    def delegations_for(self, parent_id: str) -> tuple[DelegationRecord, ...]:
+        with self._lock:
+            return tuple(
+                record for record in self._delegations.values() if record.parent_id == parent_id
+            )
+
+    def delegations(self, *, include_revoked: bool = False) -> tuple[DelegationRecord, ...]:
+        with self._lock:
+            return tuple(
+                record
+                for record in self._delegations.values()
+                if include_revoked or not record.is_revoked
+            )
+
+    def revoke_delegation(self, delegation_id: str, *, by: str | None, at: datetime) -> bool:
+        with self._lock:
+            record = self._delegations.get(delegation_id)
+            if record is None:
+                raise InvalidArgument(f"no delegation {delegation_id}")
+            if record.is_revoked:
+                return False
+            self._delegations[delegation_id] = replace(record, revoked_at=at, revoked_by=by)
+            return True
 
     # --- approvals (SPEC-v0.1 §4.2) ---------------------------------------------------
 
@@ -890,6 +1007,80 @@ class SQLiteStateStore:
     def receipts(self) -> tuple[Receipt, ...]:
         rows = self._connection().execute("SELECT json FROM receipts ORDER BY rowid").fetchall()
         return tuple(Receipt.from_json(row["json"]) for row in rows)
+
+    # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
+
+    def put_delegation(self, record: DelegationRecord) -> None:
+        try:
+            self._connection().execute(
+                "INSERT INTO delegations(delegation_id, parent_id, depth, grant_json, "
+                "created_by_agent, created_by_user, created_via, created_at, revoked_at, "
+                "revoked_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record.delegation_id,
+                    record.parent_id,
+                    record.depth,
+                    record.grant_json,
+                    record.created_by_agent,
+                    record.created_by_user,
+                    record.created_via,
+                    _iso(record.created_at),
+                    None if record.revoked_at is None else _iso(record.revoked_at),
+                    record.revoked_by,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # Never `ON CONFLICT DO UPDATE`: an upsert on an existing id would clear
+            # `revoked_at`, which is `unrevoke` by another door (§5.7).
+            raise InvalidArgument(f"delegation {record.delegation_id} already exists") from exc
+
+    def get_delegation(self, delegation_id: str) -> DelegationRecord | None:
+        row = (
+            self._connection()
+            .execute("SELECT * FROM delegations WHERE delegation_id=?", (delegation_id,))
+            .fetchone()
+        )
+        return None if row is None else _delegation_record(row)
+
+    def delegations_for(self, parent_id: str) -> tuple[DelegationRecord, ...]:
+        rows = (
+            self._connection()
+            .execute("SELECT * FROM delegations WHERE parent_id=? ORDER BY rowid", (parent_id,))
+            .fetchall()
+        )
+        return tuple(_delegation_record(row) for row in rows)
+
+    def delegations(self, *, include_revoked: bool = False) -> tuple[DelegationRecord, ...]:
+        where = "" if include_revoked else " WHERE revoked_at IS NULL"
+        rows = (
+            self._connection()
+            .execute(f"SELECT * FROM delegations{where} ORDER BY rowid")
+            .fetchall()
+        )
+        return tuple(_delegation_record(row) for row in rows)
+
+    def revoke_delegation(self, delegation_id: str, *, by: str | None, at: datetime) -> bool:
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "SELECT revoked_at FROM delegations WHERE delegation_id=?", (delegation_id,)
+            ).fetchone()
+            if row is None:
+                raise InvalidArgument(f"no delegation {delegation_id}")
+            if row["revoked_at"] is not None:
+                revoked = False
+            else:
+                connection.execute(
+                    "UPDATE delegations SET revoked_at=?, revoked_by=? WHERE delegation_id=?",
+                    (_iso(at), by, delegation_id),
+                )
+                revoked = True
+        except BaseException:
+            self._unwind(connection)
+            raise
+        connection.commit()
+        return revoked
 
     # --- approvals (SPEC-v0.1 §4.2) ---------------------------------------------------
 
@@ -1378,6 +1569,22 @@ class SQLiteStateStore:
     def _unwind(connection: sqlite3.Connection) -> None:
         """Undo the open transaction, if this failure did not already close one."""
         connection.rollback()
+
+
+def _delegation_record(row: sqlite3.Row) -> DelegationRecord:
+    """One `delegations` row, with the columns of SPEC-v0.3 §5.2 and nothing derived."""
+    return DelegationRecord(
+        delegation_id=str(row["delegation_id"]),
+        parent_id=str(row["parent_id"]),
+        depth=int(row["depth"]),
+        grant_json=str(row["grant_json"]),
+        created_by_agent=str(row["created_by_agent"]),
+        created_by_user=row["created_by_user"],
+        created_via=str(row["created_via"]),
+        created_at=datetime.fromisoformat(str(row["created_at"])),
+        revoked_at=_at(row["revoked_at"]),
+        revoked_by=row["revoked_by"],
+    )
 
 
 _T = TypeVar("_T")

@@ -953,7 +953,7 @@ def test_an_empty_CTRLRUN_CONFIG_is_refused(workspace, monkeypatch):
 
 
 def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
-    """SPEC-v0.1 §8, plus what SPEC-v0.2 §11 adds."""
+    """SPEC-v0.1 §8, plus what SPEC-v0.2 §11 and SPEC-v0.3 §11 add."""
     assert set(main.commands) == {
         "init",
         "demo",
@@ -964,6 +964,9 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         "resolve",
         "inspect",
         "gateway",
+        # SPEC-v0.3 §5.7 — build-list item 3. `stats` and `verify` land with item 4.
+        "delegate",
+        "revoke",
     }
 
 
@@ -973,6 +976,8 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         ("receipts", {"--last", "--json"}),
         ("effects", {"--state"}),
         ("resolve", {"--committed", "--failed"}),
+        ("delegate", {"--parent", "--file", "--as", "--json"}),
+        ("revoke", {"--by"}),
     ],
 )
 def test_each_command_offers_the_options_the_spec_freezes(command, options):
@@ -986,7 +991,7 @@ def test_each_command_offers_the_options_the_spec_freezes(command, options):
     assert options <= declared
 
 
-@pytest.mark.parametrize("arguments", [("approve",), ("deny",), ("resolve",)])
+@pytest.mark.parametrize("arguments", [("approve",), ("deny",), ("resolve",), ("revoke",)])
 def test_the_commands_that_name_a_thing_require_it(workspace, arguments):
     assert _cli(*arguments).exit_code != 0
 

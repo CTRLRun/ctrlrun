@@ -1325,6 +1325,12 @@ Control.delegate(parent_id: str, grant: Grant, *, by: Principal) -> Delegation
 Control.revoke(delegation_id: str, *, by: str | None = None) -> None
 ```
 
+`AuthorityResult` carries four further optional fields, added by build-list item 3 and listed
+here rather than left to be inferred: `dimension`, `missing_parent_id`, `expired_parent_id`,
+`depth_exceeded` and `cycle_at`. They are §7's `AUTHORITY_DENIED` evidence, and they exist because
+§5.6's rules 1, 3, 4, 5 and 6 all report `authority_escalation` — without them five guards would
+be one guard as far as any reader or test could tell.
+
 `Subject.__post_init__` refuses both fields `None`, and **`Grant.__post_init__` validates
 everything the YAML loader validates** — every pattern against §4.4's grammar, every condition key
 and operand against §4.5, `expires_at` timezone-aware, and each `constraints` key equal to
@@ -1804,6 +1810,13 @@ rather than by being it. That is why the record carries `created_via` (§5.2): `
 for this command, where it came from a shell. A reader of the evidence can tell an act from an
 assertion, which is the whole reason the field exists.
 
+**How `created_via` reaches the record.** §11 freezes `Control.delegate(parent_id, grant, *, by)`
+with no `via` argument, and `ctrlrun delegate` needs to say `cli`. It therefore goes through a
+package-private `Control._delegate(..., via=...)` that the public method calls with `"api"`. This
+is recorded because the alternative — widening a frozen signature so the CLI can pass one value —
+would put a caller-supplied provenance field on the public API, and a `created_via` a caller
+chooses says nothing at all.
+
 CLI delegation is an operator act inside the trust boundary, exactly as `ctrlrun approve` is
 (`docs/THREAT_MODEL.md`: "A compromised approver … is out of scope"). §13 records that v0.3 does
 not authenticate the delegator any more than it authenticates the approver, and item 6 puts the
@@ -2084,7 +2097,7 @@ DELEGATION_REJECTED
 | Type | `data` |
 |---|---|
 | `AUTHORITY_RESOLVED` | `reason` (`authority_grant`), `grant_id`, and for a delegated grant `delegation_id` and `depth` |
-| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for rule 1; `depth_exceeded` or `cycle_at` for rule 5 |
+| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for rule 1; `expired_parent_id` for rule 3; `depth_exceeded` or `cycle_at` for rule 5 |
 | `DELEGATION_CREATED` | `delegation_id`, `parent_id`, `depth`, `created_by_agent`, `created_by_user`, `created_via` |
 | `DELEGATION_REVOKED` | `delegation_id`, `revoked_by` |
 | `DELEGATION_REJECTED` | `reason` and `parent_id`; `dimension` **only** for a §5.3 rule-6 containment refusal |
@@ -2097,6 +2110,14 @@ argument `v0.2 §2.5` makes for appending `RECONCILIATION_RESOLVED` on `"unknown
 `dimension` is present only where a §5.4 row failed. The other refusals of §5.3 — `unknown_parent`,
 `parent_not_delegable`, `parent_not_valid`, `not_the_subject`, `max_depth` — name no row, and
 inventing a dimension for them would make two distinguishable guards report the same shape.
+
+`expired_parent_id` was added by build-list item 3, and the amendment is recorded rather than
+silent. §5.6 rule 3 says its whole contribution is that "the denial names the ancestor that
+lapsed rather than the leaf that inherited its deadline"; §5.6's ordering paragraph then lists the
+`data` shapes as "`missing_parent_id`, `dimension`, or neither", which would leave rule 3 carrying
+nothing and therefore indistinguishable in evidence from rule 6. A guard no reader and no test can
+tell has run is the subsumed guard this document keeps refusing to ship, so the key exists and
+T77 asserts it. The ordering paragraph's list is illustrative; this table is the closed one.
 
 **`Event.action_id` becomes `str | None`.** The three delegation events are not about an action:
 they are about an authority record, created and revoked outside any action's life. They carry
