@@ -9,7 +9,25 @@ any change to one appears here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`docs/SPEC-v0.4.md`** — the v0.4 contract, a delta over v0.1, v0.2 and v0.3. v0.4 answers
+  the question the first three releases could not: *does it hold in **my** setup?* Everything
+  CTRLRun guarantees is proven today by this repository's tests against this repository's
+  configurations, which is the right place to start and the wrong place to stop.
+  `ctrlrun verify` runs those failure scenarios against the operator's own policy, grants and
+  store type, and reports what passed, what failed, and what could not be tested at all.
+
+  Three rules govern it. **Not applicable is not a pass**: a configuration with no `approve`
+  rule cannot exercise the approval-binding guarantees, so they are reported `N/A` with the
+  reason, excluded from the denominator, and listed separately — `3/3 (5 not applicable)`,
+  never `8/8`. **Verify never touches the operator's store**: every scenario runs against a
+  scratch store created and destroyed with the run, and `.ctrlrun/state.db` is byte-identical
+  before and after. **The badge means "declared guarantees pass"** — that phrase, on the
+  badge's link target, and never "secure" or "compliant".
+
+  Nothing is implemented yet. The specification is the contract the seven build-list items are
+  written against.
 
 ## [0.3.0] — unreleased — Authority
 
