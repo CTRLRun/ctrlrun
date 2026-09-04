@@ -14,6 +14,31 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **The `authority:` section: grants, patterns and evaluation** (build-list item 2,
+  SPEC-v0.3 §4). A second axis, and it is **opt-in and then fail-closed**: a document with no
+  `authority:` key behaves exactly as v0.2, and the moment one exists every principal needs a
+  grant — including for actions the policy allows outright, including reads, including actions
+  with no effect key. There is no `default: allow` and no flag that makes a missing grant
+  permissive. `Authority`, `Grant`, `Subject` and `AuthorityResult` are public;
+  `Control(authority=...)` takes one, and `Control.from_file` reads it from the same document.
+- **Authority is evaluated before policy, and the two combine as the stricter of the pair.**
+  A denial there appends `AUTHORITY_DENIED` and **never** `POLICY_EVALUATED`, so it cannot
+  leave a pending approval request behind for an action that could never run. Neither axis
+  loosens the other: authority cannot make a denied action allowed, and policy cannot make an
+  unauthorized one permitted. **A grant carries no `decision:`** — how much autonomy an action
+  has stays the same for every principal, and what differs is whether they may propose it at
+  all.
+- **A pattern grammar small enough that containment is decidable** (§4.4, §5.5): a literal, a
+  `prefix*` that cannot cross a separator, and a final `**` whose preceding segments are all
+  literals. `stripe.*` matches `stripe.refund` and not `stripe.refund.partial`; there is no
+  `?`, no character class, and no short spelling for "everything" — granting the whole surface
+  of a system is spelled `**`, one token, greppable, and impossible to write by accident.
+- **Two new event types and one new error.** `AUTHORITY_RESOLVED` is appended for *every*
+  action that passes authority, not only a delegated one, so a deployment with a permissive
+  grant is distinguishable from one with no section at all. `AuthorityDenied` subclasses
+  `ActionDenied` — an authority denial *is* the action being denied — and carries a reason from
+  §4.3's closed set, never a grant id: a grant may legally be named `no_authority`, and
+  evidence that can be spoofed by naming a grant is not evidence.
 - **Extended `Principal`, `IdentityProvider`, and the two core providers** (build-list item 1,
   SPEC-v0.3 §2, §3). `Principal` gains `claims`, `issuer` and `expires_at`, validated the way
   arguments are — no `float`, no containers, a timezone-aware expiry — and **none of the three
@@ -39,6 +64,27 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Changed
 
+- **BREAKING: a condition naming `claims`, `issuer` or `expires_at` is refused at load**, in a
+  document of *every* schema version (§4.5, §12.1). The reservation lives in the condition-key
+  splitter, which runs for every condition in every document, and gating it on `v3` would leave
+  the same name meaning two things in two files. A `v1` policy whose protected function takes an
+  argument called `claims` stops loading until the argument is renamed; the load error says so.
+- **`Control.evaluate` returns the combined decision**, not the policy axis alone. Its signature
+  and `Evaluation`'s two fields are unchanged, and it still writes nothing — it would simply
+  stop answering "what will happen to this action" if it reported one axis while `Control.execute`
+  acted on both.
+- **`Control.resume` records the authority axis on its receipt** (§5.6.1). Evaluated and
+  recorded, not re-decided: the reservation is held and the remote may already be acting on it.
+  A lease extension is the other way round — refused where authority no longer covers the
+  action, so the lease lapses and the record becomes `AMBIGUOUS` by the ordinary path.
+- **`AcsControlHook` refuses a `Control` that holds an `Authority`** (§8.4). It reads
+  `params.metadata.agent_id` off the inbound envelope, and an authorization decision may not be
+  made against a principal the caller asserted — the same sentence that removed
+  `--principal-from-client-info`. It gains an `identity` provider of its own with item 5.
+- **`policy._Condition` is now `policy.Condition`, and `policy.parse_conditions` is public.**
+  A grant's `constraints:` is in exactly a rule's `when:` syntax and is parsed by the same code:
+  a second condition evaluator would be a second place for `True` to start comparing equal to
+  `1`. The top-level policy key set gains `authority`, which needs `ctrlrun.policy/v3`.
 - **BREAKING: `context(environment=...)` is removed** — already recorded below, and item 1 is
   where it happens. `Control(environment=...)` replaces it.
 - **BREAKING: `ctrlrun gateway --principal-from-client-info` is removed.** It exits non-zero

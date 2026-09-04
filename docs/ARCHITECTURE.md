@@ -136,6 +136,8 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 |---|---|---|
 | `action.py` | model, canonicalization, hash | policy, storage |
 | `policy.py` | YAML → rules → Decision; `effect:`/`resource:` templates | approvals, effect *state* |
+| `identity.py` | `IdentityProvider`, `IdentityContext`, static and header providers | policy, authority, storage |
+| `authority.py` | `Grant`, `Subject`, `Authority`, matching, containment, delegation planning | approvals, effect state, executors, sinks |
 | `approval.py` | request/grant/consume, providers | executors |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
@@ -151,12 +153,27 @@ itself. A gateway that owned the reservation would be a second module composing 
 and a second implementation of SPEC-v0.1 §5.5's asymmetry, which is the one rule in this
 codebase that must not drift.
 
+The same holds for authority (v0.3). `authority.py` reads the store through the `StateStore`
+protocol and **writes nothing and appends nothing**: `Authority.evaluate` returns a result and
+`plan_delegation` returns the record it *would* write, and `Control` performs every write and
+fans every event out to the sinks. An `Authority` that wrote for itself would be a second module
+composing storage and evidence, and it would leave the highest-privilege operations in the
+release as the only ones invisible to the export path (SPEC-v0.3 §4.8).
+
 One exception, added in v0.2 and worth stating rather than discovering: `policy.py` imports the
 template grammar (`template_placeholders`) from `effect.py`, because SPEC-v0.2 §3.1 requires an
 `effect:` / `resource:` template to be validated when the policy loads and the grammar is
 security-critical enough that a second copy of it is worse than the import. Policy still knows
 nothing of effect state — no records, no transitions, no reservations — and `effect.py` does not
 import `policy.py`, so there is no cycle.
+
+v0.3 makes the same exception once more, for the same reason: `authority.py` imports the
+condition parser and evaluator (`Condition`, `parse_conditions`) from `policy.py`, because a
+grant's `constraints:` is in exactly a rule's `when:` syntax and the two axes MUST share one
+evaluator (SPEC-v0.3 §4.5). A second condition evaluator would be a second place for `True` to
+start comparing equal to `1`. `policy.py` does not import `authority.py`, so there is no cycle,
+and policy still cannot see a principal: `agent_eq` and every other reserved name are still
+refused at load (§4.7).
 
 ## 7. What changes after v0.1 (and what doesn't)
 

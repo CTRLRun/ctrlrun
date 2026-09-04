@@ -87,6 +87,22 @@ class AcsControlHook:
         approver_id: str = "cli:local",
         ask_timeout_seconds: int = DEFAULT_ASK_TIMEOUT_SECONDS,
     ) -> None:
+        if control.authority is not None:
+            # SPEC-v0.3 §8.4 — this hook reads `params.metadata.agent_id` straight off the
+            # inbound envelope, and §4 makes the principal an authorization input. A
+            # self-reported name cannot be one, which is the same sentence that removes the
+            # gateway's `--principal-from-client-info` (§8.1); leaving the ACS hook alone would
+            # make that removal a gesture. §8.4 requires the hook to take an
+            # `identity: IdentityProvider` of its own, which lands with build-list item 5 — so
+            # until then it has none, and an `Authority` cannot be enforced against a principal
+            # nobody verified. Refused at construction rather than per call: a deployment finds
+            # out at startup.
+            raise InvalidArgument(
+                "AcsControlHook needs an `identity` provider for a Control that holds an "
+                "Authority, and does not take one before build-list item 5. This hook reads "
+                "params.metadata.agent_id off the envelope, and an authorization decision may "
+                "not be made against a principal the caller asserted (SPEC-v0.3 §8.4)"
+            )
         self._control = control
         self._prefix = prefix
         self._approver_id = approver_id

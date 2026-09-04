@@ -11,6 +11,7 @@ from .approval import (
     LocalApprovalProvider,
     ScriptedApprovalProvider,
 )
+from .authority import Authority, AuthorityResult, Grant, Subject
 from .control import Control, context, protect, with_approval
 from .effect import EffectRecord, EffectState, ReconcileOutcome
 from .errors import (
@@ -19,6 +20,8 @@ from .errors import (
     ApprovalMismatch,
     ApprovalRequired,
     ApprovalTimeout,
+    AuthorityDenied,
+    AuthorityEscalation,
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
@@ -35,7 +38,7 @@ from .identity import (
     IdentityProvider,
     StaticIdentityProvider,
 )
-from .policy import Decision, Policy
+from .policy import Condition, Decision, Policy, parse_conditions
 from .receipt import Event, EventSink, JSONLEventSink, Receipt
 from .state import InMemoryStateStore, SQLiteStateStore, StateStore
 from .webhook import WebhookApprovalProvider
@@ -50,7 +53,12 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalRequired",
     "ApprovalTimeout",
+    "Authority",
+    "AuthorityDenied",
+    "AuthorityEscalation",
+    "AuthorityResult",
     "CTRLRunError",
+    "Condition",
     "Control",
     "Decision",
     "DuplicateEffect",
@@ -59,6 +67,7 @@ __all__ = [
     "EffectState",
     "Event",
     "EventSink",
+    "Grant",
     "HeaderIdentityProvider",
     "IdentityContext",
     "IdentityError",
@@ -78,11 +87,13 @@ __all__ = [
     "ScriptedApprovalProvider",
     "StateStore",
     "StaticIdentityProvider",
+    "Subject",
     "Suspended",
     "WebhookApprovalProvider",
     "action_hash",
     "canonicalize",
     "context",
+    "parse_conditions",
     "protect",
     "with_approval",
 ]
