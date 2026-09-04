@@ -24,6 +24,14 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Changed
 
+- **Four edits claimed by the previous change were never in the file.** A batch that wrote only
+  at the end discarded every successful replacement before the one that raised, and only the
+  failing one was re-run — so `authority_unreadable` was referenced by §4.6, three rows of §9 and
+  T77d while §4.3's closed reason set never defined it; the precedence order was never reordered;
+  the `pyyaml>=6.0` rationale was missing from §4.2; and `authority_grant` still had no route into
+  evidence. A later edit then deleted §4.2's `environments` paragraph believing it a duplicate,
+  when it was the only copy. All five are restored, and the tooling now writes after each edit so
+  a later failure cannot undo an earlier success.
 - **BREAKING: `context(environment=...)` is removed; `Control` takes `environment=` instead.**
   v0.3 makes the environment an authorization input — a grant may scope to
   `environments: ["staging"]` — and a dimension the subject sets is not one. On the decorator path

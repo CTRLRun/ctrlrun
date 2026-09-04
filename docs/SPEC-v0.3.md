@@ -373,6 +373,14 @@ never be honoured must not spend a human's attention.
 that requires every principal to carry an expiry enforces that in its provider, which is the
 component that knows what it verified.
 
+**`Control.evaluate` cannot do any of that**, because §11 requires it to write nothing. So for
+that one entry point the expiry check is a decision rather than a refusal: it returns
+`Evaluation(Decision.DENY, "principal_expired")`, appends no event and writes no receipt. Stated
+because §4.3.1 subjects `evaluate` to the same ordered checks as the rest, and a check defined
+only as side effects would otherwise have no meaning on the one path that may not have them — and
+because §8.3 sends the gateway's approval pre-check through `evaluate`, so the three plausible
+readings give three different gateway behaviours.
+
 `IdentityError`, not `ActionDenied`: an agent loop's `except ActionDenied` is written to handle
 a policy saying no, and a credential that stopped being valid is not that. This is the same
 distinction `v0.1 §5.1` draws for `EffectKeyError`.
@@ -390,12 +398,11 @@ implementer:
 |---|---|---|
 | Committing, failing or marking ambiguous an outcome | **not refused** | The effect has already happened at the remote. Refusing the write would strand a real-world effect in `AMBIGUOUS` for a clock reason, which is the one mistake `v0.1 §5.5` exists to prevent |
 | Extending a lease (`v0.2 §6.9.4`) | **refused** | An extension is a request to keep holding authority the credential no longer carries. Refusing lets the lease lapse, and a lapsed lease is `AMBIGUOUS` (`v0.1 §5.3 E3`) — the safe state, reached by the ordinary path |
-| `Control.resume` (`v0.2 §6.9`) | **evaluated and recorded, not re-decided** | Exactly what `v0.2 §6.9.2` chose for policy on the same leg, for the same reason: the reservation is held and the remote may already be acting on it |
+| `Control.resume` (`v0.2 §6.9`) | **not re-evaluated** | The receipt carries `principal.expires_at` (§2.4) whether or not a check ran, so a check here would change nothing a reader or a test could see. §5.6.1's resume row is different, and does re-evaluate, because the combined decision it records *is* observable |
 
 A refused lease extension appends `ACTION_DENIED` with `data.reason = "principal_expired"` and
 raises `IdentityError`; it does not move the effect record, which the expiring lease will do on
-its own. The resumed leg records the expiry in its receipt (`decision_reason` stays whatever the
-resumption reached) and appends `ACTION_DENIED` for nothing — there is nothing to deny.
+its own.
 
 ### 2.4 Where claims appear
 
@@ -447,14 +454,32 @@ resolved at construction, in this order, and fixed for the life of the object:
 2. `$CTRLRUN_ENVIRONMENT`, where it is set — set but empty is `InvalidArgument`, as
    `CTRLRUN_CONFIG` and `CTRLRUN_STATE` are (`v0.1 §3.4`, `§8`): a configured-but-blank
    deployment name is a misconfiguration, and falling back would put actions in an environment
-   nobody chose;
+   nobody chose. The check runs **whenever the variable is present**, including when rank 1
+   supplied the value — a blank deployment name is a misconfiguration whether or not something
+   else happened to win, and short-circuiting past it would make the refusal depend on how the
+   `Control` was constructed. `Control(environment="")` is `InvalidArgument` at construction for
+   the same reason;
 3. the policy document's top-level `environment:` key (§12.1);
 4. `"production"`.
 
-The gateway keeps `--environment` and the ACS hook keeps its own configuration (§8.4); both are
-this rule already, which is why they needed no change. What changes is that the decorator path now
-agrees with them, so the sentence holds on **every** entry point of §4.3.1 rather than on two of
-three.
+**`Control.execute` refuses an `Action` whose `environment` is not its own.** `Action(...)` is
+public and `Control.execute(action, ...)` is frozen API, so a caller can hand over an Action
+carrying any environment it likes; without this check §4.3.1's second row is a hole straight
+through the rule above, and `Action` is frozen so the environment cannot be re-stamped. The
+refusal is `InvalidArgument` — a wiring bug, not a policy saying no — and unlike the
+principal-disagreement check §3.1 declines to add, it breaks almost nothing: both sides default to
+`"production"`, so only a caller that deliberately set a different one is affected, and that is
+the caller this is for.
+
+The gateway takes `--environment` and the ACS hook its own configuration (§8.4). The gateway was
+already this rule. The ACS hook was **not** — it reads `params.metadata.environment` off the
+inbound envelope today — and §8.4 is the amendment that stops it. That amendment ships with
+build-list item 5 while authority ships with item 2, so **`AcsControlHook` MUST refuse to be
+constructed against a `Control` holding an `Authority` from item 2 onward**, not from item 5.
+Between those two items the hook is otherwise an entry point where the caller supplies both the
+principal and the environment while authority enforces on both. With the decorator path and the direct-execute
+path both settled, the sentence holds on **every** row of §4.3.1's table rather than on some of
+them.
 
 This is a **breaking change to a frozen name** (`v0.1 §8`), and it is worth what it costs. An
 authorization dimension the subject can set is not an authorization dimension; keeping the
@@ -462,6 +487,24 @@ parameter would have meant a specification that spends a paragraph explaining wh
 `environments:` is real and when it is decoration. A deployment that ran different environments
 from one process — the case the parameter served — runs one `Control` each, which is what "the
 environment is a property of the deployment" means in code.
+
+**A rehydrated Action is checked the same way.** `Control.resume` takes its Action from the store
+(`v0.2 §6.9`), so it carries the environment of the `Control` that proposed it. Resuming it on a
+`Control` with a different one is refused — `InvalidArgument`, as above — because §5.6.1 makes the
+resumed leg re-evaluate authority for its receipt and extend a lease, and evaluating a staging
+action's authority inside a production deployment is the fail-open this section exists to close. A
+continuation is a store-wide token, so without the check the mismatch is reachable by design
+rather than by accident.
+
+**Two `Control`s in different environments MUST NOT share a store.** This is the corollary of
+"runs one `Control` each", and it needs saying because `Control.from_file()` puts the store beside
+the policy (`v0.1 §8`), so two Controls built from one `ctrlrun.yaml` share one by default. Effect
+keys carry no environment — `v0.1 §5.1`'s template sees arguments and `{resource}`, nothing else —
+so a staging `refund:txn_1` reserves the key a production refund of the same transaction needs,
+and the production action is refused as a duplicate, or blocked by a staging `AMBIGUOUS` record
+only a human can clear. Give each environment its own `CTRLRUN_STATE`. v0.2 had the same
+collision; what is new is that §2.5 tells an operator to run several Controls, so it must also
+tell them this.
 
 `ctrlrun.example.yaml` and the sector templates gain no `environment:` key: `"production"` is the
 fail-closed default, and a starting-point policy that named a non-production environment would be
@@ -493,8 +536,9 @@ Control(..., identity: IdentityProvider | None = None)
 `resolve` is called once per action, before the `Action` is constructed — it has to be, since
 an Action cannot exist without a principal (`v0.1 §2.1`).
 
-**Where it runs, and where it does not.** There are exactly two places that build an `Action`,
-and they are the two that resolve: `@protect`'s wrapper, and the gateway. `Control.execute` and
+**Where it runs, and where it does not.** Three places build an `Action`, and they are the three
+that resolve: `@protect`'s wrapper, the gateway, and `ctrlrun.acs`'s request hook (§8.4). §4.3.1's
+table is the enumeration; this paragraph is about what follows from it. `Control.execute` and
 `Control.evaluate` take an already-constructed `Action` (`v0.1 §8`, unchanged), so a caller that
 builds an `Action` by hand and passes it to `Control.execute` supplies its own `Principal` and
 the provider never runs.
@@ -508,9 +552,10 @@ is — has no such path, because the gateway builds the Action and the client ne
 `Control.execute`: it would be a check against the wrong threat, and it would break every
 existing caller that builds Actions for tests and tools.
 
-**The environment**, when a provider answers and no `context()` is active, is `"production"` —
-`v0.1 §2.1`'s default — for both `IdentityContext.environment` and the `Action`. The gateway
-supplies `--environment` instead (`v0.2 §6.5`).
+**The environment** is not this section's to decide: it comes from the `Control`, the gateway or
+the ACS hook, per §2.5, and `IdentityContext.environment` carries whichever of those applies. It
+is never `v0.1 §2.1`'s dataclass default reached by falling through, and it never depends on
+whether a `context()` is active — `context()` no longer carries one.
 
 `IdentityContext.headers` is a mapping with **lowercased** header names, because HTTP header
 names are case-insensitive and a provider that had to guess the casing would be a provider that
@@ -895,6 +940,14 @@ Requiring an expiry makes §5.4's `expires_at` row bound every descendant in tim
 so an unexpiring delegation minted at runtime becomes unrepresentable. It is one line in the
 document and it is the only dimension that bounds a chain the operator has stopped watching.
 
+**`environments` is a real restriction on every path**, because §2.5 takes the value away from
+the caller: it is set once on the `Control`, from its argument, `$CTRLRUN_ENVIRONMENT`, the
+document, or `"production"`, and the gateway and the ACS hook take it from their own
+configuration. A grant scoped `environments: ["staging"]` therefore means what it looks like it
+means, wherever the action is proposed from. It is matched by exact string, not by pattern (§4.4),
+because an environment name is a short closed list and a glob over it buys nothing but a way to
+typo `prod*` into matching `production-canary`.
+
 **Subject matching addresses `agent` and `user`, and nothing else.** Not claims, not the issuer.
 Both fields are part of the action's canonical form (`v0.1 §2.2`), so an authority decision is
 stable under the token rotation §2.2 describes; a claim is not. Matching a grant on a claim is
@@ -908,11 +961,25 @@ parses an unquoted `2026-12-31T23:59:59Z` into a `datetime` and an unquoted
 accepted on input and both must be rejected when they carry no offset. The comparison is
 `now > expires_at → expired`; a grant is valid up to and including its expiry instant.
 
+That rule needs a floor under the YAML parser, and v0.3 adds one: **`pyyaml>=6.0`** in
+`dependencies`, where the core requirement was previously unpinned. PyYAML 6 returns an
+offset-aware `datetime` for a timestamp carrying one; PyYAML 5 subtracts the offset and returns a
+naive value, which would reject §4.1's own example at load and make §5.2's "retaining the offset it
+was written with" impossible to honour. The failure is closed rather than open — nothing loads —
+but a headline example that fails on a permitted dependency version is a defect in the dependency
+declaration, not in the example.
+
 ### 4.3 Evaluation, and where it sits
 
 An action **passes authority** iff at least one grant matches on **all four** of subject, action
 name, resource and environment, has **all** its constraints hold, is **unexpired**, and — if it
-is a delegation — has a chain that is still valid under §5.
+is a delegation — has a chain that is still valid under §5, **and** no delegation record reached
+during the evaluation was unreadable (§4.6).
+
+The last clause belongs in the definition rather than in a remark three subsections later,
+because this sentence is where an implementer writes the loop. Without it the `iff` is satisfied
+by a broad root grant while a corrupted narrow delegation sits unread beside it — precisely the
+fail-open §4.6 describes.
 
 Authority is evaluated **before** policy. Two reasons, and the second is the load-bearing one:
 
@@ -945,8 +1012,19 @@ simply not on anybody's list. So the list is here, and it is normative.
 
 Every path below either proposes an action or creates authority. Each is subject to the same
 fail-closed checks in the same order — **principal validity and expiry, then authority, then
-policy** — and each MUST resolve its principal from an `IdentityProvider` where one is configured
-(§3.1), never from a value the caller supplied alongside the request.
+policy**.
+
+The **environment** obeys §2.5 on every row without exception: it comes from the `Control`, the
+gateway or the ACS hook, and a mismatched one is refused even where the caller built the Action.
+
+The **principal** obeys the same rule on every row whose *Resolves identity* cell says yes — it
+comes from an `IdentityProvider`, never from a value supplied alongside the request. The rows that
+say no are the stated exceptions, each argued where it lives rather than here: a directly-built
+`Action` is inside the process trust boundary (§3.1), a resumed leg carries the principal of the
+action it is resuming (§5.6.1), and `Control.delegate` takes `by` as an argument that §5.3 rule 4
+checks against the parent's subject but does not authenticate — `--as` is an assertion, recorded
+as one (§5.7, §13). An unqualified MUST above a table containing its own exceptions would teach an
+implementer that delegation is authenticated.
 
 | Entry point | Builds an `Action` | Resolves identity | Evaluates authority |
 |---|---|---|---|
@@ -978,15 +1056,18 @@ rather than passing one.
 | Reason | Meaning |
 |---|---|
 | `authority_grant` | **Passed.** A grant matched; `AuthorityResult.grant_id` names which |
+| `authority_unreadable` | A stored delegation could not be read, parsed or walked (§4.6, §5.5) |
 | `no_authority` | No grant matched subject, action, resource and environment |
 | `authority_constraint` | A grant matched the shape, but a constraint did not hold |
 | `authority_expired` | Every grant that matched the shape had passed its own `expires_at` |
 | `authority_escalation` | A delegated grant is no longer contained in its chain, or an ancestor has expired or is missing (§5.6) |
 | `authority_revoked` | A delegation in the chain has been revoked (§5.7) |
 
-`authority_grant` exists because a *passing* result also needs a reason: §4.6 records the axis
-that produced the decision, and there was otherwise no value to record for the cell where
-authority is the one that spoke. `decision_reason` **never** holds a grant id — a grant may
+`authority_grant` is what a *passing* result carries in `AuthorityResult.reason`, and it reaches
+evidence as `AUTHORITY_RESOLVED.data.reason` (§7). It has to reach evidence somewhere: §4.6 sends
+both passing cells' `decision_reason` to the policy axis, so without that event field the value
+would live only in memory, be asserted by no test, and be exactly the check-nothing-exercises this
+document keeps refusing to ship. T68 asserts it by name. `decision_reason` **never** holds a grant id — a grant may
 legally be named `no_authority`, and evidence that could be spoofed by naming a grant is not
 evidence. The id travels in `AuthorityResult.grant_id` and in `AUTHORITY_RESOLVED.data.grant_id`.
 
@@ -995,8 +1076,8 @@ way — expired *and* excluded by a constraint. Evaluation MUST collect every re
 for rather than short-circuiting on the first, and then report, across all grants, the first
 reason present in this fixed order:
 
-`authority_escalation` → `authority_revoked` → `authority_constraint` → `authority_expired` →
-`no_authority`
+`authority_unreadable` → `authority_escalation` → `authority_revoked` → `authority_expired` →
+`authority_constraint` → `no_authority`
 
 Fixed and collected rather than short-circuited, so the evidence for one configuration does not
 depend on the order grants appear in the document or the order an implementation happens to
@@ -1126,8 +1207,8 @@ three configurations nothing can tell apart, which reads as coverage and exercis
 pins the trace that makes them indistinguishable.
 
 `# SPEC:` the item-2 brief asks T70 to "parametrize the 3×3". With a grant carrying no decision
-(§4.2) authority is binary and the table is 2×3, so T70 parametrizes six cells and asserts the
-recorded reason in each. The brief's third row was the grant-level `decision:` this document
+(§4.2) authority is binary and the table is 2×3 — and its bottom row collapses to one case, so
+T70 parametrizes four and asserts the recorded reason in each. The brief's third row was the grant-level `decision:` this document
 removed, and the reasoning is in §4.2.
 
 **`decision_reason`** names the axis that produced the decision: an authority reason from §4.3
@@ -1242,7 +1323,12 @@ enough that every pair is decidable" holds only for grammar-valid input, and §5
 relation is undefined on a segment like `a**`. `Control.delegate` takes a `Grant` built in Python,
 so without a constructor that refuses, §5.3 rule 6 would be discharging a proof about a value
 nothing checked. A `constraints` key that disagrees with its own `Condition` is the sharpest case:
-containment would compare one thing and §5.2 would store another. `Control.delegate` is public API and takes a `Grant` built in Python, not YAML;
+containment would compare one thing and §5.2 would store another.
+
+`Subject`'s own refusal carries a different argument, and it is why the two are separate checks:
+without it a holder of a narrow grant could mint a child addressed to *every principal in the
+deployment*, widening the population rather than the powers. "Any agent" is spelled
+`Subject(agent="*")`, which is greppable — and §5.4 forbids it in a delegation regardless. `Control.delegate` is public API and takes a `Grant` built in Python, not YAML;
 without this a holder of a narrow grant could mint a child addressed to every principal in the
 deployment — widening the population rather than the powers. "Any agent" is spelled
 `Subject(agent="*")`, which is greppable — and §5.4 forbids it in a *delegation* regardless.
@@ -1858,7 +1944,7 @@ prevents. It is in the table because a reader will look for it.
 - **`would_have.blocked_reason`** is `null` when the action would have run unimpeded, and
   otherwise names what would have stopped it: `approval_required`, `duplicate`, `in_progress`,
   `ambiguous`, `approval_mismatch`, `principal_expired`, `unknown_action`, `no_matching_rule`, or
-  one of §4.3's five **deny** reasons — never `authority_grant`, which records a pass. It is separate from `decision` because "the policy said allow
+  one of §4.3's six **deny** reasons — never `authority_grant`, which records a pass. It is separate from `decision` because "the policy said allow
   and the effect was already committed" is a real and common answer, and a single field could not
   hold both halves.
 
@@ -2171,6 +2257,14 @@ multi-tenant deployment, a different alert.
 **Startup output.** The gateway already prints every action in its policy with no `effect:`
 (`v0.2 §3.2`). It now also prints, in the same startup block:
 
+- the environment in force and where it came from, because the gateway resolves it once and
+  stamps every Action with it. `--environment` defaults to **unset**, not to `"production"`: it is
+  passed to `Control(environment=...)` as §2.5's rank 1 where given, and where it is not, the
+  Control resolves ranks 2 to 4 as it would in-process. A flag defaulting to `"production"` would
+  silently outrank `$CTRLRUN_ENVIRONMENT`, so an operator who set the variable to `staging` would
+  get a gateway stamping `production` on every action and matching the wrong grants — the
+  fail-open direction. The gateway builds its Actions from the `Control`'s environment, never from
+  a second copy of its own;
 - the identity provider in force, by name, and for `HeaderIdentityProvider` the header it trusts
   and the one-line warning of §3.3;
 - whether an `authority:` section is loaded and how many grants it holds — or, when there is none,
@@ -2296,9 +2390,11 @@ happened.
 #### T61b — An expiry that falls mid-action
 Parametrized over §2.3.1: a principal that expires after `EXECUTION_STARTED` still commits (the
 record reaches `COMMITTED`, no exception); a lease extension under the same expired principal is
-refused with `IdentityError` and the record is left for the lapsing lease to move; a
-`Control.resume` under it records the expiry and does not re-decide, and the resumed leg produces a
-receipt.
+refused with `IdentityError` and the record is left for the lapsing lease to move; and a
+`Control.resume` under it is **not** re-evaluated for expiry — asserted by the resumed leg
+producing a receipt that carries `principal.expires_at` and appends no `ACTION_DENIED`, since a
+check whose only effect is a field the receipt already carries is one no test can tell from its
+absence.
 
 #### T62 — A provider returning `None` with no context is `no_principal`
 `ActionDenied(reason="no_principal")`, a warning naming the action on the `ctrlrun` logger, and the
