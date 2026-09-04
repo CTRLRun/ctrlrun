@@ -1524,24 +1524,34 @@ disagrees with the code it describes is worse than one that admits a gap. Each i
 `# SPEC:` comment where it lives; this section is the index, in the form `§9.4` takes for the
 earlier contracts.
 
-### 12.1 G6 drives a `Control` composed from the policy alone
+### 12.1 A guarantee's invariant is the behaviour, not the reason string
 
 §2.2 fixes G6's observable as `ActionDenied` with `reason == "unknown_action"`. But `v0.3 §4.3`
 evaluates **authority before policy**, so under an `authority:` section an action name no grant
-covers is refused by the authority axis and the policy axis is never reached: the observable
-would be `AuthorityDenied(reason="no_authority")`, every time, for every configuration with
-grants in it. The two sentences cannot both hold.
+covers is refused by the authority axis and the policy axis is never reached: the refusal
+arrives as `AuthorityDenied(reason="no_authority")`, which is an `ActionDenied` with a different
+reason.
 
-G6 descends from `v0.1 §7` T6, which is about the policy axis and predates the authority model,
-so its scenario builds its `Control` from the policy and no `Authority`. The kernel code under
-test is unchanged and the observable is the one §2.2 fixes; what is left out is a second,
-independent refusal — and that refusal is not left unexercised, because G7 and G8 drive it
-directly. The report carries `detail.axis = "policy"` so a reader is not left to infer it.
+That is still the guarantee holding. G6's invariant is the **behaviour** — an action the policy
+does not list never executes — and not one particular string. So the scenario runs against the
+`Control` the operator's configuration actually composes, authority included, and asserts:
 
-An alternative was considered and rejected: deriving an absent action name that some grant's
-wildcard *does* cover. It works only for configurations whose grants carry wildcards, so G6
-would exercise a different thing in different deployments, which is worse than exercising one
-thing everywhere and saying which.
+- the call raises `ActionDenied`;
+- its `reason` is one **this configuration can produce** — `unknown_action`, plus `v0.3 §4.3`'s
+  closed set of authority denials where an `authority:` section exists;
+- the executor's call count is 0;
+- a `denied` receipt was written.
+
+The counterexample is any execution, or any receipt other than `denied`. The reason that
+actually fired is reported as `detail.refused_by`, and the set it was checked against as
+`detail.reachable_reasons`, so a reader can see **which axis refused** rather than infer it.
+That is more informative than the single string §2.2 named, not less.
+
+**This generalizes, and §2.2's other rows are read the same way.** Where a guarantee names one
+observable and a fail-closed kernel produces an equivalent one earlier in the same ordered
+sequence of checks, the guarantee holds and the report says which. What it may never do is
+accept a reason the configuration cannot produce: a check that took any refusal at all would
+pass against a kernel that refused everything, which is the failure §1.3 exists to prevent.
 
 ### 12.2 G7 is N/A where no action in the policy can run
 

@@ -8,6 +8,18 @@ of these projects, none of which claims to solve this problem.
 It answers a question CTRLRun has so far only asserted: *what actually happens when the
 response is lost and the framework retries?*
 
+> **The four framework adapters have never been executed.** They are written against each
+> framework's documented entry points and have not been run against a real installation or a
+> real model, so nothing here is a finding about LangGraph, CrewAI, the OpenAI Agents SDK or
+> AutoGen — and no README, changelog entry or post may say otherwise. The only true statement
+> today is *"adapters written from documented APIs, unexecuted"*. What **has** run, in this
+> repository's CI, is the harness itself: the fake remote, the two stubs and the plain MCP
+> client, end to end over a loopback socket.
+>
+> Before any results are published, each adapter has to be run against a real model, its
+> framework version recorded, and whatever the documented APIs got wrong fixed. Until then
+> there are no results, and `results/` is empty on purpose.
+
 ---
 
 ## What it is not

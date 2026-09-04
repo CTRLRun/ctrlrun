@@ -126,14 +126,18 @@ G9 reports **which dimensions it exercised**. A parent that constrains one dimen
 score as though it had covered six, because that would be the N/A rule violated one level down.
 
 Two of these are worth a sentence on how they are exercised, because the answer is not the
-obvious one and `SPEC-v0.4.md` §12 argues both at length. **G6 runs against the policy axis
-alone.** Authority is evaluated before policy, so under an `authority:` section an unlisted
-action is refused by the authority axis and the policy's unknown-action refusal is never
-reached — the guarantee G6 makes. The report carries `detail.axis = "policy"` so this is
-visible rather than inferred, and the refusal G6 skips is exercised directly by G7 and G8.
+obvious one; `SPEC-v0.4.md` §12 argues both at length.
+
+**G6 asserts the behaviour, not one reason string.** An action your policy does not list never
+executes — but *which* check refuses it depends on your configuration. With an `authority:`
+section, no grant covers it and authority refuses first, before policy is reached; without one,
+policy refuses it as `unknown_action`. Both are the guarantee holding, so the report names the
+reason that fired in `detail.refused_by` and the set it was checked against in
+`detail.reachable_reasons`. A reason your configuration cannot produce is a failure.
+
 **G7 is `N/A` for a policy in which nothing can run at all**, because its control is "the same
-call inside `context()` runs" and there is no such call; it is applicable to every
-configuration in which anything can run, with or without grants.
+call inside `context()` runs" and there is no such call. It is applicable to every configuration
+in which anything can run, with or without grants.
 
 ### Every guarantee carries a positive control
 
@@ -243,20 +247,60 @@ Outputs: `passed`, `failed`, `applicable`, `not-applicable`, `badge-message`, `r
 The action **writes** the endpoint JSON and never publishes it. Publishing it needs
 `contents: write`, and asking for write access to your repository as the price of a
 verification badge is a bad trade for a tool whose subject is least privilege. So the cost is
-here, visible, once — and it is your decision:
+here, visible, once — and it is your decision.
+
+This repository publishes its own badge, and this is the job it uses. Three things about it are
+load-bearing:
+
+- **`contents: write` is job-level.** The workflow itself is `contents: read`, so nothing else
+  in it can write to the repository. A workflow-level grant would hand every job write access
+  to buy one file.
+- **It runs on a push to `main` and nothing else.** A pull request never reaches it. A PR from
+  a fork gets a read-only token anyway, but relying on that is relying on a default rather than
+  refusing.
+- **It publishes the badge the verify job already produced**, downloaded as an artifact rather
+  than regenerated — so the badge, the job summary and the uploaded report all come from one
+  verify run and cannot disagree.
 
 ```yaml
-      # Requires `permissions: contents: write` on the job.
-      - name: Publish the badge
-        if: github.ref == 'refs/heads/main'
+permissions:
+  contents: read          # every job, unless it says otherwise
+
+jobs:
+  badge:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # the one exception, and only here
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ctrlrun-verify
+          path: badge
+      - name: Publish to the badges branch
         run: |
-          git fetch origin badges || git switch --orphan badges
-          git switch badges
-          cp verify-badge.json .
+          set -eu
+          test -s badge/verify-badge.json
+          message=$(python -c 'import json;print(json.load(open("badge/verify-badge.json"))["message"])')
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add verify-badge.json
-          git commit -m "verify: $(python -c 'import json;print(json.load(open("verify-badge.json"))["message"])')" || exit 0
+          # Explicit destination ref: `actions/checkout` sets a single-branch refspec, so a
+          # plain `git fetch origin badges` leaves `refs/remotes/origin/badges` unset and the
+          # switch below would create a fresh orphan and be rejected on push — on the second
+          # publish, not the first.
+          if git fetch origin badges:refs/remotes/origin/badges 2>/dev/null; then
+            git switch -c badges refs/remotes/origin/badges
+          else
+            git switch --orphan badges
+          fi
+          # Nothing to clear: `git switch` replaces the working tree with the target's,
+          # and `--orphan` starts from an empty one. The downloaded artifact is
+          # untracked, so it survives either path - which is the only file that must.
+          cp badge/verify-badge.json verify-badge.json
+          git add -f verify-badge.json
+          git commit -m "verify: $message" || { echo "badge unchanged"; exit 0; }
           git push origin badges
 ```
 

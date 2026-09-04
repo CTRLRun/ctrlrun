@@ -379,3 +379,56 @@ def test_the_scenario_text_is_shared_and_not_per_adapter():
         source = inspect.getsource(sys.modules[type(adapter).__module__])
         assert scenario_module.TOOL_DESCRIPTION not in source, adapter.name
         assert scenario_module.DOUBLE_REFUND_SCENARIO.prompt not in source, adapter.name
+
+
+# --- nothing anywhere claims the harness has been run against a real framework ---------------
+
+#: The four whose adapters have never been executed. The stubs and the MCP client have — they
+#: run in this repository's CI, end to end over a loopback socket.
+UNEXECUTED = ("langgraph", "crewai", "openai-agents", "autogen")
+
+
+def test_the_readme_says_the_framework_adapters_have_never_been_executed():
+    """The study means nothing until the adapters have run, so the sentence that says they have
+    not is at the top of the harness README rather than in a per-adapter docstring nobody
+    reads. `results/` is empty for the same reason."""
+    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+
+    assert "The four framework adapters have never been executed" in readme
+    assert "adapters written from documented APIs, unexecuted" in readme
+    assert "no README, changelog entry or post may say otherwise" in readme
+
+
+@pytest.mark.parametrize("framework", UNEXECUTED)
+def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
+    module = __import__(
+        f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
+    )
+
+    docstring = " ".join((module.__doc__ or "").lower().split())
+
+    assert "never executed" in docstring, framework
+    assert "not run in this repository's ci" in docstring, framework
+
+
+def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
+    """A sentence naming one of these four outside the harness's own directory is the shape of
+    an overclaim, so there are none — and this test is what keeps it that way when somebody
+    writes the release post."""
+    checked = ["README.md", "CHANGELOG.md", "docs/verify.md", "docs/OWASP-AGENTIC-TOP10.md"]
+
+    offending = []
+    for name in checked:
+        path = REPO_ROOT / name
+        if not path.exists():  # pragma: no cover - not a checkout
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        offending += [(name, framework) for framework in UNEXECUTED if framework in text]
+
+    assert not offending, offending
+
+
+def test_the_results_directory_holds_nothing_but_its_placeholder():
+    present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
+
+    assert present == [".gitkeep"], present

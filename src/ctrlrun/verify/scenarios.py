@@ -44,6 +44,7 @@ from ..authority import (
     CONTAINMENT,
     DEEP_WILDCARD,
     DIMENSIONS,
+    REASON_PRECEDENCE,
     Authority,
     Grant,
     Subject,
@@ -1311,36 +1312,57 @@ class Engine:
             return self.na("G6", reg.NO_ACTIONS)
         digest = hashlib.sha256("\n".join(listed).encode("utf-8")).hexdigest()[:12]
         absent = f"ctrlrun.verify.absent.{digest}"
-        # SPEC: §2.2 fixes G6's observable as `ActionDenied(reason="unknown_action")`, and
-        # `v0.3 §4.3` evaluates authority **before** policy — so under an `authority:` section
-        # a name no grant covers is refused by the authority axis and the policy axis is never
-        # reached. G6 descends from `v0.1 §7` T6, which is about the policy axis and predates
-        # the authority model, so its scenario drives a `Control` composed from the policy
-        # alone. The kernel code under test is unchanged; what is left out is a second,
-        # independent refusal that G7 and G8 exercise directly.
-        control, store, recorder, _ = self.control("G6", authority=False)
+        # The guarantee is the **behaviour** - an action the policy does not list never
+        # executes - and not one particular reason string. §2.2 names `unknown_action`, which
+        # is what a v0.2 configuration produces; under an `authority:` section `v0.3 §4.3`
+        # evaluates authority first and no grant covers a name derived to collide with
+        # nothing, so the same refusal arrives as an authority denial before policy is
+        # reached. Both are the guarantee holding. What is asserted is that the refusal
+        # happened, that its reason is one this configuration can actually produce, and that
+        # nothing ran; the reason is reported so a reader can see which axis refused
+        # (SPEC-v0.4 §12.1).
+        reachable = {"unknown_action"}
+        if self.authority is not None:
+            reachable |= set(REASON_PRECEDENCE)
+        selection = self.select()
+        principal = Principal(agent=APPROVER) if selection is None else selection.principal
+        environment = self._default_environment if selection is None else selection.environment
+        control, store, recorder, _ = self._control_for(
+            "G6",
+            selection
+            or _Selection(
+                action=absent,
+                arguments={},
+                decision=Decision.DENY,
+                resource=None,
+                effect_key=None,
+                principal=principal,
+                environment=environment,
+            ),
+        )
 
         def body(detail: dict[str, Any]) -> None:
-            detail["axis"] = "policy"
             detail["absent_action"] = absent
+            detail["reachable_reasons"] = sorted(reachable)
             executor = _Executor()
             action = Action(
                 name=absent,
                 arguments={},
-                principal=Principal(agent=APPROVER),
-                environment=self._default_environment,
+                principal=principal,
+                environment=environment,
             )
             refusal = self.refused(
                 lambda: control.execute(action, executor, None),
                 (ActionDenied,),
-                "ActionDenied(reason='unknown_action')",
+                f"ActionDenied with a reason in {sorted(reachable)}",
                 f"the unlisted action {absent} was not refused",
             )
             reason = getattr(refusal, "reason", "")
+            detail["refused_by"] = reason
             _expect(
-                reason == "unknown_action",
-                "ActionDenied(reason='unknown_action')",
-                f"ActionDenied(reason={reason!r})",
+                reason in reachable,
+                f"ActionDenied with a reason in {sorted(reachable)}",
+                f"ActionDenied(reason={reason!r}), which this configuration cannot produce",
             )
             _expect(
                 executor.calls == 0,
@@ -1353,18 +1375,33 @@ class Engine:
                 "a `denied` receipt is written",
                 f"the receipt is {None if receipt is None else receipt.result}",
             )
-            known = Action(
-                name=listed[0],
-                arguments={},
-                principal=Principal(agent=APPROVER),
-                environment=self._default_environment,
-            )
-            evaluation = control.evaluate(known)
-            _expect_control(
-                evaluation.reason != "unknown_action",
-                f"the listed action {listed[0]} evaluates to something other than unknown_action",
-                f"it evaluated to {evaluation.decision}/{evaluation.reason}",
-            )
+            # The control. Without it the guarantee is satisfied by a Control that refuses
+            # everything, and the report would say so in green.
+            if selection is not None:
+                detail["control"] = "an action this configuration admits reaches a decision"
+                evaluation = control.evaluate(selection.build())
+                _expect_control(
+                    evaluation.decision is not Decision.DENY,
+                    f"{selection.action} evaluates to something other than a denial",
+                    f"it evaluated to {evaluation.decision}/{evaluation.reason}",
+                )
+            else:
+                # Nothing in this configuration can run, so the strongest control available
+                # is that a **listed** action is refused for some reason other than being
+                # unlisted. Recorded, because a weaker control is not the same control.
+                detail["control"] = "a listed action is refused for some other reason"
+                known = Action(
+                    name=listed[0],
+                    arguments={},
+                    principal=principal,
+                    environment=environment,
+                )
+                evaluation = control.evaluate(known)
+                _expect_control(
+                    evaluation.reason != "unknown_action",
+                    f"the listed action {listed[0]} does not evaluate to unknown_action",
+                    f"it evaluated to {evaluation.decision}/{evaluation.reason}",
+                )
 
         try:
             return self.graded("G6", None, store, recorder, body)

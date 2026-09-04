@@ -4,7 +4,10 @@ A prebuilt ReAct agent with one tool, run once on the scenario prompt. No retry 
 attached to the tool node and no `RetryPolicy` is passed to the graph: §7.3 rule 3 says
 framework defaults, and what LangGraph does with a tool that raised is precisely the finding.
 
-**Not run in this repository's CI.** It needs `langgraph`, a chat model and a key.
+**Never executed.** Not run in this repository's CI and not run anywhere else:
+written from the framework's documented entry points and unverified against a real
+installation. Nothing this adapter would report is a finding until somebody runs it,
+and running it needs `langgraph`, a chat model and a key.
 """
 
 from __future__ import annotations
