@@ -523,12 +523,21 @@ adapter would like to check:
 
 - **`True`.** The answer MUST carry `approved_arguments`: the arguments the human's answer was
   given against, recovered from the framework's own record of it — LangGraph's resume value, the
-  Agents SDK's `ToolApprovalItem`. The provider compares them to `pending.arguments` with the
-  type-strict equality of `v0.1 §3.2`, and refuses on any difference:
+  Agents SDK's `ToolApprovalItem`. The provider **rebuilds the stored request's `Action` with
+  those arguments and compares `action_hash`**, and refuses on any difference:
   `ApprovalMismatch(reason="mismatch")`, nothing granted, the request left `pending`. An answer
   that omits them when the adapter declared it would carry them is refused the same way — a
-  declaration is not a hint. **This is prevention**, it is performed in core, and it is the same
-  check `WebhookApprovalProvider` makes on an inbound answer, which is mandatory there too.
+  declaration is not a hint. **This is prevention**, it is performed in core, and it is
+  literally `v0.1 §4.2 A1`'s comparison — the same one `WebhookApprovalProvider` makes on an
+  inbound answer, where it is mandatory too.
+
+  Rebuilding rather than comparing the mappings directly is deliberate. `action_hash` excludes
+  `action_id` (`v0.1 §2.2`), so the replica differs from the stored proposal in exactly the
+  dimension under test and in no other; the comparison is over canonical bytes rather than over
+  Python objects, so `True` cannot compare equal to `1`; and `Action.__post_init__` validates
+  the answer's arguments on the way in, so a `float` or a `set` arriving from a framework's JSON
+  is `InvalidArgument` at the gate rather than a silent inequality (`v0.1 §2.3`). A second
+  equality implementation here would be a second place for the binding to drift.
 - **`False`.** The framework's resumption carries nothing the adapter can inspect. The binding
   across the interrupt is then **the framework's checkpoint, not CTRLRun's**: that is
   *attribution*, evidence will show what was approved and what ran, and a divergence is findable
@@ -541,10 +550,11 @@ because it was shown one. A framework's approval item was not: it records the ar
 proposed and knows nothing of CTRLRun's canonical form, and an adapter that computed a hash to
 echo would have to build an `Action`, which needs a `Principal`, which §4.2 forbids — the same
 hole `needs_approval` closed in §2.2. So the carried value is the one a framework actually holds.
-It is not a weaker check: within one framework call the action's name and environment come from
-the `Control`, its `resource` is a template over its arguments (`v0.1 §5.1`) and its principal
-from the `IdentityProvider`, so **the arguments are the only component of the canonical form a
-replay can change**, and comparing them is comparing the hash for everything at risk.
+It is not a weaker check, and the rebuild above is why: what is compared is the full
+`action_hash`, and the arguments are simply the only component of it a framework can hand back —
+within one framework call the action's name and environment come from the `Control`, its
+`resource` is a template over its arguments (`v0.1 §5.1`), and its principal from the
+`IdentityProvider`.
 
 **An adapter MUST NOT synthesize `approved_arguments` from `pending.arguments`.** Handing back a
 copy of what it was just given makes every comparison trivially pass; it is manufacturing the
