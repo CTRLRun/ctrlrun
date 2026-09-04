@@ -7,6 +7,73 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+Work towards **0.5.0 "Adapter contract"**. v0.4 asked *does it hold in my setup?* v0.5 asks a
+narrower and harder question: **can somebody else implement this?** The adapter contract is one
+of the six things v1.0 freezes, so it is written to be lived with rather than revised once
+somebody tries it.
+
+### Added
+
+- **`docs/SPEC-v0.5.md`** — the v0.5 contract, a delta over v0.1, v0.2, v0.3 and v0.4. It fixes
+  the adapter surface (§2), the approval round trip (§3), the `SPEC-v0.3.md` §4.3.1 rows an
+  adapter adds (§4), the conformance kit (§5), packaging and versioning (§6), what an adapter
+  must document (§7), the acceptance tests T126–T139 (§8) and the public names v1.0 will freeze
+  (§9). No implementation lands with it.
+
+  Five decisions are written into it **with their arguments**, because a decision whose
+  reasoning lives only in a build note is one the next session re-litigates:
+  `ApprovalRequired` + `with_approval` rather than `Suspended` + `Control.resume`; a Protocol
+  rather than a base class; the conformance kit in this repository rather than a third distribution;
+  one repository with separate distributions; and an adapter that **sees** the principal and
+  never supplies one.
+
+  A sixth was open and is settled in §3.6: an adapter **never interrupts in observe mode**,
+  **never prints** — it is inside somebody else's loop and may have nowhere to print — and
+  **logs the `SPEC-v0.3.md` §6.5 banner once per `Control`**, which `ctrlrun.adapter.banner`
+  does so no two adapters word it differently. The conformance kit **refuses** an observing
+  `Control` — a refused report with no suites, which is not a success — rather than producing
+  an all-`not_applicable` report with a zero denominator, because `0/0` reported as a pass is
+  the false green `SPEC-v0.4.md` §3.8 refuses by name.
+
+  **An independent review in a session that did not write the document found five defects that
+  would each have produced an insecure or unimplementable adapter, and §9.1 records them.** The
+  worst was `--principal-from-client-info`'s third costume: §3.5 told an adapter to answer its
+  framework's pre-invocation predicate with `Control.evaluate(action)`, and `Action.principal`
+  has no default — so the only way to obey was to build a principal from the framework's
+  session. `ctrlrun.adapter.needs_approval` is core's because of that, and
+  `Control.resolve_principal` is promoted from private for it: the identity seam an adapter may
+  **read** and may not supply.
+
+- **`ctrlrun.adapter`** — the adapter surface: the `FrameworkInterrupt` Protocol,
+  `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval` and
+  `banner`. Core and stdlib, re-exported from `ctrlrun`, and `Control.resolve_principal` is
+  promoted from private for it — the identity seam an adapter may **read** and may not supply.
+
+- **`ctrlrun.conformance`** — the adapter conformance kit: the `SPEC-v0.1.md` §7 and
+  `SPEC-v0.3.md` §10 acceptance suites runnable against any adapter through that surface, and
+  **eleven adapters broken in one named way each**, written before the reference adapters because
+  "two adapters pass the suites" means nothing until the suite can fail.
+
+  It is **core and stdlib-only**, not the extra `SPEC-v0.5.md` §5.1 originally specified. The
+  premise there was that a kit needs `pytest`; building it showed otherwise, and an extra with
+  no dependency behind it is an install line that installs nothing. §12.1 records the change.
+  `dependencies` is unchanged: `pyyaml` and `click`.
+
+### Changed
+
+- **`docs/ROADMAP.md`'s v0.5 bullet was wrong and is corrected here**, not silently. It said
+  the reference adapters map their frameworks' interrupts onto `Suspended` / `Control.resume`,
+  "which v0.2 already ships for exactly this shape". It does not: `Suspended` exists for the
+  remote asking a question *mid-execution*, where the reservation is already taken and must
+  stay taken, and an approval gate has none to hold — v0.1 consumes the approval in the same
+  transaction as the reservation, so a human deliberating for an hour pins nothing.
+  `SPEC-v0.5.md` §3.1 argues it in full. This is the treatment `SPEC-v0.4.md` §9.4 gave the
+  threat model's sentence about a check verify could not deliver.
+
+- Version is `0.5.0.dev0`.
+
 ## [0.4.0] - 2026-09-04
 
 **Does it hold in *your* setup?** Everything CTRLRun guarantees was proven, until now, by this

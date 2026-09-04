@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.4.0"
+version = "0.5.0.dev0"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -154,6 +154,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # refusal names follow this codebase's convention (DuplicateEffect, AmbiguousEffect), not the
 # suffix rule, as `errors.py` already does.
 "src/ctrlrun/verify/*.py" = ["ANN401", "N818"]
+# The conformance kit's subject matter is an adapter's return value, which is whatever the
+# operator's executor returned and has no narrower type — the same reasoning that exempts
+# `state.py`'s `commit_effect(result: Any)`. `ConformanceAdapter.invoke -> Any` is frozen in
+# SPEC-v0.5 §9 for that reason.
+"src/ctrlrun/conformance/*.py" = ["ANN401"]
 # The research harness is outside `src/` and outside the package (SPEC-v0.4 §7.1). It keeps
 # the line length and the import rules, because those are about reading it — but it is not
 # held to the kernel's typing discipline: its subject matter is a `BaseHTTPRequestHandler`

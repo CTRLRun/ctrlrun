@@ -1047,8 +1047,16 @@ implementer that delegation is authenticated.
 | The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) |
 | `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) |
 | `ctrlrun.verify.run` | no - it drives the rows above | no - it synthesizes principals for a scratch store | no - it asserts that the rows above do |
+| An adapter's protected tool -> `@protect` -> `Control.execute` | yes - `@protect` does, from the bound call | yes (§3.2), from the `Control`'s provider | yes, before the approval gate |
+| `ctrlrun.adapter.needs_approval` -> `Control.evaluate` | yes - **core** builds it; the adapter supplies neither a principal nor an `Action` | yes (§3.2), by `Control.resolve_principal` | yes - the combined §4.6 decision, and it writes nothing |
+| `ctrlrun.adapter.InterruptApprovalProvider.wait` -> `grant_approval` / `deny_approval` | no - it records an answer about an action that already exists | no - the principal was resolved when the request was created | **no**, and `SPEC-v0.5.md` §4.1 argues why: a grant authorizes nothing on its own, and `Control.execute` decides the action again in full before consuming it |
 
-The last row is **informational**, added by `SPEC-v0.4.md` §3.9 and §9.4. `ctrlrun verify`
+The `ctrlrun.verify.run` row is **informational**, added by `SPEC-v0.4.md` §3.9 and §9.4. The
+three adapter rows are added by `SPEC-v0.5.md` §4.1, which states each cell with its argument;
+the first of them is this table's `@protect` row reached through a framework, and is listed
+because a reader looking for "what does an adapter do" must find it here rather than infer it.
+
+`ctrlrun verify`
 proposes no action of its own: it constructs `Control` objects against a scratch store and calls
 the entry points already listed, asserting that each applies the checks this table requires. It
 is in the table because a reader will look for it, not because it is a new way in.

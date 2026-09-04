@@ -452,13 +452,21 @@ class Control:
         """SPEC-v0.3 §2.3. `expires_at is None` is the absence of a check, not one that passes."""
         return principal.expires_at is not None and self._clock() > principal.expires_at
 
-    def _resolve_principal(self, action_name: str) -> Principal:
+    def resolve_principal(self, action_name: str) -> Principal:
         """The principal for this action, per SPEC-v0.3 §3.2's table.
 
         The provider wins where it answers, because §4 makes the principal an authorization
         input and a self-asserted name cannot be one. A `None` is a *decline* and leaves the
         v0.1 `context()` path intact; a raise is a *refusal* and is never backfilled, since
         falling back there would turn a rejected credential into a successful action.
+
+        Public since SPEC-v0.5 §9, promoted for `ctrlrun.adapter.needs_approval`: a framework
+        that asks whether a tool call needs approval *before* it invokes the tool needs an
+        `Action`, an `Action` needs a `Principal`, and the only other place one could come from
+        is the framework's own session -- which is `--principal-from-client-info` (SPEC-v0.3
+        §8.1) in a third costume. This is the seam an adapter may **read** and may not supply.
+        It adds no capability: `@protect` has resolved principals this way since v0.3, and this
+        method writes nothing, appends nothing and creates no request.
         """
         invocation = _CONTEXT.get(None)
         from_context = invocation.principal if invocation is not None else None
@@ -1838,7 +1846,7 @@ def protect(
                 # this call never needed.
                 _refuse_no_principal(name)
             resolved = control if control is not None else _default_control()
-            principal = resolved._resolve_principal(name)
+            principal = resolved.resolve_principal(name)
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
             effect_template, resource_template = _templates_in_force(

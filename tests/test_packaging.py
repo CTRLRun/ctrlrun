@@ -466,3 +466,33 @@ def test_every_test_docs_claims_cites_exists():
     assert not cited - defined, (
         f"CLAIMS.md cites tests that do not exist: {sorted(cited - defined)}"
     )
+
+
+def test_no_credential_file_is_tracked():
+    """`.env` is what the framework probe reads its OpenAI key from (SPEC-v0.4 §7), and it
+    sits at the repository root where `git add -A` sweeps it up without asking. It was staged
+    once; the only thing between it and a public commit was GitHub's push protection, which
+    is a remote-side net and not a local guarantee.
+
+    `.gitignore` now covers it, and this asserts the index rather than the ignore file --
+    a path already tracked stays tracked no matter what `.gitignore` says afterwards, which
+    is the half of the rule that ignoring alone does not give you.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tracked.returncode != 0:  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+
+    offending = [
+        path
+        for path in tracked.stdout.split()
+        if path.rsplit("/", 1)[-1].startswith(".env")
+        and not path.rsplit("/", 1)[-1].endswith(".example")
+    ]
+
+    assert offending == [], offending
