@@ -1,6 +1,6 @@
-"""The four-scenario demo with an in-process fake Stripe. Build-list item 8; SPEC §7 T11.
+"""The five-scenario demo with an in-process fake Stripe. SPEC-v0.1 §7 T11, SPEC-v0.3 §1.2.
 
-Four ways an agent action goes wrong at the boundary between intention and effect, and what
+Five ways an agent action goes wrong at the boundary between intention and effect, and what
 CTRLRun does about each. Everything runs in this process: no network, no clock skew, no
 sleeping. The fake remote is the only thing pretending — and it pretends in the one way that
 matters, by committing before its response goes missing.
@@ -18,17 +18,21 @@ from typing import Any, Final, TypeVar
 
 import click
 
+from ..action import Action, Principal
 from ..approval import ScriptedApprovalProvider
+from ..authority import Authority, Grant, grant_from_yaml
 from ..control import Control, context, protect, with_approval
 from ..errors import (
     AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
+    AuthorityDenied,
+    AuthorityEscalation,
     DuplicateEffect,
 )
 from ..policy import Policy
 from ..receipt import EVENTS_FILENAME, RECEIPTS_FILENAME, JSONLEventSink
-from ..state import SQLiteStateStore
+from ..state import SQLiteStateStore, StateStore
 
 #: Where the demo keeps its own store and evidence, under `.ctrlrun/`.
 DEMO_DIRNAME: Final = "demo"
@@ -39,6 +43,9 @@ SCENARIO_HEADINGS: Final = (
     "Approval mutation",
     "Concurrent agents, same effect",
     "Approval replay",
+    # SPEC-v0.3 §1.2 — the fifth answers a different question from the other four. They are
+    # about *what* is being done; this one is about *who* is entitled to do it.
+    "Authority escalation",
 )
 
 #: What each scenario refunds, in integer minor units (SPEC-v0.1 §2.3). The README's
@@ -51,10 +58,22 @@ MUTATED_AMOUNT: Final = 500000  # €5,000 — what the agent tried to run inste
 CONCURRENT_AMOUNT: Final = 50000  # €500 — autonomous, raced for by two agents
 REPLAY_AMOUNT: Final = 200000  # €2,000 — approved once, presented twice
 
+#: Scenario 5's chain, in integer minor units. Each link is narrower than the one above it,
+#: which is the whole of what "attenuation" means (SPEC-v0.3 §5.4).
+HEAD_OF_SUPPORT_CEILING: Final = 10000000  # €100,000 — the human's own grant, delegable
+FINANCE_CEILING: Final = 2500000  # €25,000 — delegated to the finance agent
+SUPPORT_CEILING: Final = 200000  # €2,000 — delegated on to the support agent
+ESCALATION_AMOUNT: Final = 5000000  # €50,000 — what the support agent asks for
+WITHIN_GRANT_AMOUNT: Final = 150000  # €1,500 — what it is actually entitled to
+
 #: The amounts the README prints, in the order it prints them.
 README_AMOUNTS: Final = (LOST_RESPONSE_AMOUNT, PROPOSED_AMOUNT, MUTATED_AMOUNT)
 
 #: Amounts are integer minor units (SPEC-v0.1 §2.3): €1,000 autonomous, €10,000 with a human.
+#:
+#: Scenarios 1 to 4 load this one, and it carries **no `authority:` section**: that is v0.2
+#: behaviour exactly (SPEC-v0.3 §4.1), and running the first four against it is the demo's own
+#: small proof that authority is opt-in. Scenario 5 builds its own document.
 DEMO_POLICY: Final = """
 schema: ctrlrun.policy/v1
 actions:
@@ -143,7 +162,7 @@ def run_demo(root: Path) -> None:
     def refund(payment_id: str, amount: int, currency: str = "EUR") -> dict[str, Any]:
         return remote.refund(payment_id, amount)
 
-    click.echo("CTRLRun demo — four ways an agent action goes wrong, and what stops it.")
+    click.echo("CTRLRun demo — five ways an agent action goes wrong, and what stops it.")
     click.echo(
         "Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, "
         "above that are denied."
@@ -154,6 +173,7 @@ def run_demo(root: Path) -> None:
         _approval_mutation(refund, approvals)
         _concurrent_agents(refund, remote)
         _approval_replay(refund, approvals)
+        _authority_escalation(control, store, remote)
     finally:
         written = len(store.receipts())
         store.close()
@@ -253,6 +273,151 @@ def _approval_replay(refund: Callable[..., Any], approvals: ScriptedApprovalProv
 
         blocked = _refused(present_it_again, ApprovalMismatch)
     click.echo(f"{_BLOCKED}single-use approval already {blocked.reason}")
+
+
+# --- 5. authority escalation (SPEC-v0.3 §5.6, T80's story) ----------------------------
+
+
+#: Scenario 5's own document. The `authority:` section is the whole point, so it needs
+#: `ctrlrun.policy/v3`; the `actions:` half is the same money policy the other four use, so a
+#: reader comparing the two sees exactly one difference.
+AUTHORITY_POLICY: Final = f"""
+schema: ctrlrun.policy/v3
+authority:
+  max_delegation_depth: 3
+  grants:
+    - id: head-of-support
+      subject: {{ agent: "head-of-support", user: "dana@example.com" }}
+      actions: ["stripe.refund"]
+      constraints: {{ amount_lte: {HEAD_OF_SUPPORT_CEILING} }}
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+actions:
+  stripe.refund:
+    rules:
+      - when: {{ amount_lte: 100000 }}
+        decision: allow
+      - when: {{ amount_lte: 1000000 }}
+        decision: approve
+      - decision: deny
+"""
+
+
+def _delegated(ceiling: int, agent: str, user: str) -> Grant:
+    """One narrower grant, in the shape `ctrlrun delegate --file` takes (SPEC-v0.3 §5.7).
+
+    Every dimension is stated. **Omitting one its parent constrains would be rejected, not
+    inherited** (§5.4) — which is the sentence this scenario exists to make concrete, and the
+    opposite of how almost every permission system behaves.
+    """
+    return grant_from_yaml(
+        f"""
+subject: {{ agent: "{agent}", user: "{user}" }}
+actions: ["stripe.refund"]
+constraints: {{ amount_lte: {ceiling} }}
+delegable: true
+expires_at: "2026-12-01T00:00:00Z"
+"""
+    )
+
+
+def _authority_escalation(base: Control, store: StateStore, remote: FakeStripe) -> None:
+    """A delegation chain, and the two ways of stepping outside it (SPEC-v0.3 §5.6).
+
+    Scenarios 1 to 4 ask "is this action safe to run". This one asks "is this principal
+    entitled to propose it at all" — a separate axis, evaluated first, that a policy cannot
+    see (§4.7). A grant carries no `decision:`: how much autonomy an action has is the same
+    for every principal, and what differs is whether they may ask.
+    """
+    _heading(5, SCENARIO_HEADINGS[4])
+    # The same store and the **same sinks** as the other four. A second Control that quietly
+    # dropped the JSONL sink would leave the demo printing a receipt count from the store that
+    # the file it points the reader at does not match — which is the shape of a false green,
+    # in a transcript people paste into issues.
+    control = Control(
+        Policy.from_yaml(AUTHORITY_POLICY, source="<demo>"),
+        store,
+        base.approvals,
+        sinks=base.sinks,
+        authority=Authority.from_yaml(AUTHORITY_POLICY, source="<demo>"),
+    )
+    head = Principal(agent="head-of-support", user="dana@example.com")
+    finance = Principal(agent="finance-agent", user="dana@example.com")
+    support = Principal(agent="support-agent", user="dana@example.com")
+
+    finance_grant = control.delegate(
+        "head-of-support", _delegated(FINANCE_CEILING, "finance-agent", "dana@example.com"), by=head
+    )
+    support_grant = control.delegate(
+        finance_grant.delegation_id,
+        _delegated(SUPPORT_CEILING, "support-agent", "dana@example.com"),
+        by=finance,
+    )
+    click.echo(
+        f"   human {_euros(HEAD_OF_SUPPORT_CEILING)} delegable  →  "
+        f"finance agent {_euros(FINANCE_CEILING)}  →  support agent {_euros(SUPPORT_CEILING)}"
+    )
+    click.echo(f"   support agent's grant: {support_grant.delegation_id}")
+
+    def escalate() -> None:
+        control.execute(
+            _refund_action(support, "txn_5", ESCALATION_AMOUNT),
+            lambda: remote.refund("txn_5", ESCALATION_AMOUNT),
+            "refund:txn_5",
+        )
+
+    click.echo(f"   support agent requests {_euros(ESCALATION_AMOUNT)}  →")
+    blocked = _refused(escalate, AuthorityDenied)
+    click.echo(f"{_BLOCKED}outside the delegated grant ({blocked.reason})")
+    click.echo(f"   remote refund calls: {remote.calls.count('txn_5')}")
+
+    # And the delegation that would have widened it is refused at creation, on the dimension
+    # it widened — so an agent cannot reach the amount above by minting its own authority.
+    def over_delegate() -> None:
+        control.delegate(
+            finance_grant.delegation_id,
+            _delegated(ESCALATION_AMOUNT, "support-agent", "dana@example.com"),
+            by=finance,
+        )
+
+    escalation = _refused(over_delegate, AuthorityEscalation)
+    click.echo(
+        f"   finance agent tries to delegate {_euros(ESCALATION_AMOUNT)} under its own "
+        f"{_euros(FINANCE_CEILING)}  →  refused ({escalation.reason}: {escalation.dimension})"
+    )
+
+    # The control, and the point of §4.6 in one line: the same agent, the same chain, an
+    # amount it *is* entitled to. Authority permits it — and the policy still asks a human,
+    # because the two axes combine as the stricter of the pair. Without this the scenario
+    # would be consistent with a chain that authorized nothing at all.
+    def within_the_grant() -> None:
+        control.execute(
+            _refund_action(support, "txn_6", WITHIN_GRANT_AMOUNT),
+            lambda: remote.refund("txn_6", WITHIN_GRANT_AMOUNT),
+            "refund:txn_6",
+        )
+
+    pending = _refused(within_the_grant, ApprovalRequired)
+    click.echo(
+        f"   support agent requests {_euros(WITHIN_GRANT_AMOUNT)}  →  authority permits it, "
+        f"and the policy asks a human ({pending.request_id})"
+    )
+    click.echo("   two axes, and an action needs both: the stricter of the pair wins")
+
+
+def _refund_action(principal: Principal, payment_id: str, amount: int) -> Action:
+    """The Action `@protect` would build, built by hand.
+
+    Scenario 5 needs three different principals against one `Control`, and `context()` names a
+    principal rather than resolving one — so the Action is constructed directly, which is the
+    same public path a gateway or an adapter takes.
+    """
+    return Action(
+        name="stripe.refund",
+        arguments={"payment_id": payment_id, "amount": amount, "currency": "EUR"},
+        principal=principal,
+        resource=f"payment:{payment_id}",
+    )
 
 
 def _propose(refund: Callable[..., Any], payment_id: str, amount: int) -> str:

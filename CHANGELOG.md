@@ -14,6 +14,51 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **A fifth demo scenario, `ctrlrun demo` — authority escalation** (build-list item 6,
+  SPEC-v0.3 §1.2). The first four ask whether an *action* is safe to run; this one asks
+  whether a *principal* is entitled to propose it. A human's €100,000 delegable grant narrows
+  to a finance agent's €25,000 and then to a support agent's €2,000, and the two ways out of
+  the chain fail at two different moments: asking for €50,000 is refused at **evaluation**
+  (`authority_constraint`), and minting €50,000 under a €25,000 parent is refused at
+  **creation** (`containment`, naming the dimension). Asserting one would hide the other. The
+  scenario ends with an amount the grant *does* permit, which the policy still stops to ask a
+  human about — the two axes, combining as the stricter of the pair, in one line.
+- **`examples/authority-escalation/`** — the same story as a standalone script, with the
+  `else: raise SystemExit(...)` guard on every refusal. A demonstration that quietly starts
+  succeeding is worse than none, because it keeps printing the line that says the guard worked.
+- **`examples/authority/`** — a payments delegation chain and a DevOps chain, as complete
+  documents to read rather than run, with a README that says in its first paragraph that every
+  principal in them is invented.
+- **`docs/authority.md`** — grants, delegation and the omission rule in plain language,
+  including the two things it is worth knowing before you need them: an `Authority` is built at
+  load time and is not hot-reloaded, and there is no way to list delegations, so cutting a
+  chain of unknown width means `delegable: false` on the root and a restart.
+- **`docs/THREAT_MODEL.md` gains v0.3's boundary.** In scope: delegation escalation, omission
+  as widening, expired and revoked authority, token forgery, cross-JWT confusion, and signing
+  keys fetched from somewhere else. Out of scope, and stated rather than implied: a compromised
+  identity provider, a `HeaderIdentityProvider` behind a proxy that does not overwrite, a
+  revoked token before its `exp`, a tenant-templated issuer, and authority across an
+  agent-to-agent hop.
+- **`MANIFEST.in` ships `examples/**/README.md`, and a test now keeps it honest.** The file
+  has claimed for two releases that a test named `test_the_sdist_carries_everything_the_tests_need`
+  keeps it in step, and there was no such test — so the first README it forgot was found by
+  the CI job that builds an sdist and runs its tests, one push after it could have been found
+  locally. That is v0.2's four `.gitignore`d policy files in a different costume: setuptools
+  resolves `MANIFEST.in` against the working tree, so a local run is green either way. The
+  test now checks every **git-tracked** file under `examples/` and `docs/` against the
+  manifest's include patterns, and it found `examples/acs/README.md` had been missing since
+  v0.2 as well.
+- **Fixed a test whose fuse was the suite's own duration.** T27's parametrize list built two
+  timestamps at **collection** time, so the future-dated one was 400 seconds ahead of
+  collection and only `400 - <however long the suite had been running>` seconds ahead by the
+  time the test executed. Past the replay window's 300 seconds it landed *inside* the window
+  and the refusal under test stopped happening. It had been latent since v0.2 and fired the
+  first time an item made the suite slower. The timestamps are built when the test runs, and
+  the fix is verified against a `conftest` that stalls 120 seconds between collection and the
+  body — the condition that failed CI.
+- **The nine sector templates stay on v0.1 and now say why.** They gain no `authority:`
+  section: a grant names a real principal in a real organization, and a template that shipped
+  plausible ones would invite an operator to adopt them.
 - **`JWTIdentityProvider`** (build-list item 5, SPEC-v0.3 §3.4), in `ctrlrun[identity]`
   (`pyjwt[crypto]`), imported by naming it. It reads a bearer token from a header, verifies it
   against a JWKS or a static key, and maps the verified claims onto a `Principal`. **It issues
@@ -259,6 +304,10 @@ shipped, and the only thing in the tree today is the contract.
   writer to `mode: observe`.** An enforce-mode 0.3 writer emits no `observed` receipt and is
   safe to mix. An external reader that keys on `result` must read `execution` too, or it
   counts every observed execution as if nothing ran.
+- **The demo's scenario 5 shares the store *and the sinks* of the other four.** A second
+  `Control` that quietly dropped the JSONL sink left the demo printing a receipt count from
+  the store that the file it points the reader at did not match — a false green, in a
+  transcript people paste into issues.
 - **`ctrlrun.receipt/v2` and `ctrlrun.inspection/v2`.** The receipt carries the whole principal
   and reserves `execution` and `would_have` as `null` until observe mode fills them, so the
   shape a reader parses settles once rather than changing twice under one version string. The

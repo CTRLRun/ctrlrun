@@ -16,6 +16,7 @@ import hmac
 import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -266,22 +267,29 @@ def test_T27_a_valid_deny_moves_the_request_to_denied(store, receiver):
     assert store.get_approval(request.request_id).status is ApprovalStatus.DENIED
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"signature": "t=1,v1=deadbeef"},
-        {"signature": "nonsense"},
-        {"signature": ""},
-        {"at": datetime.now(UTC) - timedelta(seconds=400)},
-        {"at": datetime.now(UTC) + timedelta(seconds=400)},
-        {"body_request_id": "apr_somethingelse"},
-        {"action_hash": "sha256:" + "0" * 64},
-    ],
-)
-def test_T27_every_broken_condition_is_400_and_changes_nothing(store, receiver, overrides):
+#: Each way an inbound approval can be broken, as a *factory*. Not a literal `overrides`
+#: dict, because two of these are timestamps: a parametrize list is evaluated at **collection**
+#: time, so `datetime.now(UTC) + timedelta(seconds=400)` is 400 seconds ahead of collection
+#: and only `400 - <however long the suite has been running>` seconds ahead by the time this
+#: test executes. Past the replay window's 300 seconds of runtime it lands *inside* the window
+#: and the refusal under test stops happening — a time bomb whose fuse is the suite's own
+#: duration, which duly fired the first time an item made the suite slower.
+_BROKEN_CONDITIONS: dict[str, Callable[[], dict[str, object]]] = {
+    "bad-signature": lambda: {"signature": "t=1,v1=deadbeef"},
+    "unparseable-signature": lambda: {"signature": "nonsense"},
+    "no-signature": lambda: {"signature": ""},
+    "too-old": lambda: {"at": datetime.now(UTC) - timedelta(seconds=400)},
+    "too-far-ahead": lambda: {"at": datetime.now(UTC) + timedelta(seconds=400)},
+    "wrong-request-id": lambda: {"body_request_id": "apr_somethingelse"},
+    "wrong-action-hash": lambda: {"action_hash": "sha256:" + "0" * 64},
+}
+
+
+@pytest.mark.parametrize("condition", sorted(_BROKEN_CONDITIONS))
+def test_T27_every_broken_condition_is_400_and_changes_nothing(store, receiver, condition):
     request = _pending(store, receiver)
 
-    status, _ = _inbound(store, request, **overrides)
+    status, _ = _inbound(store, request, **_BROKEN_CONDITIONS[condition]())
 
     assert status == 400
     assert store.get_approval(request.request_id).status is ApprovalStatus.PENDING

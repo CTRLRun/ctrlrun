@@ -348,3 +348,74 @@ def test_MissingDependency_names_the_extra_and_the_command():
 
     assert "httpx" in str(error)
     assert "pip install 'ctrlrun[gateway]'" in str(error)
+
+
+# --- the sdist carries what the tests read (SPEC-v0.2 §1.1) -----------------------------
+
+
+def _manifest_patterns() -> tuple[list[tuple[str, str]], set[str]]:
+    """`MANIFEST.in`'s `recursive-include` pairs and its plain `include` files."""
+    recursive: list[tuple[str, str]] = []
+    plain: set[str] = set()
+    for line in (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts or parts[0].startswith("#"):
+            continue
+        if parts[0] == "recursive-include" and len(parts) >= 3:
+            recursive += [(parts[1], pattern) for pattern in parts[2:]]
+        elif parts[0] == "include":
+            plain.update(parts[1:])
+    return recursive, plain
+
+
+def test_the_sdist_carries_everything_the_tests_read():
+    """Every tracked file under `examples/` and `docs/` matches a `MANIFEST.in` include.
+
+    `MANIFEST.in` has claimed for two releases that a test named this one keeps it honest,
+    and there was no such test — so the first file it forgot was found by the CI job that
+    builds an sdist and runs its tests, one push after it could have been found here. That is
+    the same shape as v0.2's four `.gitignore`d policy files: setuptools resolves
+    `MANIFEST.in` against the working tree, so a local run is green either way.
+
+    Checked against **git**, not the filesystem, for the same reason: an untracked file is not
+    in a fresh clone whatever this file says about it.
+    """
+    import fnmatch
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "examples", "docs"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tracked.returncode != 0:  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+    recursive, plain = _manifest_patterns()
+
+    missing = [
+        path
+        for path in tracked.stdout.split()
+        if path not in plain
+        and not any(
+            path.startswith(f"{directory}/") and fnmatch.fnmatch(Path(path).name, pattern)
+            for directory, pattern in recursive
+        )
+    ]
+
+    assert not missing, f"MANIFEST.in does not ship: {sorted(missing)}"
+
+
+def test_the_manifest_check_would_notice_a_file_it_does_not_ship():
+    """The control. A check whose only evidence is a green suite is a check nothing
+    exercises, and this one is only ever *not* triggered."""
+    import fnmatch
+
+    recursive, plain = _manifest_patterns()
+    invented = "examples/authority/notes.rst"
+
+    assert invented not in plain
+    assert not any(
+        invented.startswith(f"{directory}/") and fnmatch.fnmatch("notes.rst", pattern)
+        for directory, pattern in recursive
+    )

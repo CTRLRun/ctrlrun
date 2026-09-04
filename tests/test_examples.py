@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ctrlrun import Policy
 from ctrlrun.policy import POLICY_SCHEMA
@@ -32,11 +33,14 @@ SCENARIOS: dict[str, str] = {
     "approval-mutation": "approved action ≠ requested action",
     "agent-race": "already reserved",
     "approval-replay": "single-use approval already consumed",
+    # SPEC-v0.3 §1.2 — the fifth answers a different question from the other four: not "is
+    # this action safe to run" but "is this principal entitled to propose it at all".
+    "authority-escalation": "outside the delegated grant",
 }
 
 #: Directories under `examples/` that are not one of §1.1's failure scenarios: the sector
 #: templates, and item 8's ACS integration example (SPEC-v0.2 §9, `docs/ACS.md`).
-NOT_A_SCENARIO = ("policies", "acs", "__pycache__")
+NOT_A_SCENARIO = ("policies", "acs", "authority", "__pycache__")
 
 #: The nine sectors of SPEC-v0.2 §1.1.
 SECTORS = (
@@ -291,3 +295,107 @@ def test_T31_every_template_has_at_least_one_deny(sector):
     text = (TEMPLATES / f"{sector}.yaml").read_text(encoding="utf-8")
 
     assert "decision: deny" in text
+
+
+# --- SPEC-v0.3 §1.2: the two authority configurations ----------------------------------
+
+AUTHORITY_EXAMPLES = EXAMPLES / "authority"
+
+
+def _authority_documents() -> list[Path]:
+    return sorted(AUTHORITY_EXAMPLES.glob("*.yaml"))
+
+
+def test_the_authority_examples_are_the_two_the_spec_names():
+    """§1.2 — a payments delegation chain and a DevOps chain."""
+    assert [path.name for path in _authority_documents()] == ["devops.yaml", "payments.yaml"]
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
+def test_each_authority_example_loads_on_both_axes(path):
+    """A document that does not load is not an example of anything. Both loaders, because
+    `Policy` never reads the `authority:` section and `Authority` never reads `actions:`."""
+    from ctrlrun import Authority
+
+    document = path.read_text(encoding="utf-8")
+
+    policy = Policy.from_yaml(document, source=str(path))
+    authority = Authority.from_yaml(document, source=str(path))
+
+    assert policy.actions
+    assert authority.grants
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
+def test_each_authority_example_declares_v3(path):
+    """§12.1 — `authority:` needs `ctrlrun.policy/v3`, and a reader that ignored the section
+    would run every action with no authority check at all."""
+    from ctrlrun.policy import POLICY_SCHEMA_V3
+
+    assert Policy.from_yaml(path.read_text(encoding="utf-8")).schema == POLICY_SCHEMA_V3
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
+def test_no_authority_example_grants_everything(path):
+    """`**` on its own is the whole surface of a system. These are documents a reader copies,
+    and a template that hands out `**` teaches the habit it exists to prevent."""
+    from ctrlrun import Authority
+
+    for grant in Authority.from_yaml(path.read_text(encoding="utf-8")).grants.values():
+        assert grant.actions != ("**",), f"{path.name}: grant {grant.id!r} grants everything"
+        assert grant.subject.agent != "**", f"{path.name}: grant {grant.id!r} names any agent"
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
+def test_every_delegable_grant_in_an_example_expires(path):
+    """§4.2 — the loader refuses `delegable: true` without `expires_at`, so this cannot fail
+    while the loader holds. It is here for what it says to a reader of the *examples*: the
+    grants that can mint more authority are the ones with the nearest dates on them."""
+    from ctrlrun import Authority
+
+    delegable = [
+        grant for grant in Authority.from_yaml(path.read_text()).grants.values() if grant.delegable
+    ]
+    assert delegable, f"{path.name} shows no delegable grant, so it shows no chain"
+    assert all(grant.expires_at is not None for grant in delegable)
+
+
+def test_the_authority_examples_carry_a_readme_that_says_they_are_not_drop_in():
+    """A grant names a real principal in a real organization. Adopting somebody else's is how
+    a template becomes an incident, and the file says so on its face."""
+    readme = (AUTHORITY_EXAMPLES / "README.md").read_text(encoding="utf-8")
+
+    assert "invented" in readme
+    assert "starting points" in readme
+
+
+@pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
+def test_no_authority_example_makes_a_compliance_claim(path):
+    """ROADMAP's rule, extended to the v0.3 examples: no badge before the milestone that
+    earns it."""
+    text = path.read_text(encoding="utf-8").lower()
+
+    assert not [word for word in COMPLIANCE_WORDS if word in text]
+
+
+@pytest.mark.parametrize("path", _templates(), ids=lambda path: path.stem)
+def test_no_sector_template_ships_an_authority_section(path):
+    """SPEC-v0.3 §1.2 — the nine templates stay on v0.1 primitives and gain no grants.
+
+    A grant names a real principal in a real organization. A template that shipped plausible
+    ones would invite an operator to adopt them, which is the one way a starting point turns
+    into somebody else's access-control list. Each says so on its face, so a reader who came
+    looking for grants learns why there are none rather than assuming they were forgotten.
+    """
+    text = path.read_text(encoding="utf-8")
+    # The parsed document, not the raw text: the note explaining the absence names the key,
+    # and a substring check would be satisfied by a comment while a real section sat below it.
+    document = yaml.safe_load(text)
+
+    assert "authority" not in document
+    assert "No `authority:` section, deliberately" in text
+    assert Policy.from_yaml(text, source=str(path)).schema == POLICY_SCHEMA

@@ -34,7 +34,7 @@ pip install ctrlrun
 ctrlrun demo
 ```
 
-`ctrlrun demo` runs the four failure scenarios below in well under a second, with no external services.
+`ctrlrun demo` runs the five failure scenarios below in well under a second, with no external services.
 
 Protect your first action:
 
@@ -119,7 +119,7 @@ stay out of it unless you ask for them.
 
 ```console
 $ ctrlrun demo
-CTRLRun demo — four ways an agent action goes wrong, and what stops it.
+CTRLRun demo — five ways an agent action goes wrong, and what stops it.
 Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, above that are denied.
 
 1. Duplicate effect after a lost response
@@ -148,7 +148,18 @@ Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, abo
    same approval presented again                            →
    ✗ BLOCKED — single-use approval already consumed
 
-Receipts (7): .ctrlrun/demo/receipts.jsonl
+5. Authority escalation
+
+   human €100,000 delegable  →  finance agent €25,000  →  support agent €2,000
+   support agent's grant: dlg_5f8d41938a3f29972d5489d676cd9edb
+   support agent requests €50,000  →
+   ✗ BLOCKED — outside the delegated grant (authority_constraint)
+   remote refund calls: 0
+   finance agent tries to delegate €50,000 under its own €25,000  →  refused (containment: constraints)
+   support agent requests €1,500  →  authority permits it, and the policy asks a human (apr_f86eca24dd80206ab5189ccb1b62aa55)
+   two axes, and an action needs both: the stricter of the pair wins
+
+Receipts (8): .ctrlrun/demo/receipts.jsonl
 Events:       .ctrlrun/demo/events.jsonl
 
 Read them:    CTRLRUN_STATE=.ctrlrun/demo/state.db ctrlrun receipts

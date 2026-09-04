@@ -1,0 +1,39 @@
+# The policy and the grants this example runs under. Unknown actions are denied; a principal
+# with no grant is denied. There is no default-allow on either axis.
+#
+# `authority:` needs `ctrlrun.policy/v3`: a reader that ignored the section would run every
+# action with no authority check at all, and the schema string is the only thing standing
+# between those two outcomes.
+schema: ctrlrun.policy/v3
+
+authority:
+  # How deep a chain may go. The default is 3; it is stated here because a reader deciding
+  # what to copy should see the bound rather than inherit it.
+  max_delegation_depth: 3
+
+  grants:
+    # A human's own authority: €100,000 of refunds, and the right to delegate a narrower
+    # slice of it. `delegable: true` requires an `expires_at` — authority that can mint more
+    # authority and never lapses is the one shape this model refuses to write down.
+    - id: head-of-support
+      subject: { agent: "head-of-support", user: "dana@example.com" }
+      actions: ["stripe.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 10000000 }   # €100,000.00 in integer minor units
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+
+actions:
+  # The autonomy policy is a **separate axis** and cannot see the principal. It says how much
+  # autonomy this *action* has; the grants above say who may propose it at all. An action
+  # needs both, and the two combine as the stricter of the pair.
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }      # €0.00 to €1,000.00 — autonomous
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 1000000 }     # to €10,000.00 — a human decides
+        decision: approve
+      - decision: deny
