@@ -18,13 +18,20 @@ back from its resumption cannot exercise the binding suite, and that suite is re
 separately. `report.ok` is `False` for a zero denominator, because `0/0` reported as success is
 the same false green as `6/6` with two of them uncounted.
 
-**Stdlib only, and in core.** SPEC-v0.5 §5.1 planned this as `ctrlrun[conformance]` on the
-premise that a kit needs `pytest`. Building it showed the premise was wrong -- the suites drive a
-`Control` and compare exceptions, which is `assert` and `try`, and an adapter author runs the
-result *inside* their own pytest rather than through one. An extra with no dependency behind it
-is a `MissingDependency` that can never fire and an install line that installs nothing, so the
-kit is core, exactly as `verify/` is, for the reason `v0.4 §1` gives: a check somebody has to
-remember to install is a check that does not run. SPEC-v0.5 §12.1 records it.
+**In core, and needing nothing `ctrlrun` does not already install.** SPEC-v0.5 §5.1 planned this
+as `ctrlrun[conformance]` on the premise that a kit needs `pytest`. Building it showed the premise
+was wrong -- the suites drive a `Control` and compare exceptions, which is `assert` and `try`, and
+an adapter author runs the result *inside* their own pytest rather than through one. An extra with
+no dependency behind it is a `MissingDependency` that can never fire and an install line that
+installs nothing, so the kit is core, exactly as `verify/` is, for the reason `v0.4 §1` gives: a
+check somebody has to remember to install is a check that does not run. SPEC-v0.5 §12.1 records
+it.
+
+"Stdlib" is the loose word and is not used: the suites build their scratch policies with
+`Policy.from_yaml`, so pyyaml is a runtime dependency here as it is everywhere in the kernel. What
+matters is the claim that holds — **nothing from an extra**, and nothing the module map puts in
+`conformance/`'s "must not know about" column — and T134b asserts that by walking the package's
+imports rather than by asserting a word.
 
 Nothing in the kernel imports this package, and `import ctrlrun` does not reach it (T134).
 """

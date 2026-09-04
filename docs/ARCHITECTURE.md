@@ -190,7 +190,7 @@ import `policy.py`, so there is no cycle.
 
 v0.5 adds `conformance/` beside `verify/` and `cli/`, above `control.py`: it composes the
 kernel the way an application does, nothing in the kernel imports it, and `import ctrlrun` does
-not reach it. It is core and stdlib-only for `verify/`'s reason — a check somebody has to
+not reach it. It is core, and adds no dependency, for `verify/`'s reason — a check somebody has to
 remember to install is a check that does not run — and `SPEC-v0.5.md` §12.1 records why it is
 not the extra it was planned as.
 

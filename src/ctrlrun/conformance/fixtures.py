@@ -16,6 +16,7 @@ reports on frameworks, and neither is allowed to editorialize about the other's 
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from ..action import Action
@@ -198,14 +199,47 @@ class InterruptsOnAllow(Reference):
 
     def invoke(self, request: CallRequest) -> Any:
         self.interrupt.answer = request.answer
-        self.interrupt.interrupt(
-            PendingApproval(
-                request_id="apr_invented", action_id="act_invented", action=request.action,
-                action_hash="sha256:invented", arguments=dict(request.arguments), resource=None,
-                environment=request.control.environment, agent="?", user=None,
-                created_at=request.control._clock(), expires_at=request.control._clock(),
-            )
-        )
+        # A real framework's primitive does not raise when nobody was expected: it prompts,
+        # somebody answers, and the tool runs. So the kit double's complaint is suppressed and
+        # this carries on -- because a fixture that failed *because the double raised* would be
+        # caught by the double rather than by the kit, and an adapter with a real primitive
+        # would sail through. The interrupt **count** is what catches this, and suppressing
+        # here is what makes the count the only thing that can.
+        with contextlib.suppress(AssertionError):
+            self.interrupt.interrupt(_invented(request))
+        return self._call(request)
+
+
+def _invented(request: CallRequest) -> PendingApproval:
+    """A pending approval this adapter made up, to put in front of somebody who was not asked
+    about anything: the shape of an adapter that routes every call through its framework's
+    approval UI whether the policy asked for one or not."""
+    now = request.control._clock()
+    return PendingApproval(
+        request_id="apr_invented", action_id="act_invented", action=request.action,
+        action_hash="sha256:invented", arguments=dict(request.arguments), resource=None,
+        environment=request.control.environment, agent="?", user=None,
+        created_at=now, expires_at=now,
+    )
+
+
+class InterruptsOnlyWhenUnasked(Reference):
+    """Correct on every call the policy sends to a human, and wrong on exactly the ones it does
+    not: it puts an `ALLOW` through its framework's approval UI and nothing else.
+
+    It exists because a mutation table found A1's interrupt count **subsumed**.
+    `InterruptsOnAllow` interrupts on every call, so it bumps the count on T4, B2 and B3 as
+    well, and deleting A1's check left the kit still failing that adapter -- for a reason that
+    has nothing to do with the case A1 is. This one is invisible to every other case, so A1's
+    count is the only thing that can catch it, which is what makes A1 a check rather than a
+    restatement.
+    """
+
+    def invoke(self, request: CallRequest) -> Any:
+        self.interrupt.answer = request.answer
+        if request.answer is None:
+            with contextlib.suppress(AssertionError):
+                self.interrupt.interrupt(_invented(request))
         return self._call(request)
 
 
@@ -291,6 +325,7 @@ BROKEN: dict[str, tuple[type[Reference], str]] = {
     "swallows-denial": (SwallowsDenial, "kernel"),
     "replays-approval": (ReplaysApproval, "kernel"),
     "interrupts-on-allow": (InterruptsOnAllow, "kernel"),
+    "interrupts-only-when-unasked": (InterruptsOnlyWhenUnasked, "kernel"),
     "grants-for-itself": (GrantsForItself, "kernel"),
     "ignores-authority": (IgnoresAuthority, "authority"),
     "self-asserts-principal": (SelfAssertsPrincipal, "identity"),

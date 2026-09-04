@@ -51,7 +51,7 @@ build-list position.
 |---|---|---|---|
 | 1 | The framework probe, executed against LangGraph and the Agents SDK | not packaged | `v0.4 §7` |
 | 2 | The adapter surface `ctrlrun.adapter`, and the `v0.3 §4.3.1` rows | core | §2, §4 |
-| 3 | The conformance kit, `ctrlrun.conformance` | core, stdlib only (§12.1) | §5 |
+| 3 | The conformance kit, `ctrlrun.conformance` | core, no new dependency (§12.1) | §5 |
 | 4 | The LangGraph reference adapter, `ctrlrun-langgraph` | a separate distribution | §6 |
 | 5 | The OpenAI Agents SDK reference adapter, `ctrlrun-openai-agents` | a separate distribution | §6 |
 | 6 | A third adapter, written against this document alone | disposable | §8 |
@@ -61,8 +61,8 @@ The dependency rule of `v0.2 §1.1`, `v0.3 §1` and `v0.4 §1` is unchanged and 
 install ctrlrun` MUST continue to install nothing but `pyyaml` and `click`. **The adapter
 surface itself is core** — it is in the action path, it is stdlib, and an adapter is a separate
 distribution that depends on `ctrlrun` rather than the other way round. The **conformance kit**
-is core too, and stdlib only. It was planned as an extra on the premise that a kit needs
-`pytest`; building it showed the premise was wrong, and §12.1 records the correction.
+is core too, and adds no dependency. It was planned as an extra on the premise that a kit
+needs `pytest`; building it showed the premise was wrong, and §12.1 records the correction.
 
 ### 1.1 What an adapter is not, stated before anything else
 
@@ -778,11 +778,12 @@ programme, it certifies nothing, and passing it is not a claim about an adapter'
 answers one question: *does an action driven through this adapter get the same refusals as an
 action driven through `@protect`?*
 
-It ships in **core**, stdlib only, in this repository. §12.1 records why this changed during
+It ships in **core**, in this repository, needing nothing `pip install ctrlrun` does not already install. §12.1 records why this changed during
 item 3; the arguments as they now stand:
 
-- **It needs no third-party library.** The suites drive a `Control` and compare exceptions,
-  which is `assert` and `try`. An adapter author runs the report *inside* their own pytest —
+- **It needs nothing `pip install ctrlrun` does not already install.** The suites drive a
+  `Control` and compare exceptions, which is `assert` and `try`, and they build their scratch
+  policies with the YAML parser the kernel already depends on. An adapter author runs the report *inside* their own pytest —
   `assert run(adapter).ok` — rather than through one.
 - **An extra with nothing behind it is worse than no extra.** `ctrlrun[conformance]` would
   install nothing, and the `MissingDependency` its install line promised could never fire.
@@ -798,7 +799,7 @@ dependency nobody meant to take.
 ### 5.2 What an adapter hands the kit
 
 ```python
-# ctrlrun/conformance/__init__.py — ctrlrun[conformance]
+# ctrlrun/conformance/__init__.py — core, stdlib (§12.1)
 
 @dataclass(frozen=True)
 class CallRequest:
@@ -851,17 +852,23 @@ class SuiteResult:
 @dataclass(frozen=True)
 class ConformanceReport:
     framework: str
-    status: Literal["ok", "refused"]         # "refused" is §3.6's observing Control
+    status: Literal["ok", "refused"] = "ok"  # "refused" is §3.6's observing Control
     reason: str | None = None                # why, when refused
     suites: tuple[SuiteResult, ...] = ()
 
     @property
-    def applicable(self) -> int: ...         # suites that are not NOT_APPLICABLE
+    def applicable(self) -> tuple[SuiteResult, ...]: ...   # not NOT_APPLICABLE
     @property
-    def passed(self) -> int: ...
+    def not_applicable(self) -> tuple[SuiteResult, ...]: ...
     @property
-    def ok(self) -> bool: ...                # status "ok", applicable > 0, passed == applicable
-    def to_text(self) -> str: ...            # "4/4 (2 not applicable)", never "6/6"
+    def passed(self) -> tuple[SuiteResult, ...]: ...
+    @property
+    def ok(self) -> bool: ...                # status "ok", applicable non-empty, all passed
+    def to_dict(self) -> dict[str, Any]: ...
+    def to_text(self) -> str: ...            # "4/4 (1 not applicable)", never "5/5"
+
+#: The suites, in report order. Public because a name here is a name in an adapter's README.
+SUITES: Mapping[str, tuple[Case, ...]]
 
 
 def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> ConformanceReport: ...
@@ -878,8 +885,16 @@ defect of exactly the class it exists to find. The one thing read from `deployme
 and an observing one is refused (§3.6). It is optional because an adapter author's CI has no
 deployment to hand it, and passing one is how the observe-mode refusal reaches anybody at all.
 
-**The kit wraps the adapter's `interrupt` in a counting proxy** before wiring it, and asserts
-the count on every case that expects a human and on every case that does not. That is not
+**The kit swaps a counting proxy in for the adapter's `interrupt`** — replacing the attribute,
+not merely wiring the proxy into the provider — and asserts the count on every case that expects
+a human and on every case that does not. `run()` restores the original when it is done.
+
+Replacing rather than wiring is the difference between a live guard and a dead one. A proxy
+wired only into `InterruptApprovalProvider` counts the calls that arrive through `wait()`, and
+`wait()` is reached only on `ApprovalRequired`, which an `ALLOW` policy never raises — so an
+adapter that put an allowed call to a human by reaching its **own** primitive out of band was
+invisible, and the case forbidding it was a negative test against behaviour the path already
+prevented. An independent review found it by writing that adapter: it scored 5/5. That is not
 belt-and-braces: `fixtures.GrantsForItself` grants the request before `@protect` reaches
 `wait()`, so the provider finds the record already `granted` and returns it — correctly, since
 `ctrlrun approve` grants out of band too — and the framework's primitive is never called. Every
@@ -956,6 +971,7 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 | `swallows-denial` | Catches `ActionDenied` and returns a value | `kernel` |
 | `replays-approval` | Keeps a `request_id` and presents it again on the next call | `kernel` |
 | `interrupts-on-allow` | Routes every call through the interrupt, `APPROVE` or not | `kernel` |
+| `interrupts-only-when-unasked` | Correct wherever a human is expected, and interrupts on exactly the calls where none is | `kernel` — **A1 alone** |
 | `grants-for-itself` | Takes `ApprovalRequired` with `wait=False`, writes the grant itself, and re-presents. The framework's primitive is never reached | `kernel` |
 | `ignores-authority` | Catches `AuthorityDenied` and returns a value | `authority` |
 | `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
@@ -968,7 +984,10 @@ and "this is prevention, not attribution" are the sentences a security reviewer 
 a rule with no broken fixture is a rule the kit cannot tell you about. `ignores-authority` exists
 because `swallows-denial` failed the `authority` suite only incidentally — `AuthorityDenied`
 subclasses `ActionDenied` — and a suite whose only fixture fails it by accident is a suite
-nothing is aimed at.
+nothing is aimed at. `interrupts-only-when-unasked` exists for the same reason one level down:
+`interrupts-on-allow` bumps the interrupt count on T4, B2 and B3 as well, so deleting A1's own
+count left the kit still failing it — a **subsumed** check, found by mutation. This one is
+invisible to every other case.
 
 **Every suite is named by at least one fixture, and every fixture names a suite that exists.**
 Both directions are asserted (T130), because a fixture pointed at a renamed suite passes its own
@@ -995,6 +1014,11 @@ reason.
 - **Not the operator's executor.** The kit supplies its own, always.
 - **Not where the adapter was wired.** An agent that calls the unprotected function bypasses
   CTRLRun entirely, and no amount of driving the adapter finds that.
+- **Not whether the adapter logged the observe banner.** §3.6 requires it, and the kit
+  **refuses** an observing `Control` outright — so no case ever runs under one, and an adapter
+  that never calls `ctrlrun.adapter.banner` passes every suite. The requirement is real and the
+  kit is not what enforces it; saying so here is the alternative to a reader assuming a green
+  report covered it.
 - **Not whether the adapter is a good one.** No score, no grade, no ranking.
 
 ---
@@ -1177,7 +1201,7 @@ same way (§3.8).
 ### Item 3 — The conformance kit (§5)
 
 #### T130 — The kit fails a broken adapter, per suite and by name
-Each of §5.4's nine fixtures is driven through `conformance.run`, and each fails **the suite
+Each of §5.4's eleven fixtures is driven through `conformance.run`, and each fails **the suite
 named in its row**. A fixture that failed nothing, or whose named suite passed, is the failure
 this test catches; incidental failures of other suites are permitted and asserted as such,
 because "and no other" is false of an adapter broken badly enough.
@@ -1216,11 +1240,12 @@ absent from `sys.modules`, beside `ctrlrun.verify`, `httpx`, `jwt` and every `op
 module. `ctrlrun.adapter` **is** present: it is core and in the action path, and this test says
 which side of that line each module is on.
 
-#### T134b — Core installs no conformance dependency
-`pip install ctrlrun` installs `pyyaml` and `click` and nothing else; `import
-ctrlrun.conformance` without `pytest` raises `MissingDependency` naming
-`pip install ctrlrun[conformance]` (`v0.2 §10` T30's shape). The module ships inside the core
-wheel, as `gateway/` does; only its dependency is behind the extra.
+#### T134b — The kit is core and needs no extra
+`pip install ctrlrun` installs `pyyaml` and `click` and nothing else, **and declares no
+`conformance` extra** — §12.1 records why the one this document originally specified was
+removed while it was being built. The test asserts the extra's absence and that nothing under
+`conformance/` imports from one, because an extra with no dependency behind it is an install
+line that installs nothing and a `MissingDependency` that can never fire.
 
 ### Items 4 and 5 — The reference adapters (§3.5, §6, §7)
 
@@ -1364,7 +1389,7 @@ stand, and **v0.5 adds no table and no column to any store** — an adapter writ
 | Module | Owns | Must not know about |
 |---|---|---|
 | `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | the policy evaluator, authority, effect state, executors, sinks, any framework |
-| `conformance/` | the suites, the fixtures, the report — core, stdlib only | the gateway, `otel`, `jwt_identity`; anything from an extra |
+| `conformance/` | the suites, the fixtures, the report — core, no new dependency | the gateway, `otel`, `jwt_identity`, `acs`, `webhook`; anything from an extra |
 
 `adapter.py` imports `action.py`, `approval.py`, `effect.py` (`resolve_resource`), `errors.py`
 and two names from `policy.py` — `OBSERVE` and `Decision`, which are the mode and the decision
@@ -1467,12 +1492,14 @@ never through one.
 
 That leaves an extra with no dependency behind it: an install line that installs nothing, and a
 `MissingDependency` T134b would have asserted about a condition that can never arise. So the kit
-is core and stdlib-only, exactly as `verify/` is, and `v0.4 §1`'s argument turns out to apply
-after all — *a check somebody has to remember to install is a check that does not run* is as
+is core, exactly as `verify/` is, and `v0.4 §1`'s argument turns out to apply after all — *a check somebody has to remember to install is a check that does not run* is as
 true of an adapter author's CI as of an operator's deployment.
 
 `pip install ctrlrun` is unchanged: `pyyaml` and `click`. T134b asserts the absence of the extra
-rather than its behaviour, and asserts that nothing under `conformance/` imports from one.
+rather than its behaviour, and walks the package's imports to assert that nothing under
+`conformance/` reaches an extra or one of the three modules the module map forbids it. It does
+**not** assert "stdlib only": the suites parse YAML, and a claim that is loosely true is the
+kind this document keeps refusing.
 
 ### 12.2 The binding check applies to a grant and never to a refusal
 
@@ -1508,14 +1535,27 @@ needs the adapter's `FrameworkInterrupt`. The Protocol gained `interrupt` for th
 let the adapter build the `Control` would be testing a shape that does not ship, which is the
 same defect as a test double that can grant where the real code would not.
 
-### 12.5 Three acceptance tests are not reachable through a single `invoke`
+### 12.5 Two acceptance tests are not reachable through a single `invoke`. A third is, and
+the first draft of this subsection said it was not
 
-`v0.1 §7` T2 (mutation between grant and presentation) and T5 (an approval answered after its
-expiry) both need an interval *between* the request being created and being consumed, and
-`@protect(wait=True)` has none: both happen inside one call. `v0.3 §10` T78 (delegation
-escalation) drives `Control.delegate`, which is on §2.3's never-list.
+`v0.1 §7` T2 (mutation between a grant and its presentation) needs an interval between the
+request being created and being consumed that `@protect(wait=True)` has none of: both happen
+inside one call. `v0.3 §10` T78 (delegation escalation) drives `Control.delegate`, which is on
+§2.3's never-list, so a suite driving it would test nothing about the adapter. Both stay where
+they are, and §5.3 names the absences rather than leaving a reader to wonder why a suite sourced
+from `v0.1 §7` is missing one of its tests.
 
-All three stay where they are — in the kernel's suite, and for T5's other half at the provider
-(T129d) — and §5.3 names the absences rather than leaving a reader to wonder why a suite sourced
-from `v0.1 §7` is missing two of its tests. An absence that is not stated reads as an oversight,
-and the next session re-adds it.
+**T5 was on that list and should not have been.** This subsection said an approval answered
+after its expiry was unreachable "without a hook into the adapter's own primitive" — and §12.3
+had added exactly that hook two subsections earlier. The counting proxy runs immediately before
+the adapter's primitive, so moving the kit's clock there reproduces §2.4 step 5 through one
+`invoke`. An independent review pointed at the contradiction inside the same document.
+
+It is a meaningful *adapter* case and not only a provider one: what it asks is whether the
+adapter lets `ApprovalTimeout` propagate, or swallows it the way `swallows-denial` swallows
+`ActionDenied` — an adapter that returned a value there would have executed nothing and told its
+framework the refund went through. It is in the `kernel` suite.
+
+The general lesson is worth more than the case. A claim that something is untestable is a claim
+that ages badly, because the next thing built is often the thing that makes it testable — and
+nobody re-reads a paragraph that says "not reachable" to check whether it still is.

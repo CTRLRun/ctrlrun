@@ -35,6 +35,7 @@ from ..errors import (
     ActionDenied,
     AmbiguousEffect,
     ApprovalMismatch,
+    ApprovalTimeout,
     AuthorityDenied,
     DuplicateEffect,
     NotExecuted,
@@ -183,6 +184,17 @@ class Executor:
         return "committed"
 
 
+def unwrapped(interrupt: FrameworkInterrupt) -> FrameworkInterrupt:
+    """The adapter's own interrupt, however many proxies are around it.
+
+    A case builds more than one `World`, and each would otherwise wrap the previous wrapper --
+    so a count would be of the innermost proxy's calls rather than of the framework's.
+    """
+    while isinstance(interrupt, Watched):
+        interrupt = interrupt._inner
+    return interrupt
+
+
 class Watched:
     """The adapter's own interrupt, with a call count the kit can read.
 
@@ -199,18 +211,42 @@ class Watched:
     forbids would otherwise have been visible.
     """
 
+    #: The proxy's own attributes. Everything else belongs to the adapter's interrupt and is
+    #: forwarded, because the kit swaps this object in for that one: an adapter that sets state
+    #: on `self.interrupt` before invoking -- which the reference does, to hand the kit's answer
+    #: to its primitive -- must reach the real object and not the wrapper.
+    _OWN = frozenset({"_inner", "calls", "before"})
+
+    #: Declared so the type checker sees them: `__init__` sets them past `__setattr__`, and
+    #: everything else on this object is forwarded.
+    _inner: FrameworkInterrupt
+    calls: int
+    #: Run just before the adapter's primitive, where a case needs the world to change while a
+    #: human deliberates. The kit's only way into that interval, and T5 is what it is for.
+    before: Callable[[], None] | None
+
     def __init__(self, inner: FrameworkInterrupt) -> None:
-        self._inner = inner
-        self.calls = 0
-        # Copied rather than proxied: `FrameworkInterrupt` declares both as attributes, and a
-        # read-only property does not satisfy that. Both are declarations about the framework
-        # and neither changes after construction, so a copy is faithful -- and the copy is what
-        # `InterruptApprovalProvider` validates, so a broken declaration is still refused.
-        self.framework = inner.framework
-        self.carries_approved_arguments = inner.carries_approved_arguments
+        object.__setattr__(self, "_inner", unwrapped(inner))
+        object.__setattr__(self, "calls", 0)
+        object.__setattr__(self, "before", None)
+        # `framework` and `carries_approved_arguments` are **forwarded**, not copied. A copy
+        # would diverge from the adapter's own declaration the moment anything changed it, and
+        # the provider validates what it is handed -- so forwarding keeps one truth.
+
+    def __getattr__(self, name: str) -> Any:
+        # Reached only for names not found on the instance, so `_OWN` never lands here.
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._OWN:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
 
     def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
         self.calls += 1
+        if self.before is not None:
+            self.before()
         return self._inner.interrupt(pending)
 
 
@@ -227,6 +263,14 @@ class World:
     ) -> None:
         self.clock = Clock()
         self.watched = Watched(adapter.interrupt)
+        # **Swapped in place**, not merely wired. Wiring the proxy into the provider counts
+        # only the calls that arrive through `wait()` -- and `wait()` is reached only on
+        # `ApprovalRequired`, which an `ALLOW` policy never raises. So an adapter that put an
+        # allowed call to a human by reaching its *own* primitive out of band was invisible,
+        # and the A1 case that forbids it was a negative test against behaviour the path
+        # already prevented. Replacing the attribute puts every route through the count.
+        # `run()` restores the original.
+        adapter.interrupt = self.watched
         self.store = InMemoryStateStore(clock=self.clock)
         policy = Policy.from_yaml(document, source="<conformance>")
         authority = (
@@ -436,6 +480,43 @@ def kernel_failed_permits_retry(adapter: ConformanceAdapter) -> CaseResult:
     return passed("T8", kernel_failed_permits_retry.title)
 
 
+@case("T5", "an approval answered after its expiry authorizes nothing")
+def kernel_expired_approval(adapter: ConformanceAdapter) -> CaseResult:
+    """`v0.1 §7` T5 driven through an adapter, which an earlier draft of §12.5 said was not
+    reachable through a single `invoke`. It is: the counting proxy the kit already wraps around
+    the adapter's primitive is the hook, and moving the kit's clock inside it reproduces
+    SPEC-v0.5 §2.4 step 5 exactly -- a human who deliberated past the request's own expiry.
+
+    It is an adapter case and not only a provider one, because what it asks is whether the
+    adapter lets `ApprovalTimeout` propagate or swallows it the way `swallows-denial` swallows
+    `ActionDenied`. An adapter that returned a value here would have executed nothing and told
+    its framework the refund went through.
+    """
+    world = World(adapter, APPROVE)
+    executor = Executor()
+    arguments = {"payment_id": "t5", "amount": 2000}
+    request = CallRequest(world.control, REFUND, arguments, "refund:t5", executor,
+                          answer=granted(arguments))
+    world.watched.before = lambda: world.clock.advance(timedelta(hours=1))
+
+    problem = expect("T5", kernel_expired_approval.title, lambda: adapter.invoke(request),
+                     ApprovalTimeout)
+    if problem:
+        return problem
+    if world.watched.calls != 1:
+        return failed("T5", kernel_expired_approval.title,
+                      f"the framework's primitive was reached {world.watched.calls} times, "
+                      "expected 1")
+    if executor.calls:
+        return failed("T5", kernel_expired_approval.title,
+                      f"an expired approval reached the executor {executor.calls} times")
+    if not world.pending():
+        return failed("T5", kernel_expired_approval.title,
+                      "the request was not left pending: an answer that arrived too late must "
+                      "not move the record a human could still be shown")
+    return passed("T5", kernel_expired_approval.title)
+
+
 @case("A1", "an allowed action is never put to a human")
 def kernel_no_interrupt_on_allow(adapter: ConformanceAdapter) -> CaseResult:
     """`request.answer is None` means no human is expected. The positive control for every
@@ -456,7 +537,10 @@ def kernel_no_interrupt_on_allow(adapter: ConformanceAdapter) -> CaseResult:
     if "APPROVAL_REQUESTED" in world.events() or world.watched.calls:
         return failed("A1", kernel_no_interrupt_on_allow.title,
                       f"the adapter put an action the policy allowed outright to a human "
-                      f"({world.watched.calls} interrupts)")
+                      f"({world.watched.calls} interrupts, "
+                      f"{world.events().count('APPROVAL_REQUESTED')} requests). A human asked "
+                      "about something nobody needed to approve is a human who stops reading "
+                      "the queue")
     return passed("A1", kernel_no_interrupt_on_allow.title)
 
 
@@ -668,7 +752,7 @@ def identity_no_principal(adapter: ConformanceAdapter) -> CaseResult:
     bare = Control(
         world.control.policy,
         world.store,
-        InterruptApprovalProvider(world.store, adapter.interrupt, clock=world.clock),
+        InterruptApprovalProvider(world.store, world.watched, clock=world.clock),
         clock=world.clock,
         environment="production",
     )
@@ -695,8 +779,8 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
     #: exercised where it lives: at the provider (SPEC-v0.5 T129d, both halves) and in the
     #: kernel (`v0.1 §7` T5). Same treatment T2 and T3 get in §5.3.
     "kernel": (kernel_lost_response, kernel_duplicate_after_approval, kernel_unknown_action,
-               kernel_failed_permits_retry, kernel_no_interrupt_on_allow,
-               binding_matching_answer, binding_denial),
+               kernel_failed_permits_retry, kernel_expired_approval,
+               kernel_no_interrupt_on_allow, binding_matching_answer, binding_denial),
     #: `binding` is the mutation check **alone**, and that is why it is its own suite. Its
     #: control (B2) and the denial case (B3) live in `kernel`, because both run whatever the
     #: framework carries back -- and a suite containing them would report `pass` for an adapter
@@ -732,18 +816,25 @@ def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> Confo
             "guarantees about a configuration nobody deployed (SPEC-v0.5 §3.6)",
         )
 
+    own = unwrapped(adapter.interrupt)
     results = []
-    for name, cases in SUITES.items():
-        outcomes = []
-        for item in cases:
-            try:
-                outcomes.append(item.body(adapter))
-            except BaseException as broke:
-                outcomes.append(
-                    failed(item.id, item.title,
-                           f"the case raised {type(broke).__name__}: {broke}")
-                )
-        results.append(SuiteResult.of(name, tuple(outcomes)))
+    try:
+        for name, cases in SUITES.items():
+            outcomes = []
+            for item in cases:
+                try:
+                    outcomes.append(item.body(adapter))
+                except BaseException as broke:
+                    outcomes.append(
+                        failed(item.id, item.title,
+                               f"the case raised {type(broke).__name__}: {broke}")
+                    )
+            results.append(SuiteResult.of(name, tuple(outcomes)))
+    finally:
+        # Each `World` swaps the counting proxy in for the run; the kit put it there, so the
+        # kit takes it out, whatever a case did on the way through. Leaving a test double
+        # bolted to an object the caller still holds is how a kit changes what it measured.
+        adapter.interrupt = own
     return ConformanceReport(framework=adapter.framework, suites=tuple(results))
 
 

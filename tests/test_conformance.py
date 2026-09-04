@@ -1,13 +1,14 @@
 """The conformance kit. SPEC-v0.5 §5; T130-T134b.
 
 The kit's own tests are the answer to the question the kit itself cannot answer: *would it
-notice?* Nine adapters broken in one named way each, and one that is not, and the pair is the
-whole point -- a kit that failed everything would satisfy T130 as surely as one that failed
+notice?* Eleven adapters broken in one named way each, and one that is not, and the pair is
+the whole point -- a kit that failed everything would satisfy T130 as surely as one that failed
 nothing.
 """
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import textwrap
@@ -120,8 +121,12 @@ def test_T131_the_reference_adapter_is_the_surface_and_nothing_else():
     # adapter that answers it itself has become the second approval path.
     assert inspect.signature(fixtures._protected).parameters["wait"].default is True
     assert "wait=False" not in source
-    for forbidden in ("grant_approval", "deny_approval", "reserve_effect", "Principal("):
-        assert forbidden not in source, forbidden
+    # Both the class and `_protected`, which is where the wiring actually is: a scan of a
+    # twelve-line body that delegates the interesting part elsewhere checks the wrong lines.
+    wiring = source + inspect.getsource(fixtures._protected)
+    for forbidden in ("grant_approval", "deny_approval", "reserve_effect", "Principal(",
+                      "append_event", "put_receipt", "Control("):
+        assert forbidden not in wiring, forbidden
 
 
 # --- T132: not applicable is not a pass, one level up --------------------------------------
@@ -359,18 +364,27 @@ def test_T134b_the_kit_imports_nothing_from_an_extra():
     import ast
 
     package = REPO_ROOT / "src" / "ctrlrun" / "conformance"
-    forbidden = {"httpx", "jwt", "opentelemetry", "pytest", "yaml"}
+    #: Anything from an extra, and the three modules `ARCHITECTURE.md`'s `conformance/` row
+    #: names in its "must not know about" column. `yaml` is **not** here: `Policy.from_yaml` is
+    #: how the kit builds its scratch policies, and pyyaml is a core dependency -- claiming
+    #: "stdlib only" about a package that parses YAML would be the loose kind of true.
+    forbidden = {"httpx", "jwt", "opentelemetry", "pytest"}
+    kernel_forbidden = {"gateway", "otel", "jwt_identity", "acs", "webhook"}
 
     for module in sorted(package.glob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                names = [alias.name.split(".")[0] for alias in node.names]
+                names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
-                names = [(node.module or "").split(".")[0]]
+                names = [node.module or ""]
+                # `from ..gateway import x` arrives as module="..gateway" with level=2.
+                names += [f"{'.' * node.level}{node.module or ''}"]
             else:
                 continue
-            assert not set(names) & forbidden, (module.name, names)
+            roots = {name.lstrip(".").split(".")[0] for name in names}
+            assert not roots & forbidden, (module.name, sorted(roots))
+            assert not roots & kernel_forbidden, (module.name, sorted(roots))
 
 
 # --- the kit is deterministic ----------------------------------------------------------------
@@ -384,3 +398,156 @@ def test_two_runs_of_the_same_adapter_report_identically():
 
     assert first == second
     assert T0.year == 2026
+
+
+# --- What the independent review of this kit found -----------------------------------------
+
+
+class QuietlyInterruptsOnAllow(Reference):
+    """The adapter the review wrote to break the kit: it routes every call through its **own**
+    primitive, out of band, and its primitive does not raise -- it prompts and returns, as a
+    real framework's does. Before the proxy was swapped in place rather than merely wired, this
+    scored 5/5."""
+
+    def invoke(self, request):
+        self.interrupt.answer = request.answer
+        with contextlib.suppress(AssertionError):
+            self.interrupt.interrupt(_invented(request))
+        return self._call(request)
+
+
+class GrantsForItselfFaithfully(Reference):
+    """The other one: it honours the verdict and checks the arguments itself, so every refusal
+    the kit asserts is still refused. Only the interrupt count can tell it from a correct
+    adapter -- which is what makes the count load-bearing rather than belt-and-braces."""
+
+    def invoke(self, request):
+        from ctrlrun.conformance.fixtures import _unattended
+        from ctrlrun.control import with_approval
+        from ctrlrun.errors import ApprovalRequired
+
+        try:
+            return _unattended(request)(**request.arguments)
+        except ApprovalRequired as pending:
+            answer = request.answer
+            record = request.control.store.get_approval(pending.request_id)
+            proposed = dict(record.request.action.canonical_arguments)
+            if answer and answer.granted and answer.approved_arguments == proposed:
+                request.control.store.grant_approval(pending.request_id, answer.approver)
+            else:
+                request.control.store.deny_approval(
+                    pending.request_id, answer.approver if answer else "x"
+                )
+            with with_approval(pending.request_id):
+                return _unattended(request)(**request.arguments)
+
+
+@pytest.mark.parametrize(
+    "broken", [QuietlyInterruptsOnAllow, GrantsForItselfFaithfully],
+    ids=lambda cls: cls.__name__,
+)
+def test_an_adapter_that_reaches_its_own_primitive_is_still_counted(broken):
+    """Both of these were written by a session trying to get a green report out of a broken
+    adapter, and both got one. They are here so that the fix has a subject."""
+    report = run(broken(framework=broken.__name__))
+
+    assert report.ok is False
+    assert "kernel" in {s.name for s in report.suites if s.status is SuiteStatus.FAIL}
+
+
+def test_the_kit_swaps_the_proxy_in_place_and_puts_the_original_back():
+    """The swap is what makes the count reachable from the adapter; the restore is what stops
+    the kit leaving a test double bolted to an object the caller still holds."""
+    from ctrlrun.conformance.suites import Watched
+
+    adapter = Reference()
+    own = adapter.interrupt
+    seen: list[object] = []
+
+    class Peeking(Reference):
+        def invoke(self, request):
+            seen.append(self.interrupt)
+            return super().invoke(request)
+
+    peeking = Peeking()
+    inner = peeking.interrupt
+    run(peeking)
+
+    assert seen, "no case ran"
+    assert all(isinstance(one, Watched) for one in seen), "the proxy was not swapped in"
+    assert peeking.interrupt is inner, "the kit left its proxy attached"
+    assert adapter.interrupt is own
+
+
+def test_the_proxy_forwards_state_to_the_adapters_own_primitive():
+    """An adapter sets state on `self.interrupt` before invoking -- the reference hands the
+    kit's answer to its primitive that way -- and it must reach the real object. A proxy that
+    swallowed the assignment would make every approval case fail for the wrong reason."""
+    from ctrlrun.conformance.suites import Watched
+
+    reference = Reference()
+    own = reference.interrupt
+    proxy = Watched(own)
+    proxy.answer = "carried"
+
+    assert own.answer == "carried"
+    assert proxy.answer == "carried"
+    assert proxy.framework == own.framework
+    assert proxy.carries_approved_arguments is own.carries_approved_arguments
+
+
+def test_wrapping_a_proxy_does_not_stack_proxies():
+    """A case builds more than one World, and each would otherwise wrap the previous wrapper --
+    so the count would be of the innermost proxy rather than of the framework."""
+    from ctrlrun.conformance.suites import Watched
+
+    own = Reference().interrupt
+
+    assert Watched(Watched(Watched(own)))._inner is own
+
+
+def test_T5_is_in_the_kernel_suite_and_is_reachable_through_one_invoke():
+    """§12.5. An earlier draft said this was unreachable "without a hook into the adapter's own
+    primitive" -- and §12.3 had added exactly that hook two subsections earlier."""
+    assert "T5" in {case.id for case in SUITES["kernel"]}
+
+    report = run(Reference())
+    kernel = next(suite for suite in report.suites if suite.name == "kernel")
+    t5 = next(case for case in kernel.cases if case.id == "T5")
+
+    assert t5.status is SuiteStatus.PASS
+
+
+class SwallowsTheTimeout(Reference):
+    """An adapter that catches `ApprovalTimeout` and returns. It executed nothing and told its
+    framework the refund went through -- which is why T5 is an adapter case and not only a
+    provider one."""
+
+    def invoke(self, request):
+        from ctrlrun.errors import ApprovalTimeout
+
+        try:
+            return super().invoke(request)
+        except ApprovalTimeout:
+            return "committed"
+
+
+def test_T5_catches_an_adapter_that_swallows_the_timeout():
+    report = run(SwallowsTheTimeout(framework="swallows-the-timeout"))
+    kernel = next(suite for suite in report.suites if suite.name == "kernel")
+    t5 = next(case for case in kernel.cases if case.id == "T5")
+
+    assert t5.status is SuiteStatus.FAIL
+    assert report.ok is False
+
+
+def _invented(request):
+    from datetime import UTC, datetime
+
+    from ctrlrun.adapter import PendingApproval
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return PendingApproval(
+        "apr_x", "act_x", request.action, "sha256:x", dict(request.arguments), None,
+        "production", "?", None, now, now,
+    )
