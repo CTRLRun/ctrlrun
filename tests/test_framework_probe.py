@@ -251,9 +251,15 @@ def test_T124_the_markdown_table_has_one_row_per_framework_and_is_rendered_from_
             assert row["config_deviation"] in table
 
 
-def test_T124_no_results_are_checked_in():
-    """§7.4 — item 6 ships the harness and no results. A PR carrying findings about other
-    projects that nobody had reviewed is not a PR this repository makes."""
+def test_T124_the_only_results_checked_in_are_the_published_run():
+    """§7.4 — `results/` was empty through v0.4 because nothing had been run. v0.5's item 1
+    is the item that publishes, and it publishes one run: the dated pair the maintainer read.
+    The rule that survives is that no *other* results file rides along, so a second run made
+    by a session and never read cannot reach the repository under cover of the first.
+
+    This reads the git index, where the companion on-disk check reads the directory. The two
+    disagree exactly when `.gitignore` has swallowed a file, which is how v0.2 shipped four
+    policy files that every green build had already accounted for."""
     checked_in = subprocess.run(
         ["git", "ls-files", "research/framework-probe/results"],
         cwd=REPO_ROOT,
@@ -264,9 +270,13 @@ def test_T124_no_results_are_checked_in():
     if checked_in.returncode != 0:  # pragma: no cover - not a checkout
         pytest.skip("no repository checkout")
 
-    tracked = [name for name in checked_in.stdout.split() if not name.endswith(".gitkeep")]
+    tracked = sorted(
+        name.rsplit("/", 1)[-1]
+        for name in checked_in.stdout.split()
+        if not name.endswith(".gitkeep")
+    )
 
-    assert tracked == [], tracked
+    assert tracked == ["2026-09-05.json", "2026-09-05.md"], tracked
 
 
 def test_T124_the_runner_writes_both_files(tmp_path):
@@ -531,9 +541,7 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
         if not path.exists():  # pragma: no cover - not a checkout
             continue
         text = path.read_text(encoding="utf-8").lower()
-        offending += [
-            (name, framework) for framework in NEVER_EXECUTED if framework in text
-        ]
+        offending += [(name, framework) for framework in NEVER_EXECUTED if framework in text]
 
     assert not offending, offending
 
