@@ -64,7 +64,7 @@ they entitled to?* Everything above still holds; these are the threats the secon
 - A root attacker or a malicious administrator with write access to the policy file or SQLite database.
 - A compromised external service (Stripe lying about outcomes).
 - A compromised approver, or social engineering of the approver. CTRLRun proves *what* was approved, not that the human was right.
-- Executors that raise `NotExecuted` incorrectly (asserting no side effect when one occurred). This is an integration bug; v0.4 `verify` will include a check for it where reconciliation exists.
+- Executors that raise `NotExecuted` incorrectly (asserting no side effect when one occurred). This is an integration bug, and it is the most dangerous one available: `NotExecuted` is the one exception that makes an effect retryable, so an executor that raises it after the remote acted turns the one guarantee CTRLRun is built around into a licence to act twice. **`ctrlrun verify` does not and cannot check for it.** Verify reads the operator's configuration and supplies its own executors; it never calls the one behind `@protect` and never imports the module it lives in (SPEC-v0.4 §1.2). An earlier version of this line said v0.4 verify would include such a check. It does not, and the sentence was wrong when it was written.
 - Data exfiltration through *read* actions the policy allows. CTRLRun is not DLP.
 - Denial of service by flooding approval requests.
 - Bypassing the decorator entirely (calling the raw function). v0.2 gateway mode narrows this; process-level enforcement is out of scope.
@@ -74,6 +74,34 @@ they entitled to?* Everything above still holds; these are the threats the secon
 - **A tenant-templated issuer.** `issuer` is matched as an exact string, so a multi-tenant endpoint cannot be configured correctly here. Pointing it at one without pinning the tenant makes every tenant on that platform a valid issuer — stated because the fail-open is inviting.
 - **Authority across an agent-to-agent hop.** A grant covers the principal CTRLRun resolved for *this* call. Propagating attenuated authority across hops is v0.7.
 - **Approving an authority change.** `ctrlrun delegate --as` is an assertion typed at a shell, not an authentication; the record keeps `created_via` so a reader can tell an act from an assertion. Authenticating the *approver* remains out of scope, as in v0.1.
+
+## Known v0.4 limitations — what `ctrlrun verify` does not see
+
+`ctrlrun verify` runs the kernel's own failure scenarios against an operator's configuration
+and reports what passed, what failed, and what could not be tested at all. The list of what it
+cannot see matters more than the feature does, so it is here as well as in
+[`docs/verify.md`](verify.md) — verify sees **the configuration, not the code**.
+
+- **Not the operator's executors.** The function behind `@protect` is never called. The
+  `NotExecuted` integration bug above is invisible here, because verify supplies its own
+  executors and never imports the operator's module.
+- **Not the operator's `reconcile` hooks**, for the same reason: a hook is a Python callable
+  passed to `@protect`, and it does not appear in any file verify reads.
+- **Not where the decorator was placed.** Code that calls the raw function bypasses CTRLRun
+  entirely — the "bypassing the decorator" line above — and no amount of configuration-reading
+  finds that.
+- **Not the deployment.** Whether the proxy in front of `HeaderIdentityProvider` overwrites the
+  header, whether `$CTRLRUN_STATE` points where the operator thinks, whether two gateways share
+  a state file: none of it is in the document.
+- **Not whether the policy is the *right* policy.** Verify has no opinion on whether
+  `stripe.refund` should be autonomous to €500 or to €5. It is not a linter, it does not score,
+  and it never says a configuration is too permissive. A configuration that permits everything
+  and constrains nobody can pass all ten guarantees, because the guarantees are about the
+  kernel doing what it says under that configuration.
+
+And the corollary, stated because a badge invites the opposite reading: **the badge means
+"declared guarantees pass"** and nothing else. Not secure, not safe, not compliant, not
+certified, not audited.
 
 ## Fail-closed rules (v0.1, not configurable)
 

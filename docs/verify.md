@@ -125,6 +125,16 @@ none.
 G9 reports **which dimensions it exercised**. A parent that constrains one dimension does not
 score as though it had covered six, because that would be the N/A rule violated one level down.
 
+Two of these are worth a sentence on how they are exercised, because the answer is not the
+obvious one and `SPEC-v0.4.md` §12 argues both at length. **G6 runs against the policy axis
+alone.** Authority is evaluated before policy, so under an `authority:` section an unlisted
+action is refused by the authority axis and the policy's unknown-action refusal is never
+reached — the guarantee G6 makes. The report carries `detail.axis = "policy"` so this is
+visible rather than inferred, and the refusal G6 skips is exercised directly by G7 and G8.
+**G7 is `N/A` for a policy in which nothing can run at all**, because its control is "the same
+call inside `context()` runs" and there is no such call; it is applicable to every
+configuration in which anything can run, with or without grants.
+
 ### Every guarantee carries a positive control
 
 A guarantee is a refusal, and "the second attempt was refused" is satisfied just as well by a

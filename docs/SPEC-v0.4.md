@@ -1514,3 +1514,91 @@ specifically:
   `docs/OWASP-AGENTIC-TOP10.md`, `docs/verify.md`, the README, docstrings, CLI output or the
   badge (§1.4, §6.1).
 - Anything in `VISION.md`.
+
+---
+
+## 12. What building v0.4 settled
+
+Three readings the implementation had to take, recorded here because a specification that
+disagrees with the code it describes is worse than one that admits a gap. Each is argued in a
+`# SPEC:` comment where it lives; this section is the index, in the form `§9.4` takes for the
+earlier contracts.
+
+### 12.1 G6 drives a `Control` composed from the policy alone
+
+§2.2 fixes G6's observable as `ActionDenied` with `reason == "unknown_action"`. But `v0.3 §4.3`
+evaluates **authority before policy**, so under an `authority:` section an action name no grant
+covers is refused by the authority axis and the policy axis is never reached: the observable
+would be `AuthorityDenied(reason="no_authority")`, every time, for every configuration with
+grants in it. The two sentences cannot both hold.
+
+G6 descends from `v0.1 §7` T6, which is about the policy axis and predates the authority model,
+so its scenario builds its `Control` from the policy and no `Authority`. The kernel code under
+test is unchanged and the observable is the one §2.2 fixes; what is left out is a second,
+independent refusal — and that refusal is not left unexercised, because G7 and G8 drive it
+directly. The report carries `detail.axis = "policy"` so a reader is not left to infer it.
+
+An alternative was considered and rejected: deriving an absent action name that some grant's
+wildcard *does* cover. It works only for configurations whose grants carry wildcards, so G6
+would exercise a different thing in different deployments, which is worse than exercising one
+thing everywhere and saying which.
+
+### 12.2 G7 is N/A where no action in the policy can run
+
+§2.2's `N/A when` row for G7 reads **Never**, and §1.3 requires every guarantee to carry a
+positive control. G7's control is *"the identical call inside `context()` runs"*. For a policy
+in which nothing can be driven to `allow` or `approve` there is no such call, so the two
+requirements cannot both hold.
+
+T101b settles it: it requires a configuration with an empty `actions:` to leave **zero**
+applicable guarantees, and G7 reported applicable would leave one. So G7 is `not_applicable`
+when no action can be driven to `allow` or `approve`, with G10's reason — `every action in the
+policy is denied`. It remains applicable to every configuration in which anything can run,
+including every configuration with no `authority:` section, which is what §2.2's row was
+protecting and what T109 asserts.
+
+### 12.3 G8 gains one N/A reason
+
+§2.2 lists three conditions under which G8 is N/A. A fourth exists and §2.2 does not name it,
+because it does not arise in a single-grant configuration: where a **second** grant covers the
+same action past the first one's expiry, the expired grant refuses nothing observable, and G8
+would report a failure that is really a property of a layered document.
+
+The reason is `no grant's expiry is the last authority for an action it covers; another grant
+still permits the action after it lapses`. The engine tries every grant carrying an
+`expires_at`, in id order, and reports this only when none of them is decisive.
+
+The pre-check asks only **whether** authority still passes one microsecond after the expiry —
+never **why** it stopped. Filtering on the reason would turn a kernel that denied for the wrong
+cause into an N/A, and a false N/A is a false pass wearing the other costume (§9.2). A kernel
+whose expiry denial reports the wrong reason therefore FAILs, which is what `v0.3 §10` T71 is
+for and what T108 asserts by injection.
+
+### 12.4 G9's control names the delegation only where it can
+
+§2.2's control for G9 requires *"an action within the child's limits passes authority naming
+the delegation"*. A child is contained in its parent on every dimension, so the parent matches
+every action the child does — and `v0.3 §4.6` picks the lowest grant id among those that
+passed, which is not the delegation's.
+
+`v0.3 §5.4` leaves the concrete agent a child names unconstrained: that is what delegation is
+for. So the narrowed child's subject names an agent the parent's subject does **not** match,
+and the delegation becomes the only authority for the action — `AUTHORITY_RESOLVED` then
+carries the `delegation_id` and the control asserts it. Where the parent's subject is a
+wildcard that matches the child's agent too, the delegation cannot be isolated; the control
+asserts that authority passed and the report records `detail.delegation_isolated = false`,
+because asserting a grant id the model does not promise would be asserting nothing.
+
+### 12.5 G4's children are subprocesses, not `multiprocessing`
+
+§2.2 requires `_PROCESSES` OS processes and says why they cannot share the injected clock. It
+does not say how they are started, and `multiprocessing` with the `spawn` method — the default
+on macOS and Windows — **re-imports the caller's `__main__` module in every child**. A caller
+who ran `ctrlrun.verify.run()` from an unguarded script would fork-bomb itself, and requiring
+an `if __name__ == "__main__"` guard in the program under verification is not a trade a
+verification tool gets to make.
+
+The worker is reached as `python -m ctrlrun.verify.worker` with its payload on stdin. It is
+still a module-level function taking one picklable argument, still eight OS processes, and the
+executor count still comes from `O_CREAT|O_EXCL` files so it survives the process boundary —
+which is the whole of what the guarantee is about.

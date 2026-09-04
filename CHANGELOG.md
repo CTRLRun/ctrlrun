@@ -7,7 +7,28 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-04
+
+**Does it hold in *your* setup?** Everything CTRLRun guarantees was proven, until now, by this
+repository's tests against this repository's configurations. That is the right place to start
+and the wrong place to stop: what an operator deploys is *their* policy, *their* grants and
+*their* store, and a guarantee that has never been exercised against those is a guarantee
+nobody has checked.
+
+`ctrlrun verify` runs the failure scenarios of v0.1 §7, v0.2 §10 and v0.3 §10 against the
+configuration in front of it and reports what passed, what failed, and — the part that makes
+the number mean anything — what could not be tested at all.
+
+Three rules govern it, and each has a test that would go red if it stopped holding. **Not
+applicable is not a pass.** **Verify never touches the operator's store.** **The badge means
+"declared guarantees pass"**, and nothing else. A fourth keeps verify honest about itself:
+**every guarantee carries a positive control**, because a refusal asserted against a scenario
+in which nothing ran passes on a kernel with the guard deleted.
+
+No schema changes: `ctrlrun.policy/v3`, `ctrlrun.receipt/v2`, `ctrlrun.action/v1` and
+`ctrlrun.inspection/v2` are untouched, and **no store gains a table or a column** — verify
+writes only to a scratch store it created. Three new schema strings belong to documents rather
+than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.framework-probe/v1`.
 
 ### Added
 
@@ -128,6 +149,17 @@ any change to one appears here.
   **No results are checked in**, and a test asserts it. The runs are made and published by the
   maintainer; a commit carrying findings about other projects that nobody had reviewed is not
   one this repository makes.
+
+- **`docs/SPEC-v0.4.md` gains a §12**, recording the four readings the implementation had to
+  take where the specification could not be satisfied as written. A specification that
+  disagrees with the code it describes is worse than one that admits a gap: G6 drives a
+  `Control` composed from the policy alone, because authority is evaluated first and its
+  observable would otherwise be unreachable in every configuration with grants; G7 is `N/A`
+  where no action in the policy can run, because §2.2 said "never" and §1.3 requires a control
+  that such a policy cannot supply; G8 gains a fourth N/A reason for a layered document; G9's
+  control names the delegation only where the parent's subject does not also match it; and
+  G4's children are subprocesses rather than `multiprocessing`, which would re-import the
+  caller's `__main__` in every child.
 
 ### Changed
 
@@ -774,5 +806,6 @@ until it gets one, which is the point.
 - Policy conditions address an action's arguments only. Scoping a rule by environment,
   resource or principal arrives with the authority model in v0.3.
 
-[Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.4.0
 [0.1.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0
