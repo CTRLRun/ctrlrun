@@ -539,14 +539,18 @@ def grant_from_json(text: str, *, delegation_id: str) -> Grant:
         return Grant(
             id=delegation_id,
             subject=Subject(agent=subject.get("agent"), user=subject.get("user")),
-            actions=tuple(document.get("actions") or ()),
-            resources=_optional_tuple(document.get("resources")),
+            # A list or nothing, never a coercion: `"actions": "stripe.refund"` would
+            # otherwise become thirteen single-character patterns, every one of them
+            # grammar-valid. §5.2 requires reading a grant back to validate exactly what
+            # loading one from YAML validates, and `_parse_patterns` refuses a non-list.
+            actions=_optional_tuple(document.get("actions"), delegation_id) or (),
+            resources=_optional_tuple(document.get("resources"), delegation_id),
             constraints=(
                 parse_conditions(constraints, where=f"delegation {delegation_id}")
                 if constraints
                 else NO_CONSTRAINTS
             ),
-            environments=_optional_tuple(document.get("environments")),
+            environments=_optional_tuple(document.get("environments"), delegation_id),
             expires_at=None if expires_at is None else datetime.fromisoformat(str(expires_at)),
             delegable=bool(document.get("delegable", False)),
         )
@@ -554,11 +558,14 @@ def grant_from_json(text: str, *, delegation_id: str) -> Grant:
         raise _UnreadableError(delegation_id, str(exc)) from exc
 
 
-def _optional_tuple(value: object) -> tuple[str, ...] | None:
+def _optional_tuple(value: object, delegation_id: str) -> tuple[str, ...] | None:
+    """A list of strings, or `None`. Takes the row's id because it raises past
+    `grant_from_json`'s `except` clause, and evidence that cannot name the corrupted row is
+    evidence an operator cannot act on — §13 ships no way to list delegations."""
     if value is None:
         return None
     if not isinstance(value, list):
-        raise _UnreadableError("<grant>", f"expected a list or null, got {_type_name(value)}")
+        raise _UnreadableError(delegation_id, f"expected a list or null, got {_type_name(value)}")
     return tuple(str(item) for item in value)
 
 
@@ -1093,10 +1100,16 @@ class Authority:
             return _ChainCheck(
                 depth, AuthorityResult(False, AUTHORITY_UNREADABLE, cycle_at=walk.cycle_at)
             )
-        if walk.depth_exceeded is not None:
+        if depth > self._max_delegation_depth:
+            # Compared here rather than inferred from `_walk` truncating. The walk returns as
+            # soon as it reaches a root grant, *before* it consults the bound, so a chain that
+            # completes in one step is never measured against anything — and
+            # `max_delegation_depth: 0`, which §5.5 offers as the legible way to switch
+            # delegation off, would leave every existing depth-1 delegation authorizing while
+            # appearing to work, because deeper chains truncate and deny. A guard that is a
+            # side effect of a bound is not a guard.
             return _ChainCheck(
-                depth,
-                AuthorityResult(False, AUTHORITY_ESCALATION, depth_exceeded=walk.depth_exceeded),
+                depth, AuthorityResult(False, AUTHORITY_ESCALATION, depth_exceeded=depth)
             )
         if any(not ancestor.delegable for ancestor in walk.ancestors):
             # Rule 6 exists because `delegable` is not a §5.4 row and rule 4 would therefore

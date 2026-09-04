@@ -1241,6 +1241,19 @@ gateway's approval path (§8.3), and `ctrlrun.acs`'s hook. Reading `Policy.evalu
 a decision is a defect after v0.3, and the two places in shipped code that do it are named in
 §8.3 so item 5 cannot miss them.
 
+**What §4.6's blast radius costs, stated because item 3 made it real.** A single unreadable
+`delegations` row denies **every** action for **every** principal, root-grant holders included,
+and it is not recoverable from the CLI: `ctrlrun revoke` refuses the row for the same reason
+evaluation does, and revoking would not help anyway because evaluation enumerates revoked rows
+too (§5.6 rule 2 has to be able to report `authority_revoked`). The recovery is deleting the row
+with `sqlite3`, which §5.5 already concedes is how such a row arrives. This is the fail-closed
+direction and it is what the paragraph below asks for; it is recorded here so that an operator
+meets it in the specification rather than during an incident, and so that a future release
+proposing to relax it — skipping a row that is *both* revoked and unreadable, say, which can
+never contribute a pass — is amending a stated position rather than a silent one. The one thing
+item 3 does fix is the evidence: `AUTHORITY_DENIED.data.delegation_id` names the row, because
+§13 ships no way to list delegations and an operator who cannot name the row cannot delete it.
+
 **A record that cannot be read denies the action outright.** A stored delegation whose
 `grant_json` no longer parses (§5.2), or whose chain cannot be walked (§5.5), MUST NOT be skipped
 in favour of some other grant that happens to match — it is `authority_unreadable`, first in the
@@ -1787,6 +1800,16 @@ Revoking an already-revoked delegation is idempotent: it logs, appends no second
 `ctrlrun delegate` reads a one-grant YAML document with the keys of §4.2 minus `id` (§5.2),
 validates it, runs every check of §5.3, and prints the new `delegation_id`. Its refusals exit
 non-zero and name the rule that failed.
+
+**Rule 4 has no evaluation-time counterpart, and that is deliberate.** §5.6 re-checks
+containment, revocation, expiry, `delegable` and the walk on every evaluation, but not §5.3 rule
+4: nothing at evaluation asks whether whoever created a delegation held its parent. A writer to
+the `delegations` table can therefore mint a fully-contained delegation from any `delegable` root
+grant to an agent of its choosing without ever holding it. It cannot exceed the parent — every
+other rule still applies — so the escalation available is in *population*, not in powers, and
+`docs/THREAT_MODEL.md` puts store write access out of scope. It is stated because §5.6's list of
+six rules is where a reader looks for "you may only delegate authority you hold", and finding it
+absent should read as a decision rather than as an omission.
 
 **§5.3's order tells a caller which grants exist.** Rules 1 to 3 — `unknown_parent`,
 `parent_not_delegable`, `parent_not_valid` — run before rule 4's `not_the_subject`, so in-process

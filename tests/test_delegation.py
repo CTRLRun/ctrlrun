@@ -576,6 +576,102 @@ def test_t76b_rule_3_an_ancestor_that_is_no_longer_delegable(store, clock):
     assert raised.value.reason == PARENT_NOT_VALID
 
 
+def test_t76b_rule_3_an_ancestor_whose_expiry_was_brought_forward(store, clock):
+    """§5.3 rule 3's ancestor-expiry check, in the one shape §5.4 does not already cover.
+
+    T76b excludes "the parent's own parent is *expired*" because §5.4's `expires_at` row makes
+    a grandparent's expiry imply the parent's — for a chain nobody edited. Editing the root
+    grant's expiry forward breaks that implication: `dlg_1` still expires in December, the root
+    grant now expires in October, and without the ancestor check a child of `dlg_1` is created
+    under a root grant that stopped being authority weeks ago.
+    """
+    control = _control(_document(), store, clock)
+    first = control.delegate("head-of-finance", _child(), by=CFO)
+
+    brought_forward = FINANCE.replace("2027-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+    edited = _control(_document(brought_forward), store, clock)
+    clock.advance(timedelta(days=45))  # past the root grant, before `dlg_1`
+
+    try:
+        created = edited.delegate(
+            first.delegation_id,
+            _child(subject=Subject(agent="support-agent", user="cfo@example.com")),
+            by=FINANCE_AGENT,
+        )
+    except AuthorityEscalation as raised:
+        assert raised.reason == PARENT_NOT_VALID
+    else:
+        raise AssertionError(
+            f"SPEC-v0.3 §5.3 rule 3: {created.delegation_id} was minted under a root grant "
+            "that expired 45 days ago"
+        )
+
+
+def test_t76b_rule_3_an_ancestor_that_has_gone_missing(store, clock):
+    """§5.3 rule 3 — a chain that cannot be walked to a root is not a valid chain."""
+    control = _control(_document(), store, clock)
+    chain = _chain(control, depth=2)
+
+    emptied = _control(f"{V3}\nauthority:\n  grants: []\n{ACTIONS}", store, clock)
+    with pytest.raises(AuthorityEscalation) as raised:
+        emptied.delegate(
+            chain[-1].delegation_id,
+            _child(subject=Subject(agent="agent-3", user="cfo@example.com")),
+            by=Principal(agent="agent-2", user="cfo@example.com"),
+        )
+    assert raised.value.reason == PARENT_NOT_VALID
+
+
+def test_a_row_whose_created_via_is_unknown_is_unreadable(store, clock):
+    """§5.2 — the column is what tells an act from an assertion, and `Delegation.created_via`
+    is typed on exactly the two values. A row outside them has provenance nobody can read."""
+    control = _control(_document(), store, clock)
+    store.put_delegation(
+        DelegationRecord(
+            delegation_id=f"dlg_{'b' * 32}",
+            parent_id="head-of-finance",
+            depth=1,
+            grant_json=grant_to_json(_child()),
+            created_by_agent="human-cfo",
+            created_by_user="cfo@example.com",
+            created_via="forged",
+            created_at=clock.now,
+        )
+    )
+    assert _denial(control, _action()).reason == AUTHORITY_UNREADABLE
+
+
+def test_a_stored_actions_that_is_not_a_list_is_unreadable(store, clock):
+    """§5.2 — reading a grant back validates what loading one from YAML validates.
+
+    A coerced `"actions": "stripe.refund"` would become thirteen single-character patterns,
+    every one grammar-valid, and the row would parse into a grant nobody wrote.
+    """
+    control = _control(_document(), store, clock)
+    store.put_delegation(
+        DelegationRecord(
+            delegation_id=f"dlg_{'c' * 32}",
+            parent_id="head-of-finance",
+            depth=1,
+            # `"refund"`, not `"stripe.refund"`: a coercion of the latter would produce a
+            # `"."` segment, which the pattern grammar refuses anyway — the row would be
+            # unreadable for a reason that is not this one, and the test would pass while
+            # exercising nothing. Every character of `"refund"` is a valid literal pattern.
+            grant_json=grant_to_json(_child()).replace(
+                '"actions":["stripe.refund"]', '"actions":"refund"'
+            ),
+            created_by_agent="human-cfo",
+            created_by_user="cfo@example.com",
+            created_via="api",
+            created_at=clock.now,
+        )
+    )
+    denied = _denial(control, _action())
+    assert denied.reason == AUTHORITY_UNREADABLE
+    # §13 ships no way to list delegations, so the event is the only way to find the row.
+    assert _data(store, EventType.AUTHORITY_DENIED)[-1]["delegation_id"] == f"dlg_{'c' * 32}"
+
+
 def test_t76b_rule_5_depth_is_walked_not_read(tmp_path, clock):
     """T76b — a chain whose stored `depth` column says otherwise is still too deep (§5.5)."""
     store = SQLiteStateStore(tmp_path / "state.db", clock=clock)
@@ -847,6 +943,71 @@ def test_t79_a_lowered_maximum_denies_an_existing_chain(store, clock):
     lowered = _control(_document(depth="  max_delegation_depth: 2\n"), store, clock)
     denied = _denial(lowered, _action(principal=Principal(agent="agent-3", user="cfo@example.com")))
     assert denied.reason == AUTHORITY_ESCALATION
+
+
+def test_the_walk_is_bounded_at_max_depth_plus_one_steps(store, clock):
+    """§5.5 — "the walk MUST be bounded", asserted as steps rather than as an outcome.
+
+    Once §5.6 rule 5 compares the walked depth to the maximum outright, the bound no longer
+    changes *what* a long chain decides — both refuse. What it still does is stop the walk
+    reading a hand-edited store to its end, and the only way to tell it ran is to count the
+    reads. A test asserting the denial alone could not tell the bound had been removed.
+    """
+    control = _control(_document(), store, clock)
+    #: 30 rows, each the parent of the next, none of them reachable through `Control.delegate`
+    #: and none of them reaching a root grant — so every one of them denies, and the only
+    #: thing left to measure is how far the walk got.
+    previous = "no-such-parent"
+    for index in range(30):
+        delegation_id = f"dlg_{index:032x}"
+        store.put_delegation(
+            DelegationRecord(
+                delegation_id=delegation_id,
+                parent_id=previous,
+                depth=index + 1,
+                grant_json=grant_to_json(_child()),
+                created_by_agent="human-cfo",
+                created_by_user="cfo@example.com",
+                created_via="api",
+                created_at=clock.now,
+            )
+        )
+        previous = delegation_id
+
+    reads: list[str] = []
+    original = store.get_delegation
+
+    def counting(delegation_id: str):
+        reads.append(delegation_id)
+        return original(delegation_id)
+
+    store.get_delegation = counting  # type: ignore[method-assign]
+    denied = _denial(control, _action())
+
+    assert denied.reason == AUTHORITY_ESCALATION
+    # Every one of the 30 rows matches the action's shape, so each is walked; a walk bounded
+    # at `max_delegation_depth + 1` reads at most that many parents per candidate.
+    assert reads, "the walk read nothing, so this test cannot see the bound at all"
+    assert len(reads) <= 30 * (control.authority.max_delegation_depth + 1)
+
+
+def test_t79_zero_denies_an_existing_depth_one_delegation(store, clock):
+    """T79 / §5.6 rule 5 — the depth-1 case, which the walk's bound never measures.
+
+    `_walk` returns as soon as it reaches a root grant, *before* it consults the bound, so a
+    chain that completes in one step is compared to nothing. Deeper chains truncate and deny,
+    which is what makes this the dangerous shape: `max_delegation_depth: 0` — §5.5's legible
+    way to switch delegation off — would appear to work while every existing depth-1
+    delegation, the common case, kept authorizing.
+    """
+    control = _control(_document(), store, clock)
+    control.delegate("head-of-finance", _child(), by=CFO)
+
+    switched_off = _control(_document(depth="  max_delegation_depth: 0\n"), store, clock)
+    denied = _denial(switched_off, _action())
+
+    assert denied.reason == AUTHORITY_ESCALATION
+    assert _data(store, EventType.AUTHORITY_DENIED)[-1]["depth_exceeded"] == 1
 
 
 def test_t79_zero_refuses_every_creation(store, clock):
