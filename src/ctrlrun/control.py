@@ -27,6 +27,7 @@ from .approval import (
     ApprovalStatus,
     LocalApprovalProvider,
 )
+from .authority import Authority, AuthorityResult, _optional_from_yaml
 from .effect import (
     DEFAULT_LEASE,
     RECONCILED_STATES,
@@ -44,12 +45,14 @@ from .errors import (
     AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
+    AuthorityDenied,
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
     IdentityError,
     InvalidArgument,
     NotExecuted,
+    PolicyError,
     Suspended,
 )
 from .identity import IdentityContext, IdentityProvider
@@ -222,6 +225,7 @@ class Control:
         sinks: Sequence[EventSink] = (),
         suspend_timeout: timedelta = DEFAULT_SUSPEND_TIMEOUT,
         identity: IdentityProvider | None = None,
+        authority: Authority | None = None,
         environment: str | None = None,
     ) -> None:
         self._policy = policy
@@ -235,6 +239,7 @@ class Control:
         self._sinks = tuple(sinks)
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
         self._identity = identity
+        self._authority = authority
         self._environment = _resolve_environment(environment, policy)
         #: SPEC-v0.3 §3.2 — the provider-versus-context warning is emitted at most once per
         #: Control. A warning that repeats per call is a warning nobody reads.
@@ -252,6 +257,10 @@ class Control:
         are shared by every worker that loaded the same policy (§5.3 E1, §8).
         """
         policy = Policy.from_file(path)
+        # SPEC-v0.3 §4.1 — the same document, read again for its `authority:` section, and
+        # `None` where it has none. Opt-in is the whole rule: a loader that returned an empty
+        # `Authority` here would deny every action in a v0.2 configuration.
+        authority = _optional_authority(policy.source)
         state = state_path(policy.source)
         store = SQLiteStateStore(state)
         # SPEC-v0.2 §4.3 — the two files of v0.1 §6 land exactly where v0.1 put them,
@@ -261,6 +270,7 @@ class Control:
             store,
             LocalApprovalProvider(store),
             sinks=[JSONLEventSink(state.parent)],
+            authority=authority,
             environment=environment,
         )
 
@@ -292,6 +302,15 @@ class Control:
         return self._identity
 
     @property
+    def authority(self) -> Authority | None:
+        """The grants this Control evaluates against, if any (SPEC-v0.3 §4.1).
+
+        `None` is v0.2 behaviour, exactly: no authority evaluation, no `AUTHORITY_*` event,
+        no change to any decision. Not `None` means every principal needs a grant.
+        """
+        return self._authority
+
+    @property
     def environment(self) -> str:
         """The environment every Action this Control decides carries (SPEC-v0.3 §2.5).
 
@@ -316,7 +335,62 @@ class Control:
         self._check_environment(action)
         if self._is_expired(action.principal):
             return Evaluation(Decision.DENY, PRINCIPAL_EXPIRED)
+        # SPEC-v0.3 §4.6 — the combined decision, not the policy axis alone. This method is
+        # the public "what will happen to this action" query and it would stop answering that
+        # question if it reported one axis while `execute` acted on both. It reads the store
+        # to resolve delegations and still writes nothing.
+        result = self._authority_result(action)
+        if result is not None and not result.passed:
+            return Evaluation(Decision.DENY, result.reason)
         return self._policy.evaluate(action)
+
+    def _authority_result(self, action: Action) -> AuthorityResult | None:
+        """The authority axis for this action, or `None` where there is no section (§4.1)."""
+        if self._authority is None:
+            return None
+        return self._authority.evaluate(action, now=self._clock(), store=self._store)
+
+    def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
+        """SPEC-v0.3 §7 — the ids travel here, and never in `decision_reason`.
+
+        A grant may legally be named `no_authority`, so evidence that could be spoofed by
+        naming a grant is not evidence. Absent keys are omitted rather than written `null`:
+        `grant_id` is present "where one grant was implicated", and `no_authority` implicates
+        none.
+        """
+        data: dict[str, Any] = {"reason": result.reason}
+        if result.grant_id is not None:
+            data["grant_id"] = result.grant_id
+        if result.delegation_id is not None:
+            data["delegation_id"] = result.delegation_id
+            data["depth"] = result.depth
+        return data
+
+    def _refuse_authority(
+        self, action: Action, result: AuthorityResult, started_at: datetime, effect_key: str | None
+    ) -> NoReturn:
+        """Record an authority denial and raise (SPEC-v0.3 §4.3).
+
+        `AUTHORITY_DENIED` then `ACTION_DENIED`, and **no** `POLICY_EVALUATED`: policy is never
+        evaluated, so no approval request is created and no human is left staring at a request
+        for an action that could never run.
+        """
+        self._append(EventType.AUTHORITY_DENIED, action, self._authority_data(result), effect_key)
+        self._append(EventType.ACTION_DENIED, action, {"reason": result.reason}, effect_key)
+        self._record(
+            action,
+            Evaluation(Decision.DENY, result.reason),
+            ReceiptResult.DENIED,
+            started_at,
+            effect_key=effect_key,
+        )
+        raise AuthorityDenied(
+            f"{action.name} denied: {result.reason}",
+            reason=result.reason,
+            action_id=action.action_id,
+            grant_id=result.grant_id,
+            delegation_id=result.delegation_id,
+        )
 
     def _is_expired(self, principal: Principal) -> bool:
         """SPEC-v0.3 §2.3. `expires_at is None` is the absence of a check, not one that passes."""
@@ -339,11 +413,13 @@ class Control:
 
         resolved = self._ask_provider(action_name, from_context)
         if resolved is None:
-            # A decline. SPEC-v0.3 §3.2 adds one more row here in build-list item 2: once an
-            # `authority:` section is loaded a decline is refused rather than backfilled,
-            # because omitting a credential would otherwise be an easier route than forging
-            # one. `Authority` does not exist yet, so that row lands with the code it needs.
-            if from_context is None:
+            # A decline, and SPEC-v0.3 §3.2's last row: once an `authority:` section is loaded
+            # a decline is refused rather than backfilled. Otherwise agent code already running
+            # inside `with context("finance-agent")` executes every un-credentialed call as
+            # finance-agent, with finance-agent's grants — omitting a credential reaches the
+            # same destination as forging one, by an easier route. This is not a flag and there
+            # is nothing to configure: it follows from §4.1's opt-in rule.
+            if from_context is None or self._authority is not None:
                 _refuse_no_principal(action_name)
             return from_context
 
@@ -437,6 +513,15 @@ class Control:
                 f"{action.name}: the principal's credential expired at "
                 f"{action.principal.expires_at}"
             )
+        # SPEC-v0.3 §4.3.1 — the order, stated once so it can be tested: principal_expired →
+        # authority → policy → approval → reservation → execution.
+        result = self._authority_result(action)
+        if result is not None:
+            if not result.passed:
+                self._refuse_authority(action, result, started_at, effect_key)
+            self._append(
+                EventType.AUTHORITY_RESOLVED, action, self._authority_data(result), effect_key
+            )
         evaluation = self._policy.evaluate(action)
         self._append(
             EventType.POLICY_EVALUATED,
@@ -507,7 +592,23 @@ class Control:
         # The action was decided and reserved on the first leg; refusing here would strand a
         # reservation the remote may already be acting on, which is the one thing a held
         # reservation exists to avoid.
-        evaluation = self._policy.evaluate(action)
+        #
+        # SPEC-v0.3 §5.6.1 gives authority the same treatment, and for a sharper reason: this
+        # is the *only* receipt an MCP multi round-trip or ACS action ever gets (§8.3), so a
+        # receipt reporting a bare policy reason would be the whole evidence for that action.
+        result = self._authority_result(action)
+        if result is None:
+            evaluation = self._policy.evaluate(action)
+        elif result.passed:
+            self._append(
+                EventType.AUTHORITY_RESOLVED, action, self._authority_data(result), held.effect_key
+            )
+            evaluation = self._policy.evaluate(action)
+        else:
+            self._append(
+                EventType.AUTHORITY_DENIED, action, self._authority_data(result), held.effect_key
+            )
+            evaluation = Evaluation(Decision.DENY, result.reason)
         return self._outcome(
             action,
             evaluation,
@@ -681,6 +782,24 @@ class Control:
                 f"{action.name}: the principal's credential expired at "
                 f"{action.principal.expires_at}, so the reservation is not held across the "
                 "round trip; the lease will lapse and the record becomes AMBIGUOUS"
+            )
+        result = self._authority_result(action)
+        if result is not None and not result.passed:
+            # SPEC-v0.3 §5.6.1 — an extension asks to keep holding a reservation the grant no
+            # longer authorizes. Refused, and the record is deliberately not moved: the lease
+            # lapses and it becomes AMBIGUOUS by the ordinary path of v0.1 §5.3 E3, which is
+            # the safe state reached without inventing one. Without this, §5.7's "a chain of
+            # any depth is cut by one write" is false for exactly the actions in flight when
+            # an operator hits the switch.
+            self._append(EventType.ACTION_DENIED, action, self._authority_data(result), effect_key)
+            raise AuthorityDenied(
+                f"{action.name}: authority no longer covers this action ({result.reason}), so "
+                "the reservation is not held across the round trip; the lease will lapse and "
+                "the record becomes AMBIGUOUS",
+                reason=result.reason,
+                action_id=action.action_id,
+                grant_id=result.grant_id,
+                delegation_id=result.delegation_id,
             )
         rounds = self._store.hold_continuation(
             action, effect_key, suspension.continuation, self._clock() + self._suspend_timeout
@@ -1168,6 +1287,26 @@ def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
     if isinstance(refused, DuplicateEffect):
         return {"reason": "duplicate", "state": refused.state}
     return {"reason": "ambiguous"}
+
+
+def _optional_authority(source: str) -> Authority | None:
+    """The `authority:` section of the policy document, or `None` (SPEC-v0.3 §4.1).
+
+    Reads the file a second time rather than threading the parsed document through `Policy`:
+    `policy.py` must not learn what an `authority:` section means (`ARCHITECTURE.md` §6), and
+    a configuration file is read once at startup. Called only from `Control.from_file`, which
+    has just loaded a `Policy` from this path — so a read that fails here is a `PolicyError`
+    and never a silent `None`. "The file went away, so run every action unchecked" is the
+    fail-open direction, and §4.1 has no half-way.
+    """
+    try:
+        text = Path(source).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PolicyError(
+            f"the policy at {source} loaded but could not be read again for its 'authority:' "
+            f"section: {exc}"
+        ) from exc
+    return _optional_from_yaml(text, source=source)
 
 
 def state_path(source: str | os.PathLike[str] | None = None) -> Path:

@@ -805,3 +805,73 @@ def test_a_remote_bind_is_permitted_only_when_it_is_meant():
     )
 
     assert config.host == "0.0.0.0"
+
+
+# --- SPEC-v0.3 §4: authority reaches the gateway's execution path ------------------------
+
+AUTHORITY_ONLY = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: refunds-only
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.create_refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 20000 }
+"""
+
+
+@pytest.fixture
+def authority_gateway(upstream, store):
+    from ctrlrun import Authority
+
+    policy = Policy.from_yaml(POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v3"))
+    control = Control(policy, store, authority=Authority.from_yaml(AUTHORITY_ONLY, standalone=True))
+    config = GatewayConfig(upstream=upstream.url, alias="acme", principal_header="X-Agent", port=0)
+    forwarder = httpx_forwarder(config)
+    yield Gateway(config, control, forwarder)
+    forwarder.close()
+
+
+@pytest.fixture
+def authority_client(authority_gateway):
+    server = build_server(authority_gateway)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as opened:
+        yield opened
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.authority
+def test_a_call_outside_the_grant_never_reaches_the_upstream(authority_client, upstream, store):
+    """§4.3 at the gateway. The `-41012` code and the `--authority` flag are build-list item
+    5 (§8.3); what item 2 owns is that a gateway whose Control holds an `Authority` refuses
+    before dispatch and writes the evidence, rather than forwarding and finding out later."""
+    response = _post(
+        authority_client,
+        _call(arguments={"amount": 50000, "payment_id": "pi_1"}),
+        headers={"X-Agent": "refund-agent"},
+    )
+
+    assert upstream.calls == []
+    assert response.json()["error"]["data"]["reason"] == "authority_constraint"
+    assert [str(event.type) for event in store.events()][1] == "AUTHORITY_DENIED"
+    assert store.receipts()[-1].decision_reason == "authority_constraint"
+
+
+@pytest.mark.authority
+def test_a_call_inside_the_grant_is_forwarded(authority_client, upstream):
+    """The control for the refusal: without it a gateway that refused everything would pass."""
+    upstream.respond({"resultType": "complete", "content": []})
+
+    response = _post(
+        authority_client,
+        _call(arguments={"amount": 1000, "payment_id": "pi_2"}),
+        headers={"X-Agent": "refund-agent"},
+    )
+
+    assert len(upstream.calls) == 1
+    assert "error" not in response.json()

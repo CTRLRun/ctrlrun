@@ -40,3 +40,63 @@ def state_store(request, tmp_path, fake_clock):
     )
     yield store
     store.close()
+
+
+# --- SPEC-v0.3 §7 / T66: the five new event types stay inside authority's tests ----------
+
+#: The event types SPEC-v0.3 §7 adds. A configuration with no `authority:` section must
+#: never produce one (§4.1), and T66's mechanical half is the assertion that none of them
+#: appeared anywhere in the run except in a test that built such a section.
+AUTHORITY_EVENT_TYPES = frozenset(
+    {
+        "AUTHORITY_RESOLVED",
+        "AUTHORITY_DENIED",
+        "DELEGATION_CREATED",
+        "DELEGATION_REVOKED",
+        "DELEGATION_REJECTED",
+    }
+)
+
+
+def check_authority_events_declared(appended, *, declared, nodeid="<test>"):
+    """Raise unless every SPEC-v0.3 §7 event came from a test that opted into authority.
+
+    A separate function so T66 can exercise the check itself. A guard whose only evidence is
+    that the suite stayed green is a guard nothing exercises, and this one is only ever *not*
+    triggered.
+    """
+    leaked = sorted(set(appended) & AUTHORITY_EVENT_TYPES)
+    if leaked and not declared:
+        raise AssertionError(
+            f"{nodeid} appended {', '.join(leaked)} without an `authority` marker. "
+            "SPEC-v0.3 §4.1: a configuration with no `authority:` section behaves exactly as "
+            "v0.2, which means none of the §7 event types exists in it. Mark the test "
+            "`@pytest.mark.authority` if it really does build an `authority:` section."
+        )
+
+
+@pytest.fixture(autouse=True)
+def authority_events_are_declared(request, monkeypatch):
+    """Record every event either shipped store appends, and check T66's rule per test.
+
+    Per test rather than at session finish, so the failure names the test that leaked and
+    fails red where a reader is looking.
+    """
+    appended: list[str] = []
+
+    for store_class in (InMemoryStateStore, SQLiteStateStore):
+        original = store_class.append_event
+
+        def recording(self, event, _original=original):
+            appended.append(str(event.type))
+            return _original(self, event)
+
+        monkeypatch.setattr(store_class, "append_event", recording)
+
+    yield appended
+
+    check_authority_events_declared(
+        appended,
+        declared=request.node.get_closest_marker("authority") is not None,
+        nodeid=request.node.nodeid,
+    )

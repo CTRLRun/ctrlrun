@@ -37,6 +37,54 @@ class ActionDenied(CTRLRunError):
         self.action_id = action_id
 
 
+class AuthorityDenied(ActionDenied):
+    """The principal holds no grant that covers this action (SPEC-v0.3 §4.3).
+
+    A subclass of `ActionDenied`, because an authority denial *is* the action being denied and
+    an agent loop's existing `except ActionDenied` should keep working. `reason` is one of the
+    closed set in §4.3 — `no_authority`, `authority_constraint`, `authority_expired`,
+    `authority_escalation`, `authority_revoked`, `authority_unreadable` — never a grant id: a
+    grant may legally be named `no_authority`, and evidence that can be spoofed by naming a
+    grant is not evidence. The id travels in `grant_id`.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        reason: str,
+        action_id: str | None = None,
+        grant_id: str | None = None,
+        delegation_id: str | None = None,
+    ) -> None:
+        super().__init__(message, reason=reason, action_id=action_id)
+        self.grant_id = grant_id
+        self.delegation_id = delegation_id
+
+
+class AuthorityEscalation(CTRLRunError):
+    """A delegation that may not exist: it is not contained in its parent (SPEC-v0.3 §5.3).
+
+    Not an `ActionDenied`: nothing was proposed. This is the creation-time vocabulary —
+    `containment`, `unknown_parent`, `parent_not_delegable`, `parent_not_valid`,
+    `not_the_subject`, `max_depth` — and it is disjoint from `AuthorityDenied`'s evaluation
+    reasons. The two are never used interchangeably.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        reason: str,
+        parent_id: str | None = None,
+        dimension: str | None = None,
+    ) -> None:
+        super().__init__(message if message is not None else reason)
+        self.reason = reason
+        self.parent_id = parent_id
+        self.dimension = dimension
+
+
 class ApprovalRequired(CTRLRunError):
     """The action needs a human. `request_id` is what `ctrlrun approve` takes (SPEC §4.3).
 

@@ -76,6 +76,13 @@ ctrlrun = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # SPEC-v0.3 §4.1 / T66: a test that legitimately builds an `authority:` section, and
+    # may therefore append one of the five §7 event types. `tests/conftest.py` fails any
+    # unmarked test that appends one, which is what "no `authority:` section behaves
+    # exactly as v0.2" means mechanically inside one pytest process.
+    "authority: builds an `authority:` section (SPEC-v0.3 §4.1)",
+]
 
 [tool.mypy]
 python_version = "3.11"

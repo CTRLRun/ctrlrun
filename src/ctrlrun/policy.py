@@ -63,10 +63,16 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 #: Longest first, so `amount_neq` reads as (amount, neq) and never as (amount_n, eq).
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
-_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment"})
+_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment", "authority"})
 
-#: SPEC-v0.3 §12.1 — the top-level keys that need `ctrlrun.policy/v3`.
-_V3_TOP_LEVEL_KEYS: Final = frozenset({"environment"})
+#: SPEC-v0.3 §12.1 — the top-level keys that need `ctrlrun.policy/v3`, and what an older
+#: reader would do with each if it ignored one. `mode:` joins them with build-list item 4.
+_V3_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
+    "environment": ("an older reader would ignore it and put every action in the wrong deployment"),
+    "authority": (
+        "an older reader would ignore it and run every action with no authority check at all"
+    ),
+}
 _RULE_KEYS: Final = frozenset({"when", "decision"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
@@ -82,8 +88,23 @@ _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
 #: rule — `when: { environment_eq: production }` — and matches nothing, so it is refused at
 #: load. Same fail-closed reading as `{resource}` in §5.1: two candidate meanings for one
 #: name, so make the author rename rather than silently pick one.
+#: SPEC-v0.3 §4.5 adds `claims`, `issuer` and `expires_at`: before v0.3 those names meant
+#: nothing, and now they name fields of a `Principal`, so v0.1 §3.2's rule applies — a name
+#: with two candidate meanings is refused until the author renames. Not gated on the schema
+#: version (§12.1): the splitter runs for every condition in every document, and gating it
+#: would leave the same name meaning two things in two files.
 RESERVED_ARGUMENTS: Final = frozenset(
-    {"action_id", "agent", "environment", "principal", "resource", "user"}
+    {
+        "action_id",
+        "agent",
+        "claims",
+        "environment",
+        "expires_at",
+        "issuer",
+        "principal",
+        "resource",
+        "user",
+    }
 )
 
 
@@ -142,7 +163,14 @@ def _is_container(value: object) -> bool:
 
 
 @dataclass(frozen=True)
-class _Condition:
+class Condition:
+    """One `<argument>_<op>: operand` test against an action's arguments (SPEC-v0.1 §3.2).
+
+    Public since SPEC-v0.3 §11, because a `Grant`'s constraints are made of them and the two
+    axes share one evaluator: a second implementation would be a second place for `True` to
+    start comparing equal to `1`. `key` is the raw condition key the author wrote.
+    """
+
     key: str
     argument: str
     op: str
@@ -184,7 +212,7 @@ class _Condition:
 @dataclass(frozen=True)
 class _Rule:
     decision: Decision
-    conditions: tuple[_Condition, ...]
+    conditions: tuple[Condition, ...]
 
     def matches(self, action_name: str, arguments: Mapping[str, Any]) -> bool:
         # A rule with no `when` has no conditions, so all() holds and it always matches.
@@ -283,19 +311,14 @@ class Policy:
                 f"{source}: 'actions' must be a mapping of action name to entry, "
                 f"got {_type_name(entries)}"
             )
+        require_v3(document, str(schema), source)
         environment = document.get("environment")
-        if "environment" in document:
-            if str(schema) != POLICY_SCHEMA_V3:
-                raise PolicyError(
-                    f"{source}: 'environment' needs 'schema: {POLICY_SCHEMA_V3}'; this document "
-                    f"declares {schema!r}, and an older reader would ignore it and put every "
-                    "action in the wrong deployment"
-                )
-            if not isinstance(environment, str) or not environment.strip():
-                raise PolicyError(
-                    f"{source}: 'environment' must be a non-empty string, "
-                    f"got {_type_name(environment)}"
-                )
+        if "environment" in document and (
+            not isinstance(environment, str) or not environment.strip()
+        ):
+            raise PolicyError(
+                f"{source}: 'environment' must be a non-empty string, got {_type_name(environment)}"
+            )
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
@@ -345,6 +368,37 @@ def discover_policy_path() -> Path:
     if not configured.strip():
         raise PolicyError(f"{CONFIG_ENV_VAR} is set but empty; unset it or point it at a policy")
     return Path(configured)
+
+
+def require_v3(document: Mapping[Any, Any], schema: str, source: str) -> None:
+    """Refuse a `ctrlrun.policy/v3` key in an older document (SPEC-v0.3 §12.1).
+
+    Shared with `authority.py`, which reads the same key from a document the policy loader
+    may never see: SPEC-v0.3 §8.3's `--authority` file carries `schema` and `authority` and
+    nothing else, so the check has to exist on both paths rather than on whichever runs first.
+    """
+    if schema == POLICY_SCHEMA_V3:
+        return
+    for key, consequence in _V3_TOP_LEVEL_KEYS.items():
+        if key in document:
+            raise PolicyError(
+                f"{source}: {key!r} needs 'schema: {POLICY_SCHEMA_V3}'; this document "
+                f"declares {schema!r}, and {consequence}"
+            )
+
+
+def parse_conditions(mapping: Mapping[Any, Any], *, where: str) -> Mapping[str, Condition]:
+    """Parse a `when:`-shaped mapping into conditions, keyed by the raw condition key.
+
+    Public since SPEC-v0.3 §11: a grant's `constraints:` is in exactly this syntax and MUST be
+    parsed by this code (§4.5). The key is injective given §3.2's longest-suffix split, which
+    is what lets `Grant`'s containment check look a dimension up by name.
+    """
+    conditions: dict[str, Condition] = {}
+    for key, operand in mapping.items():
+        condition = _parse_condition(key, operand, where)
+        conditions[condition.key] = condition
+    return conditions
 
 
 def _reject_unknown_keys(mapping: Mapping[Any, Any], allowed: Iterable[str], where: str) -> None:
@@ -478,15 +532,15 @@ def _parse_rule(rule: object, where: str) -> _Rule:
         )
     return _Rule(
         decision=decision,
-        conditions=tuple(_parse_condition(key, operand, where) for key, operand in when.items()),
+        conditions=tuple(parse_conditions(when, where=where).values()),
     )
 
 
-def _parse_condition(key: object, operand: object, where: str) -> _Condition:
+def _parse_condition(key: object, operand: object, where: str) -> Condition:
     if not isinstance(key, str):
         raise PolicyError(f"{where}: condition keys must be strings, got {key!r}")
     argument, op = _split_condition_key(key, where)
-    return _Condition(
+    return Condition(
         key=key,
         argument=argument,
         op=op,
@@ -516,9 +570,15 @@ def _split_condition_key(key: str, where: str) -> tuple[str, str]:
 def _parse_operand(op: str, operand: object, where: str, key: str) -> object:
     if op in _NUMERIC_COMPARE:
         if not _is_int(operand):
+            # SPEC-v0.3 §4.5 — the message names the representation rule, because the operator
+            # who wrote `amount_lte: "2000.00"` has hit a real limit and not a typo: only
+            # integer arguments can be bounded, so a deployment representing money as decimal
+            # strings cannot express an amount ceiling in a grant at all.
             raise PolicyError(
                 f"{where}: condition {key!r}: a numeric operator needs an int operand, "
-                f"got {_type_name(operand)}"
+                f"got {_type_name(operand)}. Only integers can be bounded, so an amount that "
+                "a rule or a grant compares is written in integer minor units "
+                "(amount_lte: 200000), never as a decimal string"
             )
         return operand
     if op == "in":

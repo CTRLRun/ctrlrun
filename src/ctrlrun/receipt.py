@@ -99,6 +99,18 @@ class EventType(StrEnum):
     #: caused it: `receipt.py` does not learn MCP vocabulary (ARCHITECTURE §6).
     EXECUTION_SUSPENDED = "EXECUTION_SUSPENDED"
     EXECUTION_RESUMED = "EXECUTION_RESUMED"
+    #: SPEC-v0.3 §7 — the five types authority and delegation add. `AUTHORITY_RESOLVED` is
+    #: appended for *every* action that passes authority, not only for a delegated one:
+    #: evidence has to record that CTRLRun checked and found a grant, or a deployment with a
+    #: permissive grant is indistinguishable from one with no `authority:` section at all.
+    #: The three `DELEGATION_*` types are produced by `Control.delegate` and `Control.revoke`,
+    #: which land with build-list item 3; the vocabulary is closed here so a reader of an
+    #: evidence file has one list to check against.
+    AUTHORITY_RESOLVED = "AUTHORITY_RESOLVED"
+    AUTHORITY_DENIED = "AUTHORITY_DENIED"
+    DELEGATION_CREATED = "DELEGATION_CREATED"
+    DELEGATION_REVOKED = "DELEGATION_REVOKED"
+    DELEGATION_REJECTED = "DELEGATION_REJECTED"
 
 
 @dataclass(frozen=True)

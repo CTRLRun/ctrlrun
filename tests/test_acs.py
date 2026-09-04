@@ -489,3 +489,37 @@ def test_T55_the_response_is_json_serialisable(hook):
     """A Guardian puts this on a wire; anything that will not serialise is a bug here."""
     for envelope in (_call(), _call(amount=200000), _call(amount=99999999)):
         assert json.loads(json.dumps(hook.handle(envelope)))
+
+
+# --- SPEC-v0.3 §8.4: the hook needs an identity, for the reason the gateway does --------
+
+
+@pytest.mark.authority
+def test_an_authority_holding_control_is_refused_at_construction(store):
+    """§8.4 — this hook reads `params.metadata.agent_id` off the inbound envelope, and §4 makes
+    the principal an authorization input. A self-reported name cannot be one, which is the same
+    sentence that removes `--principal-from-client-info` (§8.1); the ACS hook is that flag in a
+    different module, and removing one while leaving the other would make the removal a
+    gesture. T91d asserts the item-5 form of this, where the hook takes an `identity` of its
+    own; until then it has none, so an `Authority` is refused outright."""
+    from ctrlrun import Authority, InvalidArgument
+
+    authority = Authority.from_yaml(
+        "schema: ctrlrun.policy/v3\n"
+        "authority:\n"
+        "  grants:\n"
+        "    - id: g\n"
+        '      subject: { agent: "refund-agent" }\n'
+        '      actions: ["**"]\n',
+        standalone=True,
+    )
+    control = Control(Policy.from_yaml(POLICY), store, authority=authority)
+
+    with pytest.raises(InvalidArgument, match="identity"):
+        AcsControlHook(control, prefix="acs")
+
+
+def test_a_control_with_no_authority_still_constructs(control):
+    """The control for the refusal above: without it, an implementation that refused every
+    Control would satisfy the first half."""
+    assert AcsControlHook(control, prefix="acs") is not None
