@@ -19,6 +19,10 @@ recursive-include tests *.py
 # fails on a fresh checkout, which is the failure `prune internal` exists to avoid.
 recursive-include examples *.py
 recursive-include examples *.yaml
+# And the READMEs. `examples/authority/` is two documents to *read*, so its README is the
+# example rather than a note beside one — and a test asserts what it says, which is how the
+# sdist job caught this line missing rather than the release did.
+recursive-include examples *.md
 
 # Local-only: working notes, and anything an operator's run left behind. Nothing here is
 # picked up by default — these are belt and braces, so a stray file cannot ride along.

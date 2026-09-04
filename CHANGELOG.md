@@ -39,6 +39,15 @@ shipped, and the only thing in the tree today is the contract.
   identity provider, a `HeaderIdentityProvider` behind a proxy that does not overwrite, a
   revoked token before its `exp`, a tenant-templated issuer, and authority across an
   agent-to-agent hop.
+- **`MANIFEST.in` ships `examples/**/README.md`, and a test now keeps it honest.** The file
+  has claimed for two releases that a test named `test_the_sdist_carries_everything_the_tests_need`
+  keeps it in step, and there was no such test — so the first README it forgot was found by
+  the CI job that builds an sdist and runs its tests, one push after it could have been found
+  locally. That is v0.2's four `.gitignore`d policy files in a different costume: setuptools
+  resolves `MANIFEST.in` against the working tree, so a local run is green either way. The
+  test now checks every **git-tracked** file under `examples/` and `docs/` against the
+  manifest's include patterns, and it found `examples/acs/README.md` had been missing since
+  v0.2 as well.
 - **The nine sector templates stay on v0.1 and now say why.** They gain no `authority:`
   section: a grant names a real principal in a real organization, and a template that shipped
   plausible ones would invite an operator to adopt them.
