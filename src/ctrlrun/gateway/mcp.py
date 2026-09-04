@@ -273,18 +273,25 @@ def encode_header_value(value: str) -> str:
 
 
 def _agrees(declared: str, value: object) -> bool:
-    """Whether a header value agrees with the body's, comparing integers numerically (§6.4).
+    """Whether a header value is the body value's canonical rendering (SPEC-v0.2 §6.4).
 
-    `2000` in a header is text and the body's is an `int`; comparing them as strings would
-    refuse every well-formed request that annotated a numeric parameter.
+    A string's header carries its bare text; everything else must be exactly what JSON writes
+    for it — `2000`, `true`, `null`. One rendering per value, produced by the serializer the
+    body already went through, so there is nothing to re-parse and nothing to be lenient about.
+
+    This used to call `int(declared)`, which reads `2_000`, `+2000`, `02000`, ` 2000`, and the
+    Arabic-indic and fullwidth spellings of 2000 as agreeing with a body carrying `2000`. None
+    of them is what a JSON serializer writes, and each is read differently — or not at all — by
+    another parser: `parseInt("2_000")` is 2 in JavaScript and `strconv.Atoi` refuses it in Go.
+    §6.4 exists because "different components in the network rely on different sources of
+    truth", so certifying agreement that only holds under Python's rules is the hazard rather
+    than a convenience. Booleans were compared case-insensitively, with the same consequence.
+
+    It also declines the revision's SHOULD that a server compare integers numerically, under
+    which `2000.0` equals `2000`. v0.1 §2.3 refuses a float in the body outright (§6.6), so the
+    leniency has no legitimate case here; taking it would mean accepting a spelling of a number
+    that the body could never hold.
     """
-    if isinstance(value, bool):
-        return declared.lower() == str(value).lower()
-    if isinstance(value, int):
-        try:
-            return int(declared) == value
-        except ValueError:
-            return False
     if isinstance(value, str):
         return declared == value
     return declared == json.dumps(value, separators=(",", ":"))

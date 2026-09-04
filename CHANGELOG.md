@@ -9,7 +9,26 @@ any change to one appears here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The gateway compared mirrored header values by re-parsing them, and Python's parser is
+  lenient.** `Mcp-Param-{Name}` validation ran the header through `int()`, so a body carrying
+  `amount: 2000` was certified as agreeing with headers spelling it `2_000`, `+2000`, `02000`,
+  ` 2000`, `2000 `, and the Arabic-indic and fullwidth digit forms; booleans were matched
+  case-insensitively, so `TRUE`, `True` and `tRuE` all agreed with `true`. None of those is
+  what a JSON serializer writes, and each is read differently — or refused — by another
+  parser: `parseInt("2_000")` is 2 in JavaScript and `strconv.Atoi` errors in Go.
+
+  That is the exact hazard SPEC-v0.2 §6.4 exists to prevent. The gateway's job there is to
+  certify that a routing intermediary and CTRLRun are looking at the same value, and it was
+  certifying agreement that held only under Python's rules. CTRLRun's own decisions were never
+  affected — the action is built from the body, and the headers are only checked — so this
+  costs an intermediary's correctness rather than an approval binding.
+
+  A header value must now be the body value's canonical rendering, compared as text, with no
+  parser in the comparison. This also declines the revision's SHOULD that servers compare
+  integers numerically (`42.0` equals `42`): v0.1 §2.3 refuses a float in the body outright, so
+  the leniency has no legitimate case here. SPEC-v0.2 §6.4 states both rules and the reasoning.
 
 ## [0.2.0] — unreleased
 

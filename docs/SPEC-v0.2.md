@@ -513,8 +513,25 @@ for. So:
 
 - The gateway MUST parse the body of every request it forwards and MUST validate
   `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-{Name}` against it,
-  decoding the `=?base64?…?=` sentinel before comparing, and comparing integers numerically.
-  A mismatch, or a missing required header, is HTTP 400 with `-32020`.
+  decoding the `=?base64?…?=` sentinel before comparing. A mismatch, or a missing required
+  header, is HTTP 400 with `-32020`.
+- **A header value MUST be the body value's canonical rendering**, compared as text: a string's
+  own characters, and for everything else exactly what JSON writes — `2000`, `true`, `null`.
+  One rendering per value, and it is the one the body already went through a serializer to get.
+
+  This is stricter than the revision's *"servers SHOULD compare the header value and the body
+  value numerically rather than as strings (e.g., `42.0` and `42` are considered equal)"*, and
+  the gateway **declines that SHOULD**, for two reasons. A float cannot appear in the body at
+  all — v0.1 §2.3 refuses it and §6.6 turns it into `-41008` — so the leniency has no
+  legitimate case here; taking it would mean accepting a spelling of a number the body could
+  never hold. And re-parsing is what creates the hazard this section is about: `int("2_000")`
+  is 2000 in Python, `parseInt("2_000")` is 2 in JavaScript, and `strconv.Atoi("2_000")` is an
+  error in Go, so a gateway that certified `Mcp-Param-Amount: 2_000` as agreeing with a body
+  carrying `2000` would be telling a load balancer that a header they read differently is
+  safe to route on. `+2000`, `02000`, leading or trailing whitespace, and the Arabic-indic and
+  fullwidth spellings of the digits are the same defect wearing other hats; so is matching
+  `true` case-insensitively. The comparison has no parser in it, so it has no parser to
+  disagree with.
 - The gateway MUST decide what to intercept from the **body's** `method` and `params.name`,
   never from the headers. The headers are checked; the body is believed.
 - The gateway MUST NOT rely on the upstream to perform this validation. A `-32020` arriving
