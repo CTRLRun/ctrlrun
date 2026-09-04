@@ -910,6 +910,32 @@ An action that **passes** authority appends `AUTHORITY_RESOLVED` with `data.gran
 a delegated grant — `data.delegation_id` and `data.depth`. Policy then runs as it always has, and
 the two results combine per §4.6.
 
+### 4.3.1 The entry points, by name
+
+The expired-credential hole of §5.3 rule 0 was not a missing check. It was a **missing
+enumeration**: §2.3 wrote its expiry refusal against `Control.execute`, and `Control.delegate` was
+simply not on anybody's list. So the list is here, and it is normative.
+
+Every path below either proposes an action or creates authority. Each is subject to the same
+fail-closed checks in the same order — **principal validity and expiry, then authority, then
+policy** — and each MUST resolve its principal from an `IdentityProvider` where one is configured
+(§3.1), never from a value the caller supplied alongside the request.
+
+| Entry point | Builds an `Action` | Resolves identity | Evaluates authority |
+|---|---|---|---|
+| `@protect` → `Control.execute` | yes | yes (§3.2) | yes |
+| `Control.execute` called directly | no — the caller built it | no; the in-process trust boundary (§3.1) | yes |
+| `Control.evaluate` | no | no | yes — returns the combined §4.6 decision |
+| `Control.resume` | rehydrated from the store | no — the principal is the held action's | evaluated and recorded, not re-decided (§5.6.1) |
+| `Control.delegate` / `Control.revoke` | no — creates authority | checks `by` is unexpired (§5.3 rule 0) | the six checks of §5.3 |
+| The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) |
+| `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) |
+
+**A new entry point is a specification amendment before it is code.** Adding one — a framework
+adapter, a second protocol, a batch runner — means adding a row here and saying what it does about
+each column, because the failure mode is never that somebody wrote a check wrongly. It is that
+nobody remembered the new path needed one.
+
 **Order within `Control.execute`,** stated once so it can be tested: `principal_expired` (§2.3)
 → authority → policy → approval → reservation → execution. The effect key resolves earlier still,
 before `Control.execute` is entered, exactly as `v0.1 §5.1` requires; an unresolvable template
@@ -1632,6 +1658,15 @@ Revoking an already-revoked delegation is idempotent: it logs, appends no second
 validates it, runs every check of §5.3, and prints the new `delegation_id`. Its refusals exit
 non-zero and name the rule that failed.
 
+**§5.3's order tells a caller which grants exist.** Rules 1 to 3 — `unknown_parent`,
+`parent_not_delegable`, `parent_not_valid` — run before rule 4's `not_the_subject`, so in-process
+code can call `Control.delegate` with a junk child against a guessed `parent_id` and learn from
+the reason whether that grant exists, whether it is delegable, and whether its chain is live,
+without holding it. This is recorded rather than fixed: the document those ids live in is on the
+same host and readable by the same process, so the order buys legibility in the common case and
+leaks nothing that a file read would not. It is stated here because a reader who notices it should
+find it already answered, not think it was missed.
+
 **`--as` is an assertion, and the record says so.** It supplies the creating principal for §5.3
 rule 4, and there is no default, because the default would be "whoever the store belongs to",
 which is not a principal. The agent half MUST NOT contain `/`: `v0.1 §2.1` does not forbid the
@@ -2156,7 +2191,7 @@ is individually configurable**, and there is no flag that makes any single one o
 | `authority:` present, every matching grant expired | `AuthorityDenied(reason="authority_expired")` | ⚠ |
 | Delegated grant no longer contained in its parent | `AuthorityDenied(reason="authority_escalation")` | ⚠ |
 | A delegation in the chain is revoked | `AuthorityDenied(reason="authority_revoked")` | ⚠ |
-| An ancestor of a delegated grant has expired | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 3) | ⚠ |
+| An ancestor of a delegated grant has expired | `AuthorityDenied(reason="authority_escalation")` — **attribution, not a defence**: §5.4's `expires_at` row already makes the delegation itself expired, so rule 4 or §4.3 refuses it either way. The row earns its place by naming the ancestor that lapsed (§5.6 rule 3) | ⚠ |
 | A parent grant has been deleted from the document | `AuthorityDenied(reason="authority_escalation")`, `missing_parent_id` | ⚠ |
 | An ancestor is no longer `delegable` | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 6) | ⚠ |
 | A chain walk exceeds the depth bound | `AuthorityDenied(reason="authority_escalation")`, `depth_exceeded` (§5.5) | ⚠ |
