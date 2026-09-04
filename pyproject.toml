@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.4.0"
+version = "0.5.0.dev0"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -73,6 +73,11 @@ otel = [
 # rather than at install time. An extra that installs cleanly and then cannot verify an RS256
 # token is worse than one that names its dependency.
 identity = ["pyjwt[crypto]>=2.8"]
+# SPEC-v0.5 §5.1 — the conformance kit runs this repository's own acceptance suites against an
+# adapter, so it needs `pytest`, and core must not carry test machinery. It is an extra rather
+# than core because SPEC-v0.4 §1's argument does not transfer: verify is run by every operator
+# against every deployment, and the kit is run by an adapter author, once, in that adapter's CI.
+conformance = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
