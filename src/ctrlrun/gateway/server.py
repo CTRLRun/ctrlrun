@@ -37,6 +37,7 @@ from ..errors import (
     NotExecuted,
     Suspended,
 )
+from ..policy import OBSERVE
 from ..receipt import Receipt
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
 from .outcome import (
@@ -515,7 +516,13 @@ class Gateway:
         approval = None
         if self._control.policy.evaluate(action).decision.value == "approve":
             approval = self._control.store.find_granted_approval(action.action_hash)
-            if approval is None:
+            if approval is None and self._control.policy.mode != OBSERVE:
+                # SPEC-v0.3 §6.2 — §6.10's pre-check exists to spare a human, and it spares
+                # them by *refusing* the call. Observe mode troubles no human and refuses
+                # nothing about an action: a gateway that kept this would enforce three of
+                # §9's ⚠ rows in the one mode that enforces none of them, and an operator
+                # measuring what enforcement would cost would be reading a number the
+                # gateway had already changed.
                 refusal = self._before_asking_a_human(action, effect_key, request_id)
                 if refusal is not None:
                     return refusal

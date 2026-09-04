@@ -12,9 +12,9 @@ agent is waiting on in another shell.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -26,13 +26,30 @@ from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
 from ..errors import AuthorityEscalation, CTRLRunError
-from ..policy import DEFAULT_POLICY_FILENAME
-from ..receipt import Event, EventType, Receipt, iso_timestamp
+from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Decision, Policy
+from ..receipt import (
+    BLOCKED_APPROVAL_REQUIRED,
+    BLOCKED_BY_STATE,
+    Event,
+    EventType,
+    Receipt,
+    ReceiptResult,
+    iso_timestamp,
+)
 from ..state import RESOLUTIONS, SQLiteStateStore
 from .demo import run_demo
 
 #: Who the CLI records as the answer's author. Free text in v0.1 (SPEC-v0.1 §4.1).
 CLI_APPROVER: Final = "cli:local"
+
+#: SPEC-v0.3 §6.5 — printed to stderr, before anything else, by every command that loads the
+#: operator's policy, on every invocation. To stderr so a `--json` stdout stays
+#: machine-readable and a pipeline cannot silently swallow it; on every invocation because a
+#: deployment that has been observing for six months is exactly the one this line is for.
+OBSERVE_BANNER: Final = "OBSERVE MODE — nothing is enforced"
+
+#: SPEC-v0.3 §6.4 — one `ctrlrun stats --json` document.
+STATS_SCHEMA: Final = "ctrlrun.stats/v1"
 
 #: SPEC-v0.2 §5 — the schema of one `ctrlrun inspect --json` document.
 #: SPEC-v0.3 §12.2 — v2 where the header block gained the principal's issuer, expiry and
@@ -82,6 +99,23 @@ actions:
 def _store() -> SQLiteStateStore:
     """Open the store this working tree's agents use (SPEC-v0.1 §8)."""
     return SQLiteStateStore(state_path())
+
+
+def _loaded_policy() -> Policy:
+    """Load the operator's policy, printing the observe banner first (SPEC-v0.3 §6.5).
+
+    Only the commands that already need the policy call this — `gateway`, `stats`,
+    `delegate`, `revoke` and `verify`. `receipts`, `inspect` and the rest deliberately do
+    not: `state_path()` finds the store without loading a policy, and making an evidence
+    command load one would turn a malformed policy into a failure of the evidence.
+
+    Where the policy cannot be loaded the `PolicyError` propagates and no banner is printed,
+    because there is no mode to report.
+    """
+    policy = Policy.from_file()
+    if policy.mode == OBSERVE:
+        click.echo(OBSERVE_BANNER, err=True)
+    return policy
 
 
 def _fail(exc: CTRLRunError) -> click.ClickException:
@@ -456,6 +490,173 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
 
 
 @main.command()
+@click.option(
+    "--since",
+    default=None,
+    help="Count only receipts finished at or after this: an ISO-8601 timestamp with an "
+    "offset, or <n>m / <n>h / <n>d.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+def stats(since: str | None, as_json: bool) -> None:
+    """Count what this store's receipts say, from the local store and nothing else.
+
+    No network, no aggregation service, no upload: this reads the SQLite file the process it
+    is diagnosing has been writing (SPEC-v0.3 §6.4).
+    """
+    policy = _loaded_policy()
+    boundary = _since(since)
+    try:
+        counted = [
+            receipt
+            for receipt in _store().receipts()
+            if boundary is None or receipt.finished_at >= boundary
+        ]
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    document = _stats_document(counted, mode=policy.mode, boundary=boundary)
+    if as_json:
+        click.echo(json.dumps(document, ensure_ascii=False, indent=2))
+        return
+    for line in _stats_lines(document):
+        click.echo(line)
+
+
+def _since(argument: str | None) -> datetime | None:
+    """Parse `--since` into an inclusive lower bound on `finished_at` (SPEC-v0.3 §6.4).
+
+    Absolute ISO-8601 **with an offset**, or a relative `<n><unit>` where the unit is exactly
+    one of `m`, `h` or `d`. No months, no weeks, no bare numbers: `2mo` and `1w` are ambiguous
+    enough that guessing one would silently report the wrong window, which is worse than
+    refusing.
+    """
+    if argument is None:
+        return None
+    text = argument.strip()
+    if text and text[-1] in _RELATIVE_UNITS and text[:-1].isdigit() and int(text[:-1]) > 0:
+        return datetime.now(UTC) - timedelta(**{_RELATIVE_UNITS[text[-1]]: int(text[:-1])})
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise click.UsageError(
+            f"--since {argument!r} is not a window this command accepts. Give an ISO-8601 "
+            "timestamp with an offset (2026-09-01T00:00:00Z), or one of <n>m, <n>h, <n>d "
+            "(30m, 24h, 7d). No months, no weeks, and no bare numbers"
+        )
+    return parsed
+
+
+#: The three relative units of §6.4, and the `timedelta` keyword each names.
+_RELATIVE_UNITS: Final[Mapping[str, str]] = {"m": "minutes", "h": "hours", "d": "days"}
+
+
+def _stats_document(
+    counted: list[Receipt], *, mode: str, boundary: datetime | None
+) -> dict[str, Any]:
+    """The numbers of §6.4, from `would_have` in observe mode and from `result` in enforce.
+
+    The two are deliberately different shapes. An enforce-mode receipt carries no
+    counterfactual and no structured `blocked_reason` — a `blocked` receipt keeps the
+    duplicate/ambiguous distinction only inside `error` as exception text (v0.1 §6.1) — so
+    the command reports what it can substantiate and says in its footer what it cannot.
+    """
+    finished = [receipt.finished_at for receipt in counted]
+    document: dict[str, Any] = {
+        "schema": STATS_SCHEMA,
+        "mode": mode,
+        "since": None if boundary is None else iso_timestamp(boundary),
+        "from": iso_timestamp(min(finished)) if finished else None,
+        "to": iso_timestamp(max(finished)) if finished else None,
+        "actions": len(counted),
+    }
+    if mode != OBSERVE:
+        refused = [r for r in counted if r.result is ReceiptResult.DENIED]
+        document["denied"] = len(refused)
+        document["denied_by_reason"] = _tally(r.decision_reason for r in refused)
+        document["ambiguous_outcomes"] = len(
+            [r for r in counted if r.result is ReceiptResult.AMBIGUOUS]
+        )
+        return document
+    # Every observe-mode number comes off `would_have`, so the counterfactuals are pulled out
+    # once. A receipt with none was written by one of §6.2's still-refuses rows: the action was
+    # genuinely stopped and there is nothing counterfactual to count.
+    counterfactuals = [r.would_have for r in counted if r.would_have is not None]
+    denied = [w for w in counterfactuals if w.decision is Decision.DENY]
+    blocked = [w for w in counterfactuals if w.blocked_reason in BLOCKED_BY_STATE]
+    document["would_have_been_denied"] = len(denied)
+    document["denied_by_reason"] = _tally(w.blocked_reason or w.reason for w in denied)
+    document["would_have_needed_approval"] = len(
+        [w for w in counterfactuals if w.blocked_reason == BLOCKED_APPROVAL_REQUIRED]
+    )
+    document["would_have_been_blocked"] = len(blocked)
+    document["blocked_by_reason"] = _tally(w.blocked_reason for w in blocked)
+    document["ambiguous_outcomes"] = len(
+        [r for r in counted if r.execution is ReceiptResult.AMBIGUOUS]
+    )
+    return document
+
+
+def _tally(reasons: Iterable[str | None]) -> dict[str, int]:
+    """Counts by reason, largest first, then alphabetically so the output is stable."""
+    counts: dict[str, int] = {}
+    for reason in reasons:
+        counts[str(reason)] = counts.get(str(reason), 0) + 1
+    return dict(sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])))
+
+
+def _stats_lines(document: Mapping[str, Any]) -> list[str]:
+    """§6.4's report. Every number comes from the document, so `--json` cannot disagree."""
+    window = f"{document['from'] or '-'} .. {document['to'] or '-'}"
+    lines = [f"CTRLRun — {window}   ({document['mode']} mode)", ""]
+    lines.append(_stat("actions", document["actions"]))
+    if document["mode"] == OBSERVE:
+        lines.append(_stat("would have been denied", document["would_have_been_denied"]))
+        lines += _breakdown(document["denied_by_reason"])
+        lines.append(_stat("would have needed approval", document["would_have_needed_approval"]))
+        lines.append(_stat("would have been blocked", document["would_have_been_blocked"]))
+        lines += _breakdown(document["blocked_by_reason"])
+    else:
+        lines.append(_stat("denied", document["denied"]))
+        lines += _breakdown(document["denied_by_reason"])
+    lines.append(_stat("ambiguous outcomes", document["ambiguous_outcomes"]))
+    lines.append("")
+    if document["mode"] != OBSERVE:
+        # §6.4 — say what is missing rather than print a line the receipts cannot substantiate.
+        lines.append(
+            "An enforce-mode receipt carries no structured blocked_reason, so the duplicate "
+            "and ambiguous breakdown is not reported."
+        )
+    lines.append("Actions still awaiting a human have no receipt yet and are not counted.")
+    return lines
+
+
+def _stat(label: str, count: int) -> str:
+    return f"{label:<30}{count:>6}"
+
+
+def _breakdown(counts: Mapping[str, int]) -> list[str]:
+    return [f"   {reason:<27}{count:>6}" for reason, count in counts.items()]
+
+
+@main.command()
+def verify() -> None:
+    """Not yet: verification of an evidence file lands in v0.4.
+
+    It exists here because observe mode's whole purpose is to lead somewhere, and the command
+    an operator reaches for next should not be a `No such command` error that suggests they
+    mistyped (SPEC-v0.3 §6.5). It runs nothing, checks nothing, and claims nothing.
+    """
+    _loaded_policy()
+    click.echo(
+        "ctrlrun verify lands in 0.4. It does not exist yet: nothing was checked and nothing "
+        "is claimed about this store.",
+        err=True,
+    )
+    raise SystemExit(2)
+
+
+@main.command()
 @click.option("--parent", required=True, help="The grant or delegation being narrowed.")
 @click.option(
     "--file",
@@ -484,6 +685,7 @@ def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
     if not agent:
         raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
     try:
+        _loaded_policy()
         control = Control.from_file()
         grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
         created = control._delegate(
@@ -515,6 +717,7 @@ def revoke(delegation_id: str, by: str) -> None:
     already-revoked delegation is idempotent and exits 0.
     """
     try:
+        _loaded_policy()
         control = Control.from_file()
         before = control.store.get_delegation(delegation_id)
         control.revoke(delegation_id, by=by)
@@ -621,7 +824,11 @@ def gateway(
     try:
         from ..gateway import serve
 
-        _announce_actions_without_an_effect()
+        # §6.5 — before anything else this command prints. The removed-flag guard above is a
+        # usage error and runs first deliberately: it must not depend on a policy being
+        # loadable, or a gateway started in a directory with no policy would report the wrong
+        # problem.
+        _announce_actions_without_an_effect(_loaded_policy())
         serve(
             upstream=upstream,
             alias=alias,
@@ -649,16 +856,13 @@ def gateway(
         click.echo("")
 
 
-def _announce_actions_without_an_effect() -> None:
+def _announce_actions_without_an_effect(policy: Policy) -> None:
     """SPEC-v0.2 §3.2 — print the actions with no `effect:` at startup.
 
     A write with no effect key is exactly the configuration this product exists to prevent,
     and it should be visible on the line that starts the process rather than discovered in a
     receipt three weeks later.
     """
-    from ..policy import Policy
-
-    policy = Policy.from_file()
     keyless = sorted(name for name in policy.actions if policy.effect_template(name) is None)
     if not keyless:
         return

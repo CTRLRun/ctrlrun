@@ -14,6 +14,50 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **Observe mode** (build-list item 4, SPEC-v0.3 §6). A top-level `mode: observe` runs every
+  real decision against real traffic and records what *would* have been blocked, without
+  blocking anything: no `ActionDenied`, no `AuthorityDenied`, no `ApprovalRequired`, no
+  `DuplicateEffect`. `Control.execute` returns a receipt whose `result` is `observed`, whose
+  `execution` is what the executor actually did, and whose `would_have` says what enforce mode
+  would have reached and what it would have done with it. It is the rollout path, and it is
+  **not a dry run**: it executes, effects land at remotes, and the records of them are real.
+- **One switch, and it governs the process.** `mode:` is top level and nothing else — inside an
+  action, a rule, a grant or the `authority:` section it is a load error naming the rule, and
+  so is a value that is not exactly `observe` or `enforce`. A partially-enforced configuration
+  is the failure mode that rule exists to prevent. Absent means `enforce`; `mode:` needs
+  `schema: ctrlrun.policy/v3`, because a reader that ignored it would enforce a configuration
+  that was deployed to observe.
+- **Observe mode still refuses what it cannot describe.** A missing principal, a provider that
+  raises, an unresolvable effect key, an argument an Action cannot represent, and a delegation
+  that would escalate are refused in both modes: the first four are wiring bugs that would run
+  an action CTRLRun could not describe, and the fifth is an act of authority rather than a
+  decision about an action. It asks no human either — a policy reaching `approve` records
+  `approval_required` and runs, creating no request and appending no `APPROVAL_REQUESTED` —
+  and it never calls the `reconcile` hook, whose `"committed"` answer would move a record a
+  human may still be adjudicating.
+- **A refused reservation writes no effect record.** The record belongs to the attempt that
+  holds the key, and observe mode does not make a second attempt its owner: a record already
+  `AMBIGUOUS` stays `AMBIGUOUS`. The refusal is on the receipt instead, as
+  `would_have.blocked_reason`. The gateway's v0.2 §6.10 pre-check is skipped in observe mode
+  for the same reason — it refuses calls before `Control.execute` is reached, and a gateway
+  that kept it would enforce three rows in the one mode that enforces none of them.
+- **`ctrlrun stats`**, counting from the local store and nothing else — no network, no
+  aggregation service, no upload. Would-have-denied broken down by reason, would-have-needed-
+  approval, would-have-been-blocked broken down by duplicate and ambiguous, and ambiguous
+  outcomes. `--since` takes an ISO-8601 timestamp with an offset or `30m`/`24h`/`7d` and
+  compares `finished_at` inclusively; `--json` emits the same numbers under
+  `schema: ctrlrun.stats/v1`. In enforce mode it reports what actually happened and **reports
+  less**, saying so in its footer rather than printing a line the receipts cannot substantiate.
+- **The observe banner.** `OBSERVE MODE — nothing is enforced`, to stderr, before anything
+  else, on every invocation of every command that loads the operator's policy — `gateway`,
+  `stats`, `delegate`, `revoke`, `verify`. To stderr so a `--json` stdout stays parseable. The
+  evidence commands (`receipts`, `effects`, `inspect`, `resolve`, `approve`, `deny`) do not
+  print it and do not load a policy at all: reading evidence must not depend on the
+  configuration that produced it.
+- **`ctrlrun verify`** as a stub that prints to stderr that verification lands in 0.4 and exits
+  **2**. It runs nothing, checks nothing, and claims nothing. It exists because observe mode's
+  whole purpose is to lead somewhere, and the command an operator reaches for next should not
+  be a `No such command` error that suggests they mistyped.
 - **Delegation with attenuation** (build-list item 3, SPEC-v0.3 §5). A principal who holds a
   `delegable` grant can create a narrower one at runtime — `Control.delegate`, `ctrlrun
   delegate` — and revoke it — `Control.revoke`, `ctrlrun revoke`. A delegated grant is valid
@@ -124,6 +168,14 @@ shipped, and the only thing in the tree today is the contract.
 - **A repeated identity header is refused** — `-41007`, HTTP 403, upstream untouched. A
   `Mapping` holds one value per name, so something had to decide what two become, and under
   authority that decision picks the principal.
+- **BREAKING for a reader: `ReceiptResult` gains `observed`.** `Receipt.from_dict` parses
+  `result` into a closed `StrEnum` and `SQLiteStateStore` reads every stored receipt through
+  it, so a CTRLRun ≤ 0.2 process running `ctrlrun receipts` or `ctrlrun inspect` against a
+  store an 0.3 **observe-mode** process wrote raises on the unknown value. Two processes
+  sharing one store is the intended deployment: **upgrade every reader before switching any
+  writer to `mode: observe`.** An enforce-mode 0.3 writer emits no `observed` receipt and is
+  safe to mix. An external reader that keys on `result` must read `execution` too, or it
+  counts every observed execution as if nothing ran.
 - **`ctrlrun.receipt/v2` and `ctrlrun.inspection/v2`.** The receipt carries the whole principal
   and reserves `execution` and `would_have` as `null` until observe mode fills them, so the
   shape a reader parses settles once rather than changing twice under one version string. The

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import yaml
 
@@ -43,6 +43,13 @@ POLICY_SCHEMA_V3: Final = "ctrlrun.policy/v3"
 #: All of them, newest last, for the message an unknown schema produces.
 SUPPORTED_SCHEMAS: Final = (POLICY_SCHEMA, POLICY_SCHEMA_V2, POLICY_SCHEMA_V3)
 
+#: SPEC-v0.3 §6.1 — the two values of the top-level `mode:` key, and nothing else. Absent
+#: means `enforce`: the fail-closed default, so a document that predates the key enforces.
+MODE_KEY: Final = "mode"
+OBSERVE: Final = "observe"
+ENFORCE: Final = "enforce"
+POLICY_MODES: Final = (OBSERVE, ENFORCE)
+
 CONFIG_ENV_VAR: Final = "CTRLRUN_CONFIG"
 DEFAULT_POLICY_FILENAME: Final = "ctrlrun.yaml"
 
@@ -63,15 +70,16 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 #: Longest first, so `amount_neq` reads as (amount, neq) and never as (amount_n, eq).
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
-_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment", "authority"})
+_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment", "authority", "mode"})
 
 #: SPEC-v0.3 §12.1 — the top-level keys that need `ctrlrun.policy/v3`, and what an older
-#: reader would do with each if it ignored one. `mode:` joins them with build-list item 4.
+#: reader would do with each if it ignored one.
 _V3_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
     "environment": ("an older reader would ignore it and put every action in the wrong deployment"),
     "authority": (
         "an older reader would ignore it and run every action with no authority check at all"
     ),
+    "mode": ("an older reader would enforce a configuration that was deployed to observe"),
 }
 _RULE_KEYS: Final = frozenset({"when", "decision"})
 
@@ -267,6 +275,11 @@ class Policy:
     #: through to "production". Policy itself never reads it — the environment is not a
     #: condition (`environment` is a reserved argument name) — it is carried for `Control`.
     environment: str | None = None
+    #: SPEC-v0.3 §6.1 — `observe` or `enforce`, top-level and nothing else. Policy itself
+    #: never reads it either: observe mode changes what `Control` *does* with a decision, not
+    #: which decision is reached, and an evaluator that knew the mode would be a second place
+    #: for the two to disagree.
+    mode: Literal["observe", "enforce"] = ENFORCE
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Policy:
@@ -319,6 +332,7 @@ class Policy:
             raise PolicyError(
                 f"{source}: 'environment' must be a non-empty string, got {_type_name(environment)}"
             )
+        mode = _parse_mode(document, source)
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
@@ -329,6 +343,7 @@ class Policy:
             source=source,
             schema=str(schema),
             environment=environment if isinstance(environment, str) else None,
+            mode=mode,
         )
 
     def effect_template(self, action_name: str) -> str | None:
@@ -387,6 +402,45 @@ def require_v3(document: Mapping[Any, Any], schema: str, source: str) -> None:
             )
 
 
+def _parse_mode(document: Mapping[Any, Any], source: str) -> Literal["observe", "enforce"]:
+    """The top-level `mode:`, or the fail-closed default (SPEC-v0.3 §6.1).
+
+    The value MUST be exactly `observe` or `enforce`. `true`, `off` and `0` are not aliases
+    for either: a switch that governs whether *anything* is enforced is set deliberately or
+    not at all, and YAML would otherwise read `mode: off` as the boolean `False`, which names
+    neither mode.
+    """
+    if MODE_KEY not in document:
+        return ENFORCE
+    value = document[MODE_KEY]
+    if value not in POLICY_MODES:
+        raise PolicyError(
+            f"{source}: 'mode' must be exactly {OBSERVE!r} or {ENFORCE!r}, got {value!r}. "
+            "There is one switch and it governs the process (SPEC-v0.3 §6.1)"
+        )
+    return OBSERVE if value == OBSERVE else ENFORCE
+
+
+def reject_nested_mode(mapping: Mapping[Any, Any], where: str) -> None:
+    """Refuse a `mode:` anywhere but the top level of the policy document (SPEC-v0.3 §6.1).
+
+    The closed key sets of `v0.1 §3.1` would already refuse it as unknown, wherever they
+    reach. This runs first and for its *message*: "unknown key 'mode'" reads as "CTRLRun has
+    no such setting", and the author who wrote it here believes they have observed one action
+    while enforcing the rest. A partially-enforced configuration is the failure mode the
+    top-level-only rule exists to prevent, so the error says which rule was broken.
+
+    Shared with `authority.py`, which owns the two nestings inside an `authority:` section and
+    parses documents the policy loader never reads (§4.8).
+    """
+    if MODE_KEY in mapping:
+        raise PolicyError(
+            f"{where}: 'mode' is top level and nothing else (SPEC-v0.3 §6.1). A configuration "
+            "where some actions are observed and some are enforced is one where nobody can say "
+            "whether an action was permitted or merely watched; move it beside 'schema:'"
+        )
+
+
 def parse_conditions(mapping: Mapping[Any, Any], *, where: str) -> Mapping[str, Condition]:
     """Parse a `when:`-shaped mapping into conditions, keyed by the raw condition key.
 
@@ -414,6 +468,7 @@ def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
         raise PolicyError(
             f"{where}: entry must be a mapping with 'decision' or 'rules', got {_type_name(entry)}"
         )
+    reject_nested_mode(entry, where)
     _reject_unknown_keys(entry, _ENTRY_KEYS, where)
     _reject_v2_keys_under_v1(entry, where, schema)
     has_decision = "decision" in entry
@@ -516,6 +571,7 @@ def _parse_decision(value: object, where: str) -> Decision:
 def _parse_rule(rule: object, where: str) -> _Rule:
     if not isinstance(rule, Mapping):
         raise PolicyError(f"{where}: a rule must be a mapping, got {_type_name(rule)}")
+    reject_nested_mode(rule, where)
     _reject_unknown_keys(rule, _RULE_KEYS, where)
     if "decision" not in rule:
         raise PolicyError(f"{where}: a rule must have a 'decision'")
