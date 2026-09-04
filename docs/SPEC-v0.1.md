@@ -517,13 +517,20 @@ protect(name: str, *, effect: str | None = None, resource: str | None = None,
         wait: bool = False, lease: timedelta | None = None,
         control: Control | None = None) -> Callable
 
-context(agent: str, user: str | None = None, environment: str | None = None) -> ContextManager
+context(agent: str, user: str | None = None) -> ContextManager
+# `environment` was a parameter here until v0.3. SPEC-v0.3 §2.5 removed it: the environment
+# became an authorization input, and a dimension the subject sets is not one. It is set once
+# on the Control instead.
 with_approval(request_id: str) -> ContextManager
 
 Control.from_file(path=None) -> Control
 Control(policy: Policy, store: StateStore, approvals: ApprovalProvider | None = None, *,
         clock=..., approval_ttl: timedelta = timedelta(minutes=15),
-        lease: timedelta = timedelta(minutes=5))
+        lease: timedelta = timedelta(minutes=5),
+        environment: str | None = None)
+# `environment` was added in v0.3 when it became an authorization input; SPEC-v0.3 §2.5 has
+# the four sources it resolves from. `Control.from_file()` passes none, so it reaches ranks
+# 2 to 4 -- the env var, the document, then "production".
 Control.evaluate(action: Action) -> Evaluation   # decision + reason, no side effects
 Control.execute(action: Action, executor: Callable[[], Any], effect_key: str | None,
                 *, lease: timedelta | None = None) -> Receipt
