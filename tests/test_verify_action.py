@@ -687,3 +687,14 @@ def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
         check=True,
     )
     assert len(log.stdout.strip().splitlines()) == 1, log.stdout
+
+
+def test_the_verify_page_is_honest_about_what_branch_protection_buys():
+    """A badge is a claim, and a branch nobody guards is a claim anybody can write. The page
+    says which half is protected rather than implying both: deletion and force pushes are
+    blocked, and a fast-forward push by anyone with write access is not."""
+    page = " ".join(_repository_file(VERIFY_DOC).split())
+
+    assert "It does **not** restrict who may push" in page
+    assert "silently dropped" in page
+    assert "self-healing" in page

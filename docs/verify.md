@@ -304,6 +304,25 @@ jobs:
           git push origin badges
 ```
 
+### What protecting the `badges` branch buys, and what it does not
+
+Worth being exact, because a badge is a claim and a branch nobody guards is a claim anybody can
+write. This repository's `badges` branch blocks **deletion** and **force pushes**, so the
+badge's history cannot be rewritten or removed.
+
+It does **not** restrict who may push. Anyone with write access can fast-forward a different
+badge onto the branch. GitHub's classic branch protection cannot express "only the Actions
+token may push" — adding `github-actions` to the push allowlist is silently dropped, which
+leaves an allowlist that blocks *everyone*, including the job. A repository ruleset with a
+bypass actor can express it; getting the bypass wrong breaks the publish in a way that only
+surfaces the next time the badge's value changes, so it is a deliberate choice rather than a
+default.
+
+The mitigation that does hold without any of that: **the job is self-healing.** It copies the
+badge its own verify run produced over whatever is on the branch, so a falsified badge is
+overwritten by the next push to `main` that changes the value. A badge is worth what the run
+behind it is worth, and the run is in the workflow log.
+
 Then the badge is:
 
 ```markdown
