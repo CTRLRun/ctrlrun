@@ -22,6 +22,34 @@ shipped, and the only thing in the tree today is the contract.
 - **The `identity` extra**, empty until build-list item 5 adds the JWT verifier and the `pyjwt`
   line it needs. `pip install ctrlrun` still installs nothing but `pyyaml` and `click`.
 
+### Changed
+
+- **`docs/SPEC-v0.3.md` amended against an independent review of §4 and §5.** The contract was
+  read by two reviewers who had not written it, and they found two authorization holes the
+  author's own pass had missed.
+
+  **An expired credential could mint permanent authority.** `Control.delegate`'s checks matched
+  the creating principal on `agent` and `user`, which do not stop being equal when a token stops
+  being valid — and §2.3's expiry refusal is scoped to `Control.execute`, which a delegation is
+  not. A principal whose every action was being refused could still write an unexpiring,
+  re-delegable grant for an agent of its choosing. §5.3 gains a rule 0.
+
+  **The ACS hook read its principal off the wire.** `ctrlrun.acs` takes `agent_id` and
+  `environment` from `params.metadata` on the inbound envelope. Under v0.2 that was survivable on
+  the argument `v0.2 §6.5` makes for `clientInfo`; §4 ends it, and §8.1 removes
+  `--principal-from-client-info` over exactly this. Removing the flag while the same pattern
+  lived in another module would have made the removal a gesture. §8.4 gives the hook an
+  `IdentityProvider` and refuses to construct one without it against a `Control` holding an
+  `Authority`.
+
+  Also: an unreadable stored delegation is now `authority_unreadable` and denies outright rather
+  than being skipped in favour of a broader grant that happens to match; `Control.resume` joins
+  the list of call sites that must use the combined decision, and §5.6.1 says what authority does
+  across a lease extension, a commit and a resume; a `delegable` grant must declare `expires_at`,
+  which is the only thing bounding the grantee population a compromised holder can reach; and
+  `pyyaml>=6.0` becomes a floor, because PyYAML 5 returns naive datetimes and would reject the
+  specification's own example.
+
 ### Notes on what the contract decides
 
 Recorded here because each is a decision a reader of the code would otherwise have to

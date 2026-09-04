@@ -19,7 +19,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pyyaml",
+    # SPEC-v0.3 §4.2: a grant's `expires_at` must carry an offset, and PyYAML 6 is the floor that
+    # makes that checkable. PyYAML 5 subtracts the offset and hands back a naive datetime, which
+    # would reject the specification's own example at load.
+    "pyyaml>=6.0",
     "click",
 ]
 

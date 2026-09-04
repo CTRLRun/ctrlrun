@@ -789,7 +789,7 @@ and inferring "nothing" from a missing key would make a truncated edit look deli
 | `constraints` | no | mapping | Conditions in policy's `when:` syntax (§4.5); omitted → none |
 | `environments` | no | non-empty list | Exact environment names; omitted → any environment |
 | `expires_at` | no | timestamp | ISO-8601 with an offset; omitted → does not expire |
-| `delegable` | no | `bool` | May a delegation be created from it (§5); default `false` |
+| `delegable` | no | `bool` | May a delegation be created from it (§5); default `false`. A grant with `delegable: true` MUST declare `expires_at` |
 
 Key sets are **closed** at every level, as `v0.1 §3.1` requires: `authority` accepts
 `max_delegation_depth` and `grants`; a grant accepts exactly the keys above; `subject` accepts
@@ -822,15 +822,51 @@ call returns, and a `Grant` with a non-empty `id` on it is refused.
 **Subject.** `subject.agent` and `subject.user` are §4.4 patterns over a **single segment** — an
 agent name and a user name are opaque strings, not dotted paths, so they carry no separator and a
 `*` in them matches any run of characters. `subject` MUST declare at least one of `agent` and
-`user`. A grant matching every principal is a grant nobody means to write, and `subject: {}` is
-far more likely a truncated edit than an intent — the same reading `v0.1 §3.2` gives `when: {}`.
-A subject that really does mean "any agent" writes `agent: "*"`, which is legible in review.
+`user`, and **a subject pattern may not carry a deep wildcard**: `agent: "**"` is a `PolicyError`
+at load. A subject has no separator, so `**` means nothing there that `*` does not, and leaving it
+legal would give "any agent" a spelling that a review grep for `"*"` misses.
+
+That leaves one more, and it is the one the schema makes easy: **omitting `agent` also means any
+agent**, exactly as omitting `user` means any user. A root grant
+`subject: {user: "alice@example.com"}` authorizes *every* agent in the deployment acting for
+alice, carries no wildcard, and is invisible to a search for one. It is permitted — a root grant
+is an operator's decision in a reviewed file, and "any agent acting for this human" is something
+an operator may genuinely mean — but it is spelled out here rather than left to be inferred from
+§5.4, which bans the same omission in a delegation and explains why.
+
+So a grant matching every principal is a grant nobody means to write by accident; `subject: {}` is
+far more likely a truncated edit than an intent, the same reading `v0.1 §3.2` gives `when: {}`;
+and "any agent" has exactly two legible spellings, `agent: "*"` and the omission named above. T73
+asserts the `**` refusal, T67b asserts what the omission matches.
 
 **`subject.user` semantics.** Omitted, it matches any principal including one with no user.
 Present, the principal's `user` MUST be non-`None` and match the pattern; a principal with no
 user does not match a grant that names one. Fail-closed: a grant scoped to a human is not
 satisfied by an agent acting alone. This rule is the whole of who holds a grant, so it is tested
 by name in T67b rather than left to a grant that happens not to match.
+
+**A `delegable` grant MUST declare `expires_at`.** Nothing else bounds the *population* a
+delegable grant can reach. §5.4 makes each child concrete and no wider than its parent, but §5.2
+makes creation deliberately non-idempotent and nothing caps children per parent, so a compromised
+holder of an unexpiring `delegable` grant can mint one full-width child per agent name it can
+think of — the wildcard outcome §5.4's `subject` row forbids, reached in N records instead of one.
+Requiring an expiry makes §5.4's `expires_at` row bound every descendant in time by construction,
+so an unexpiring delegation minted at runtime becomes unrepresentable. It is one line in the
+document and it is the only dimension that bounds a chain the operator has stopped watching.
+
+**`environments` is an authorization dimension, and v0.3 does not authenticate it.** This is
+stated rather than implied, because the rest of §4 rests on the opposite property for the
+principal. `Action.environment` has three sources: `context(environment=...)`, which is a free
+string from the agent's own call site; `AcsControlHook`, which §8.4 now takes from configuration
+rather than the envelope; and the gateway's `--environment`, which is the operator's. Only the last
+two are worth anything to an authorization decision.
+
+So a grant scoped `environments: ["staging"]` is a real restriction **only where the environment is
+set by something the agent does not control**. In-process, under `@protect` and `context()`, it is
+not: the same code that proposes the action names the environment it is proposed in. An operator
+who needs environment scoping enforced runs the gateway, or supplies the environment from their own
+trusted configuration. `docs/THREAT_MODEL.md` carries this beside the delegator (§5.7) and the
+approver (`v0.1 §4.1`), which are unauthenticated for the same kind of reason. §13 records it.
 
 **Subject matching addresses `agent` and `user`, and nothing else.** Not claims, not the issuer.
 Both fields are part of the action's canonical form (`v0.1 §2.2`), so an authority decision is
@@ -874,6 +910,32 @@ An action that **passes** authority appends `AUTHORITY_RESOLVED` with `data.gran
 a delegated grant — `data.delegation_id` and `data.depth`. Policy then runs as it always has, and
 the two results combine per §4.6.
 
+### 4.3.1 The entry points, by name
+
+The expired-credential hole of §5.3 rule 0 was not a missing check. It was a **missing
+enumeration**: §2.3 wrote its expiry refusal against `Control.execute`, and `Control.delegate` was
+simply not on anybody's list. So the list is here, and it is normative.
+
+Every path below either proposes an action or creates authority. Each is subject to the same
+fail-closed checks in the same order — **principal validity and expiry, then authority, then
+policy** — and each MUST resolve its principal from an `IdentityProvider` where one is configured
+(§3.1), never from a value the caller supplied alongside the request.
+
+| Entry point | Builds an `Action` | Resolves identity | Evaluates authority |
+|---|---|---|---|
+| `@protect` → `Control.execute` | yes | yes (§3.2) | yes |
+| `Control.execute` called directly | no — the caller built it | no; the in-process trust boundary (§3.1) | yes |
+| `Control.evaluate` | no | no | yes — returns the combined §4.6 decision |
+| `Control.resume` | rehydrated from the store | no — the principal is the held action's | evaluated and recorded, not re-decided (§5.6.1) |
+| `Control.delegate` / `Control.revoke` | no — creates authority | checks `by` is unexpired (§5.3 rule 0) | the six checks of §5.3 |
+| The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) |
+| `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) |
+
+**A new entry point is a specification amendment before it is code.** Adding one — a framework
+adapter, a second protocol, a batch runner — means adding a row here and saying what it does about
+each column, because the failure mode is never that somebody wrote a check wrongly. It is that
+nobody remembered the new path needed one.
+
 **Order within `Control.execute`,** stated once so it can be tested: `principal_expired` (§2.3)
 → authority → policy → approval → reservation → execution. The effect key resolves earlier still,
 before `Control.execute` is entered, exactly as `v0.1 §5.1` requires; an unresolvable template
@@ -911,7 +973,16 @@ reason present in this fixed order:
 
 Fixed and collected rather than short-circuited, so the evidence for one configuration does not
 depend on the order grants appear in the document or the order an implementation happens to
-check them in. T71b pins it by permuting the document.
+check them in. T71b pins it by permuting the document. Where several grants produce the **same**
+reported reason, the `grant_id` in `AuthorityDenied` and in `AUTHORITY_DENIED` is the one that
+sorts first by codepoint, as §4.6's does on a pass — otherwise T71b's "identical `AUTHORITY_DENIED`
+data" would be satisfiable by whichever grant an implementation happened to reach first.
+
+`authority_expired` outranks `authority_constraint`, and the order is argued rather than asserted:
+expiry is a property of the *grant*, a failed constraint a property of the *call*. Told "a
+constraint did not hold", an operator goes looking for an amount ceiling; the fix is renewing a
+grant that stopped being authority months ago. The reason should name what will still be wrong
+after the caller changes the request.
 
 **A delegation's own expiry is `authority_expired`**, like any other grant's. §5.6's
 `authority_escalation` covers its *ancestors* — an expired or missing parent — which is a
@@ -1018,9 +1089,14 @@ decision is the **stricter** of the two:
 | **authority denies** | deny | deny | deny |
 
 Neither axis can loosen the other. Authority cannot make a denied action allowed; policy cannot
-make an unauthorized action permitted. The bottom row is reached without evaluating policy at all
-(§4.3), so its three cells share an outcome and differ in their event trace. T70 parametrizes the
-outcomes; T74 pins the trace.
+make an unauthorized action permitted.
+
+The bottom row is reached without evaluating policy at all (§4.3), so its three cells are
+**indistinguishable** — same outcome, same events, same receipt, same `decision_reason` — because
+the policy column is never read. T70 therefore parametrizes four cases, not six: the top row's
+three, and one for the bottom. Running the bottom row three times would be one assertion over
+three configurations nothing can tell apart, which reads as coverage and exercises nothing. T74
+pins the trace that makes them indistinguishable.
 
 `# SPEC:` the item-2 brief asks T70 to "parametrize the 3×3". With a grant carrying no decision
 (§4.2) authority is binary and the table is 2×3, so T70 parametrizes six cells and asserts the
@@ -1046,8 +1122,17 @@ gateway's approval path (§8.3), and `ctrlrun.acs`'s hook. Reading `Policy.evalu
 a decision is a defect after v0.3, and the two places in shipped code that do it are named in
 §8.3 so item 5 cannot miss them.
 
-**Where several grants match**, the action passes; a grant is a permission, and holding two
-permissions must never be worse than holding one. Denial arises from the absence of a matching
+**A record that cannot be read denies the action outright.** A stored delegation whose
+`grant_json` no longer parses (§5.2), or whose chain cannot be walked (§5.5), MUST NOT be skipped
+in favour of some other grant that happens to match — it is `authority_unreadable`, first in the
+precedence order of §4.3. The permissive reading is the one an implementer reaches for naturally:
+iterate the grants, collect the matches, ignore the row that raised. That is how a principal
+holding both a broad root grant and a narrow delegation ends up authorized by the broad one
+because the narrow one was corrupted. CTRLRun cannot tell a corrupted record from a tampered one,
+and the safe reading of "I cannot read this" is not "then it does not apply".
+
+**Where several grants match** and all are readable, the action passes; a grant is a permission,
+and holding two permissions must never be worse than holding one. Denial arises from the absence of a matching
 grant, never from the presence of a stricter one.
 
 Which grant is *named* then needs a rule, because any of them authorizes the action and evidence
@@ -1105,7 +1190,8 @@ class AuthorityResult:
 
 class Authority:
     @classmethod
-    def from_yaml(cls, text: str, *, source: str = "<string>") -> Authority: ...
+    def from_yaml(cls, text: str, *, source: str = "<string>",
+                  standalone: bool = False) -> Authority: ...
     grants: Mapping[str, Grant]
     max_delegation_depth: int
     def evaluate(self, action: Action, *, now: datetime, store: StateStore) -> AuthorityResult: ...
@@ -1120,8 +1206,16 @@ Control.delegate(parent_id: str, grant: Grant, *, by: Principal) -> Delegation
 Control.revoke(delegation_id: str, *, by: str | None = None) -> None
 ```
 
-`Subject.__post_init__` refuses both fields `None`, so the constructor refuses exactly what the
-loader refuses. `Control.delegate` is public API and takes a `Grant` built in Python, not YAML;
+`Subject.__post_init__` refuses both fields `None`, and **`Grant.__post_init__` validates
+everything the YAML loader validates** — every pattern against §4.4's grammar, every condition key
+and operand against §4.5, `expires_at` timezone-aware, and each `constraints` key equal to
+`f"{condition.argument}_{condition.op}"` — so the constructor refuses exactly what the loader
+refuses. This is not decoration: §5.4's closing claim that "the pattern grammar of §4.4 is small
+enough that every pair is decidable" holds only for grammar-valid input, and §5.5's segment
+relation is undefined on a segment like `a**`. `Control.delegate` takes a `Grant` built in Python,
+so without a constructor that refuses, §5.3 rule 6 would be discharging a proof about a value
+nothing checked. A `constraints` key that disagrees with its own `Condition` is the sharpest case:
+containment would compare one thing and §5.2 would store another. `Control.delegate` is public API and takes a `Grant` built in Python, not YAML;
 without this a holder of a narrow grant could mint a child addressed to every principal in the
 deployment — widening the population rather than the powers. "Any agent" is spelled
 `Subject(agent="*")`, which is greppable — and §5.4 forbids it in a *delegation* regardless.
@@ -1130,6 +1224,15 @@ deployment — widening the population rather than the powers. "Any agent" is sp
 given `v0.1 §3.2`'s longest-suffix split, and valued by the `Condition` §11 promotes from
 `policy.py`. §5.4 needs exactly that keyed lookup. `_NO_CONSTRAINTS` is a shared immutable empty
 mapping, for §2.1's reason.
+
+**Two documents, two closed key sets, and `from_yaml` is told which.** A combined `ctrlrun.yaml`
+carries `schema`, `actions`, `mode` and `authority` (§12.1), and both loaders read it and ignore
+the keys that are not theirs. A `--authority` document (§8.3) carries `schema` and `authority` and
+nothing else. One constructor cannot enforce both, so `standalone` takes the distinction as an
+argument: `standalone=True` refuses `actions:` and `mode:`; `standalone=False` tolerates them,
+because the policy loader owns them. Without it, §8.3's closed key set rejects §4.1's own example —
+the fail-closed reading of two contradictory sentences makes item 2's worked configuration
+unloadable.
 
 `store` is **required** on `evaluate`. §5.6 re-checks a delegation's whole chain on every
 evaluation and that walk reads the store; an optional store would give an implementation a
@@ -1178,7 +1281,8 @@ delegations(
   parent_id     TEXT NOT NULL,        -- a root grant's id, or another delegation_id
   depth         INTEGER NOT NULL,     -- recorded, never trusted (§5.5)
   grant_json    TEXT NOT NULL,        -- the child grant, serialized per below
-  created_by    TEXT NOT NULL,        -- "agent" or "agent/user"
+  created_by_agent TEXT NOT NULL,
+  created_by_user  TEXT,               -- NULL where the creator acted with no user
   created_via   TEXT NOT NULL,        -- "api" | "cli" (§5.7)
   created_at    TEXT NOT NULL,
   revoked_at    TEXT,                 -- NULL while live
@@ -1200,7 +1304,7 @@ class Delegation:
     parent_id: str
     depth: int
     grant: Grant
-    created_by: str
+    created_by: Principal              # the agent, and the user where there was one
     created_via: Literal["api", "cli"]
     created_at: datetime
     revoked_at: datetime | None = None
@@ -1218,6 +1322,15 @@ record would lose which one a receipt refers to.
 `grant.id` for a delegation therefore **is** its `delegation_id`: one namespace addresses both
 kinds and `--parent` takes either. §4.2 keeps root grant ids out of the `dlg_` namespace.
 
+Enforcing that on one side only would leave the other open, so: a `delegation_id` read from the
+store MUST match `^dlg_[0-9a-f]{32}$`, and a row that does not is a corrupted record —
+`authority_unreadable` (§4.3), never a grant. And **a root grant wins any collision**: an id is
+resolved against the document first and the store second. Both rules exist because §5.5 already
+concedes the table is reachable with `sqlite3` and a text editor, and without them a hand-inserted
+row named `head-of-finance` would *shadow* the root grant of that name — which would quietly
+disconnect the one lever §5.6 offers against a compromised root grant, editing the file and
+restarting.
+
 **`grant_json`** is the grant as JSON with `sort_keys=True`, `separators=(",", ":")`,
 `ensure_ascii=False`: `subject` as an object of two nullable strings, `actions`/`resources`/
 `environments` as arrays of strings or `null`, `constraints` as an object mapping each raw
@@ -1234,28 +1347,46 @@ store is not more trusted than a file, and a delegation whose stored form no lon
 
 ### 5.3 Who may delegate
 
-`Control.delegate(parent_id, grant, *, by)` MUST refuse unless **all** hold. The six checks are
+`Control.delegate(parent_id, grant, *, by)` MUST refuse unless **all** hold. The checks are
 performed **in the order listed**, and the first that fails is the refusal's reason — fixed, for
 §4.3's reason: the evidence for one attempted creation must not depend on the order an
 implementation happens to check things in.
 
+0. `by` is **unexpired** at `now` (§2.1's `expires_at`). Otherwise `IdentityError`, with
+   `DELEGATION_REJECTED` carrying `data.reason = "principal_expired"`, and no record.
 1. `parent_id` names a root grant or a live delegation. Otherwise `unknown_parent`.
 2. The parent's `delegable` is `true`. Otherwise `parent_not_delegable`.
-3. The parent is unexpired at `now`, and no delegation in its chain is revoked or expired.
-   Otherwise `parent_not_valid`.
+3. The parent is unexpired at `now`, and no delegation in its chain is revoked, expired, or no
+   longer `delegable`. Otherwise `parent_not_valid`.
 4. `by` — the principal creating the delegation — **matches the parent grant's subject** (§4.2's
    matching, including the `user` rule). Otherwise `not_the_subject`. You may only delegate
    authority you hold; a process that could delegate from a grant addressed to someone else would
    make the subject field decorative.
-5. `parent.depth + 1 <= max_delegation_depth` (§5.5). Otherwise `max_depth`.
-6. The child grant is contained in the parent on every dimension of §5.4. Otherwise
+5. `parent.depth + 1 <= max_delegation_depth`, where `parent.depth` is **derived by walking to
+   the root** (§5.5) and not read from the stored column. Otherwise `max_depth`.
+6. The child grant is well formed under §4.2 and §4.4 — `Grant.__post_init__` refuses what the
+   loader refuses (§4.8) — and is contained in the parent on every dimension of §5.4. Otherwise
    `containment`, and `data.dimension` names the row.
+
+**Rule 0 exists because §2.3's expiry check is scoped to `Control.execute`, and this is not an
+action.** Without it an expired credential can still mint authority: `finance-agent`, whose token
+lapsed five minutes ago and whose every proposed action is now refused, calls `Control.delegate`
+and writes a permanent, unexpiring, re-delegable grant for an agent of its choosing. Rule 4
+matches on `agent` and `user`, which do not stop being equal when a token stops being valid. A
+delegation is the most durable thing a principal can create — §6.2 refuses to let observe mode
+suspend it for exactly that reason — so it is the last place a stale credential should still
+work.
+
+Rule 3 covers `delegable` across the whole chain, not just the immediate parent, so an operator
+who sets `delegable: false` on a root grant stops new delegations appearing anywhere beneath it
+rather than only one level down. §5.6 rule 6 is the evaluation-time half of the same edit.
 
 Every refusal raises `AuthorityEscalation(reason=...)`, writes no delegation record, and appends
 `DELEGATION_REJECTED` with `data.reason` and `data.parent_id`. **`data.dimension` is present only
 for a rule-6 refusal**, because it names a §5.4 row and the other five are not rows; §7 says the
 same. A successful creation appends `DELEGATION_CREATED` with `data.delegation_id`,
-`data.parent_id`, `data.depth`, `data.created_by` and `data.created_via`.
+`data.parent_id`, `data.depth`, `data.created_by_agent`, `data.created_by_user` and
+`data.created_via`.
 
 `AuthorityEscalation`'s reasons are creation-time reasons and are a **different vocabulary** from
 §4.3's evaluation-time deny reasons. A test asserting `authority_escalation` on a creation is
@@ -1379,9 +1510,16 @@ edited directly in the database cannot assert its way to a shorter chain.
 
 The walk MUST be bounded at `max_delegation_depth + 1` steps and MUST refuse a chain that revisits
 a `delegation_id` it has already seen. A cycle is not reachable through `Control.delegate` — a
-parent exists before its child — but it is reachable with `sqlite3` and a text editor, and an
-unbounded walk over one would hang the process rather than deny the action. Exceeding the bound,
-or revisiting an id, is `authority_escalation`.
+parent exists before its child — but it is reachable with `sqlite3` and a text editor.
+
+The two refusals are **separately observable**, and that is the point of having both: exceeding
+the bound is `authority_escalation` with `data.depth_exceeded`, and revisiting an id is
+`authority_unreadable` (§4.3) with `data.cycle_at` naming it. The bound alone would stop a cycle
+hanging the process, so a revisit check that reported the same thing as the bound would be a guard
+nothing could tell had run — and the two conditions are genuinely different findings. A chain
+longer than the limit is a configuration an operator can reason about; a chain that loops is a
+store somebody has edited by hand, and it belongs with the other unreadable-record cases rather
+than with the ordinary escalations.
 
 `max_delegation_depth: 0` is valid and means no delegation may be created at all — the legible way
 to switch the feature off in a deployment that only wants root grants. A negative value is a
@@ -1395,12 +1533,22 @@ At evaluation, a delegated grant is valid only if, walking from it to the root:
    naming the one that does not;
 2. no ancestor, and not itself, is revoked (§5.7) → else `authority_revoked`;
 3. no ancestor has expired at `now` → else `authority_escalation` (the delegation's *own* expiry
-   is `authority_expired`, §4.3);
+   is `authority_expired`, §4.3). **This rule attributes rather than prevents**: §5.4's
+   `expires_at` row makes every child expire no later than its parent, so an expired ancestor
+   implies an expired delegation, which rule 4 or §4.3 would refuse anyway. What it adds is
+   evidence — the denial names the ancestor that lapsed rather than the leaf that inherited its
+   deadline — which is why §9 lists it as a reason rather than as a defence;
 4. every parent→child step still satisfies §5.4 → else `authority_escalation`, with
    `data.dimension`;
 5. the chain's depth is still within `max_delegation_depth`, and the walk is acyclic (§5.5) →
    else `authority_escalation`;
 6. every ancestor is still `delegable` → else `authority_escalation`.
+
+The rules are evaluated **1 → 6 and the first that fails names the refusal** and supplies its
+`data`, for the reason §5.3 gives for its own fixed order: rules 1, 3, 4, 5 and 6 all yield
+`authority_escalation` while carrying different `data` — `missing_parent_id`, `dimension`, or
+neither — so a chain that is both orphaned above and non-contained below would otherwise record
+implementation-defined evidence for one configuration.
 
 Rule 6 exists because `delegable` is not a §5.4 row and rule 4 would therefore never see it. An
 operator who sets `delegable: false` on a root grant is shutting down a chain they believe is
@@ -1422,14 +1570,35 @@ takes effect when the process next loads the document, which for `ctrlrun gatewa
 restart. Every "MUST take effect" in this section is scoped to that.
 
 The operational consequence is the one worth knowing: **the runtime kill switch is
-`ctrlrun revoke`, and it covers delegations only.** There is no runtime revocation for a root
-grant. A compromised root grant is answered by editing the file and restarting the process, or by
-revoking the delegations beneath it. Hot reload, `SIGHUP` and a root-grant revoke are all recorded
+`ctrlrun revoke`, and it covers one delegation at a time, by id.** There is no runtime revocation
+for a root grant, and — because v0.3 ships no way to *list* delegations (§13) — no way to sweep a
+subtree either. A compromised root grant is answered by setting its `delegable` to `false` and
+restarting: §5.6 rule 6 then denies every descendant on the next evaluation, which is the one
+operation that cuts a chain of unknown width. Revoking beneath it works only for delegations whose
+ids the operator already has, which in practice means from the events file. Hot reload, `SIGHUP` and a root-grant revoke are all recorded
 as out of scope in §13 rather than implied by prose here.
 
 T77b and T79 therefore each run against **one long-lived `Control`** for the live half — parent
 expiry, revocation, depth — and reload explicitly for the file half, so neither can pass by
 rebuilding the world between the two halves.
+
+### 5.6.1 Authority across an action already under way
+
+§4.3 evaluates authority once, at the top of `Control.execute`. §2.3.1 works out the three
+re-entry moments for an expiring *principal*; authority needs the same table, and for a sharper
+reason: §5.7 claims a chain is "cut by one write", and without this that claim is false for
+exactly the actions in flight when an operator hits the switch — the ones an incident responder
+cares about.
+
+| Moment | Chain revoked, expired, or no longer contained | Why |
+|---|---|---|
+| Committing, failing or marking ambiguous an outcome | **not refused** | The effect has already happened at the remote; refusing the write would strand it in `AMBIGUOUS` for an authorization reason, which is what `v0.1 §5.5` exists to prevent |
+| Extending a lease (`v0.2 §6.9.4`) | **refused** — `ACTION_DENIED` with the §4.3 reason | An extension asks to keep holding a reservation the chain no longer authorizes. The lease lapses and the record becomes `AMBIGUOUS` by the ordinary path (`v0.1 §5.3 E3`), which is the safe state and is reached without inventing one |
+| `Control.resume` (`v0.2 §6.9`) | **evaluated and recorded, not re-decided** | Exactly what `v0.2 §6.9.2` chose for policy on the same leg, for the same reason: the reservation is held and the remote may already be acting on it |
+
+The resumed leg therefore appends `AUTHORITY_RESOLVED` or `AUTHORITY_DENIED` and records the
+combined §4.6 decision on its receipt — which, for an MCP multi round-trip or ACS action, is the
+only receipt that action ever gets (§8.3).
 
 **The signature scenario.**
 
@@ -1474,6 +1643,13 @@ Revocation is **transitive by structure**: a revoked delegation breaks the chain
 beneath it, because §5.6 rule 2 walks to the root on every evaluation. Nothing is rewritten and no
 children are visited at revoke time; a chain of any depth is cut by one write.
 
+**Both writes are atomic.** `revoke_delegation` performs its read-then-write inside a
+`BEGIN IMMEDIATE`, as every other read-then-write in the store does (`v0.1 §5.3 E1`), and returns
+`False` for a row that was already revoked; two concurrent revokes therefore append one
+`DELEGATION_REVOKED` between them rather than one each. `put_delegation` is a plain `INSERT` that
+raises on a duplicate id and **is never an upsert** — an upsert on an existing id would clear
+`revoked_at`, which is `unrevoke` by another door in a release that says there is no such thing.
+
 Revoking an already-revoked delegation is idempotent: it logs, appends no second event, and exits
 0. Revoking an unknown id exits non-zero with a message on stderr and prints nothing on stdout, as
 `ctrlrun inspect` does for an unknown action (`v0.2 §5`).
@@ -1482,9 +1658,22 @@ Revoking an already-revoked delegation is idempotent: it logs, appends no second
 validates it, runs every check of §5.3, and prints the new `delegation_id`. Its refusals exit
 non-zero and name the rule that failed.
 
+**§5.3's order tells a caller which grants exist.** Rules 1 to 3 — `unknown_parent`,
+`parent_not_delegable`, `parent_not_valid` — run before rule 4's `not_the_subject`, so in-process
+code can call `Control.delegate` with a junk child against a guessed `parent_id` and learn from
+the reason whether that grant exists, whether it is delegable, and whether its chain is live,
+without holding it. This is recorded rather than fixed: the document those ids live in is on the
+same host and readable by the same process, so the order buys legibility in the common case and
+leaks nothing that a file read would not. It is stated here because a reader who notices it should
+find it already answered, not think it was missed.
+
 **`--as` is an assertion, and the record says so.** It supplies the creating principal for §5.3
 rule 4, and there is no default, because the default would be "whoever the store belongs to",
-which is not a principal. But it is free text typed by whoever runs the command, checked against a
+which is not a principal. The agent half MUST NOT contain `/`: `v0.1 §2.1` does not forbid the
+character in an agent name, so `--as a/b` and a stored `"a/b"` would each be ambiguous between the
+agent `a/b` acting alone and the agent `a` acting for `b` — and §4.2 spends a paragraph making
+that exact distinction load-bearing. The record keeps the two halves in separate columns (§5.2)
+rather than in one string for the same reason. But it is free text typed by whoever runs the command, checked against a
 grant that same person can read — so at the CLI, rule 4 is satisfied by naming the right principal
 rather than by being it. That is why the record carries `created_via` (§5.2): `api` for
 `Control.delegate`, where `by` came from wherever the application's identity came from, and `cli`
@@ -1770,11 +1959,11 @@ DELEGATION_REJECTED
 
 | Type | `data` |
 |---|---|
-| `AUTHORITY_RESOLVED` | `grant_id`, and for a delegated grant `delegation_id` and `depth` |
-| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for a §5.6 rule-1 failure |
-| `DELEGATION_CREATED` | `delegation_id`, `parent_id`, `depth`, `created_by`, `created_via` |
+| `AUTHORITY_RESOLVED` | `reason` (`authority_grant`), `grant_id`, and for a delegated grant `delegation_id` and `depth` |
+| `AUTHORITY_DENIED` | `reason` (§4.3); `grant_id` / `delegation_id` where one grant was implicated; `dimension` for a §5.6 rule-4 failure; `missing_parent_id` for rule 1; `depth_exceeded` or `cycle_at` for rule 5 |
+| `DELEGATION_CREATED` | `delegation_id`, `parent_id`, `depth`, `created_by_agent`, `created_by_user`, `created_via` |
 | `DELEGATION_REVOKED` | `delegation_id`, `revoked_by` |
-| `DELEGATION_REJECTED` | `reason` and `parent_id`; `dimension` **only** for a §5.3 rule-6 refusal |
+| `DELEGATION_REJECTED` | `reason` and `parent_id`; `dimension` **only** for a §5.3 rule-6 containment refusal |
 
 `AUTHORITY_RESOLVED` is appended for **every** action that passes authority, not only for
 delegated ones. Evidence has to record that CTRLRun checked and found a grant, or a deployment
@@ -1802,8 +1991,15 @@ delegation chain appear and be revoked with nothing in the trace. The highest-pr
 in the release must not be the only ones missing from the export path.
 
 `ctrlrun inspect <action_id>` is unaffected: it selects by `action_id`, and rows with `NULL` never
-match. A delegation's history is read from the events file and `ctrlrun stats`; there is no
-`ctrlrun delegations` in v0.3 (§13).
+match.
+
+**Where a delegation's history is read, precisely.** From the **events file** — the `JSONLEventSink`
+that `Control.from_file()` installs by default (`v0.2 §4.3`) — and from the `events` table beneath
+it. **Not** from `ctrlrun stats`, which counts receipts (§6.4) and these events produce none, and
+not from `ctrlrun inspect`, which selects on an `action_id` they do not carry. A deployment whose
+only sink is the store reads the table directly. There is no `ctrlrun delegations` in v0.3 (§13),
+and the consequence is stated in §5.6 rather than left for an operator to discover during an
+incident: without the ids, the lever is `delegable: false` on the root grant plus a restart.
 
 ---
 
@@ -1891,11 +2087,40 @@ start, naming both paths. Two sources for one section is the ambiguity `v0.1 §5
 `{resource}`: pick one, or say which.
 
 **The approval gate uses the combined decision.** `v0.2 §6.10`'s approval flow keys off the
-action's decision, and since §4.6 that is the combined one. Two places in shipped v0.2 code read
-`Policy.evaluate` directly to decide whether to look for a granted approval — the gateway's
-`tools/call` path and `ctrlrun.acs`'s request hook — and both MUST be changed to use the combined
-result, and to evaluate authority first so §4.3's ordering holds on the gateway path too. They are
-named here so item 5 cannot miss them.
+action's decision, and since §4.6 that is the combined one. **Three** places in shipped v0.2 code
+read `Policy.evaluate` directly — the gateway's `tools/call` path, `ctrlrun.acs`'s request hook,
+and `Control.resume` — and all three MUST be changed to use the combined result, and to evaluate
+authority first so §4.3's ordering holds off the decorator path too. They are named here so item 5
+cannot miss them.
+
+`Control.resume` is the one most easily missed and the one that matters most: it writes the **only**
+receipt an MCP multi round-trip or ACS action ever gets (`v0.2 §6.9`), so a receipt reporting a
+bare policy reason with no authority axis would be the whole evidence for that action. §5.6.1 says
+what it re-evaluates and what it may not re-decide.
+
+### 8.4 The ACS hook needs an identity, for the same reason the gateway does
+
+`ctrlrun.acs.AcsControlHook` builds an `Action` from an inbound JSON-RPC envelope and reads
+`params.metadata.agent_id` and `params.metadata.user_context.user_id` straight out of it. Under
+v0.2 that was survivable on exactly the argument `v0.2 §6.5` makes for `clientInfo`: a policy could
+not address the principal, so a self-reported one misattributed a receipt and could not widen an
+outcome.
+
+§4 ends that, and §8.1 removes `--principal-from-client-info` over it. The ACS hook is the same
+flag in a different module, and it is not enough to remove one and leave the other:
+
+- `AcsControlHook` MUST take an `identity: IdentityProvider`, with `IdentityContext.headers` filled
+  from the transport carrying the envelope, under §8.2's rule — exactly one source, no default.
+- A hook constructed against a `Control` that holds an `Authority`, with no identity provider, MUST
+  refuse at construction with `InvalidArgument` naming the argument. A self-reported name cannot be
+  an authorization input, and a component that silently kept using one would make §8.1 a gesture.
+- Where a provider is configured, `params.metadata.agent_id` is **ignored**, not merged, not used
+  as a fallback, and not compared. It is display data, like `clientInfo`.
+- `params.metadata.environment` is not the action's environment either, for §4.2's reason: an
+  environment named in an authorization decision cannot come off the wire from the caller.
+  `AcsControlHook` takes it from its own configuration.
+
+`docs/ACS.md`'s mapping table is amended in the same item, and T91d asserts the refusal.
 
 **A denial outside the grant is `-41012`.** A tool call outside the principal's grant returns
 JSON-RPC error **`-41012` `ctrlrun.unauthorized`**, HTTP 403, with the same `data` shape as
@@ -1966,16 +2191,24 @@ is individually configurable**, and there is no flag that makes any single one o
 | `authority:` present, every matching grant expired | `AuthorityDenied(reason="authority_expired")` | ⚠ |
 | Delegated grant no longer contained in its parent | `AuthorityDenied(reason="authority_escalation")` | ⚠ |
 | A delegation in the chain is revoked | `AuthorityDenied(reason="authority_revoked")` | ⚠ |
-| An ancestor of a delegated grant has expired | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 3) | ⚠ |
+| An ancestor of a delegated grant has expired | `AuthorityDenied(reason="authority_escalation")` — **attribution, not a defence**: §5.4's `expires_at` row already makes the delegation itself expired, so rule 4 or §4.3 refuses it either way. The row earns its place by naming the ancestor that lapsed (§5.6 rule 3) | ⚠ |
 | A parent grant has been deleted from the document | `AuthorityDenied(reason="authority_escalation")`, `missing_parent_id` | ⚠ |
 | An ancestor is no longer `delegable` | `AuthorityDenied(reason="authority_escalation")` (§5.6 rule 6) | ⚠ |
-| A chain walk revisits a delegation, or exceeds the depth bound | `AuthorityDenied(reason="authority_escalation")` (§5.5) | ⚠ |
+| A chain walk exceeds the depth bound | `AuthorityDenied(reason="authority_escalation")`, `depth_exceeded` (§5.5) | ⚠ |
+| A lease extension whose chain is revoked, expired or no longer contained | refused; the lease lapses and the record becomes `AMBIGUOUS` (§5.6.1) | ⚠ |
 | Delegation creation: any §5.4 dimension violated | `AuthorityEscalation(reason="containment")`; no record; `DELEGATION_REJECTED` | |
 | Delegation creation: parent unknown / not `delegable` / not valid | `AuthorityEscalation` naming which (§5.3) | |
 | Delegation creation: creator is not the parent's subject | `AuthorityEscalation(reason="not_the_subject")` | |
 | Delegation creation: depth would exceed the maximum | `AuthorityEscalation(reason="max_depth")` | |
 | Delegation creation: child subject carries a wildcard, omits `agent`, or drops the parent's `user` | `AuthorityEscalation(reason="containment")`, `dimension="subject"` | |
-| A stored delegation whose `grant_json` no longer parses | `AuthorityDenied`; never a grant with a field defaulted (§5.2) | ⚠ |
+| A stored delegation whose `grant_json` no longer parses | `AuthorityDenied(reason="authority_unreadable")`; never skipped in favour of another matching grant (§4.6) | ⚠ |
+| A chain walk revisits a delegation id | `AuthorityDenied(reason="authority_unreadable")`, `cycle_at` (§5.5) | ⚠ |
+| A `delegation_id` column outside `^dlg_[0-9a-f]{32}$` | `AuthorityDenied(reason="authority_unreadable")` (§5.2) | ⚠ |
+| Delegation creation: `by` has expired | `IdentityError`; `DELEGATION_REJECTED` reason `principal_expired`; no record (§5.3 rule 0) | |
+| Delegation creation: an ancestor is no longer `delegable` | `AuthorityEscalation(reason="parent_not_valid")` (§5.3 rule 3) | |
+| A grant with `delegable: true` and no `expires_at` | `PolicyError` at load (§4.2) | |
+| `agent: "**"` in a subject | `PolicyError` at load (§4.2) | |
+| `actions:` or `mode:` in a document loaded with `standalone=True` | `PolicyError` at load (§4.8) | |
 | `authority:` present but malformed, or `grants` missing | `PolicyError` at load; no `Control` | |
 | A pattern outside §4.4's grammar | `PolicyError` at load | |
 | `mode:` anywhere but the top level of the policy document | `PolicyError` at load | |
@@ -2096,7 +2329,10 @@ grant.
 
 #### T68 — A matching grant passes to policy
 Subject, action, resource and environment all match and the constraints hold. Then
-`AUTHORITY_RESOLVED` names the grant, `POLICY_EVALUATED` follows it, and the action executes.
+`AUTHORITY_RESOLVED` carries `reason == "authority_grant"` **and** names the grant,
+`POLICY_EVALUATED` follows it, and the action executes. The reason is asserted by name because
+§4.6 sends both passing cells' `decision_reason` to the policy axis, so this event is the only
+place a pass reason is observable at all.
 
 #### T69 — A failed constraint denies what policy would allow
 Policy says `allow`. The grant's `amount_lte` excludes the action. Then
@@ -2107,11 +2343,12 @@ cannot pass as `no_authority`.
 A grant whose constraint operand is a decimal string (`amount_lte: "2000.00"`) is a `PolicyError`
 at load whose message names the representation rule (§4.5). No `Control` is constructed.
 
-#### T70 — Stricter wins, all six cells
-Parametrized over authority ∈ {passes, denies} × policy ∈ {allow, approve, deny}, asserting the
-combined decision of §4.6's table in every cell and asserting the recorded `decision_reason` names
-the axis §4.6 says it should. `Control.evaluate` is asserted to return the same decision as the
-one `Control.execute` acts on, in every cell.
+#### T70 — Stricter wins, four cases
+The top row's three cells — authority passes × policy ∈ {allow, approve, deny} — plus **one** for
+authority denying, because §4.6's bottom row is reached without evaluating policy and its three
+cells are therefore indistinguishable. Each asserts the combined decision of §4.6's table and that
+the recorded `decision_reason` names the axis §4.6 says it should. `Control.evaluate` is asserted
+to return the same decision `Control.execute` acts on, in every case.
 
 #### T70b — Several matching grants, and order does not matter
 Two grants match the same action; the action passes and `AUTHORITY_RESOLVED.grant_id` is the
@@ -2128,9 +2365,10 @@ passes; one microsecond later does not.
 One configuration in which three grants match on shape and fail respectively for
 `authority_expired`, `authority_constraint` and `authority_revoked`; the reported reason is
 `authority_revoked`. A single grant that fails both by expiry and by constraint reports
-`authority_constraint`. Permuting the grants in the document yields the identical reason and the
-identical `AUTHORITY_DENIED` data — the only assertion that can catch a sort that fell back to
-file order.
+`authority_expired` (§4.3). Two grants failing for the *same* reason report the `grant_id` that
+sorts first. Permuting the grants in the document yields the identical reason and the identical
+`AUTHORITY_DENIED` data — the only assertion that can catch a sort that fell back to file
+order.
 
 #### T72 — Pattern matching does not cross a separator
 Parametrized over §4.4's table: `stripe.*` matches `stripe.refund` and not `stripe.refund.partial`;
@@ -2156,9 +2394,14 @@ a duplicate `id`; an `id` beginning `dlg_`; a naive `expires_at`; `constraints: 
 naming a reserved argument; a `float` operand; `max_delegation_depth: -1`. Each raises `PolicyError`
 at load and **no `Control` is constructed** — asserted, not assumed.
 
-#### T73b — `Subject` refuses in Python what the loader refuses in YAML
+#### T73b — The models refuse in Python what the loader refuses in YAML
 `Subject()` and `Subject(agent=None, user=None)` raise `InvalidArgument` (§4.8), so
-`Control.delegate` cannot be handed a grant addressed to every principal.
+`Control.delegate` cannot be handed a grant addressed to every principal. And `Grant` refuses,
+parametrized: a pattern outside §4.4 (`stripe.a*.**`), a naive `expires_at`, a `constraints` key
+that disagrees with its own `Condition` (`{"amount_gte": Condition(argument="amount", op="lte",
+…)}`), `delegable=True` with no `expires_at`. Each is `InvalidArgument` at construction — without
+this, §5.3 rule 6 discharges a containment proof over a value nothing validated, and §5.5's segment
+relation is undefined on `a**`.
 
 #### T74 — Authority is evaluated before policy
 An action denied by authority produces `ACTION_PROPOSED`, `AUTHORITY_DENIED`, `ACTION_DENIED` and
@@ -2196,13 +2439,21 @@ Each → `AuthorityEscalation(reason="containment")`, `DELEGATION_REJECTED` whos
 names the row, and no record written.
 
 #### T76b — The creation-time rules that are not containment
-Parametrized over §5.3 rules 1–5, each asserting the reason **by name**, that
+Parametrized over §5.3 rules 0–5, each asserting the reason **by name**, that
 `store.get_delegation` returns nothing for the id that was not created, that exactly one
-`DELEGATION_REJECTED` was appended, and that `data.dimension` is **absent**: an unknown
-`parent_id` → `unknown_parent`; a parent with `delegable: false` → `parent_not_delegable`; an
-expired parent, a parent whose own parent is revoked, and one whose own parent is expired →
-`parent_not_valid`; a depth beyond the maximum → `max_depth`. Rule 3 has no other test, and
-without this one it is a guard whose deletion §5.6 would silently cover.
+`DELEGATION_REJECTED` was appended, and that `data.dimension` is **absent**: an expired `by` →
+`IdentityError` with `data.reason == "principal_expired"`; an unknown `parent_id` →
+`unknown_parent`; a parent with `delegable: false` → `parent_not_delegable`; an expired parent, a
+parent whose own parent is revoked, and an ancestor whose `delegable` was set to `false` →
+`parent_not_valid`; a depth beyond the maximum, asserted against a chain whose stored `depth`
+column says otherwise → `max_depth`.
+
+Rule 0 is the one that matters: without it an expired credential mints permanent, re-delegable
+authority, and the `else` branch — the delegation having been created — fails the test with the
+id it should not have got. Rule 3's "own parent is *expired*" case is deliberately **not** in the
+list: §5.4's `expires_at` row makes a grandparent's expiry imply the parent's, so it is the
+expired-parent case wearing another name, and a row that cannot be constructed distinctly reads as
+coverage while exercising nothing.
 
 #### T77 — Valid at creation, invalid later
 A child valid at creation; then the parent's `expires_at` passes under the fake clock. The child
@@ -2222,10 +2473,15 @@ A depth-2 chain whose root grant is removed from the reloaded document. `Authori
 `reason == "authority_escalation"`, asserted **not** to be `no_authority`, and the
 `AUTHORITY_DENIED` event names the missing parent in `data.missing_parent_id`.
 
-#### T77d — A cyclic or over-deep chain terminates
-A `delegations` table mutated directly so that two rows are each other's parent. Evaluation denies
-with `authority_escalation` within the §5.5 bound and does not hang; the test bounds its own
-iteration so a broken bound fails red rather than timing out CI.
+#### T77d — A cyclic and an over-deep chain are refused, and distinguishably
+A `delegations` table mutated directly so that two rows are each other's parent: evaluation denies
+with `authority_unreadable` and `data.cycle_at` naming the repeated id, within the §5.5 bound and
+without hanging. Separately, a chain longer than the limit denies with `authority_escalation` and
+`data.depth_exceeded`. Both asserted by reason **and** by data, because the bound alone already
+stops a cycle hanging — so a revisit check reporting what the bound reports would be a guard no
+test could tell had run. A row whose `delegation_id` is not `dlg_` + 32 hex is
+`authority_unreadable` too. The test bounds its own iteration so a broken bound fails red rather
+than timing out CI.
 
 #### T78 — A revoked parent denies
 `ctrlrun revoke` on a mid-chain delegation appends `DELEGATION_REVOKED` **and reaches a registered
@@ -2247,6 +2503,14 @@ requesting €1,500 passes authority and reaches policy. Two separate creation a
 different guards refuse them: `finance-agent` delegating €50,000 under its €25,000 parent →
 `containment` with `data.dimension == "constraints"`; `support-agent` delegating anything at all →
 `parent_not_delegable`. Asserting one would hide the other.
+
+#### T80b — Authority across an action already under way
+Parametrized over §5.6.1: an action that reserved and then had its chain revoked still **commits**
+(the record reaches `COMMITTED`, nothing raised); a lease extension on the same action is
+**refused** and the record becomes `AMBIGUOUS` when the lease lapses; a `Control.resume` after
+revocation records the denial on its receipt and does not re-decide, and that receipt carries the
+combined §4.6 decision rather than a bare policy reason. Without this, §5.7's "a chain of any depth
+is cut by one write" is false for every action in flight when the operator hits the switch.
 
 #### T81 — Omission is not "unlimited"
 A parent with `amount_lte: 25000`; a child with **no** `amount` constraint. The delegation is
@@ -2353,6 +2617,14 @@ it is refused; a key whose own `alg` excludes the token's is refused even when t
 allow-list admits it; a failed fetch is `IdentityError` and the previously cached keys are not
 discarded.
 
+#### T91d — The ACS hook refuses a self-asserted principal
+`AcsControlHook` constructed against a `Control` holding an `Authority`, with no
+`identity` provider, raises `InvalidArgument` at construction naming the argument (§8.4). With a
+provider configured, an envelope whose `params.metadata.agent_id` names a different agent than the
+provider resolved executes as the **provider's** principal, and the envelope's `environment` is
+ignored in favour of the hook's configuration. Without this the flag §8.1 removes survives in
+another module.
+
 #### T91 — The gateway enforces authority, distinguishably
 A `tools/call` outside the principal's grant returns JSON-RPC `-41012` `ctrlrun.unauthorized` with
 `data.reason="no_authority"`, HTTP 403, upstream request count 0, and a `denied` receipt. The same
@@ -2399,6 +2671,7 @@ from .identity import (
     StaticIdentityProvider,
     HeaderIdentityProvider,
 )
+# and, in ctrlrun[gateway]: AcsControlHook(..., identity=...) — §8.4
 from .authority import Authority, Grant, Subject, Delegation, AuthorityResult
 from .policy import Condition, parse_conditions       # promoted; see below
 from .state import DelegationRecord
@@ -2424,7 +2697,7 @@ Control.authority -> Authority | None
 Control.delegate(parent_id: str, grant: Grant, *, by: Principal) -> Delegation
 Control.revoke(delegation_id: str, *, by: str | None = None) -> None
 
-Authority.from_yaml(text, *, source="<string>") -> Authority
+Authority.from_yaml(text, *, source="<string>", standalone=False) -> Authority
 Authority.grants -> Mapping[str, Grant]
 Authority.max_delegation_depth -> int
 Authority.evaluate(action, *, now, store) -> AuthorityResult
@@ -2433,11 +2706,12 @@ Authority.plan_revocation(delegation_id, *, by, store, now) -> Delegation
 
 Policy.mode -> Literal["observe", "enforce"]
 
-StateStore.put_delegation(record: DelegationRecord) -> None
+StateStore.put_delegation(record: DelegationRecord) -> None      # INSERT; never an upsert
 StateStore.get_delegation(delegation_id: str) -> DelegationRecord | None
 StateStore.delegations_for(parent_id: str) -> tuple[DelegationRecord, ...]
 StateStore.delegations(*, include_revoked: bool = False) -> tuple[DelegationRecord, ...]
 StateStore.revoke_delegation(delegation_id: str, *, by: str | None, at: datetime) -> bool
+#   BEGIN IMMEDIATE; False where the row was already revoked (§5.7)
 ```
 
 **Promoted.** `policy._Condition` becomes `policy.Condition`, and the parser behind a `when:`
@@ -2623,6 +2897,13 @@ Everything in `v0.1 §9` and `v0.2 §12` that v0.3 does not deliver, and specifi
   (§5.7, §7).
 - **Authenticating the delegator.** `ctrlrun delegate --as` is an assertion, recorded as one
   (§5.7) — the same position `v0.1 §4.1` takes on the approver, who is also still unauthenticated.
+- **Authenticating the environment.** `environments:` scopes a grant, and in-process the
+  environment is whatever `context()` said (§4.2). It is a real restriction only where something
+  the agent does not control supplies it, which in v0.3 means the gateway or the ACS hook's own
+  configuration.
+- **Sweeping a subtree of delegations.** `ctrlrun revoke` takes one id and v0.3 lists none, so the
+  answer to a chain of unknown width is `delegable: false` on the root grant plus a restart
+  (§5.6).
 - **Data scope.** Authority governs *which actions on which resources*, not which records, fields
   or purposes. That is `VISION.md` §5's resource/data scope and it is not v0.3.
 - **Consequence taxonomy, the CONTROL registry, separation of duties, multi-approver workflows,
