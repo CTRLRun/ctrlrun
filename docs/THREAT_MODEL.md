@@ -1,6 +1,6 @@
 # Threat Model
 
-CTRLRun sits in the execution path of consequential actions. This document states what it defends against, what it explicitly does not, and the fail-closed rules that follow. It is scoped to v0.1 and will grow with the roadmap.
+CTRLRun sits in the execution path of consequential actions. This document states what it defends against, what it explicitly does not, and the fail-closed rules that follow. It covers v0.1, v0.2 and v0.3, and grows with the roadmap.
 
 ## Assets
 
@@ -97,10 +97,11 @@ they entitled to?* Everything above still holds; these are the threats the secon
 - No reconciliation; AMBIGUOUS always needs a human (v0.2 adds executor `check`).
 - The decorator can be bypassed by code that doesn't use it.
 
-## Known v0.2 limitations (specified, not yet shipped)
+## Known v0.2 limitations
 
-These follow from `SPEC-v0.2.md` and are recorded here as they are decided, not after the code
-lands. Nothing in this section describes behaviour you can run today.
+These follow from `SPEC-v0.2.md`. They were written here **before** the code landed, which is
+the point — a limitation recorded only after somebody hits it is a postmortem, not a threat
+model. They shipped in 0.2.0 and every one of them describes behaviour you can run today.
 
 - **A lazily-validating upstream can win a retry it should not have.** The gateway maps the
   JSON-RPC errors that the specification defines as emitted *before dispatch* — `-32700`,
@@ -124,13 +125,16 @@ lands. Nothing in this section describes behaviour you can run today.
   the approved call cannot be altered. What remains is the content of the elicited answer
   itself, which a compromised upstream chooses the question for. It is recorded
   (`EXECUTION_RESUMED` carries the keys and a digest) but not approved. Deny the tool if that
-  is unacceptable; binding an approval across a round trip is a v0.3 question.
-- **The gateway's principal is not authenticated.** `--principal-header` is worth whatever the
-  proxy that sets it is worth, and `--principal-from-client-info` reads a field the MCP
-  specification says implementations *"SHOULD NOT rely on … for security decisions"*. It is
-  survivable only because a v0.1 policy cannot address the principal at all, so an
-  unauthenticated one misattributes a receipt and cannot widen a decision. That stops being
-  true with the authority model, and the `clientInfo` option is removed in v0.3.
+  is unacceptable. Binding an approval across an elicitation round trip was asked of v0.3 and
+  deliberately not answered there (`SPEC-v0.3.md` §13); it stands.
+- **The gateway's principal is not authenticated — ~~and `clientInfo` is one of its sources~~.**
+  *Closed in part by 0.3.0.* `--principal-from-client-info` is **removed**: it read a field the
+  MCP specification says implementations *"SHOULD NOT rely on … for security decisions"*, and it
+  was survivable only while a policy could not address the principal at all. The authority model
+  ended that, so the flag exits non-zero naming `--principal-header`. What remains is the
+  original sentence: `--principal-header` is worth whatever the proxy that sets it is worth. A
+  deployment that wants the principal *verified* rather than asserted uses `--identity-jwt`
+  (0.3.0), which is the only option here that checks a credential.
 - **Reservation is still single-host.** Two gateways in front of one upstream share no
   reservations unless they share a state file on one machine.
 
