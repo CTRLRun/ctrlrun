@@ -107,13 +107,23 @@ def _spans(exporter):
 # --- SPEC-v0.3 §2.4: the issuer and the claim NAMES, never the values ------------------
 
 
+#: The claim values `_with_claims` puts on the principal, named here so the fixture and the
+#: assertion that they never reach a span cannot drift apart.
+CLAIM_VALUES = (918273645012, "CASE-9")
+
+
 def _with_claims(store, provider, **options):
     control = _control(store, provider, **options)
     from ctrlrun import Action, Principal
 
     principal = Principal(
         agent="refund-agent",
-        claims={"employee_no": 4471, "case": "CASE-9"},
+        # SPEC-v0.3 §2.1 allows str, int and bool claims, so both shapes are represented.
+        # The integer is long on purpose: `test_the_span_never_carries_a_claim_value` scans
+        # the whole attribute repr, which contains a random 32-hex-character `action_id`, and
+        # a short all-digit value collides with one by chance. `4471` did, in CI, roughly one
+        # run in 2,300. See that test.
+        claims={"employee_no": CLAIM_VALUES[0], "case": CLAIM_VALUES[1]},
         issuer="https://issuer.example/",
     )
     control.execute(
@@ -141,14 +151,28 @@ def test_the_span_carries_the_issuer_and_the_claim_names(exporter, store):
 def test_the_span_never_carries_a_claim_value(exporter, store):
     """§2.4 — the security half. A span is exported to a third party by default; a receipt is
     evidence meant to be read. A claim can hold an employee number, a case id or a licence, so
-    the two make opposite trades, and `--otel-arguments` does not widen this one."""
+    the two make opposite trades, and `--otel-arguments` does not widen this one.
+
+    Asserted twice, and the pair is deliberate. **Structurally**, because that is exact: no
+    attribute may *be* a claim value. **And over the whole repr**, because a leak could arrive
+    embedded in a larger attribute rather than as one, and a structural check alone would miss
+    that.
+
+    The textual half is why the claims above are shaped as they are. The repr contains
+    `ctrlrun.action_id`, which is `act_` plus 32 random hex characters, so a short all-digit
+    claim value appears inside one by chance — `4471` did, in CI, about one run in 2,300. A
+    value that is long, or that carries a character hex cannot produce, makes the scan
+    deterministic instead of merely usually right. Do not shorten either of them.
+    """
     exporter, provider = exporter
     _with_claims(store, provider, arguments=True)
 
-    exported = repr(_spans(exporter)[0].attributes)
+    attributes = _attrs(_spans(exporter)[0])
+    exported = repr(attributes)
 
-    assert "4471" not in exported
-    assert "CASE-9" not in exported
+    for value in CLAIM_VALUES:
+        assert value not in attributes.values(), value
+        assert str(value) not in exported, value
 
 
 def _attrs(span):
