@@ -38,7 +38,13 @@ import yaml
 
 from .action import Action, Principal
 from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
-from .policy import SUPPORTED_SCHEMAS, Condition, parse_conditions, require_v3
+from .policy import (
+    SUPPORTED_SCHEMAS,
+    Condition,
+    parse_conditions,
+    reject_nested_mode,
+    require_v3,
+)
 from .policy import _equal as _type_strict_equal
 from .state import DelegationRecord, StateStore
 
@@ -1171,6 +1177,10 @@ def _from_section(section: object, source: str) -> Authority:
         raise PolicyError(
             f"{where}: must be a mapping with a 'grants' key, got {_type_name(section)}"
         )
+    # §6.1 — `mode:` is top level and nothing else, and this loader owns the two nestings
+    # inside an `authority:` section: the `--authority` document of §8.3 never reaches the
+    # policy loader at all.
+    reject_nested_mode(section, where)
     _reject_unknown_keys(section, _AUTHORITY_KEYS, where)
     depth = section.get("max_delegation_depth", DEFAULT_MAX_DELEGATION_DEPTH)
     if not isinstance(depth, int) or isinstance(depth, bool) or depth < 0:
@@ -1231,6 +1241,7 @@ _UNASSIGNED: Final = "unassigned"
 def _parse_grant(entry: object, where: str, *, unassigned: bool = False) -> Grant:
     if not isinstance(entry, Mapping):
         raise PolicyError(f"{where}: a grant must be a mapping, got {_type_name(entry)}")
+    reject_nested_mode(entry, where)
     _reject_unknown_keys(entry, _GRANT_KEYS, where)
     grant_id = entry.get("id")
     if not isinstance(grant_id, str) or not grant_id:

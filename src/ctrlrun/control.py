@@ -29,6 +29,7 @@ from .approval import (
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
+    COMMITTED_EFFECT,
     DEFAULT_LEASE,
     RECONCILED_STATES,
     RECONCILED_UNKNOWN,
@@ -57,14 +58,20 @@ from .errors import (
     Suspended,
 )
 from .identity import IdentityContext, IdentityProvider
-from .policy import Decision, Evaluation, Policy, discover_policy_path
+from .policy import OBSERVE, Decision, Evaluation, Policy, discover_policy_path
 from .receipt import (
+    BLOCKED_AMBIGUOUS,
+    BLOCKED_APPROVAL_MISMATCH,
+    BLOCKED_APPROVAL_REQUIRED,
+    BLOCKED_DUPLICATE,
+    BLOCKED_IN_PROGRESS,
     Event,
     EventSink,
     EventType,
     JSONLEventSink,
     Receipt,
     ReceiptResult,
+    _WouldHave,
     iso_timestamp,
     new_receipt_id,
 )
@@ -160,6 +167,41 @@ def with_approval(request_id: str) -> Iterator[None]:
         _PRESENTED_APPROVAL.reset(token)
 
 
+class _Observation:
+    """One observe-mode action's counterfactual, assembled as it is evaluated (§6.3).
+
+    Mutable and short-lived: `Control.execute` makes one per call, every check that would
+    have stopped the action writes to it, and it is frozen into a `_WouldHave` on the receipt.
+    A holder rather than a return value because the checks are spread across `execute`,
+    `_observe_secure` and `_outcome`, and threading four extra values through all three would
+    put the same fact in three signatures.
+
+    `block()` keeps the **first** reason, because the checks run in the order enforce mode
+    runs them and enforce mode stops at the first: a later refusal is one enforce mode would
+    never have reached.
+    """
+
+    __slots__ = ("blocked_reason", "decision", "reason")
+
+    def __init__(self) -> None:
+        self.decision = Decision.ALLOW
+        self.reason = ""
+        self.blocked_reason: str | None = None
+
+    def decided(self, evaluation: Evaluation) -> None:
+        self.decision = evaluation.decision
+        self.reason = evaluation.reason
+
+    def block(self, reason: str) -> None:
+        if self.blocked_reason is None:
+            self.blocked_reason = reason
+
+    def frozen(self) -> _WouldHave:
+        return _WouldHave(
+            decision=self.decision, reason=self.reason, blocked_reason=self.blocked_reason
+        )
+
+
 class _Reconciler:
     """One attempt's right to ask a `reconcile` hook, spent at most once (SPEC-v0.2 §2.3).
 
@@ -242,6 +284,10 @@ class Control:
         self._identity = identity
         self._authority = authority
         self._environment = _resolve_environment(environment, policy)
+        #: SPEC-v0.3 §6.1 — one switch, read once, governing the process. Not a parameter:
+        #: the mode belongs to the configuration an operator deployed, and a Control that
+        #: could be handed a different one would be a per-caller opt-out of enforcement.
+        self._observing = policy.mode == OBSERVE
         #: SPEC-v0.3 §3.2 — the provider-versus-context warning is emitted at most once per
         #: Control. A warning that repeats per call is a warning nobody reads.
         self._warned_about_principal = False
@@ -503,6 +549,9 @@ class Control:
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
+        # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
+        # Every branch below reads it to choose between refusing and recording.
+        observation = _Observation() if self._observing else None
         self._append(
             EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash}, effect_key
         )
@@ -511,10 +560,21 @@ class Control:
             # attribute the refusal to, so unlike a call outside context() it is recorded; and
             # it is refused before the approval gate, because a decision that can never be
             # honoured must not spend a human's attention.
+            expired = Evaluation(Decision.DENY, PRINCIPAL_EXPIRED)
+            if observation is not None:
+                # §6.2's first bullet — evaluated and recorded, not enforced. Authority and
+                # policy stay unevaluated, because enforce mode stops here and observe mode
+                # records what enforce mode *would have reached*, not a deeper answer it
+                # never gets to.
+                observation.decided(expired)
+                observation.block(PRINCIPAL_EXPIRED)
+                return self._observed(
+                    action, expired, executor, effect_key, started_at, observation, reconciler, held
+                )
             self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
             self._record(
                 action,
-                Evaluation(Decision.DENY, PRINCIPAL_EXPIRED),
+                expired,
                 ReceiptResult.DENIED,
                 started_at,
                 effect_key=effect_key,
@@ -528,6 +588,29 @@ class Control:
         result = self._authority_result(action)
         if result is not None:
             if not result.passed:
+                if observation is not None:
+                    # §6.2 — `AUTHORITY_DENIED` is appended exactly as in enforce mode,
+                    # including §4.3's rule that a denial by authority skips policy. What is
+                    # *not* appended is `ACTION_DENIED`: the action ran.
+                    denial = Evaluation(Decision.DENY, result.reason)
+                    self._append(
+                        EventType.AUTHORITY_DENIED,
+                        action,
+                        self._authority_data(result),
+                        effect_key,
+                    )
+                    observation.decided(denial)
+                    observation.block(result.reason)
+                    return self._observed(
+                        action,
+                        denial,
+                        executor,
+                        effect_key,
+                        started_at,
+                        observation,
+                        reconciler,
+                        held,
+                    )
                 self._refuse_authority(action, result, started_at, effect_key)
             self._append(
                 EventType.AUTHORITY_RESOLVED, action, self._authority_data(result), effect_key
@@ -539,8 +622,30 @@ class Control:
             {"decision": str(evaluation.decision), "reason": evaluation.reason},
             effect_key,
         )
+        if observation is not None:
+            observation.decided(evaluation)
 
         if evaluation.decision is Decision.DENY:
+            if observation is not None:
+                # SPEC: §6.3 lists `unknown_action` and `no_matching_rule` among
+                # `blocked_reason`'s values and stops there, but a policy also denies by a
+                # `rule[N]` and by a bare `decision`. The reading taken is the uniform one —
+                # a denial's `blocked_reason` **is** its `decision_reason` — because that is
+                # what makes §6.3's two named values right, and inventing a `policy_denied`
+                # bucket for the other two would leave `ctrlrun stats` unable to say which
+                # rule an operator should look at. The vocabulary stays closed per document:
+                # every value is a reason some check actually produced.
+                observation.block(evaluation.reason)
+                return self._observed(
+                    action,
+                    evaluation,
+                    executor,
+                    effect_key,
+                    started_at,
+                    observation,
+                    reconciler,
+                    held,
+                )
             self._append(EventType.ACTION_DENIED, action, {"reason": evaluation.reason}, effect_key)
             self._record(
                 action, evaluation, ReceiptResult.DENIED, started_at, effect_key=effect_key
@@ -549,6 +654,10 @@ class Control:
                 f"{action.name} denied: {evaluation.reason}",
                 reason=evaluation.reason,
                 action_id=action.action_id,
+            )
+        if observation is not None:
+            return self._observed(
+                action, evaluation, executor, effect_key, started_at, observation, reconciler, held
             )
         approval, reservation = self._secure(
             action, evaluation, started_at, effect_key, held, reconciler
@@ -568,8 +677,162 @@ class Control:
                 raise
         self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
         return self._outcome(
-            action, evaluation, executor, effect_key, attempt, approval, started_at, reconciler
+            action,
+            evaluation,
+            executor,
+            effect_key,
+            attempt,
+            approval,
+            started_at,
+            reconciler,
+            held_key=effect_key,
         )
+
+    # --- observe mode (SPEC-v0.3 §6) ----------------------------------------------------
+
+    def _observed(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        executor: Callable[[], Any],
+        effect_key: str | None,
+        started_at: datetime,
+        observation: _Observation,
+        reconciler: _Reconciler,
+        lease: timedelta,
+    ) -> Receipt:
+        """Run an action observe mode has finished deciding about (SPEC-v0.3 §6.2).
+
+        Reached from four places in `execute` — an expired principal, an authority denial, a
+        policy denial, and a decision that would have let the action through — because all
+        four execute in observe mode and only the counterfactual differs. The reservation is
+        attempted from every one of them: observe mode *executes*, and an attempt that runs
+        an effect must own its key where it can.
+        """
+        approval, reservation = self._observe_secure(
+            action, evaluation, effect_key, lease, observation
+        )
+        held_key = None if reservation is None else effect_key
+        attempt = 1 if reservation is None else reservation.attempt
+        if held_key is not None:
+            try:
+                self._store.begin_execution(held_key, action.action_id)
+            except (DuplicateEffect, AmbiguousEffect) as refused:
+                # The key was taken from under this attempt between winning it and starting.
+                # Nothing is refused here, so the attempt goes on to run holding nothing —
+                # and §6.2's rule applies: the record belongs to whoever holds the key.
+                self._append(
+                    EventType.EFFECT_RESERVATION_REFUSED,
+                    action,
+                    _refusal_data(refused),
+                    effect_key,
+                )
+                observation.block(_blocked_by(refused))
+                held_key = None
+        self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
+        return self._outcome(
+            action,
+            evaluation,
+            executor,
+            effect_key,
+            attempt,
+            approval,
+            started_at,
+            reconciler,
+            held_key=held_key,
+            observation=observation,
+        )
+
+    def _observe_secure(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        effect_key: str | None,
+        lease: timedelta,
+        observation: _Observation,
+    ) -> tuple[Approval | None, Reservation | None]:
+        """Attempt what `_secure` takes, record every refusal, and hold nothing it lost.
+
+        A separate implementation from `_secure` rather than a flag through it, because the
+        two differ in almost every branch: this one writes no receipt, raises nothing, and
+        never reconciles. It can only ever end up holding **less** than `_secure` would, so
+        the fail-closed direction is preserved by construction.
+
+        Two things it deliberately does not do (SPEC-v0.3 §6.2):
+
+        - **It creates no approval request.** A policy reaching `approve` with nothing
+          presented is recorded and the action runs. Paging a human about an action that is
+          about to execute regardless of the answer produces a queue, not evidence.
+        - **It never calls the `reconcile` hook.** The blocking trigger of `v0.2 §2.3` fires
+          when an `AMBIGUOUS` record refuses a reservation; here that refusal is ignored, so
+          there is nothing being unblocked — and the hook's `"committed"` answer would move a
+          record a human may still be adjudicating.
+        """
+        approval_id = None
+        if evaluation.decision is Decision.APPROVE:
+            approval_id = _PRESENTED_APPROVAL.get(None)
+            if approval_id is None:
+                observation.block(BLOCKED_APPROVAL_REQUIRED)
+        if approval_id is None and effect_key is None:
+            return None, None
+        try:
+            approval, reservation = self._take(action, approval_id, effect_key, lease)
+        except (DuplicateEffect, AmbiguousEffect) as refused:
+            observation.block(_blocked_by(refused))
+            self._append(
+                EventType.EFFECT_RESERVATION_REFUSED,
+                action,
+                _refusal_data(refused),
+                effect_key,
+                approval_id=approval_id,
+            )
+            return None, None
+        except ApprovalMismatch as mismatch:
+            # A *presented* approval that does not authorize this action. §6.2 lists
+            # `ApprovalMismatch` among the exceptions observe mode does not raise, so it is
+            # recorded and the action runs; the approval is left unconsumed either way.
+            observation.block(BLOCKED_APPROVAL_MISMATCH)
+            self._append(
+                EventType.APPROVAL_INVALIDATED,
+                action,
+                {"reason": mismatch.reason, "action_hash": action.action_hash},
+                effect_key,
+                approval_id=approval_id,
+            )
+            return None, None
+        except ActionDenied as denied:
+            # The store raises this where the record says a human refused the approval that
+            # was presented. §4.2 makes that a denial of the action, and the reason is the
+            # one `_secure` records; observe mode records it and runs.
+            observation.block(denied.reason)
+            self._append(
+                EventType.APPROVAL_DENIED,
+                action,
+                {"approver": self._approver_of(approval_id)},
+                effect_key,
+                approval_id=approval_id,
+            )
+            return None, None
+        if approval is not None:
+            self._append(
+                EventType.APPROVAL_CONSUMED,
+                action,
+                {"approver": approval.approver},
+                effect_key,
+                approval_id=approval.approval_id,
+            )
+        if reservation is not None:
+            self._append(
+                EventType.EFFECT_RESERVED,
+                action,
+                {
+                    "attempt": reservation.attempt,
+                    "lease_expires_at": iso_timestamp(reservation.lease_expires_at),
+                },
+                effect_key,
+                approval=approval,
+            )
+        return approval, reservation
 
     def resume(self, continuation: str, executor: Callable[[], Any]) -> Receipt:
         """Finish an action a `Suspended` executor left open (SPEC-v0.2 §6.9).
@@ -619,6 +882,17 @@ class Control:
                 EventType.AUTHORITY_DENIED, action, self._authority_data(result), held.effect_key
             )
             evaluation = Evaluation(Decision.DENY, result.reason)
+        # SPEC-v0.3 §6.3 — a resumption in observe mode gets the same `observed` receipt its
+        # first leg did. It is the *only* receipt an MCP multi round-trip ever gets (§8.3), so
+        # a resumed leg reporting `committed` under a mode that enforces nothing would put the
+        # one piece of evidence for that action in the wrong vocabulary. The reservation was
+        # taken on the first leg and is still held, so nothing is blocked here.
+        observation: _Observation | None = None
+        if self._observing:
+            observation = _Observation()
+            observation.decided(evaluation)
+            if evaluation.decision is Decision.DENY:
+                observation.block(evaluation.reason)
         return self._outcome(
             action,
             evaluation,
@@ -628,6 +902,8 @@ class Control:
             None,
             started_at,
             _Reconciler(None, False),
+            held_key=held.effect_key,
+            observation=observation,
         )
 
     def _outcome(
@@ -640,12 +916,25 @@ class Control:
         approval: Approval | None,
         started_at: datetime,
         reconciler: _Reconciler,
+        *,
+        held_key: str | None,
+        observation: _Observation | None = None,
     ) -> Receipt:
         """Run the executor and record what happened (SPEC-v0.1 §5.5).
 
         The single implementation of the asymmetry: `NotExecuted` is the only outcome that
         maps to `FAILED`, `Suspended` records no outcome at all, and everything else is
         `AMBIGUOUS`. `execute` and `resume` both come through here, so the two cannot drift.
+
+        `effect_key` names the key on every event and on the receipt; `held_key` is the key
+        this attempt actually **reserved**, and the only one it may write an outcome to. They
+        differ in exactly one case: an observe-mode attempt whose reservation was refused
+        (SPEC-v0.3 §6.2). The record belongs to the attempt that holds the key, and observe
+        mode does not make a second attempt its owner — `commit_effect` and its siblings admit
+        only the holder (v0.1 §5.3 E1), and a record in `AMBIGUOUS` is a human's to move.
+
+        `observation` turns every terminal receipt below into an `observed` one carrying what
+        the executor did and what enforce mode would have done (§6.3).
         """
         try:
             result = executor()
@@ -653,21 +942,25 @@ class Control:
             # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
             # and this attempt is not finished. Handled above the generic branch precisely so
             # it cannot be mistaken for one.
-            self._suspend(action, effect_key, suspension, approval)
+            #
+            # SPEC-v0.3 §6.2 — with no reservation held there is no lease to extend and no
+            # continuation to hold, which is §6.9.3's no-effect-key path reached for a
+            # different reason. `held_key` says so.
+            self._suspend(action, held_key, suspension, approval)
             raise
         except NotExecuted as exc:
-            if effect_key is not None:
+            if held_key is not None:
                 # SPEC §5.5 — the executor asserted the remote side did nothing, so this is
                 # the one outcome that leaves the key retryable (§5.4).
                 try:
-                    self._store.fail_effect(effect_key, action.action_id, str(exc))
+                    self._store.fail_effect(held_key, action.action_id, str(exc))
                 except (DuplicateEffect, AmbiguousEffect) as refused:
                     # SPEC: §5.2 — the record moved on while the executor ran: this attempt's
                     # lease lapsed and another declared the effect AMBIGUOUS, which only a
                     # human moves it out of. The store's refusal is what propagates, not the
                     # NotExecuted: an agent that caught that would retry a key it lost.
                     self._unrecorded(
-                        action, evaluation, started_at, effect_key, attempt, refused, approval
+                        action, evaluation, started_at, held_key, attempt, refused, approval
                     )
                     raise
             self._append(
@@ -686,6 +979,7 @@ class Control:
                 approval=approval,
                 effect_key=effect_key,
                 attempt=attempt,
+                observation=observation,
             )
             raise
         except BaseException as exc:
@@ -695,9 +989,9 @@ class Control:
             # is a regression, not a cleanup.
             error = f"{type(exc).__name__}: {exc}"
             recorded = effect_key is None
-            if effect_key is not None:
+            if held_key is not None:
                 try:
-                    self._store.mark_ambiguous(effect_key, action.action_id, error)
+                    self._store.mark_ambiguous(held_key, action.action_id, error)
                     recorded = True
                 except (DuplicateEffect, AmbiguousEffect) as refused:
                     # Recording an unknown outcome must never mask the exception that caused
@@ -728,18 +1022,19 @@ class Control:
                 approval=approval,
                 effect_key=effect_key,
                 attempt=attempt,
+                observation=observation,
             )
             raise
-        if effect_key is not None:
+        if held_key is not None:
             try:
-                self._store.commit_effect(effect_key, action.action_id, result)
+                self._store.commit_effect(held_key, action.action_id, result)
             except (DuplicateEffect, AmbiguousEffect) as refused:
                 # SPEC: §5.2 — the executor returned, but the key is no longer this attempt's
                 # to commit: the lease lapsed and the record is AMBIGUOUS until a human says
                 # otherwise. What happened at the remote is now as unknown as a timeout, so
                 # the attempt is recorded `ambiguous` rather than committed.
                 self._unrecorded(
-                    action, evaluation, started_at, effect_key, attempt, refused, approval
+                    action, evaluation, started_at, held_key, attempt, refused, approval
                 )
                 raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
@@ -751,6 +1046,7 @@ class Control:
             approval=approval,
             effect_key=effect_key,
             attempt=attempt,
+            observation=observation,
         )
 
     def _suspend(
@@ -1303,7 +1599,13 @@ class Control:
         approver: str | None = None,
         effect_key: str | None = None,
         attempt: int = 1,
+        observation: _Observation | None = None,
     ) -> Receipt:
+        # SPEC-v0.3 §6.3 — one place turns a terminal outcome into an observed receipt, so
+        # `result`, `execution` and `would_have` cannot disagree about the same action. The
+        # still-refuses rows of §6.2 pass no observation and keep their `denied` receipt with
+        # both new fields null, which is what makes "would_have present on every observed run
+        # and absent on every refused one" true in both directions.
         receipt = Receipt(
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
@@ -1319,7 +1621,9 @@ class Control:
             approver=approval.approver if approval is not None else approver,
             effect_key=effect_key,
             attempt=attempt,
-            result=result,
+            result=ReceiptResult.OBSERVED if observation is not None else result,
+            execution=None if observation is None else result,
+            would_have=None if observation is None else observation.frozen(),
             started_at=started_at,
             finished_at=self._clock(),
             error=error,
@@ -1404,6 +1708,18 @@ def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
     if isinstance(refused, DuplicateEffect):
         return {"reason": "duplicate", "state": refused.state}
     return {"reason": "ambiguous"}
+
+
+def _blocked_by(refused: DuplicateEffect | AmbiguousEffect) -> str:
+    """The same refusal in `would_have.blocked_reason`'s vocabulary (SPEC-v0.3 §6.3).
+
+    `duplicate` and `in_progress` are kept apart because one says the effect happened and the
+    other says another attempt holds the key right now — a rollout report that merged them
+    would count a contended key as a repeated payment.
+    """
+    if isinstance(refused, AmbiguousEffect):
+        return BLOCKED_AMBIGUOUS
+    return BLOCKED_DUPLICATE if refused.state == COMMITTED_EFFECT else BLOCKED_IN_PROGRESS
 
 
 def _optional_authority(source: str) -> Authority | None:

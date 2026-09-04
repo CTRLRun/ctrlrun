@@ -23,10 +23,9 @@ from typing import Any, Final, Protocol
 from .action import Principal
 from .policy import Decision
 
-#: SPEC-v0.3 §12.2. The bump lands with build-list item 1, because that is when the first v2
-#: field appears — the principal's claims, issuer and expiry. `execution` and `would_have` are
-#: carried as `null` from here and populated by observe mode in item 4, so the shape a reader
-#: parses is settled once rather than changing twice under one version string.
+#: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
+#: field appeared — the principal's claims, issuer and expiry. `execution` and `would_have`
+#: joined them in item 4, under the same version string, so a reader parses one shape.
 RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v2"
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
@@ -34,6 +33,28 @@ RECEIPTS_FILENAME: Final = "receipts.jsonl"
 EVENTS_FILENAME: Final = "events.jsonl"
 
 _ID_HEX_BYTES: Final = 16  # "ctr_" + 32 hex chars
+
+#: SPEC-v0.3 §6.3 — the part of `would_have.blocked_reason`'s closed vocabulary that names
+#: something other than a decision. The rest of it is decision reasons, reused verbatim:
+#: `principal_expired`, `unknown_action`, `no_matching_rule`, a `rule[N]`, and §4.3's six
+#: authority denials. It is closed because §6.4 buckets counts on it, and a bucketed count
+#: over a string nobody constrained is a report that quietly stops adding up.
+BLOCKED_APPROVAL_REQUIRED: Final = "approval_required"
+BLOCKED_APPROVAL_MISMATCH: Final = "approval_mismatch"
+BLOCKED_DUPLICATE: Final = "duplicate"
+BLOCKED_IN_PROGRESS: Final = "in_progress"
+BLOCKED_AMBIGUOUS: Final = "ambiguous"
+
+#: The four that mean "the effect state or a presented approval would have stopped it", as
+#: opposed to a decision that would have. `ctrlrun stats` counts them as one line (§6.4).
+BLOCKED_BY_STATE: Final = frozenset(
+    {
+        BLOCKED_APPROVAL_MISMATCH,
+        BLOCKED_DUPLICATE,
+        BLOCKED_IN_PROGRESS,
+        BLOCKED_AMBIGUOUS,
+    }
+)
 
 
 def new_receipt_id() -> str:
@@ -62,9 +83,11 @@ def _principal_dict(principal: Principal) -> dict[str, Any]:
 
 
 class ReceiptResult(StrEnum):
-    """The terminal outcome recorded on a receipt (SPEC-v0.1 §6.1).
+    """The terminal outcome recorded on a receipt (SPEC-v0.1 §6.1, SPEC-v0.3 §6.3).
 
-    `BLOCKED` covers duplicate, ambiguous-retry and approval-mismatch refusals.
+    `BLOCKED` covers duplicate, ambiguous-retry and approval-mismatch refusals. `OBSERVED`
+    is the observe-mode result, and it is not in v0.1 §6.1's set — which is why the receipt
+    schema bumped to v2 (§12.2) and why every reader upgrades before any writer switches.
     """
 
     COMMITTED = "committed"
@@ -72,6 +95,10 @@ class ReceiptResult(StrEnum):
     AMBIGUOUS = "ambiguous"
     DENIED = "denied"
     BLOCKED = "blocked"
+    #: SPEC-v0.3 §6.3 — every receipt an observe-mode run *observed*, including the ones
+    #: nothing would have blocked. What the executor actually did is on `execution`; what
+    #: enforce mode would have done is on `would_have`.
+    OBSERVED = "observed"
 
 
 class EventType(StrEnum):
@@ -150,6 +177,41 @@ class Event:
 
 
 @dataclass(frozen=True)
+class _WouldHave:
+    """What enforce mode would have done with an observed action (SPEC-v0.3 §6.3).
+
+    Private, like `policy._ActionPolicy`, because SPEC-v0.3 §11 freezes `Receipt.would_have`
+    and not a type name for it: the shape a reader parses is the JSON object, and adding a
+    public class here would be an addition to a frozen surface.
+
+    `decision` and `reason` are the combined §4.6 result — what enforce mode would have
+    *reached*. `blocked_reason` is what would have been *done* with it, and is `None` where
+    the action would have run unimpeded. The pair is not a duplicate: "the policy said allow
+    and the effect was already committed" is a real and common answer, and a single field
+    could not hold both halves.
+    """
+
+    decision: Decision
+    reason: str
+    blocked_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": str(self.decision),
+            "reason": self.reason,
+            "blocked_reason": self.blocked_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]) -> _WouldHave:
+        return cls(
+            decision=Decision(document["decision"]),
+            reason=document["reason"],
+            blocked_reason=document.get("blocked_reason"),
+        )
+
+
+@dataclass(frozen=True)
 class Receipt:
     """Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1)."""
 
@@ -171,6 +233,15 @@ class Receipt:
     effect_key: str | None = None
     attempt: int = 1
     error: str | None = None
+    #: SPEC-v0.3 §6.3 — what the executor actually did, in observe mode: `committed`,
+    #: `failed` or `ambiguous`, or `None` where it never ran. Always `None` in enforce mode,
+    #: where `result` already carries it; duplicating it would give two fields that can
+    #: disagree.
+    execution: ReceiptResult | None = None
+    #: The counterfactual, present on every observed run and absent on every refused one
+    #: (§6.3). That is what keeps "never infer from the absence of a field" true in both
+    #: directions.
+    would_have: _WouldHave | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The receipt as plain JSON-serializable data, in the field order of SPEC §6.1."""
@@ -191,9 +262,8 @@ class Receipt:
             "effect_key": self.effect_key,
             "attempt": self.attempt,
             "result": str(self.result),
-            # SPEC-v0.3 §6.3 — `null` in enforce mode, which is every mode until item 4.
-            "execution": None,
-            "would_have": None,
+            "execution": None if self.execution is None else str(self.execution),
+            "would_have": None if self.would_have is None else self.would_have.to_dict(),
             "error": self.error,
             "started_at": iso_timestamp(self.started_at),
             "finished_at": iso_timestamp(self.finished_at),
@@ -232,6 +302,16 @@ class Receipt:
             effect_key=document["effect_key"],
             attempt=document["attempt"],
             result=ReceiptResult(document["result"]),
+            # `.get` again: a 0.2 receipt carries neither key, and must parse back rather
+            # than raise (§12.2).
+            execution=(
+                None if document.get("execution") is None else ReceiptResult(document["execution"])
+            ),
+            would_have=(
+                None
+                if document.get("would_have") is None
+                else _WouldHave.from_dict(document["would_have"])
+            ),
             error=document["error"],
             started_at=datetime.fromisoformat(document["started_at"]),
             finished_at=datetime.fromisoformat(document["finished_at"]),
