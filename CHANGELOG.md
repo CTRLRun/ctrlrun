@@ -54,6 +54,19 @@ reconstruct:
 
 ### Fixed
 
+- **`ruff format` reformatted Python code blocks inside the specs; `ruff check` never looked
+  at them.** Whether a spec's examples were rewritten therefore turned on whether they happened
+  to parse: `SPEC-v0.1.md` and `SPEC-v0.2.md` keep their aligned comments only because theirs
+  carry placeholders like `<generated>`, and `SPEC-v0.3.md`'s parse, so a CI check that had
+  never fired before went red on them and the alignment was flattened to make it green.
+
+  A specification's code blocks are illustration rather than code — they elide, they annotate,
+  they line comments up so a reader can compare down the column — and the formatter has no way
+  to know that. `[tool.ruff.format] exclude` now tells it, `force-exclude` makes the exclusion
+  mean the same thing however ruff is invoked, and SPEC-v0.3's alignment is restored.
+  `test_the_formatter_leaves_markdown_alone` keeps it that way, with a control test that fails
+  if the probe it relies on is not actually unformatted.
+
 - **The gateway compared mirrored header values by re-parsing them, and Python's parser is
   lenient.** `Mcp-Param-{Name}` validation ran the header through `int()`, so a body carrying
   `amount: 2000` was certified as agreeing with headers spelling it `2_000`, `+2000`, `02000`,

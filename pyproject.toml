@@ -90,6 +90,21 @@ ignore_missing_imports = true
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# So an exclusion means the same thing however ruff is invoked. Without this, a path named
+# explicitly on the command line skips the exclude list, and `ruff format docs/SPEC-v0.3.md`
+# would reformat what `ruff format` leaves alone — the same surprise in a smaller box.
+force-exclude = true
+
+[tool.ruff.format]
+# The formatter reads Python code blocks inside Markdown; the linter does not (`ruff check`
+# on a `.md` reports "No Python files found"). That asymmetry is a trap: whether a spec's
+# examples get reformatted depends on whether they happen to parse, so SPEC-v0.1 and v0.2
+# keep their aligned comments only because theirs carry placeholders like `<generated>`, and
+# SPEC-v0.3 lost its alignment to a check that had never fired before. A specification's code
+# blocks are illustration, not code — they elide, they annotate, they line comments up to be
+# read — and the formatter has no way to know that. So it leaves Markdown alone, and the two
+# tools now agree on what a `.md` file is.
+exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
