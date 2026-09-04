@@ -150,6 +150,17 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   maintainer; a commit carrying findings about other projects that nobody had reviewed is not
   one this repository makes.
 
+- **`docs/SPEC-v0.4.md` gains a §12**, recording the four readings the implementation had to
+  take where the specification could not be satisfied as written. A specification that
+  disagrees with the code it describes is worse than one that admits a gap: G6 drives a
+  `Control` composed from the policy alone, because authority is evaluated first and its
+  observable would otherwise be unreachable in every configuration with grants; G7 is `N/A`
+  where no action in the policy can run, because §2.2 said "never" and §1.3 requires a control
+  that such a policy cannot supply; G8 gains a fourth N/A reason for a layered document; G9's
+  control names the delegation only where the parent's subject does not also match it; and
+  G4's children are subprocesses rather than `multiprocessing`, which would re-import the
+  caller's `__main__` in every child.
+
 ### Changed
 
 - **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the
