@@ -626,13 +626,30 @@ def test_an_adapter_declares_every_distribution_its_run_imports():
         imported = set(re.findall(r"^\s+from (\w+)[. ]", source, re.M))
         imported |= set(re.findall(r"^\s+import (\w+)", source, re.M))
         declared = {adapter.distribution, *getattr(adapter, "requires", ())}
+        named = set(getattr(adapter, "modules", ()))
         for module in imported:
             if module == "framework_probe":
                 continue
             providers = set(provided_by.get(module, ()))
-            if not providers:
-                # Not installed here, so the mapping cannot be read. The adapter still has to
-                # have said something about it: fall back to comparing names.
+            if providers:
+                # Installed here, so the real mapping is readable and is what gets asserted.
+                # It also keeps `modules` honest: a declaration that contradicted the
+                # environment would fail on a developer machine that has the framework.
+                assert not (module in named and not providers & declared), (
+                    f"{adapter.name} declares {module!r} in `modules`, but the installed "
+                    f"environment says it comes from {sorted(providers)}, none of which is "
+                    f"declared {sorted(declared)}"
+                )
+            elif module in named:
+                # Not installed, so the mapping cannot be read and the adapter's own
+                # declaration stands in. This is the CI path: none of these frameworks is a
+                # dependency of this repository, so nothing here is installed.
+                continue
+            else:
+                # Neither installed nor declared. Falling back to `module.replace("_", "-")`
+                # here is what made this test pass locally and fail in CI: it assumes the
+                # import name and the distribution name agree, which is the assumption this
+                # test exists to refuse. `openai-agents` installs `agents` and they do not.
                 providers = {module.replace("_", "-")}
             assert providers & declared, (
                 f"{adapter.name}.run() imports {module!r} (from {sorted(providers)}), which is "

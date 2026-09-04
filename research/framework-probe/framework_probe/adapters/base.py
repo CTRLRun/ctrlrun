@@ -49,6 +49,15 @@ class Adapter(Protocol):
     #: §7.3 rule 4 — `None`, or the single change without which the framework cannot run the
     #: scenario at all. It goes in the table.
     config_deviation: str | None
+    #: Top-level modules `run()` imports whose name is **not** the name of a declared
+    #: distribution with `-` for `_`. Only `openai-agents` needs one: it installs `agents`.
+    #:
+    #: `test_an_adapter_declares_every_distribution_its_run_imports` reads the real mapping
+    #: out of the environment where the framework is installed, and falls back to this where
+    #: it is not — which is every CI run, since none of these frameworks is a dependency of
+    #: this repository. Without it the fallback guessed that the import name and the
+    #: distribution name matched, which is the assumption that test exists to refuse.
+    modules: tuple[str, ...]
 
     def available(self) -> bool:
         """Is the framework installed? An absent one is skipped **by name** (T123)."""

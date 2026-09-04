@@ -34,6 +34,9 @@ class OpenAIAgentsAdapter:
     #: An adapter whose `available()` did not name them all reports a missing dependency as a
     #: framework that broke.
     requires: tuple[str, ...] = ()
+    #: The distribution is `openai-agents`; the module it installs is `agents`. Nothing in the
+    #: environment says so when the distribution is absent, so the adapter does.
+    modules: tuple[str, ...] = ("agents",)
 
     def available(self) -> bool:
         return is_installed(self.distribution, *self.requires)
