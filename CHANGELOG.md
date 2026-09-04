@@ -87,6 +87,25 @@ any change to one appears here.
   so a change that made verify silently count N/As as passes is caught in CI rather than in a
   badge.
 
+- **`docs/OWASP-AGENTIC-TOP10.md`** (SPEC-v0.4 §6) — a reading of the OWASP Top 10 for Agentic
+  Applications (2026 edition, announced 2025-12-09) against the ten guarantees. Its first line,
+  before any table, says what it is not: not a compliance claim, not a conformance claim, not a
+  certification, and not a statement that CTRLRun covers the Top 10.
+
+  Two tables, and the second is what makes the first credible. `ASI04` supply chain, `ASI05`
+  code execution and `ASI06` memory and context poisoning are **not CTRLRun's subject** —
+  nothing here inspects a package, sandboxes an interpreter or reads a model's memory — and
+  `ASI07` inter-agent communication waits on v0.7. `ASI01` agent goal hijack and `ASI09`
+  human-agent trust exploitation appear in **both** tables, because CTRLRun constrains what a
+  hijacked agent can do without detecting the hijack, and binds an approval to one action
+  without authenticating the approver or noticing that they were misled.
+
+  The document records how its codes and titles were derived, because the published PDF sits
+  behind a download form and could not be retrieved: they come from the OWASP-owned
+  `OWASP/secure-agent-playbook` repository, corroborated against two independent summaries, and
+  the four places where a third summary disagreed are named. That correction is what SPEC-v0.4
+  §6.2 marked its own provisional list as needing.
+
 ### Changed
 
 - **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the
