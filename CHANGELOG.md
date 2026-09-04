@@ -11,7 +11,11 @@ any change to one appears here.
 
 Nothing yet.
 
-## [0.3.0] — 2026-09-04 — Authority
+## [0.3.0] — unreleased — Authority
+
+`0.3.0rc1` is this section, published to TestPyPI only, so the wheel and the sdist can be
+installed from a real index before a version number that can never be reused is spent on
+PyPI. The date lands when `0.3.0` is cut.
 
 **Who is acting, and what are they entitled to?** v0.1 built the kernel and v0.2 put it in the
 network path; both could see the action and nothing else. This release adds a second axis —
