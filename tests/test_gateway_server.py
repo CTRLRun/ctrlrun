@@ -288,6 +288,60 @@ def test_T20_a_body_over_the_limit_is_refused_with_413(client, upstream):
     assert upstream.calls == []
 
 
+# --- T65b/T65c: the removed flag, and a repeated identity header (SPEC-v0.3 §8.1, §3.1) --
+
+
+def test_T65b_the_removed_client_info_flag_exits_naming_its_replacement():
+    """§8.1 — a hard error, not a silent ignore. The flag chose the gateway's principal, so a
+    gateway that started anyway would run with a different one than the operator asked for."""
+    from click.testing import CliRunner
+
+    from ctrlrun.cli.main import main
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "gateway",
+            "--upstream",
+            "http://127.0.0.1:1/mcp",
+            "--alias",
+            "acme",
+            "--principal-from-client-info",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--principal-header" in result.output
+
+
+def test_T65c_a_repeated_identity_header_is_refused(client, upstream, store):
+    """§3.1 — a `Mapping` holds one value per name, so something must decide what a repeated
+    header becomes, and under authority that decision picks the principal."""
+    upstream.respond({"resultType": "complete", "content": []})
+    body = _call()
+    headers = [(k, v) for k, v in _headers(body).items() if k.lower() != "x-agent"]
+    headers += [("X-Agent", "refund-agent"), ("X-Agent", "attacker-agent")]
+
+    response = client.post("/mcp", content=json.dumps(body).encode(), headers=headers)
+
+    assert response.status_code == 403
+    assert _error(response)["data"]["error"] == "ctrlrun.no_principal"
+    assert upstream.calls == []
+    assert store.receipts() == ()
+    assert store.events() == ()
+
+
+def test_T65c_the_same_request_with_one_header_is_forwarded(client, upstream):
+    """The control: without it, a gateway that refused everything would satisfy the test
+    above, and the recorder would never have had a forwarded request to miss."""
+    upstream.respond({"resultType": "complete", "content": []})
+
+    response = _post(client)
+
+    assert response.status_code == 200
+    assert len(upstream.calls) == 1
+
+
 # --- T21: no principal, no action ------------------------------------------------------
 
 

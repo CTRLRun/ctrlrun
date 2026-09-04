@@ -58,8 +58,12 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
     allow_insecure = bool(options.pop("allow_insecure_webhook", False))
     secret = webhook_secret(secret_file) if secret_file else webhook_secret()
 
+    # SPEC-v0.3 §2.5 — `--environment` is rank 1 on the Control, not a second value the
+    # gateway stamps for itself. Where it is absent the Control resolves ranks 2 to 4, so
+    # $CTRLRUN_ENVIRONMENT still means what it says.
+    environment = options.pop("environment", None)
     config = GatewayConfig(upstream=upstream, alias=alias, webhook_secret=secret, **options)
-    control = Control.from_file()
+    control = Control.from_file(environment=environment)
     if otel:
         # §8 — one more sink beside the JSONL one `from_file` installed. It never blocks and
         # never raises into the kernel (§4.2), so adding it changes no decision.
@@ -70,6 +74,7 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
             control.store,
             control.approvals,
             sinks=[*control.sinks, OTelEventSink(arguments=otel_arguments)],
+            environment=control.environment,
         )
     if webhook_url:
         # §7 — the provider notifies; the gateway's endpoint receives. Both need the same
@@ -85,6 +90,7 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
                 allow_insecure=allow_insecure,
             ),
             sinks=[],
+            environment=control.environment,
         )
     forwarder = httpx_forwarder(config)
     try:

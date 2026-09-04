@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -142,9 +142,7 @@ class GatewayConfig:
     path: str = DEFAULT_PATH
     principal: str | None = None
     principal_header: str | None = None
-    principal_from_client_info: bool = False
     user_header: str | None = None
-    environment: str = "production"
     wait_approvals: bool = False
     approval_timeout: float = DEFAULT_APPROVAL_TIMEOUT
     upstream_timeout: float = DEFAULT_UPSTREAM_TIMEOUT
@@ -171,16 +169,18 @@ class GatewayConfig:
                 f"--path {self.path!r} must start with '/' and must not overlap "
                 f"{CTRLRUN_PREFIX!r}, which is reserved for the approvals endpoint"
             )
-        sources = [
-            self.principal is not None,
-            self.principal_header is not None,
-            self.principal_from_client_info,
-        ]
+        sources = [self.principal is not None, self.principal_header is not None]
         if sum(sources) != 1:
             raise InvalidArgument(
-                "exactly one of --principal, --principal-header or "
-                "--principal-from-client-info is required; there is no default, because an "
-                "Action cannot exist without a principal (SPEC-v0.2 §6.5)"
+                "exactly one of --principal or --principal-header is required; there is no "
+                "default, because an Action cannot exist without a principal (SPEC-v0.2 §6.5)"
+            )
+        if self.user_header is not None and self.principal_header is None:
+            # SPEC-v0.3 §8.2 — a flag that cannot take effect is a flag the operator believes
+            # took effect.
+            raise InvalidArgument(
+                "--user-header is only meaningful with --principal-header; with --principal "
+                "there is no request to read a user from"
             )
         if self.host not in ("127.0.0.1", "localhost", "::1") and not self.allow_remote:
             raise InvalidArgument(
@@ -335,17 +335,9 @@ class Gateway:
         agent: str | None = None
         if self._config.principal is not None:
             agent = self._config.principal
-        elif self._config.principal_header is not None:
-            agent = _header(headers, self._config.principal_header.lower())
         else:
-            meta = parsed.document.get("params", {})
-            meta = meta.get("_meta", {}) if isinstance(meta, Mapping) else {}
-            info = (
-                meta.get("io.modelcontextprotocol/clientInfo")
-                if isinstance(meta, Mapping)
-                else None
-            )
-            agent = info.get("name") if isinstance(info, Mapping) else None
+            assert self._config.principal_header is not None
+            agent = _header(headers, self._config.principal_header.lower())
         if not isinstance(agent, str) or not agent:
             return None
         user = (
@@ -377,7 +369,8 @@ class Gateway:
                 if resource_template is None
                 else resolve_resource(resource_template, parsed.arguments)
             ),
-            environment=self._config.environment,
+            # SPEC-v0.3 §2.5 — the Control's, never a second copy of the gateway's own.
+            environment=self._control.environment,
         )
 
     def _record_unrepresentable(
@@ -393,7 +386,7 @@ class Gateway:
             name=action_name,
             arguments=arguments,
             principal=principal,
-            environment=self._config.environment,
+            environment=self._control.environment,
         )
         control = self._control
         control._append(EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash})
@@ -736,6 +729,29 @@ class _Unrepresentable(CTRLRunError):
         self.pointer = pointer
 
 
+def _repeated_identity_header(
+    config: GatewayConfig, pairs: Iterable[tuple[str, str]]
+) -> str | None:
+    """The name of an identity header that appeared more than once, or `None` (§3.1).
+
+    Only the headers this gateway's identity configuration actually reads. Every other
+    repeated field is the upstream's business, and RFC 9110 says an intermediary forwards what
+    it does not recognize.
+    """
+    watched = {
+        name.lower() for name in (config.principal_header, config.user_header) if name is not None
+    }
+    if not watched:
+        return None
+    seen: set[str] = set()
+    for key, _ in pairs:
+        lowered = key.lower()
+        if lowered in watched and lowered in seen:
+            return key
+        seen.add(lowered)
+    return None
+
+
 def _header(headers: Mapping[str, str], name: str) -> str | None:
     for key, value in headers.items():
         if key.lower() == name.lower():
@@ -866,6 +882,23 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
                 self._respond(_Response(413))
                 return
             body = self.rfile.read(length)
+            repeated = _repeated_identity_header(gateway.config, self.headers.items())
+            if repeated is not None:
+                # SPEC-v0.3 §3.1 — `dict(...)` collapses a repeated field to one value, and
+                # under an authority model that collapse picks the principal. A proxy that
+                # appends rather than overwrites is a common default, so joining its value to
+                # the client's is how a client chooses its own identity. Refuse instead.
+                _LOG.warning("refused: the identity header %r appeared more than once", repeated)
+                code, token, status = NO_PRINCIPAL
+                self._respond(
+                    _json(
+                        status,
+                        json_rpc_error(
+                            None, code, token, f"the {repeated!r} header appeared more than once"
+                        ),
+                    )
+                )
+                return
             self._respond(gateway.handle(body, dict(self.headers.items())))
 
         def _respond(self, response: _Response) -> None:
@@ -894,16 +927,14 @@ def serve_forever(gateway: Gateway) -> None:
     server = build_server(gateway)
     if gateway.config.host not in ("127.0.0.1", "localhost", "::1"):
         _LOG.warning("listening on %s, which is not loopback", gateway.config.host)
-    if gateway.config.principal_from_client_info:
-        # §6.5 — the revision says clientInfo is self-reported and SHOULD NOT be relied on
-        # for security decisions. It is offerable in v0.2 only because a v0.1 policy cannot
-        # address the principal at all, so an unauthenticated one misattributes evidence and
-        # cannot widen an outcome. It is removed in v0.3.
+    if gateway.config.principal_header is not None:
+        # SPEC-v0.3 §8.3 — the identity in force, on the line that starts the process, with
+        # what it costs. A header is worth what the proxy that sets it is worth.
         _LOG.warning(
-            "--principal-from-client-info is DEPRECATED and will be removed in 0.3; use "
-            "--principal-header instead. It trusts a name the protocol does not verify, "
-            "which is attribution on a receipt and never an authorization input — and v0.3's "
-            "authority model makes the principal an authorization input (SPEC-v0.2 §6.5)"
+            "principal from the %r header: it is worth what the proxy that sets it is worth, "
+            "and that proxy must authenticate the caller and overwrite the header on every "
+            "request (SPEC-v0.3 §3.3)",
+            gateway.config.principal_header,
         )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -17,7 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, ParamSpec, TypeVar, cast
+from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
@@ -47,10 +47,12 @@ from .errors import (
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
+    IdentityError,
     InvalidArgument,
     NotExecuted,
     Suspended,
 )
+from .identity import IdentityContext, IdentityProvider
 from .policy import Decision, Evaluation, Policy, discover_policy_path
 from .receipt import (
     Event,
@@ -78,6 +80,12 @@ DEFAULT_SUSPEND_TIMEOUT: Final = timedelta(minutes=5)
 #: Denial reason when a protected function is called outside `ctrlrun.context()`.
 NO_PRINCIPAL: Final = "no_principal"
 
+#: SPEC-v0.3 §2.3 — the reason an expired credential refuses, on the receipt and the event.
+PRINCIPAL_EXPIRED: Final = "principal_expired"
+
+#: SPEC-v0.3 §2.5 rank 2.
+ENVIRONMENT_ENV_VAR: Final = "CTRLRUN_ENVIRONMENT"
+
 #: The two moments a `reconcile` hook may run, for `RECONCILIATION_STARTED.data.trigger`
 #: (SPEC-v0.2 §2.3). There are no others.
 RECONCILE_BLOCKING: Final = "blocking"
@@ -103,7 +111,6 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True)
 class _Invocation:
     principal: Principal
-    environment: str
 
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
@@ -111,23 +118,22 @@ _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
 
 @contextmanager
-def context(agent: str, user: str | None = None, environment: str | None = None) -> Iterator[None]:
-    """Bind the principal (and optionally the environment) for calls made inside the block.
+def context(agent: str, user: str | None = None) -> Iterator[None]:
+    """Bind the principal for calls made inside the block.
 
     A protected function called outside any `context()` has no principal and is denied
-    (SPEC-v0.1 §2.1). A nested `context()` that omits `environment` inherits the enclosing
-    one, so entering a context to change agent cannot silently move a call to production.
+    (SPEC-v0.1 §2.1).
+
+    **`environment` was a parameter here until v0.3** and is gone (SPEC-v0.3 §2.5). A grant may
+    scope to an environment, which makes it an authorization input, and an authorization
+    dimension the subject sets is not one — the same argument that removes
+    `--principal-from-client-info` from the gateway. It is set once on the `Control` now, so
+    every Action a deployment proposes carries the deployment's own answer.
+
+    Where an `IdentityProvider` is installed, the principal named here is a **hint** rather than
+    an identity: the provider wins where it answers (§3.2).
     """
-    if environment is not None and not environment:
-        raise InvalidArgument("context(environment=...) must be a non-empty string or None")
-    enclosing = _CONTEXT.get(None)
-    if environment is not None:
-        resolved = environment
-    elif enclosing is not None:
-        resolved = enclosing.environment
-    else:
-        resolved = DEFAULT_ENVIRONMENT
-    token = _CONTEXT.set(_Invocation(Principal(agent=agent, user=user), resolved))
+    token = _CONTEXT.set(_Invocation(Principal(agent=agent, user=user)))
     try:
         yield
     finally:
@@ -215,6 +221,8 @@ class Control:
         lease: timedelta = DEFAULT_LEASE,
         sinks: Sequence[EventSink] = (),
         suspend_timeout: timedelta = DEFAULT_SUSPEND_TIMEOUT,
+        identity: IdentityProvider | None = None,
+        environment: str | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -226,9 +234,16 @@ class Control:
         self._lease = _checked_lease(lease, "Control(lease=...)")
         self._sinks = tuple(sinks)
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
+        self._identity = identity
+        self._environment = _resolve_environment(environment, policy)
+        #: SPEC-v0.3 §3.2 — the provider-versus-context warning is emitted at most once per
+        #: Control. A warning that repeats per call is a warning nobody reads.
+        self._warned_about_principal = False
 
     @classmethod
-    def from_file(cls, path: str | os.PathLike[str] | None = None) -> Control:
+    def from_file(
+        cls, path: str | os.PathLike[str] | None = None, *, environment: str | None = None
+    ) -> Control:
         """Build a Control from a policy file (`$CTRLRUN_CONFIG`, else `./ctrlrun.yaml`).
 
         A missing or malformed policy raises `PolicyError`: a Control cannot be constructed
@@ -246,6 +261,7 @@ class Control:
             store,
             LocalApprovalProvider(store),
             sinks=[JSONLEventSink(state.parent)],
+            environment=environment,
         )
 
     @property
@@ -270,9 +286,99 @@ class Control:
         """How long a reservation this Control takes is held for (SPEC-v0.1 §5.3 E3)."""
         return self._lease
 
+    @property
+    def identity(self) -> IdentityProvider | None:
+        """The provider this Control resolves principals from, if any (SPEC-v0.3 §3.1)."""
+        return self._identity
+
+    @property
+    def environment(self) -> str:
+        """The environment every Action this Control decides carries (SPEC-v0.3 §2.5).
+
+        Resolved once at construction and fixed for the life of the object, because a grant may
+        scope to it (§4.2) and an authorization dimension the subject sets is not one.
+        """
+        return self._environment
+
     def evaluate(self, action: Action) -> Evaluation:
-        """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8)."""
+        """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8).
+
+        An expired principal is a `DENY` here rather than the refusal `execute` raises
+        (SPEC-v0.3 §2.3): this method may not write, and a check defined only as side effects
+        would otherwise have no meaning on the one path that may not have them. The gateway's
+        approval pre-check reads this, so leaving it undefined would give three different
+        gateway behaviours.
+        """
+        if self._is_expired(action.principal):
+            return Evaluation(Decision.DENY, PRINCIPAL_EXPIRED)
         return self._policy.evaluate(action)
+
+    def _is_expired(self, principal: Principal) -> bool:
+        """SPEC-v0.3 §2.3. `expires_at is None` is the absence of a check, not one that passes."""
+        return principal.expires_at is not None and self._clock() > principal.expires_at
+
+    def _resolve_principal(self, action_name: str) -> Principal:
+        """The principal for this action, per SPEC-v0.3 §3.2's table.
+
+        The provider wins where it answers, because §4 makes the principal an authorization
+        input and a self-asserted name cannot be one. A `None` is a *decline* and leaves the
+        v0.1 `context()` path intact; a raise is a *refusal* and is never backfilled, since
+        falling back there would turn a rejected credential into a successful action.
+        """
+        invocation = _CONTEXT.get(None)
+        from_context = invocation.principal if invocation is not None else None
+        if self._identity is None:
+            if from_context is None:
+                _refuse_no_principal(action_name)
+            return from_context
+
+        resolved = self._ask_provider(action_name, from_context)
+        if resolved is None:
+            # A decline. SPEC-v0.3 §3.2 adds one more row here in build-list item 2: once an
+            # `authority:` section is loaded a decline is refused rather than backfilled,
+            # because omitting a credential would otherwise be an easier route than forging
+            # one. `Authority` does not exist yet, so that row lands with the code it needs.
+            if from_context is None:
+                _refuse_no_principal(action_name)
+            return from_context
+
+        if from_context is not None and not self._warned_about_principal:
+            same = (from_context.agent, from_context.user) == (resolved.agent, resolved.user)
+            if not same:
+                self._warned_about_principal = True
+                _LOG.warning(
+                    "%s: the identity provider resolved %r and an active context() says %r; "
+                    "the provider is in force (SPEC-v0.3 §3.2)",
+                    action_name,
+                    _named(resolved),
+                    _named(from_context),
+                )
+        return resolved
+
+    def _ask_provider(self, action_name: str, hint: Principal | None) -> Principal | None:
+        assert self._identity is not None
+        identity_context = IdentityContext(
+            action=action_name,
+            environment=self._environment,
+            agent=hint.agent if hint is not None else None,
+            user=hint.user if hint is not None else None,
+        )
+        try:
+            return self._identity.resolve(identity_context)
+        except IdentityError:
+            # Already the exception a caller catches; re-wrapping would lose its message.
+            raise
+        except Exception as exc:
+            # SPEC-v0.3 §3.2 — one exception type for a caller to catch, with the cause kept.
+            # A `BaseException` that is not an `Exception` propagates untouched (v0.1 §5.5).
+            _LOG.warning(
+                "%s: identity provider %s raised %s: %s",
+                action_name,
+                type(self._identity).__name__,
+                type(exc).__name__,
+                exc,
+            )
+            raise IdentityError(f"{action_name}: the identity provider rejected this call") from exc
 
     def execute(
         self,
@@ -301,6 +407,7 @@ class Control:
         """
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
+        self._check_environment(action)
         held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
@@ -308,6 +415,23 @@ class Control:
         self._append(
             EventType.ACTION_PROPOSED, action, {"action_hash": action.action_hash}, effect_key
         )
+        if self._is_expired(action.principal):
+            # SPEC-v0.3 §2.3 — before authority and before policy. There is a principal to
+            # attribute the refusal to, so unlike a call outside context() it is recorded; and
+            # it is refused before the approval gate, because a decision that can never be
+            # honoured must not spend a human's attention.
+            self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
+            self._record(
+                action,
+                Evaluation(Decision.DENY, PRINCIPAL_EXPIRED),
+                ReceiptResult.DENIED,
+                started_at,
+                effect_key=effect_key,
+            )
+            raise IdentityError(
+                f"{action.name}: the principal's credential expired at "
+                f"{action.principal.expires_at}"
+            )
         evaluation = self._policy.evaluate(action)
         self._append(
             EventType.POLICY_EVALUATED,
@@ -364,6 +488,10 @@ class Control:
         held = self._store.take_continuation(continuation)
         started_at = self._clock()
         action = held.action
+        # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
+        # environment can reach one. Evaluating a staging action inside a production
+        # deployment is the fail-open §2.5 exists to close.
+        self._check_environment(action)
         self._append(
             EventType.EXECUTION_RESUMED,
             action,
@@ -549,6 +677,21 @@ class Control:
         )
 
     # --- the effect key (SPEC-v0.1 §5.1) ------------------------------------------------
+
+    def _check_environment(self, action: Action) -> None:
+        """Refuse an Action built for another deployment (SPEC-v0.3 §2.5).
+
+        `Action(...)` is public and `execute` is frozen API, so without this a caller sets the
+        dimension a grant scopes to. `InvalidArgument` rather than a denial: it is a wiring
+        bug, not a policy saying no, and `Action` is frozen so there is nothing to re-stamp.
+        """
+        if action.environment != self._environment:
+            raise InvalidArgument(
+                f"{action.name}: the action is for environment {action.environment!r} and this "
+                f"Control is {self._environment!r}. The environment belongs to the deployment "
+                "(SPEC-v0.3 §2.5); build the Action from this Control's environment, or use a "
+                "Control for that one"
+            )
 
     def _resolve_effect(self, action: Action, template: str | None) -> str | None:
         """Resolve an effect template against a constructed action, or deny the action.
@@ -960,6 +1103,46 @@ class Control:
                 )
 
 
+def _refuse_no_principal(action_name: str) -> NoReturn:
+    """SPEC-v0.1 §2.1, unchanged by v0.3 §3.2.
+
+    A call with no principal is a wiring bug, not an agent action: it is denied and warned
+    about, but never enters the evidence log, which records actions and has no principal to
+    attribute this one to.
+    """
+    _LOG.warning("%s: denied: no principal is available", action_name)
+    raise ActionDenied(
+        f"{action_name}: no principal is available; wrap the call in "
+        "'with ctrlrun.context(agent=...)', or install an identity provider that answers",
+        reason=NO_PRINCIPAL,
+    )
+
+
+def _named(principal: Principal) -> str:
+    return principal.agent if principal.user is None else f"{principal.agent}/{principal.user}"
+
+
+def _resolve_environment(argument: str | None, policy: Policy) -> str:
+    """SPEC-v0.3 §2.5: the argument, else $CTRLRUN_ENVIRONMENT, else the document, else production.
+
+    The environment-variable check runs whenever the variable is *present*, including when the
+    argument won, so the refusal does not depend on how the Control happened to be constructed.
+    """
+    configured = os.environ.get(ENVIRONMENT_ENV_VAR)
+    if configured is not None and not configured.strip():
+        raise InvalidArgument(
+            f"{ENVIRONMENT_ENV_VAR} is set but empty; unset it or name the deployment. Falling "
+            "back would put actions in an environment nobody chose (SPEC-v0.3 §2.5)"
+        )
+    if argument is not None:
+        if not argument:
+            raise InvalidArgument("Control(environment=...) must be a non-empty string or None")
+        return argument
+    if configured is not None:
+        return configured
+    return policy.environment or DEFAULT_ENVIRONMENT
+
+
 def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
     """Why a reservation was refused, for `EFFECT_RESERVATION_REFUSED` (SPEC §5.4, §6.2)."""
     if isinstance(refused, DuplicateEffect):
@@ -1050,30 +1233,22 @@ def protect(
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            invocation = _CONTEXT.get(None)
-            if invocation is None:
-                # SPEC-v0.1 §2.1 — a call outside context() is a wiring bug, not an agent
-                # action: it is denied and warned about, but never enters the evidence log,
-                # which records actions and has no principal to attribute this one to.
-                _LOG.warning("%s: denied: no ctrlrun.context() is active", name)
-                raise ActionDenied(
-                    f"{name}: no ctrlrun.context() is active; wrap the call in "
-                    "'with ctrlrun.context(agent=...)'",
-                    reason=NO_PRINCIPAL,
-                )
-            bound = signature.bind(*args, **kwargs)
-            bound.apply_defaults()
             # SPEC-v0.2 §3.2 — the Control resolves before the Action, because the policy
             # may be the only place a template is declared and `resource` is part of the
-            # canonical form. The decorator's value wins where both exist.
+            # canonical form. The decorator's value wins where both exist. SPEC-v0.3 §3.2
+            # adds a second reason: only the Control knows whether an identity provider is
+            # installed, and the principal comes from it where one is.
             resolved = control if control is not None else _default_control()
+            principal = resolved._resolve_principal(name)
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
             effect_template, resource_template = _templates_in_force(
                 resolved, name, effect, resource, compared
             )
             action = Action(
                 name=name,
                 arguments=dict(bound.arguments),
-                principal=invocation.principal,
+                principal=principal,
                 # SPEC-v0.1 §5.1 — `resource` is part of the canonical form, so it resolves
                 # before the Action exists; the effect template resolves against the Action.
                 resource=(
@@ -1081,7 +1256,8 @@ def protect(
                     if resource_template is None
                     else resolve_resource(resource_template, bound.arguments)
                 ),
-                environment=invocation.environment,
+                # SPEC-v0.3 §2.5 — the deployment's, never the call's.
+                environment=resolved.environment,
             )
             effect_key = resolved._resolve_effect(action, effect_template)
             if reconcile is not None and effect_key is None and not dangling:

@@ -22,11 +22,18 @@ from .errors import (
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
+    IdentityError,
     InvalidArgument,
     MissingDependency,
     NotExecuted,
     PolicyError,
     Suspended,
+)
+from .identity import (
+    HeaderIdentityProvider,
+    IdentityContext,
+    IdentityProvider,
+    StaticIdentityProvider,
 )
 from .policy import Decision, Policy
 from .receipt import Event, EventSink, JSONLEventSink, Receipt
@@ -52,6 +59,10 @@ __all__ = [
     "EffectState",
     "Event",
     "EventSink",
+    "HeaderIdentityProvider",
+    "IdentityContext",
+    "IdentityError",
+    "IdentityProvider",
     "InMemoryStateStore",
     "InvalidArgument",
     "JSONLEventSink",
@@ -66,6 +77,7 @@ __all__ = [
     "SQLiteStateStore",
     "ScriptedApprovalProvider",
     "StateStore",
+    "StaticIdentityProvider",
     "Suspended",
     "WebhookApprovalProvider",
     "action_hash",

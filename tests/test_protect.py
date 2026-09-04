@@ -324,22 +324,29 @@ def test_context_defaults_the_user_to_none_and_the_environment_to_production(con
     assert receipt.environment == "production"
 
 
-def test_context_sets_the_environment(control, store):
+def test_the_environment_comes_from_the_control_not_the_context(store):
+    """SPEC-v0.3 §2.5 — `context(environment=...)` is gone, because a grant may scope to the
+    environment and an authorization dimension the subject sets is not one. The full rule and
+    its resolution order are T65d in `test_identity.py`; this is the decorator half."""
+    control = Control(Policy.from_yaml(POLICY), store, clock=_Clock(), environment="staging")
+
     @protect("customer.read", control=control)
     def read() -> None: ...
 
-    with context(agent="refund-agent", environment="staging"):
+    with context(agent="refund-agent"):
         read()
 
     (receipt,) = store.receipts()
     assert receipt.environment == "staging"
 
 
-def test_a_nested_context_inherits_the_enclosing_environment(control, store):
+def test_a_nested_context_changes_the_principal_and_not_the_environment(store):
+    control = Control(Policy.from_yaml(POLICY), store, clock=_Clock(), environment="staging")
+
     @protect("customer.read", control=control)
     def read() -> None: ...
 
-    with context(agent="outer", environment="staging"), context(agent="inner"):
+    with context(agent="outer"), context(agent="inner"):
         read()
 
     (receipt,) = store.receipts()
@@ -366,9 +373,11 @@ def test_context_rejects_an_empty_agent():
         context(agent="").__enter__()
 
 
-def test_context_rejects_an_empty_environment():
-    with pytest.raises(InvalidArgument):
-        context(agent="refund-agent", environment="").__enter__()
+def test_context_no_longer_takes_an_environment():
+    """SPEC-v0.3 §2.5 — the refusal it used to carry is now `Control(environment="")`, tested
+    in T65d. What remains here is that the parameter cannot come back by accident."""
+    with pytest.raises(TypeError):
+        context(agent="refund-agent", environment="staging")  # type: ignore[call-arg]
 
 
 def test_missing_context_denies_the_action(control, store):
@@ -659,13 +668,24 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         "effect_key",
         "attempt",
         "result",
+        # SPEC-v0.3 §12.2 — `ctrlrun.receipt/v2`. `null` until observe mode fills them in.
+        "execution",
+        "would_have",
         "error",
         "started_at",
         "finished_at",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")
-    assert document["principal"] == {"agent": "support-agent", "user": "ops@example.com"}
+    assert document["principal"] == {
+        "agent": "support-agent",
+        "user": "ops@example.com",
+        # SPEC-v0.3 §2.4 — present and empty where no provider supplied them, so a reader can
+        # tell "the provider stated none" from a field the store dropped.
+        "claims": {},
+        "issuer": None,
+        "expires_at": None,
+    }
     assert document["arguments"] == {"customer_id": "cus_1"}
     assert document["attempt"] == 1
     assert document["effect_key"] is None

@@ -143,6 +143,17 @@ class Suspended(CTRLRunError):
         self.continuation = continuation
 
 
+class IdentityError(CTRLRunError):
+    """A credential was offered and rejected (SPEC-v0.3 §3.2).
+
+    Not an `ActionDenied`: an agent loop's `except ActionDenied` is written to handle a policy
+    saying no, and a credential that stopped being valid is not that — the same distinction
+    v0.1 §5.1 draws for `EffectKeyError`. A *missing* principal stays
+    `ActionDenied(reason="no_principal")`; this is for one that was produced and found wanting,
+    which includes an expired `Principal` reaching `Control.execute` (§2.3).
+    """
+
+
 class MissingDependency(CTRLRunError):
     """An optional extra is not installed (SPEC-v0.2 §1.1, §11).
 

@@ -34,7 +34,10 @@ from .demo import run_demo
 CLI_APPROVER: Final = "cli:local"
 
 #: SPEC-v0.2 §5 — the schema of one `ctrlrun inspect --json` document.
-INSPECTION_SCHEMA: Final = "ctrlrun.inspection/v1"
+#: SPEC-v0.3 §12.2 — v2 where the header block gained the principal's issuer, expiry and
+#: claim names. The values reach `--json`; the human block shows only the names, because a
+#: claim can hold an employee number or a case id and this output is read over shoulders.
+INSPECTION_SCHEMA: Final = "ctrlrun.inspection/v2"
 
 #: `ctrlrun init` writes this. It is `ctrlrun.example.yaml` in the repository, and
 #: `test_the_shipped_example_policy_is_the_one_in_the_repository` keeps the two identical.
@@ -339,6 +342,15 @@ def _inspection_lines(
         user = "" if proposed.principal.user is None else f" (user: {proposed.principal.user})"
         lines += [
             f"principal   {proposed.principal.agent}{user}",
+        ]
+        # SPEC-v0.3 §2.4 — the issuer and expiry in full, and the claim *names* only.
+        if proposed.principal.issuer is not None:
+            lines.append(f"issuer      {proposed.principal.issuer}")
+        if proposed.principal.expires_at is not None:
+            lines.append(f"expires     {iso_timestamp(proposed.principal.expires_at)}")
+        if proposed.principal.claim_names:
+            lines.append(f"claims      {', '.join(proposed.principal.claim_names)}")
+        lines += [
             f"resource    {proposed.resource or '-'}",
             f"environment {proposed.environment}",
             f"arguments   {json.dumps(dict(proposed.arguments), ensure_ascii=False)}",
@@ -452,11 +464,16 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
 @click.option(
     "--principal-from-client-info",
     is_flag=True,
-    help="DEPRECATED, removed in 0.3 — use --principal-header. Takes the agent from "
-    "clientInfo, which the protocol does not verify.",
+    hidden=True,
+    help="Removed in 0.3. Use --principal-header.",
 )
 @click.option("--user-header", default=None, help="Take principal.user from this header.")
-@click.option("--environment", default="production", show_default=True)
+@click.option(
+    "--environment",
+    default=None,
+    help="The deployment this gateway acts in. Default: $CTRLRUN_ENVIRONMENT, else the "
+    "policy document, else production (SPEC-v0.3 §2.5).",
+)
 @click.option("--upstream-timeout", type=float, default=30.0, show_default=True)
 @click.option("--max-body-bytes", type=int, default=1024 * 1024, show_default=True)
 @click.option("--allow-origin", "allow_origins", multiple=True, help="Repeatable.")
@@ -503,6 +520,17 @@ def gateway(
     otel_arguments: bool,
 ) -> None:
     """Front an MCP server, applying this directory's policy to every tools/call."""
+    if principal_from_client_info:
+        # SPEC-v0.3 §8.1 — a hard error, not a silent ignore and not a warning-and-continue.
+        # The flag chose the gateway's principal; a gateway that started anyway would run with
+        # a different principal than the operator asked for, and under v0.3 the principal is an
+        # authorization input.
+        raise click.ClickException(
+            "--principal-from-client-info was removed in 0.3. Use --principal-header NAME, set "
+            "by a proxy that authenticates the caller and overwrites the header on every "
+            "request. clientInfo is self-reported and the MCP specification says implementations "
+            "SHOULD NOT rely on it for security decisions (SPEC-v0.3 §8.1)."
+        )
     host, _, port = listen.rpartition(":")
     try:
         from ..gateway import serve
@@ -516,7 +544,6 @@ def gateway(
             path=path,
             principal=principal,
             principal_header=principal_header,
-            principal_from_client_info=principal_from_client_info,
             user_header=user_header,
             environment=environment,
             upstream_timeout=upstream_timeout,

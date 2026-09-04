@@ -80,6 +80,9 @@ SPEC_RECEIPT_FIELDS = (
     "effect_key",
     "attempt",
     "result",
+    # SPEC-v0.3 §12.2 — `ctrlrun.receipt/v2`. `null` until observe mode (item 4) fills them.
+    "execution",
+    "would_have",
     "error",
     "started_at",
     "finished_at",
@@ -569,7 +572,15 @@ def test_T11_every_demo_receipt_carries_every_field_in_the_spec(demo_run):
         document = json.loads(line)
         assert tuple(document) == SPEC_RECEIPT_FIELDS
         assert document["schema"] == RECEIPT_SCHEMA
-        assert set(document["principal"]) == {"agent", "user"}
+        # SPEC-v0.3 §2.4 — a receipt carries the whole principal, because §2.1's distinction
+        # between "the provider stated no expiry" and "nothing was stored" is load-bearing.
+        assert set(document["principal"]) == {
+            "agent",
+            "user",
+            "claims",
+            "issuer",
+            "expires_at",
+        }
 
 
 def test_T11_every_demo_receipt_renders_its_enums_by_value(demo_run):

@@ -14,6 +14,21 @@ shipped, and the only thing in the tree today is the contract.
 
 ### Added
 
+- **Extended `Principal`, `IdentityProvider`, and the two core providers** (build-list item 1,
+  SPEC-v0.3 §2, §3). `Principal` gains `claims`, `issuer` and `expires_at`, validated the way
+  arguments are — no `float`, no containers, a timezone-aware expiry — and **none of the three
+  is in the action hash**, so an approval survives a token rotation. `StaticIdentityProvider`
+  and `HeaderIdentityProvider` ship in core; the JWT one lands with item 5. A provider's answer
+  wins over `context()`, a `None` is a decline that leaves the v0.1 path intact, and a provider
+  that *raises* is never backfilled — falling back there would turn a rejected credential into
+  a successful action.
+- **An expired principal is refused before authority and before policy**, with a `denied`
+  receipt and no approval request. `Control.evaluate` returns `deny`/`principal_expired`
+  instead, because it may not write.
+- **`ctrlrun inspect`** shows the issuer, the expiry and the claim *names*; the values reach
+  `--json`. The OTel sink exports the issuer and the names only — a span goes to a third party
+  by default, a receipt is evidence meant to be read.
+
 - **`docs/SPEC-v0.3.md`** — the v0.3 contract, a delta over v0.1 and v0.2. Seven deliverables:
   an extended `Principal` and the `IdentityProvider` protocol; the `authority:` section with
   grants, patterns and constraints; delegation with structural attenuation; observe mode and
@@ -23,6 +38,23 @@ shipped, and the only thing in the tree today is the contract.
   line it needs. `pip install ctrlrun` still installs nothing but `pyyaml` and `click`.
 
 ### Changed
+
+- **BREAKING: `context(environment=...)` is removed** — already recorded below, and item 1 is
+  where it happens. `Control(environment=...)` replaces it.
+- **BREAKING: `ctrlrun gateway --principal-from-client-info` is removed.** It exits non-zero
+  naming `--principal-header`, rather than starting with a principal the operator did not ask
+  for. `--environment` now defaults to unset so `$CTRLRUN_ENVIRONMENT` is not silently
+  outranked, and `--user-header` without `--principal-header` is an error rather than a flag
+  that cannot take effect.
+- **A repeated identity header is refused** — `-41007`, HTTP 403, upstream untouched. A
+  `Mapping` holds one value per name, so something had to decide what two become, and under
+  authority that decision picks the principal.
+- **`ctrlrun.receipt/v2` and `ctrlrun.inspection/v2`.** The receipt carries the whole principal
+  and reserves `execution` and `would_have` as `null` until observe mode fills them, so the
+  shape a reader parses settles once rather than changing twice under one version string. The
+  stored Action carries the whole principal too — without it every receipt written by
+  `Control.resume` reported no claims and no expiry, on the only receipt an MCP
+  multi-round-trip action ever gets.
 
 - **Four edits claimed by the previous change were never in the file.** A batch that wrote only
   at the end discarded every successful replacement before the one that raised, and only the

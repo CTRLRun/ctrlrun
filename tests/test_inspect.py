@@ -37,7 +37,10 @@ actions:
       - decision: deny
 """
 
-INSPECTION_SCHEMA = "ctrlrun.inspection/v1"
+# SPEC-v0.3 §12.2 — v2 where the header block gained the principal's issuer, expiry and claim
+# names. Spelled out here rather than imported, so a bump has to be made deliberately in two
+# places and cannot ride along with an unrelated edit.
+INSPECTION_SCHEMA = "ctrlrun.inspection/v2"
 
 
 class Remote:

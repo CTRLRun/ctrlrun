@@ -35,8 +35,13 @@ POLICY_SCHEMA: Final = "ctrlrun.policy/v1"
 #: those two outcomes, so it is not optional and not inferred.
 POLICY_SCHEMA_V2: Final = "ctrlrun.policy/v2"
 
-#: Both, newest last, for the message an unknown schema produces.
-SUPPORTED_SCHEMAS: Final = (POLICY_SCHEMA, POLICY_SCHEMA_V2)
+#: SPEC-v0.3 §12.1 — required by any document using `environment:`, and later by `authority:`
+#: and `mode:`. A v3 key in an older document is a load error naming the key and the schema,
+#: for the reason v0.2 gives: a reader that ignored it would run with a guarantee switched off.
+POLICY_SCHEMA_V3: Final = "ctrlrun.policy/v3"
+
+#: All of them, newest last, for the message an unknown schema produces.
+SUPPORTED_SCHEMAS: Final = (POLICY_SCHEMA, POLICY_SCHEMA_V2, POLICY_SCHEMA_V3)
 
 CONFIG_ENV_VAR: Final = "CTRLRUN_CONFIG"
 DEFAULT_POLICY_FILENAME: Final = "ctrlrun.yaml"
@@ -58,7 +63,10 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 #: Longest first, so `amount_neq` reads as (amount, neq) and never as (amount_n, eq).
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
-_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions"})
+_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment"})
+
+#: SPEC-v0.3 §12.1 — the top-level keys that need `ctrlrun.policy/v3`.
+_V3_TOP_LEVEL_KEYS: Final = frozenset({"environment"})
 _RULE_KEYS: Final = frozenset({"when", "decision"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
@@ -227,6 +235,10 @@ class Policy:
     actions: Mapping[str, _ActionPolicy]
     source: str
     schema: str = POLICY_SCHEMA
+    #: SPEC-v0.3 §2.5 rank 3. `None` where the document names none; `Control` then falls
+    #: through to "production". Policy itself never reads it — the environment is not a
+    #: condition (`environment` is a reserved argument name) — it is carried for `Control`.
+    environment: str | None = None
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Policy:
@@ -271,12 +283,30 @@ class Policy:
                 f"{source}: 'actions' must be a mapping of action name to entry, "
                 f"got {_type_name(entries)}"
             )
+        environment = document.get("environment")
+        if "environment" in document:
+            if str(schema) != POLICY_SCHEMA_V3:
+                raise PolicyError(
+                    f"{source}: 'environment' needs 'schema: {POLICY_SCHEMA_V3}'; this document "
+                    f"declares {schema!r}, and an older reader would ignore it and put every "
+                    "action in the wrong deployment"
+                )
+            if not isinstance(environment, str) or not environment.strip():
+                raise PolicyError(
+                    f"{source}: 'environment' must be a non-empty string, "
+                    f"got {_type_name(environment)}"
+                )
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
                 raise PolicyError(f"{source}: action names must be non-empty strings, got {name!r}")
             actions[name] = _parse_entry(entry, f"{source}: action {name!r}", str(schema))
-        return cls(actions=MappingProxyType(actions), source=source, schema=str(schema))
+        return cls(
+            actions=MappingProxyType(actions),
+            source=source,
+            schema=str(schema),
+            environment=environment if isinstance(environment, str) else None,
+        )
 
     def effect_template(self, action_name: str) -> str | None:
         """This action's `effect:` template, or `None` (SPEC-v0.2 §3.1, §11).
