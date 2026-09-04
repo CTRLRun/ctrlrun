@@ -180,6 +180,54 @@ def test_ci_runs_the_check_script():
         )
 
 
+def test_no_dataclass_field_has_an_unhashable_default():
+    """Python 3.11 refuses *any* unhashable dataclass default; 3.12 relaxed the check to
+    `list`, `dict` and `set` only.
+
+    So `claims: Mapping[...] = MappingProxyType({})` imports cleanly on a 3.12 developer
+    machine and raises `ValueError` at class definition on 3.11 — the floor this package
+    supports, and the version a local run never sees. CI's matrix caught it once; this catches
+    it on whichever version happens to be running, because a guard only CI knows about is one
+    that fails after the push rather than before it.
+
+    The fix is always `field(default_factory=...)`.
+    """
+    import dataclasses
+    import importlib
+    import pkgutil
+
+    import ctrlrun
+
+    offenders = []
+    for info in pkgutil.walk_packages(ctrlrun.__path__, prefix="ctrlrun."):
+        if any(part in info.name for part in ("otel", "jwt_identity")):
+            continue  # lazily imported behind an extra; importing here would defeat T30
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # pragma: no cover - an extra that is not installed
+            continue
+        for value in vars(module).values():
+            if not dataclasses.is_dataclass(value) or not isinstance(value, type):
+                continue
+            for spec in dataclasses.fields(value):
+                default = spec.default
+                if default is dataclasses.MISSING:
+                    continue
+                try:
+                    hash(default)
+                except TypeError:
+                    # Attempting the hash rather than reading `__class__.__hash__`, which is
+                    # what 3.11's dataclasses check reads. Python 3.12 made `mappingproxy`
+                    # hashable-when-its-mapping-is, so the class-level read passes on 3.12 and
+                    # fails on 3.11 — testing the version that is running would have missed
+                    # exactly the bug this exists for.
+                    offenders.append(f"{value.__module__}.{value.__name__}.{spec.name}")
+
+    assert offenders == [], (
+        "unhashable dataclass defaults fail at import on Python 3.11: " + ", ".join(offenders)
+    )
+
+
 def test_core_declares_only_pyyaml_and_click():
     declared = {
         name.split("[")[0].split(">")[0].split("=")[0].strip().lower()

@@ -28,8 +28,11 @@ FrozenValue: TypeAlias = (
 #: storing one here.
 ClaimValue: TypeAlias = "str | int | bool"
 
-#: A `Principal` with no claims. Shared, because it is immutable and a dataclass default must
-#: be — a bare `{}` would not reach class definition.
+#: A `Principal` with no claims. Shared, because it is immutable — but it is handed out by a
+#: `default_factory` rather than used as a bare default: Python 3.11 refuses *any* unhashable
+#: dataclass default, `mappingproxy` included, and 3.11 is the floor this package supports.
+#: 3.12 relaxed that check to `list`/`dict`/`set` only, so the bare form passes there and fails
+#: on the minimum version — which is exactly the shape a local run cannot see.
 NO_CLAIMS: Final[Mapping[str, ClaimValue]] = MappingProxyType({})
 
 _ID_HEX_BYTES: Final = 16  # "act_" + 32 hex chars
@@ -118,7 +121,7 @@ class Principal:
 
     agent: str
     user: str | None = None
-    claims: Mapping[str, ClaimValue] = NO_CLAIMS
+    claims: Mapping[str, ClaimValue] = field(default_factory=lambda: NO_CLAIMS)
     issuer: str | None = None
     expires_at: datetime | None = None
 

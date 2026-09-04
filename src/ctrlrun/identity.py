@@ -47,7 +47,7 @@ class IdentityContext:
 
     action: str
     environment: str
-    headers: Mapping[str, str] = _NO_HEADERS
+    headers: Mapping[str, str] = field(default_factory=lambda: _NO_HEADERS)
     agent: str | None = None
     user: str | None = None
 
@@ -95,7 +95,7 @@ class StaticIdentityProvider:
 
     agent: str
     user: str | None = None
-    claims: Mapping[str, ClaimValue] = NO_CLAIMS
+    claims: Mapping[str, ClaimValue] = field(default_factory=lambda: NO_CLAIMS)
     issuer: str | None = None
     expires_at: datetime | None = None
     _principal: Principal = field(init=False, repr=False, compare=False)
