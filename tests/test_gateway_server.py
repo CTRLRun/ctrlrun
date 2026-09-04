@@ -306,12 +306,41 @@ def test_T65b_the_removed_client_info_flag_exits_naming_its_replacement():
             "http://127.0.0.1:1/mcp",
             "--alias",
             "acme",
+            # A valid identity source, so the "exactly one of ..." guard cannot fire instead —
+            # it also exits non-zero and also names --principal-header, which would let this
+            # test pass with the removal guard deleted.
+            "--principal-header",
+            "X-Agent",
             "--principal-from-client-info",
         ],
     )
 
     assert result.exit_code != 0
+    assert "was removed in 0.3" in result.output, result.output
     assert "--principal-header" in result.output
+
+
+def test_T65b_a_gateway_without_the_removed_flag_gets_past_that_check():
+    """The control: the invocation above must fail *because of the flag*. Without this, a CLI
+    that refused every gateway invocation would satisfy it."""
+    from click.testing import CliRunner
+
+    from ctrlrun.cli.main import main
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "gateway",
+            "--upstream",
+            "http://127.0.0.1:1/mcp",
+            "--alias",
+            "acme",
+            "--principal-header",
+            "X-Agent",
+        ],
+    )
+
+    assert "was removed in 0.3" not in result.output
 
 
 def test_T65c_a_repeated_identity_header_is_refused(client, upstream, store):
@@ -340,6 +369,74 @@ def test_T65c_the_same_request_with_one_header_is_forwarded(client, upstream):
 
     assert response.status_code == 200
     assert len(upstream.calls) == 1
+
+
+def test_T65c_a_repeated_user_header_is_refused_too(upstream, store):
+    """§10 T65c — "Repeated for `--user-header`". The principal header being watched does not
+    mean the user header is, and a collapsed user is still a principal the client chose."""
+    import threading as _threading
+
+    from ctrlrun.gateway.server import build_server
+
+    config = GatewayConfig(
+        upstream=upstream.url,
+        alias="acme",
+        principal_header="X-Agent",
+        user_header="X-User",
+        port=0,
+    )
+    forwarder = httpx_forwarder(config)
+    gateway = Gateway(config, Control(Policy.from_yaml(POLICY), store), forwarder)
+    server = build_server(gateway)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        upstream.respond({"resultType": "complete", "content": []})
+        body = _call()
+        # X-Agent exactly once, so the refusal can only come from the repeated X-User. With
+        # it twice the principal-header watch fires and this proves nothing about the user one.
+        headers = [(k, v) for k, v in _headers(body).items() if k.lower() != "x-agent"]
+        headers += [("X-Agent", "refund-agent"), ("X-User", "alice"), ("X-User", "mallory")]
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}") as client:
+            response = client.post("/mcp", content=json.dumps(body).encode(), headers=headers)
+        assert response.status_code == 403
+        assert upstream.calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        forwarder.close()
+
+
+def test_the_gateway_stamps_the_controls_environment(upstream, store):
+    """SPEC-v0.3 §2.5 — the Control's, never a second copy of the gateway's own. Hard-coding
+    one here is how `$CTRLRUN_ENVIRONMENT` gets silently outranked."""
+    import threading as _threading
+
+    from ctrlrun.gateway.server import build_server
+
+    config = GatewayConfig(upstream=upstream.url, alias="acme", principal_header="X-Agent", port=0)
+    forwarder = httpx_forwarder(config)
+    control = Control(Policy.from_yaml(POLICY), store, environment="staging")
+    server = build_server(Gateway(config, control, forwarder))
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        upstream.respond({"resultType": "complete", "content": []})
+        body = _call()
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}") as client:
+            client.post("/mcp", content=json.dumps(body).encode(), headers=_headers(body))
+        assert [r.environment for r in store.receipts()] == ["staging"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        forwarder.close()
+
+
+def test_a_user_header_without_a_principal_header_is_refused():
+    """SPEC-v0.3 §8.2 — a flag that cannot take effect is a flag the operator believes took
+    effect: with `--principal` there is no request to read a user from."""
+    with pytest.raises(InvalidArgument):
+        GatewayConfig(upstream="http://x/mcp", alias="acme", principal="a", user_header="X-User")
 
 
 # --- T21: no principal, no action ------------------------------------------------------

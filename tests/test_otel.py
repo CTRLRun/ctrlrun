@@ -80,6 +80,53 @@ def _spans(exporter):
     return exporter.get_finished_spans()
 
 
+# --- SPEC-v0.3 §2.4: the issuer and the claim NAMES, never the values ------------------
+
+
+def _with_claims(store, provider, **options):
+    control = _control(store, provider, **options)
+    from ctrlrun import Action, Principal
+
+    principal = Principal(
+        agent="refund-agent",
+        claims={"employee_no": 4471, "case": "CASE-9"},
+        issuer="https://issuer.example/",
+    )
+    control.execute(
+        Action(
+            name="stripe.refund",
+            arguments={"payment_id": "txn_1", "amount": 100},
+            principal=principal,
+        ),
+        lambda: "re_1",
+        "refund:txn_1",
+    )
+    return control
+
+
+def test_the_span_carries_the_issuer_and_the_claim_names(exporter, store):
+    exporter, provider = exporter
+    _with_claims(store, provider)
+
+    attributes = _spans(exporter)[0].attributes
+
+    assert attributes["ctrlrun.principal.issuer"] == "https://issuer.example/"
+    assert attributes["ctrlrun.principal.claims"] == "case,employee_no"  # sorted
+
+
+def test_the_span_never_carries_a_claim_value(exporter, store):
+    """§2.4 — the security half. A span is exported to a third party by default; a receipt is
+    evidence meant to be read. A claim can hold an employee number, a case id or a licence, so
+    the two make opposite trades, and `--otel-arguments` does not widen this one."""
+    exporter, provider = exporter
+    _with_claims(store, provider, arguments=True)
+
+    exported = repr(_spans(exporter)[0].attributes)
+
+    assert "4471" not in exported
+    assert "CASE-9" not in exported
+
+
 def _attrs(span):
     return dict(span.attributes or {})
 

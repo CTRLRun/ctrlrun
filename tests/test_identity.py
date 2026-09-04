@@ -67,13 +67,16 @@ class _Clock:
 
 
 @pytest.fixture
-def store():
-    return InMemoryStateStore()
+def clock():
+    return _Clock()
 
 
 @pytest.fixture
-def clock():
-    return _Clock()
+def store(clock):
+    """The store shares the Control's clock, so a lease the Control thinks is live is one the
+    store agrees is live. With the default real clock a fake `now` in the past makes every
+    `extend_lease` look already-expired."""
+    return InMemoryStateStore(clock=clock)
 
 
 @pytest.fixture
@@ -337,6 +340,72 @@ def test_T61_evaluate_returns_deny_and_writes_nothing(control, store, clock):
     assert len(store.events()) == before
 
 
+# --- T61b: an expiry that falls mid-action (§2.3.1) ------------------------------------
+
+
+def test_T61b_an_outcome_still_commits_under_an_expired_principal(control, store, clock):
+    """§2.3.1 row 1 — the effect has already happened at the remote. Refusing the write would
+    strand it in `AMBIGUOUS` for a clock reason, which is what `v0.1 §5.5` exists to prevent."""
+    action = _action(arguments={"amount": 100, "payment_id": "txn_c"})
+    principal_expires = clock.now + timedelta(seconds=1)
+    action = _action(
+        arguments={"amount": 100, "payment_id": "txn_c"},
+        principal=Principal(agent="refund-agent", expires_at=principal_expires),
+    )
+
+    def executor():
+        clock.advance(timedelta(minutes=5))  # the credential lapses mid-flight
+        return "committed at the remote"
+
+    receipt = control.execute(action, executor, "refund:txn_c")
+
+    assert receipt.result == "committed"
+    assert store.get_effect("refund:txn_c").state == "committed"
+
+
+def test_T61b_a_lease_extension_under_an_expired_principal_is_refused(control, store, clock):
+    """§2.3.1 row 2 — `hold_continuation` is the library's lease extension, and an extension
+    asks to keep holding authority the credential no longer carries. Without this an expired
+    credential holds a reservation across a whole round trip."""
+    from ctrlrun import Suspended
+
+    action = _action(
+        arguments={"amount": 100, "payment_id": "txn_d"},
+        principal=Principal(agent="refund-agent", expires_at=clock.now + timedelta(seconds=1)),
+    )
+
+    def executor():
+        clock.advance(timedelta(minutes=5))
+        raise Suspended("continuation-token")
+
+    with pytest.raises(IdentityError):
+        control.execute(action, executor, "refund:txn_d")
+
+    denials = [
+        e
+        for e in store.events()
+        if e.type == EventType.ACTION_DENIED and e.data.get("reason") == "principal_expired"
+    ]
+    assert len(denials) == 1
+    assert store.continuation_rounds("refund:txn_d") == 0, "nothing was held"
+
+
+def test_T61b_a_live_principal_still_holds_the_continuation(control, store, clock):
+    """The control for the row above: without it a `_suspend` that refused every suspension
+    would satisfy it."""
+    from ctrlrun import Suspended
+
+    action = _action(arguments={"amount": 100, "payment_id": "txn_e"})
+
+    def executor():
+        raise Suspended("continuation-token")
+
+    with pytest.raises(Suspended):
+        control.execute(action, executor, "refund:txn_e")
+
+    assert store.continuation_rounds("refund:txn_e") == 1
+
+
 # --- T62/T63/T64: the providers (§3.2, §3.3) -------------------------------------------
 
 
@@ -568,6 +637,70 @@ def test_T65_a_base_exception_from_a_provider_is_not_wrapped(store):
         read(customer_id="c1")
 
 
+def test_T65_no_warning_where_the_provider_and_the_context_agree(store, caplog):
+    """The other half of the disagreement rule: a warning that fired on agreement would fire on
+    every call in a correctly-configured deployment, which is how warnings get filtered out."""
+    control = _control(store, identity=_Answering("ctx-agent"))
+
+    @protect("customer.read", control=control)
+    def read(customer_id: str):
+        return "read"
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"), context("ctx-agent"):
+        read(customer_id="c1")
+
+    assert [r for r in caplog.records if "in force" in r.getMessage()] == []
+
+
+def test_T65_the_provider_answers_with_no_context_at_all(store):
+    """§3.2 row 3 says the provider wins "either" way — with a context and without one."""
+    control = _control(store, identity=_Answering())
+
+    @protect("customer.read", control=control)
+    def read(customer_id: str):
+        return "read"
+
+    read(customer_id="c1")
+
+    assert store.receipts()[-1].principal.agent == "provider-agent"
+
+
+def test_a_missing_context_with_no_control_still_refuses_before_loading_a_policy(monkeypatch):
+    """m2 — v0.1 §2.1's ordering. Only a Control can hold a provider and `from_file()` never
+    does, so with neither a Control nor a context there is nothing that could answer, and the
+    refusal must not be preceded by a `PolicyError` about a file this call never needed."""
+    monkeypatch.chdir("/")
+
+    @protect("customer.read")
+    def read(customer_id: str):  # pragma: no cover - must not run
+        raise AssertionError("executed with no principal")
+
+    with pytest.raises(ActionDenied) as raised:
+        read(customer_id="c1")
+
+    assert raised.value.reason == "no_principal"
+
+
+def test_T60b_a_float_claim_says_it_is_a_float(caplog):
+    """m3 — the float branch is kept for its *message*: without asserting it, the next branch
+    refuses the same value with a different one and deleting the guard is invisible."""
+    with pytest.raises(InvalidArgument) as raised:
+        Principal(agent="a", claims={"amount": 20.0})
+
+    assert "float" in str(raised.value)
+
+
+def test_claim_names_are_sorted():
+    """§2.4 — evidence shows the names sorted, so two receipts for the same claim set read the
+    same however the provider happened to order them."""
+    assert Principal(agent="a", claims={"z": 1, "a": 2, "m": 3}).claim_names == ("a", "m", "z")
+
+
+def test_a_header_provider_needs_a_header_name():
+    with pytest.raises(InvalidArgument):
+        HeaderIdentityProvider("   ")
+
+
 # --- T65d: the environment comes from the deployment (§2.5) ----------------------------
 
 
@@ -655,6 +788,85 @@ def test_T65d_execute_refuses_an_action_from_another_environment(store, monkeypa
 
     with pytest.raises(InvalidArgument):
         control.execute(_action(environment="staging"), lambda: "ok", None)
+
+
+def test_T65d_resume_refuses_an_action_from_another_environment(store, clock, monkeypatch):
+    """§2.5 — a continuation is a store-wide token, so a Control in another environment can
+    reach one. Evaluating a staging action inside a production deployment is the fail-open the
+    section exists to close, and it is reachable by design rather than by accident."""
+    from ctrlrun import Suspended
+
+    monkeypatch.delenv("CTRLRUN_ENVIRONMENT", raising=False)
+    staging = Control(Policy.from_yaml(POLICY), store, clock=clock, environment="staging")
+
+    def suspending():
+        raise Suspended("token-abc")
+
+    with pytest.raises(Suspended):
+        staging.execute(
+            _action(environment="staging", arguments={"amount": 100, "payment_id": "txn_r"}),
+            suspending,
+            "refund:txn_r",
+        )
+
+    production = Control(Policy.from_yaml(POLICY), store, clock=clock, environment="production")
+    with pytest.raises(InvalidArgument):
+        production.resume("token-abc", lambda: "ok")
+
+
+def test_T65d_evaluate_refuses_an_action_from_another_environment(store, monkeypatch):
+    """§4.3.1 — the environment obeys §2.5 on every row of that table, and `evaluate` is one."""
+    monkeypatch.delenv("CTRLRUN_ENVIRONMENT", raising=False)
+    control = Control(Policy.from_yaml(POLICY), store, clock=_Clock(), environment="production")
+
+    with pytest.raises(InvalidArgument):
+        control.evaluate(_action(environment="staging"))
+
+
+@pytest.mark.parametrize(
+    "document, message",
+    [
+        (
+            "schema: ctrlrun.policy/v1\nenvironment: staging\n"
+            "actions:\n  customer.read:\n    decision: allow\n",
+            "ctrlrun.policy/v3",
+        ),
+        (
+            "schema: ctrlrun.policy/v3\nenvironment: '  '\n"
+            "actions:\n  customer.read:\n    decision: allow\n",
+            "non-empty",
+        ),
+    ],
+    ids=["needs-v3", "blank"],
+)
+def test_T65d_a_bad_environment_key_is_a_load_error(document, message):
+    """§9 — two rows. An older reader would ignore `environment:` and put every action in the
+    wrong deployment, so the key is gated on the schema that understands it."""
+    from ctrlrun import PolicyError
+
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert message in str(raised.value)
+
+
+@pytest.mark.parametrize("value", ["  ", ""], ids=["whitespace", "empty"])
+def test_T65d_a_blank_environment_is_refused_in_every_rank(store, monkeypatch, value):
+    """m1 — one blank rule for all three ranks. An unstripped value would never match a grant
+    scoped to `["staging"]` either, and the mismatch would be invisible."""
+    monkeypatch.setenv("CTRLRUN_ENVIRONMENT", value)
+    with pytest.raises(InvalidArgument):
+        Control(Policy.from_yaml(POLICY), store, clock=_Clock())
+
+    monkeypatch.delenv("CTRLRUN_ENVIRONMENT", raising=False)
+    with pytest.raises(InvalidArgument):
+        Control(Policy.from_yaml(POLICY), store, clock=_Clock(), environment=value)
+
+
+def test_T65d_a_padded_environment_is_stripped(store, monkeypatch):
+    monkeypatch.setenv("CTRLRUN_ENVIRONMENT", "  staging  ")
+
+    assert Control(Policy.from_yaml(POLICY), store, clock=_Clock()).environment == "staging"
 
 
 def test_T65d_execute_accepts_an_action_from_its_own_environment(store, monkeypatch):

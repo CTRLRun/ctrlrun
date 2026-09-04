@@ -289,9 +289,14 @@ class AcsControlHook:
                 if resource_template is None
                 else resolve_resource(resource_template, arguments)
             ),
-            # `environment` is an ACS enum (development|staging|production); v0.1 §2.1 takes
-            # any non-empty string, so it passes through rather than being mapped.
-            environment=str(metadata.get("environment") or "production"),
+            # SPEC-v0.3 §2.5, §8.4 — the deployment's, never the envelope's. `environment`
+            # is an ACS enum the *caller* sets, and v0.3 makes it an authorization input: a
+            # grant may scope to it, so a value off the wire would let the caller choose the
+            # environment it is authorized in. §8.4 assigns the rest of this hook's identity
+            # amendment to item 5; the environment half lands here because `Control.execute`
+            # now refuses an Action from another deployment, and without it a
+            # `Control(environment="staging")` fronting ACS would refuse every call.
+            environment=self._control.environment,
         )
 
     def _action_name(self, tool: Mapping[str, Any], operation: object) -> str:

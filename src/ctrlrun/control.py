@@ -309,6 +309,11 @@ class Control:
         approval pre-check reads this, so leaving it undefined would give three different
         gateway behaviours.
         """
+        # SPEC-v0.3 §4.3.1 — the environment obeys §2.5 on *every* row of that table, and
+        # `evaluate` is one. Read-only, so this refuses rather than denies: an Action from
+        # another deployment is a wiring bug, and answering "what would happen to this" for a
+        # Control that would never run it is answering a different question.
+        self._check_environment(action)
         if self._is_expired(action.principal):
             return Evaluation(Decision.DENY, PRINCIPAL_EXPIRED)
         return self._policy.evaluate(action)
@@ -665,6 +670,18 @@ class Control:
                 approval=approval,
             )
             return
+        if self._is_expired(action.principal):
+            # SPEC-v0.3 §2.3.1 — holding a continuation extends a lease, and an extension is a
+            # request to keep holding authority the credential no longer carries. Refusing lets
+            # the lease lapse, and a lapsed lease is AMBIGUOUS (v0.1 §5.3 E3): the safe state,
+            # reached by the ordinary path. The effect record is deliberately not moved here —
+            # the expiring lease does that.
+            self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
+            raise IdentityError(
+                f"{action.name}: the principal's credential expired at "
+                f"{action.principal.expires_at}, so the reservation is not held across the "
+                "round trip; the lease will lapse and the record becomes AMBIGUOUS"
+            )
         rounds = self._store.hold_continuation(
             action, effect_key, suspension.continuation, self._clock() + self._suspend_timeout
         )
@@ -1135,12 +1152,15 @@ def _resolve_environment(argument: str | None, policy: Policy) -> str:
             "back would put actions in an environment nobody chose (SPEC-v0.3 §2.5)"
         )
     if argument is not None:
-        if not argument:
+        if not argument.strip():
             raise InvalidArgument("Control(environment=...) must be a non-empty string or None")
-        return argument
+        return argument.strip()
     if configured is not None:
-        return configured
-    return policy.environment or DEFAULT_ENVIRONMENT
+        # Stripped, and blank-after-strip refused above, so all three ranks answer the same
+        # question the same way. An unstripped value would also never match a grant scoped to
+        # `["staging"]`, and the mismatch would be invisible.
+        return configured.strip()
+    return (policy.environment or DEFAULT_ENVIRONMENT).strip()
 
 
 def _refusal_data(refused: DuplicateEffect | AmbiguousEffect) -> dict[str, str]:
@@ -1238,6 +1258,13 @@ def protect(
             # canonical form. The decorator's value wins where both exist. SPEC-v0.3 §3.2
             # adds a second reason: only the Control knows whether an identity provider is
             # installed, and the principal comes from it where one is.
+            if control is None and _CONTEXT.get(None) is None:
+                # SPEC-v0.1 §2.1's ordering, kept. Only a Control can hold an identity
+                # provider, and `_default_control()` builds one from a file, which never has
+                # one — so with no Control passed and no context there is nothing that could
+                # answer, and the refusal must not be preceded by a PolicyError about a file
+                # this call never needed.
+                _refuse_no_principal(name)
             resolved = control if control is not None else _default_control()
             principal = resolved._resolve_principal(name)
             bound = signature.bind(*args, **kwargs)

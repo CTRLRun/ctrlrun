@@ -98,6 +98,55 @@ def _cli(*args):
     return CliRunner().invoke(main, list(args))
 
 
+# --- SPEC-v0.3 §2.4: the issuer, the expiry, and the claim NAMES -----------------------
+
+
+def _with_claims(control):
+    from datetime import UTC, datetime
+
+    from ctrlrun import Action, Principal
+
+    action = Action(
+        name="stripe.refund",
+        arguments={"payment_id": "txn_c", "amount": 100},
+        principal=Principal(
+            agent="refund-agent",
+            claims={"employee_no": 4471, "case": "CASE-9"},
+            issuer="https://issuer.example/",
+            expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+        ),
+    )
+    control.execute(action, lambda: "re_1", "refund:txn_c")
+    return action.action_id
+
+
+def test_inspect_shows_the_issuer_the_expiry_and_the_claim_names(control):
+    """§2.4 — the *names*, sorted. This output is read over shoulders and a claim can hold an
+    employee number or a case id, so the values reach `--json` and not the header block."""
+    action_id = _with_claims(control)
+
+    output = _ok(_cli("inspect", action_id)).stdout
+
+    assert "issuer      https://issuer.example/" in output
+    assert "expires     2027-01-01T00:00:00.000Z" in output
+    assert "claims      case, employee_no" in output
+    assert "4471" not in output
+    assert "CASE-9" not in output
+
+
+def test_inspect_json_carries_the_claim_values(control):
+    """The other half of §2.4: withheld from the header block, present in `--json`, which is
+    what an evidence pipeline reads."""
+    action_id = _with_claims(control)
+
+    document = json.loads(_ok(_cli("inspect", action_id, "--json")).stdout)
+
+    assert document["receipt"]["principal"]["claims"] == {
+        "employee_no": 4471,
+        "case": "CASE-9",
+    }
+
+
 def _ok(result):
     assert result.exit_code == 0, f"{result.output}\n{result.exception!r}"
     return result

@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from .action import NO_CLAIMS, ClaimValue, Principal
+from .errors import InvalidArgument
 
 _LOG = logging.getLogger("ctrlrun")
 
@@ -142,8 +143,8 @@ class HeaderIdentityProvider:
     issuer: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.agent_header:
-            raise ValueError("agent_header must be a non-empty header name")
+        if not self.agent_header.strip():
+            raise InvalidArgument("agent_header must be a non-empty header name")
         _LOG.warning(
             "HeaderIdentityProvider trusts the header %r: it is worth what the proxy that sets "
             "it is worth, and must be overwritten on every request by something that "
