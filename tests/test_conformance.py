@@ -124,8 +124,15 @@ def test_T131_the_reference_adapter_is_the_surface_and_nothing_else():
     # Both the class and `_protected`, which is where the wiring actually is: a scan of a
     # twelve-line body that delegates the interesting part elsewhere checks the wrong lines.
     wiring = source + inspect.getsource(fixtures._protected)
-    for forbidden in ("grant_approval", "deny_approval", "reserve_effect", "Principal(",
-                      "append_event", "put_receipt", "Control("):
+    for forbidden in (
+        "grant_approval",
+        "deny_approval",
+        "reserve_effect",
+        "Principal(",
+        "append_event",
+        "put_receipt",
+        "Control(",
+    ):
         assert forbidden not in wiring, forbidden
 
 
@@ -443,7 +450,8 @@ class GrantsForItselfFaithfully(Reference):
 
 
 @pytest.mark.parametrize(
-    "broken", [QuietlyInterruptsOnAllow, GrantsForItselfFaithfully],
+    "broken",
+    [QuietlyInterruptsOnAllow, GrantsForItselfFaithfully],
     ids=lambda cls: cls.__name__,
 )
 def test_an_adapter_that_reaches_its_own_primitive_is_still_counted(broken):
@@ -548,6 +556,15 @@ def _invented(request):
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
     return PendingApproval(
-        "apr_x", "act_x", request.action, "sha256:x", dict(request.arguments), None,
-        "production", "?", None, now, now,
+        "apr_x",
+        "act_x",
+        request.action,
+        "sha256:x",
+        dict(request.arguments),
+        None,
+        "production",
+        "?",
+        None,
+        now,
+        now,
     )

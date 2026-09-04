@@ -86,9 +86,7 @@ def _protected(request: CallRequest, *, wait: bool = True) -> Any:
     parameters = ", ".join(request.arguments)
     forwarded = ", ".join(f"{name}={name}" for name in request.arguments)
     namespace: dict[str, Any] = {"_executor": request.executor}
-    exec(
-        f"def tool({parameters}):\n    return _executor({forwarded})", namespace
-    )
+    exec(f"def tool({parameters}):\n    return _executor({forwarded})", namespace)
     return protect(
         request.action,
         effect=request.effect,
@@ -216,10 +214,17 @@ def _invented(request: CallRequest) -> PendingApproval:
     approval UI whether the policy asked for one or not."""
     now = request.control._clock()
     return PendingApproval(
-        request_id="apr_invented", action_id="act_invented", action=request.action,
-        action_hash="sha256:invented", arguments=dict(request.arguments), resource=None,
-        environment=request.control.environment, agent="?", user=None,
-        created_at=now, expires_at=now,
+        request_id="apr_invented",
+        action_id="act_invented",
+        action=request.action,
+        action_hash="sha256:invented",
+        arguments=dict(request.arguments),
+        resource=None,
+        environment=request.control.environment,
+        agent="?",
+        user=None,
+        created_at=now,
+        expires_at=now,
     )
 
 
