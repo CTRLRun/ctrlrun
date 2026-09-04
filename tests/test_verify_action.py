@@ -48,12 +48,27 @@ FORBIDDEN = ("secure", "safe", "compliant", "certified", "audited")
 BADGE_MESSAGE = re.compile(r"^verified \d+/\d+$")
 
 
+def _repository_file(path: Path) -> str:
+    """Read a file that belongs to the **repository** rather than to the package.
+
+    `action.yml` and `.github/workflows/ci.yml` are not in the sdist and must not be: a
+    downstream packager builds a library, not a GitHub Action, and `MANIFEST.in` prunes
+    `.github` on purpose. So these assertions skip where the file is absent, the way
+    `test_packaging.py` already skips without a checkout — and they run, with everything
+    asserted, in the working tree and in CI's `check` job, which is where a change to either
+    file is actually made.
+    """
+    if not path.exists():  # pragma: no cover - only outside a checkout
+        pytest.skip(f"{path.name} is not in the sdist; this asserts a repository file")
+    return path.read_text(encoding="utf-8")
+
+
 def _action() -> dict:
-    return yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    return yaml.safe_load(_repository_file(ACTION))
 
 
 def _workflow() -> dict:
-    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return yaml.safe_load(_repository_file(WORKFLOW))
 
 
 def _write(directory: Path, document: str) -> Path:
@@ -83,7 +98,6 @@ EMPTY = "schema: ctrlrun.policy/v1\nactions: {}\n"
 def test_T118_the_action_is_a_composite_action_at_the_repository_root():
     action = _action()
 
-    assert ACTION.exists()
     assert action["runs"]["using"] == "composite"
     assert set(action["inputs"]) >= {
         "policy",
@@ -207,7 +221,7 @@ def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
 
 
 def test_T119_the_link_target_carries_the_exact_phrase():
-    page = VERIFY_DOC.read_text(encoding="utf-8")
+    page = _repository_file(VERIFY_DOC)
 
     assert "declared guarantees pass" in page
     # And it is the anchor the badge links to, not a phrase buried somewhere else.
@@ -231,7 +245,7 @@ def test_T119_no_claim_uses_the_forbidden_vocabulary(tmp_path, word):
     # On the page, each of these words appears only inside a sentence that refuses it. The
     # unit is the paragraph rather than the line, because the refusal and the word it refuses
     # are often on different lines of the same wrapped sentence.
-    page = VERIFY_DOC.read_text(encoding="utf-8")
+    page = _repository_file(VERIFY_DOC)
     offending = [
         paragraph
         for paragraph in page.split("\n\n")
@@ -242,7 +256,7 @@ def test_T119_no_claim_uses_the_forbidden_vocabulary(tmp_path, word):
 
 
 def test_T119_the_action_and_the_workflow_make_no_forbidden_claim():
-    text = (ACTION.read_text(encoding="utf-8") + WORKFLOW.read_text(encoding="utf-8")).lower()
+    text = (_repository_file(ACTION) + _repository_file(WORKFLOW)).lower()
 
     for word in FORBIDDEN:
         assert word not in text, word
@@ -350,7 +364,7 @@ def test_T120_the_renderer_writes_the_badge_where_one_is_allowed(tmp_path):
 
 
 def test_the_readme_carries_the_badge_and_links_it_to_what_it_means():
-    readme = README.read_text(encoding="utf-8")
+    readme = _repository_file(README)
 
     assert "img.shields.io/endpoint" in readme
     assert "verify-badge.json" in readme
@@ -358,7 +372,7 @@ def test_the_readme_carries_the_badge_and_links_it_to_what_it_means():
 
 
 def test_the_readme_documentation_table_links_the_verify_page():
-    readme = README.read_text(encoding="utf-8")
+    readme = _repository_file(README)
 
     assert "docs/verify.md" in readme
     assert "declared guarantees pass" in readme
