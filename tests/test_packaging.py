@@ -11,12 +11,14 @@ in-process it would pass or fail on whatever pytest happened to import first.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ctrlrun import MissingDependency
 
@@ -95,6 +97,87 @@ def test_the_otel_extra_declares_the_api_sdk_and_exporter():
     assert "opentelemetry-api" in declared
     assert "opentelemetry-sdk" in declared
     assert "otlp" in declared
+
+
+#: A spec-shaped code block: valid Python, and deliberately not what the formatter would write.
+_ALIGNED_BLOCK = """@dataclass(frozen=True)
+class Principal:
+    agent: str                     # aligned, so a reader can compare down the column
+    user: str | None = None        # and the alignment is the point
+"""
+
+_SPEC_PAGE = (
+    "A specification, whose code blocks are illustration rather than code.\n\n"
+    "```python\n" + _ALIGNED_BLOCK + "```\n"
+)
+
+
+def _ruff_format_check(path: Path) -> int:
+    """`ruff format --check` under this repository's configuration, on one file."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "format",
+            "--check",
+            "--no-cache",
+            "--config",
+            str(REPO_ROOT / "pyproject.toml"),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    ).returncode
+
+
+def test_the_formatter_leaves_markdown_alone(tmp_path):
+    """`ruff format` reads Python code blocks inside Markdown and `ruff check` does not, so
+    whether a spec's examples get reformatted turns on whether they happen to parse. SPEC-v0.1
+    and v0.2 keep their aligned comments only because theirs carry unparseable placeholders;
+    SPEC-v0.3's parse, and a CI check that had never fired before went red on them.
+
+    A specification's blocks elide and annotate and line comments up to be read. The formatter
+    cannot know that, so `[tool.ruff.format] exclude` tells it, and this test is what stops the
+    exclusion being dropped by someone who does not meet the trap until CI does.
+    """
+    page = tmp_path / "SPEC-probe.md"
+    page.write_text(_SPEC_PAGE, encoding="utf-8")
+
+    assert _ruff_format_check(page) == 0, "the formatter wants to rewrite a Markdown file"
+
+
+def test_the_formatter_would_have_reformatted_that_block_as_python(tmp_path):
+    """The control for the test above. Without it a `ruff` that had stopped working — or a
+    block that was already formatted — would pass that test while proving nothing, which is a
+    negative test against something the environment already prevents."""
+    module = tmp_path / "probe.py"
+    module.write_text(_ALIGNED_BLOCK, encoding="utf-8")
+
+    assert _ruff_format_check(module) != 0, (
+        "the probe is already formatted, so the Markdown assertion proves nothing"
+    )
+
+
+def test_ci_runs_the_check_script():
+    """`scripts/check.sh` is what CI's `check` job runs, so "it passed locally" and "it passed
+    in CI" cannot come to mean different things. If a step goes back to naming the tools inline
+    the two ends can drift again, which is how the Markdown surprise reached `main`.
+
+    Skipped outside a checkout: `MANIFEST.in` prunes `.github`, so an sdist carries no workflow
+    to read and a packager building from one has no CI wiring to check.
+    """
+    workflow = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+    if not workflow.exists():
+        pytest.skip("no repository checkout")
+    steps = yaml.safe_load(workflow.read_text())["jobs"]["check"]["steps"]
+    commands = " ".join(step.get("run", "") for step in steps)
+
+    assert "scripts/check.sh" in commands
+    for tool in ("pytest", "mypy", "ruff"):
+        assert not re.search(rf"(^|\s){tool}\s", commands), (
+            f"CI's check job invokes {tool} directly; it should go through scripts/check.sh"
+        )
 
 
 def test_core_declares_only_pyyaml_and_click():

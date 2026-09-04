@@ -26,17 +26,10 @@ jobs:
           # touch it, in a subprocess, whether or not it happens to be installed here.
           pip install -e ".[dev,gateway,otel,identity]"
 
-      - name: pytest
-        run: pytest
-
-      - name: mypy
-        run: mypy --strict src
-
-      - name: ruff
-        run: ruff check
-
-      - name: ruff format
-        run: ruff format --check
+      # One script, called here and by a developer before pushing, so the two cannot
+      # diverge. `test_ci_runs_the_check_script` fails if this step stops calling it.
+      - name: check
+        run: ./scripts/check.sh
 
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being
