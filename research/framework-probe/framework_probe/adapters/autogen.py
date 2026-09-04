@@ -14,14 +14,14 @@ install. Nothing this adapter would report is a finding until somebody runs it.
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 
 from ..scenarios import APPROVAL_MUTATION, Scenario
-from ._framework import call_remote, record_approval
+from ._framework import PROBE_MODEL, call_remote, record_approval
 from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
 
-MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
+#: One `CTRLRUN_PROBE_MODEL` for every adapter, unprefixed — see `_framework.PROBE_MODEL`.
+MODEL = PROBE_MODEL
 
 
 @dataclass
@@ -30,8 +30,14 @@ class AutoGenAdapter:
     distribution: str = "autogen-agentchat"
     config_deviation: str | None = None
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `run()` imports `autogen_ext.models.openai`, which is a different distribution.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ("autogen-ext",)
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)

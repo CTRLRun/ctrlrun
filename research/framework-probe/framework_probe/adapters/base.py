@@ -71,8 +71,19 @@ def read_version(distribution: str) -> str:
         return ""
 
 
-def is_installed(distribution: str) -> bool:
-    return bool(read_version(distribution))
+def is_installed(*distributions: str) -> bool:
+    """Are **all** of these installed?
+
+    Variadic because an adapter's `available()` has to name every distribution its `run()`
+    imports, and not just the one the row is labelled with. It did not, and running the harness
+    is what showed the cost: with `langchain` absent, the LangGraph adapter's `available()`
+    still said yes, `run()` raised `ImportError`, and the table carried a row named `langgraph`,
+    with LangGraph's version, whose outcome was `error` — a finding about the harness's own
+    environment, attributed to a framework, in the same closed-set value as "the framework
+    broke". §7.3 rule 5's "skipped **by name**" is the correct outcome, and it is only reachable
+    if `available()` knows what `run()` needs.
+    """
+    return all(read_version(distribution) for distribution in distributions)
 
 
 def tool_endpoint(url: str) -> str:

@@ -12,7 +12,9 @@ thing about every real framework it ever ran.
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -391,7 +393,13 @@ def test_the_scenario_text_is_shared_and_not_per_adapter():
 #: far as an unkeyed run goes. That is why the wording moved. It is a narrower claim than the
 #: one it replaces, and it is the one that is true — a sentence that has quietly become
 #: imprecise is the shape of an overclaim, whichever direction it drifted in.
-UNEXECUTED = ("langgraph", "crewai", "openai-agents", "autogen")
+NEVER_RUN_AGAINST_A_MODEL = ("langgraph", "crewai", "openai-agents", "autogen")
+
+#: The two that were never executed at all -- a strictly stronger claim than the one above, and
+#: the one that keeps the headline honest. Without a test of its own, an edit could level these
+#: two down to the LangGraph wording and leave the README's first line reading as though all
+#: four had been executed, with the whole suite still green.
+NEVER_EXECUTED = ("crewai", "autogen")
 
 #: The two that reached the model call, with the version each was executed against. Read at
 #: runtime everywhere else (T123); written here because the *claim* in the README is about a
@@ -411,22 +419,74 @@ def test_the_readme_says_the_framework_adapters_have_never_been_run_against_a_mo
     assert "no README, changelog entry or post may say otherwise" in readme
 
 
+def leading_blockquote() -> str:
+    """The README's opening blockquote, as one whitespace-collapsed string.
+
+    Scoped to the block rather than to the file because "in the same paragraph" is the claim,
+    and a substring search over the whole README passes with the bounding sentence moved to the
+    bottom — which is the exact failure the assertion is meant to prevent.
+    """
+    lines = (PROBE_ROOT / "README.md").read_text(encoding="utf-8").splitlines()
+    quoted = [line[1:] for line in lines if line.startswith(">")]
+    assert quoted, "the README's leading blockquote is gone"
+    return " ".join(" ".join(quoted).split())
+
+
 def test_the_readme_says_exactly_how_far_the_two_executed_adapters_got():
-    """The partial run is stated with its limit attached, in the same paragraph.
+    """The partial run is stated with its limit attached, **in the same blockquote**.
 
     "Reached the model call" is a much weaker claim than "executed", and the two are one word
     apart in a README somebody will quote. So the sentence that makes the claim is required to
     carry the sentence that bounds it: no scenario completed, and `results/` is still empty."""
-    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+    block = leading_blockquote()
 
-    assert "reached the model call" in readme
-    assert "no scenario completed" in readme
-    assert "`results/` is still empty" in readme
+    assert "reached the model call" in block
+    assert "no scenario completed" in block
+    assert "`results/` is still empty" in block
     for framework, version in REACHED_THE_MODEL_CALL.items():
-        assert version in readme, framework
+        assert version in block, framework
 
 
-@pytest.mark.parametrize("framework", UNEXECUTED)
+def test_the_readme_says_the_other_two_were_never_executed_at_all():
+    """The stronger claim, in the same blockquote as the headline it bounds (see NEVER_EXECUTED)."""
+    block = leading_blockquote()
+
+    assert "were not installed and remain unexecuted in every sense" in block
+    for framework in NEVER_EXECUTED:
+        assert framework.replace("autogen", "AutoGen").replace("crewai", "CrewAI") in block
+
+
+@pytest.mark.parametrize("framework", NEVER_EXECUTED)
+def test_a_never_executed_adapter_makes_the_stronger_claim_in_its_docstring(framework):
+    module = __import__(
+        f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
+    )
+
+    docstring = " ".join((module.__doc__ or "").lower().split())
+
+    assert "never executed at all" in docstring, framework
+
+
+WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+
+
+def test_the_readme_agrees_with_itself_about_how_many_defects_the_run_found():
+    """Two sentences counted the findings and disagreed, in the one section whose whole purpose
+    is precision about what the run established. A number written twice must be written twice
+    the same, and it must be the number of rows in the table it introduces."""
+    readme = (PROBE_ROOT / "README.md").read_text(encoding="utf-8")
+    rows = [line for line in readme.splitlines() if re.match(r"^\| \d+ \|", line)]
+    written = {
+        WORDS[word.lower()]
+        for word in re.findall(r"(\w+) defects", readme)
+        if word.lower() in WORDS
+    }
+
+    assert rows, "the findings table is gone"
+    assert written == {len(rows)}, (written, len(rows))
+
+
+@pytest.mark.parametrize("framework", NEVER_RUN_AGAINST_A_MODEL)
 def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
     module = __import__(
         f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
@@ -468,7 +528,9 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
         if not path.exists():  # pragma: no cover - not a checkout
             continue
         text = path.read_text(encoding="utf-8").lower()
-        offending += [(name, framework) for framework in UNEXECUTED if framework in text]
+        offending += [
+            (name, framework) for framework in NEVER_RUN_AGAINST_A_MODEL if framework in text
+        ]
 
     assert not offending, offending
 
@@ -477,3 +539,125 @@ def test_the_results_directory_holds_nothing_but_its_placeholder():
     present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
 
     assert present == [".gitkeep"], present
+
+
+# --- What running the harness against real installations found (item 1) --------------------
+
+
+def test_one_model_string_is_shared_by_every_adapter():
+    """§7.3 rule 2. `openai:gpt-4o-mini` here and `gpt-4o-mini` there meant one
+    `CTRLRUN_PROBE_MODEL` could not satisfy both, and the values happening to coincide today is
+    not the same as there being one of them."""
+    from framework_probe.adapters._framework import PROBE_MODEL
+
+    driven = ("langgraph", "openai_agents", "crewai", "autogen")
+    for name in driven:
+        module = __import__(f"framework_probe.adapters.{name}", fromlist=["MODEL"])
+        assert module.MODEL is PROBE_MODEL, name
+        assert "os.environ" not in inspect.getsource(module), (
+            f"{name} reads CTRLRUN_PROBE_MODEL for itself; that is the drift the shared "
+            "constant exists to prevent"
+        )
+
+
+def test_an_adapter_declares_every_distribution_its_run_imports():
+    """§7.3 rule 5's "skipped **by name**" is only reachable if `available()` knows what `run()`
+    needs. It did not: with `langchain` absent, the LangGraph adapter said it was available,
+    raised `ImportError`, and the table carried a row named `langgraph`, with LangGraph's
+    version, whose outcome was `error` — the harness's own environment reported as a framework
+    that broke."""
+    from importlib.metadata import packages_distributions
+
+    from framework_probe.adapters import all_adapters
+
+    #: Top-level module -> the distributions that provide it, read from the installed
+    #: environment rather than guessed: `openai-agents` installs `agents`, and a test that
+    #: assumed the two names matched would pass for the wrong reason on every adapter whose
+    #: names happen to agree.
+    provided_by = packages_distributions()
+
+    for adapter in all_adapters():
+        source = inspect.getsource(adapter.run)
+        imported = set(re.findall(r"^\s+from (\w+)[. ]", source, re.M))
+        imported |= set(re.findall(r"^\s+import (\w+)", source, re.M))
+        declared = {adapter.distribution, *getattr(adapter, "requires", ())}
+        for module in imported:
+            if module == "framework_probe":
+                continue
+            providers = set(provided_by.get(module, ()))
+            if not providers:
+                # Not installed here, so the mapping cannot be read. The adapter still has to
+                # have said something about it: fall back to comparing names.
+                providers = {module.replace("_", "-")}
+            assert providers & declared, (
+                f"{adapter.name}.run() imports {module!r} (from {sorted(providers)}), which is "
+                f"in neither `distribution` nor `requires` {sorted(declared)} — a missing "
+                f"dependency would be reported as a framework that broke"
+            )
+
+
+def test_is_installed_is_all_of_them_and_not_any():
+    from framework_probe.adapters.base import is_installed
+
+    assert is_installed("ctrlrun") is True
+    assert is_installed("ctrlrun", "no-such-distribution-9e1f") is False
+    assert is_installed("no-such-distribution-9e1f") is False
+
+
+def test_an_error_row_carries_the_exception_and_a_successful_row_does_not():
+    """Both halves. The second is the one with a failure mode: a stub whose response was
+    deliberately lost has an exception too, and repeating it beside `executed_once` would make
+    every successful row read like a broken one."""
+    from framework_probe.adapters.base import Attempt
+    from framework_probe.results import ERROR, EXECUTED_ONCE
+    from framework_probe.runner import _notes
+
+    assert _notes(Attempt(error="Boom: why"), ERROR) == "Boom: why"
+    assert _notes(Attempt(error="Boom: why", notes="context"), ERROR) == "context; Boom: why"
+    assert _notes(Attempt(error="Boom: why", notes="context"), EXECUTED_ONCE) == "context"
+    assert _notes(Attempt(notes="context"), ERROR) == "context"
+    assert _notes(Attempt(), ERROR) == ""
+
+
+def test_a_frameworks_exception_text_cannot_restructure_the_table():
+    """`notes` used to be written only by this harness's authors. It now carries a measured
+    framework's exception string, and a `|` or a newline in one of those does not make an ugly
+    cell — it makes a *different table*: the row gains a phantom column and then terminates."""
+    from framework_probe.results import SCHEMA, to_markdown
+
+    document = {
+        "schema": SCHEMA,
+        "run_at": "2026-09-04T12:00:00+00:00",
+        "python": "3.12.3",
+        "remote": "fake-mcp/1",
+        "results": [
+            {
+                "framework": "nasty",
+                "version": "1.0",
+                "adapter": "research/framework-probe/framework_probe/adapters/nasty.py",
+                "scenario": scenario,
+                "outcome": "error",
+                "effects_observed": 0,
+                "requests_observed": 0,
+                "config_deviation": None,
+                "notes": "ValueError: boom | pipe and\nnewline here",
+            }
+            for scenario in ("double-refund", "approval-mutation")
+        ],
+    }
+
+    table = to_markdown(document)
+    body = [line for line in table.splitlines() if line.startswith("| nasty")]
+
+    assert len(body) == 1, table
+    assert len(re.findall(r"(?<!\\)\|", body[0])) == 7, body[0]
+    assert "\n" not in body[0]
+
+
+def test_a_very_long_note_does_not_run_away_with_the_row():
+    from framework_probe.results import NOTE_LIMIT, cell
+
+    rendered = cell("x" * (NOTE_LIMIT * 3))
+
+    assert len(rendered) == NOTE_LIMIT
+    assert rendered.endswith("…")

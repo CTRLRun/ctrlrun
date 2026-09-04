@@ -29,8 +29,14 @@ class OpenAIAgentsAdapter:
     distribution: str = "openai-agents"
     config_deviation: str | None = None
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `run()` imports nothing outside `agents`.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ()
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)

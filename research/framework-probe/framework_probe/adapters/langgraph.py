@@ -4,12 +4,21 @@ A prebuilt agent with one tool, run once on the scenario prompt. No retry policy
 to the tool node and no `RetryPolicy` is passed to the graph: §7.3 rule 3 says framework
 defaults, and what LangGraph does with a tool that raised is precisely the finding.
 
-The entry point is `langchain.agents.create_agent`, not `langgraph.prebuilt.create_react_agent`.
-Running this adapter is what settled that: on langgraph 1.2.11 the prebuilt raises
-`LangGraphDeprecatedSinceV10` naming its replacement and saying it goes in V2.0. Measuring an
-entry point the framework is retiring would report a path no reader would write today, and the
-row would still say "langgraph" — so the adapter follows the framework's own instruction, which
-is what §7.3 rule 3 means by defaults.
+The entry point stays `langgraph.prebuilt.create_react_agent`, and running this adapter is what
+settled that rather than settling the opposite. On langgraph 1.2.11 the prebuilt emits
+`LangGraphDeprecatedSinceV10` — a **warning**, not an exception — naming
+`langchain.agents.create_agent` as its replacement and V2.0 as its removal, and it then
+constructs and runs exactly as before. So the framework **can** run the scenario without a
+change, which is the condition §7.3 rule 4 attaches to permitting one: the change would be
+elective, and an elective change of the code path under measurement is what rule 4 exists to
+surface.
+
+Two reasons beyond the letter of the rule. `create_react_agent` is LangGraph's own
+implementation, while `create_agent` lives in `langchain/agents/factory.py` — a different
+distribution — so a row labelled `langgraph`, carrying a version read from `langgraph`, would be
+reporting langchain's agent loop and its middleware defaults. And the deprecation is itself a
+finding: it belongs in the README's documentation table under §7.3 rule 7, where a reader can
+see it, rather than in an adapter that quietly moved.
 
 **Never run against a model.** Not run in this repository's CI and not run against a
 chat model anywhere else. On 2026-09-04 it was executed against a real installation —
@@ -44,15 +53,22 @@ class LangGraphAdapter:
     distribution: str = "langgraph"
     config_deviation: str | None = None
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `create_react_agent` resolves its model string through langchain's
+    #: `init_chat_model`, which imports the provider package lazily.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ("langchain", "langchain-core", "langchain-openai")
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)
 
     def run(self, scenario: Scenario, url: str) -> Attempt:
-        from langchain.agents import create_agent
         from langchain_core.tools import StructuredTool
+        from langgraph.prebuilt import create_react_agent
 
         if scenario.name == APPROVAL_MUTATION:
             assert scenario.approved is not None
@@ -68,7 +84,7 @@ class LangGraphAdapter:
             name=scenario.tool_name,
             description=scenario.tool_description,
         )
-        agent = create_agent(MODEL, [tool])
+        agent = create_react_agent(MODEL, [tool])
         try:
             agent.invoke({"messages": [{"role": "user", "content": scenario.prompt}]})
         except Exception as failure:
