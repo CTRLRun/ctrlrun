@@ -286,8 +286,18 @@ jobs:
           message=$(python -c 'import json;print(json.load(open("badge/verify-badge.json"))["message"])')
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin badges 2>/dev/null && git switch badges || git switch --orphan badges
-          git rm -rq --cached . 2>/dev/null || true
+          # Explicit destination ref: `actions/checkout` sets a single-branch refspec, so a
+          # plain `git fetch origin badges` leaves `refs/remotes/origin/badges` unset and the
+          # switch below would create a fresh orphan and be rejected on push — on the second
+          # publish, not the first.
+          if git fetch origin badges:refs/remotes/origin/badges 2>/dev/null; then
+            git switch -c badges refs/remotes/origin/badges
+          else
+            git switch --orphan badges
+          fi
+          # Nothing to clear: `git switch` replaces the working tree with the target's,
+          # and `--orphan` starts from an empty one. The downloaded artifact is
+          # untracked, so it survives either path - which is the only file that must.
           cp badge/verify-badge.json verify-badge.json
           git add -f verify-badge.json
           git commit -m "verify: $message" || { echo "badge unchanged"; exit 0; }

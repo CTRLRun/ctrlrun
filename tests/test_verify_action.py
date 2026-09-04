@@ -520,3 +520,170 @@ def test_the_verify_page_documents_the_permission_the_publish_costs():
 
     assert "contents: write" in page
     assert "least privilege" in page
+
+
+def _publish_script() -> str:
+    """The badge job's publish step, lifted out of the workflow so it can be **run**."""
+    for step in _workflow()["jobs"]["badge"]["steps"]:
+        if step.get("name") == "Publish to the badges branch":
+            return str(step["run"])
+    raise AssertionError("the badge job has no publish step")
+
+
+def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
+    """Run it **twice**, because the failure it guards against only appears the second time.
+
+    `actions/checkout` configures a single-branch refspec, so a plain `git fetch origin badges`
+    writes `FETCH_HEAD` and not `refs/remotes/origin/badges`. A `git switch badges` then fails,
+    falls through to a fresh orphan, and the push is rejected as a non-fast-forward — on the
+    second publish and never on the first. A test that ran the script once would be green
+    against exactly that bug, which is the whole reason this one runs it twice.
+
+    It also sets that refspec explicitly. Without it, `git remote add`'s default
+    `+refs/heads/*:refs/remotes/origin/*` creates the remote-tracking ref for free and the
+    broken script passes — which it did, until the line was added. A negative test proves
+    nothing unless the thing it forbids would otherwise happen.
+    """
+    import json
+    import subprocess
+
+    script = _publish_script()
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+
+    def publish(message: str) -> subprocess.CompletedProcess[str]:
+        work = tmp_path / f"work-{message}"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=work, check=True)
+        # **The condition that makes this test mean anything.** `actions/checkout` configures a
+        # single-branch refspec, and that is the whole reason the naive `git fetch origin
+        # badges` fails to create `refs/remotes/origin/badges`. A test with `git remote add`'s
+        # default `+refs/heads/*:refs/remotes/origin/*` passes against the broken script — it
+        # did, before this line was added, which is exactly the false green a negative test
+        # gives when the environment already prevents the thing it forbids.
+        subprocess.run(
+            ["git", "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"],
+            cwd=work,
+            check=True,
+        )
+        (work / "placeholder").write_text("a checkout has other files in it\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-qm",
+                "a checkout",
+            ],
+            cwd=work,
+            check=True,
+        )
+        # The artifact is **untracked**, as `actions/download-artifact` leaves it on a runner.
+        # That matters: `git switch --orphan` clears the tracked worktree, so an artifact this
+        # test had committed would vanish before the script could copy it, and the test would
+        # be failing on its own setup rather than on the script.
+        (work / "badge").mkdir()
+        (work / "badge" / "verify-badge.json").write_text(
+            json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": message}),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", "-c", script], cwd=work, capture_output=True, text=True, check=False
+        )
+
+    first = publish("verified 1/1")
+    assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
+
+    second = publish("verified 2/2")
+    assert second.returncode == 0, f"{second.stdout}\n{second.stderr}"
+
+    # The second publish built on the first rather than replacing it, and the branch holds the
+    # badge and nothing else.
+    log = subprocess.run(
+        ["git", "log", "--oneline", "badges"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 2, log.stdout
+
+    listing = subprocess.run(
+        ["git", "ls-tree", "--name-only", "badges"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert listing.stdout.split() == ["verify-badge.json"], listing.stdout
+
+    published = subprocess.run(
+        ["git", "show", "badges:verify-badge.json"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(published.stdout)["message"] == "verified 2/2"
+
+
+def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
+    """A push per green build, for a file nobody edited, is noise in the history."""
+    import json
+    import subprocess
+
+    script = _publish_script()
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+
+    def publish(index: int) -> subprocess.CompletedProcess[str]:
+        work = tmp_path / f"work-{index}"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=work, check=True)
+        subprocess.run(
+            ["git", "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"],
+            cwd=work,
+            check=True,
+        )
+        (work / "placeholder").write_text("a checkout\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-qm",
+                "a checkout",
+            ],
+            cwd=work,
+            check=True,
+        )
+        (work / "badge").mkdir(parents=True)
+        (work / "badge" / "verify-badge.json").write_text(
+            json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": "verified 9/9"}),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", "-c", script], cwd=work, capture_output=True, text=True, check=False
+        )
+
+    assert publish(1).returncode == 0
+    unchanged = publish(2)
+
+    assert unchanged.returncode == 0, f"{unchanged.stdout}\n{unchanged.stderr}"
+    assert "badge unchanged" in unchanged.stdout
+    log = subprocess.run(
+        ["git", "log", "--oneline", "badges"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(log.stdout.strip().splitlines()) == 1, log.stdout
