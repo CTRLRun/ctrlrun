@@ -5,6 +5,11 @@
 #   leaves the building    → approve  (a human, every time)
 #   destroys the evidence  → deny     (not an agent action at any size)
 #
+#
+# **No `authority:` section, deliberately** (SPEC-v0.3 §1.2). A grant names a real principal
+# in a real organization, and a template that shipped plausible ones would invite an operator
+# to adopt them. Add grants yourself, against names your directory actually holds; see
+# `docs/authority.md` and `examples/authority/`.
 # Unknown actions are denied. There is no default-allow: this file is the list of what an
 # agent may do, and anything not written here is refused.
 schema: ctrlrun.policy/v1

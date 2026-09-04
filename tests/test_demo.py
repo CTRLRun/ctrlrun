@@ -523,18 +523,52 @@ def test_T11_demo_runs_in_under_sixty_seconds(demo_run):
     assert elapsed < 60
 
 
-def test_T11_demo_prints_all_four_scenario_headings(demo_run):
+def test_T93_demo_prints_all_five_scenario_headings(demo_run):
     result, _, _ = demo_run
 
+    assert len(SCENARIO_HEADINGS) == 5
     for number, heading in enumerate(SCENARIO_HEADINGS, start=1):
         assert f"{number}. {heading}" in result.output
 
 
-def test_T11_demo_prints_four_blocked_lines(demo_run):
+def test_T93_demo_prints_five_blocked_lines(demo_run):
     result, _, _ = demo_run
 
     blocked = [line for line in result.output.splitlines() if "BLOCKED" in line]
-    assert len(blocked) == 4
+    assert len(blocked) == 5, "\n".join(blocked)
+
+
+def test_T93_the_fifth_scenario_blocks_on_authority_and_names_the_reason(demo_run):
+    """SPEC-v0.3 §1.2 — scenario 5 answers a different question from the other four, so its
+    refusal has to be legible as a different *kind* of refusal. A `BLOCKED` line that said
+    only "denied" would leave a reader with no way to tell the two axes apart."""
+    result, _, _ = demo_run
+
+    assert "outside the delegated grant (authority_constraint)" in result.output
+    # And the creation-time half, which is the one an agent would otherwise use to reach the
+    # amount above by minting its own permission.
+    assert "refused (containment: constraints)" in result.output
+
+
+def test_T93_the_fifth_scenario_shows_both_axes_applying_to_one_action(demo_run):
+    """§4.6 — the two combine as the stricter of the pair. Without this the scenario would be
+    consistent with a chain that authorized nothing at all, and every refusal in it would be
+    vacuous."""
+    result, _, _ = demo_run
+
+    assert "authority permits it, and the policy asks a human" in result.output
+
+
+def test_T93_the_first_four_scenarios_run_with_no_authority_section(demo_run):
+    """§4.1 — a document with no `authority:` section behaves exactly as v0.2. The demo's own
+    small proof of the opt-in rule: scenarios 1 to 4 load `DEMO_POLICY`, which declares
+    `ctrlrun.policy/v1` and has no section at all."""
+    from ctrlrun import Policy
+    from ctrlrun.cli.demo import DEMO_POLICY
+    from ctrlrun.policy import POLICY_SCHEMA
+
+    assert "authority:" not in DEMO_POLICY
+    assert Policy.from_yaml(DEMO_POLICY).schema == POLICY_SCHEMA
 
 
 def test_T11_demo_writes_receipts(demo_run):
@@ -543,7 +577,11 @@ def test_T11_demo_writes_receipts(demo_run):
     lines = _lines(evidence / "receipts.jsonl")
     assert lines
     results = [json.loads(line)["result"] for line in lines]
+    # Four `blocked` receipts, not five: scenario 5's refusals are `denied` (an authority
+    # denial *is* the action being denied) and its last action is still awaiting a human, so
+    # it has no receipt at all yet (v0.1 §6.1).
     assert results.count("blocked") == 4
+    assert results.count("denied") >= 1
     assert "committed" in results
     assert "ambiguous" in results
 
@@ -633,10 +671,11 @@ def test_a_path_outside_the_run_directory_is_printed_whole(tmp_path):
     assert written_path(tmp_path, outside) == str(outside)
 
 
-#: The only thing in the demo's output that differs between runs: generated approval ids.
-#: Evidence paths are printed relative to where the demo ran, so they are stable and the
-#: README must quote them exactly — that is what keeps an absolute path from creeping back in.
-_RUN_VARYING = re.compile(r"apr_[0-9a-f]+")
+#: The only things in the demo's output that differ between runs: generated approval ids and,
+#: since scenario 5, generated delegation ids. Evidence paths are printed relative to where
+#: the demo ran, so they are stable and the README must quote them exactly — that is what
+#: keeps an absolute path from creeping back in.
+_RUN_VARYING = re.compile(r"(?:apr|dlg)_[0-9a-f]+")
 
 
 def _readme_demo_section() -> str:

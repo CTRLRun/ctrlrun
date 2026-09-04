@@ -1,0 +1,74 @@
+# A DevOps delegation chain: who may touch which cluster, and for how long.
+#
+# The shape worth copying here is the **environment** dimension. A grant scoped to
+# `["staging"]` cannot authorize a production action however the caller describes itself,
+# because the environment belongs to the deployment: it is set once on the `Control` — from
+# `--environment`, `$CTRLRUN_ENVIRONMENT`, this document's top-level `environment:`, or
+# "production" — and never taken from the call. An authorization dimension the subject can set
+# is not one.
+#
+# Replace every name before use.
+schema: ctrlrun.policy/v3
+
+# This deployment's environment, which every Action it decides carries. Rank three of four:
+# `Control(environment=...)` and `$CTRLRUN_ENVIRONMENT` both outrank it.
+environment: staging
+
+authority:
+  max_delegation_depth: 2
+
+  grants:
+    # The on-call human. Everything in staging, and the right to lend a slice of it for a
+    # short window — note the near expiry: a grant that can mint authority should outlive the
+    # incident it was created for by as little as possible.
+    - id: sre-oncall
+      subject: { agent: "sre-oncall", user: "sam@example.com" }
+      actions: ["k8s.**"]
+      resources: ["cluster:staging/*"]
+      environments: ["staging"]
+      delegable: true
+      expires_at: "2026-10-01T00:00:00Z"
+
+    # A deploy agent, scoped to one namespace pattern and to the two verbs it needs. `k8s.*`
+    # matches `k8s.scale` and **not** `k8s.namespace.delete`: a `*` cannot cross a separator,
+    # which is what makes "everything under here" something you have to write on purpose.
+    - id: deploy-agent
+      subject: { agent: "deploy-agent" }
+      actions: ["k8s.apply", "k8s.scale"]
+      resources: ["cluster:staging/app-*"]
+      environments: ["staging"]
+
+    # A read-only agent across both clusters. There is no short spelling for "everything":
+    # granting the whole surface of a system is `**`, one token, greppable, and impossible to
+    # write by accident — and this grant does not use it.
+    - id: observability
+      subject: { agent: "metrics-agent" }
+      actions: ["k8s.get", "k8s.logs"]
+      resources: ["cluster:staging/*", "cluster:production/*"]
+      environments: ["staging", "production"]
+
+actions:
+  # Destructive infrastructure is never autonomous, for anybody. Authority decides *who* may
+  # propose it; this line decides that a human answers whenever they do.
+  k8s.namespace.delete:
+    effect: "k8s:delete-namespace:{namespace}"
+    resource: "cluster:{cluster}/{namespace}"
+    decision: approve
+
+  k8s.apply:
+    effect: "k8s:apply:{namespace}:{revision}"
+    resource: "cluster:{cluster}/{namespace}"
+    decision: allow
+
+  k8s.scale:
+    effect: "k8s:scale:{namespace}:{deployment}:{replicas}"
+    resource: "cluster:{cluster}/{namespace}"
+    rules:
+      - when: { replicas_lte: 20 }
+        decision: allow
+      - decision: approve
+
+  k8s.get:
+    decision: allow
+  k8s.logs:
+    decision: allow

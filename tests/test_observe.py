@@ -836,10 +836,25 @@ def test_T84_a_mistyped_mode_key_is_caught_by_the_closed_top_level_key_set():
 
 #: §6.5's two columns, by name. v0.3 moves no command across the line.
 LOADS_THE_POLICY = ("gateway", "stats", "delegate", "revoke", "verify")
-DOES_NOT = ("init", "demo", "approve", "deny", "receipts", "effects", "resolve", "inspect")
+DOES_NOT = (
+    "init",
+    # `ctrlrun demo` builds an `authority:` section of its own for scenario 5 (SPEC-v0.3
+    # §1.2), so it may legitimately append the §7 event types. Marked here rather than on the
+    # whole test, so T66's guard still covers the other seven commands: a leak from
+    # `receipts` or `inspect` must still fail.
+    pytest.param("demo", marks=pytest.mark.authority),
+    "approve",
+    "deny",
+    "receipts",
+    "effects",
+    "resolve",
+    "inspect",
+)
 
 #: Enough arguments for each command to reach its body. Several exit non-zero against an
 #: empty store, which is the point: the banner is printed before anything else.
+#: Keyed by command name; `DOES_NOT` carries a `pytest.param` for one of them, so the ids the
+#: parametrization produces are the plain names either way.
 ARGUMENTS = {
     "gateway": ("--upstream", "http://127.0.0.1:1/mcp", "--alias", "acme", "--principal", "bot"),
     "stats": (),

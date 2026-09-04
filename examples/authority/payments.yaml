@@ -1,0 +1,87 @@
+# A payments delegation chain: who may refund, how much, and who may hand a slice of that on.
+#
+# Two axes, and an action needs both:
+#
+#   authority:  may this principal propose this action at all?
+#   actions:    how much autonomy does this action have, for everybody?
+#
+# A grant carries no `decision:`. How much autonomy `stripe.refund` has is the same for the
+# head of support and for the newest agent; what differs is whether they may ask.
+#
+# The names here are illustrative. Replace every one before use: a grant names a real
+# principal in a real organization, and adopting somebody else's is how a template becomes an
+# incident.
+schema: ctrlrun.policy/v3
+
+authority:
+  # A chain may be at most three links long. Depth is recomputed on every evaluation by
+  # walking to the root, never read from the stored row, so a longer chain cannot be created
+  # by editing this number down after the fact.
+  max_delegation_depth: 3
+
+  grants:
+    # 1. The human. €100,000, and the right to hand a narrower slice to an agent.
+    #
+    # `delegable: true` requires `expires_at`: authority that can mint more authority and
+    # never lapses is the one shape this model refuses to write down. Bringing this date
+    # forward narrows every delegation beneath it on the next evaluation — but only after the
+    # process reloads the file, because `Authority` is built at load time and v0.3 does not
+    # hot-reload. The runtime lever is `ctrlrun revoke <delegation-id>`.
+    - id: head-of-support
+      subject: { agent: "head-of-support", user: "dana@example.com" }
+      actions: ["stripe.refund", "stripe.refund.partial"]
+      resources: ["payment:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }   # €0 to €100,000.00
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+
+    # 2. A service account that reconciles, and may never move money. It holds no `delegable`
+    # key at all, which is the default and means it cannot create a delegation.
+    - id: reconciliation
+      subject: { agent: "reconciliation-agent" }
+      actions: ["stripe.charge.read", "stripe.refund.read"]
+      resources: ["payment:*"]
+      environments: ["production", "staging"]
+
+    # 3. The floor, for a chain nobody edits: refunds up to €50, one agent, one environment.
+    # A grant with no `constraints:` places no *value* limit — but it still limits the action
+    # names, the resources and the environment, which is why those are never left out.
+    - id: tier-one-support
+      subject: { agent: "support-agent" }
+      actions: ["stripe.refund"]
+      resources: ["payment:EU-*"]
+      constraints: { amount_gte: 0, amount_lte: 5000 }       # €0 to €50.00
+      environments: ["production"]
+
+# The autonomy policy. It cannot see the principal — `agent_eq` and every other
+# principal-addressing condition is refused at load — so these rules say what is true of the
+# *action* for everybody, and the grants above say who may propose it.
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      # Both ends are bound. `amount_lte` on its own lets a negative amount through, and a
+      # refund of a negative amount is a charge.
+      - when: { amount_gte: 0, amount_lte: 100000 }          # to €1,000.00 — autonomous
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 1000000 }         # to €10,000.00 — a human
+        decision: approve
+      - decision: deny
+
+  stripe.refund.partial:
+    effect: "refund:{payment_id}:{line_item}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: approve
+
+  # Reads get no effect: template, and that is correct for a read. Anything that changes the
+  # world and has none gets no reservation at all, and `ctrlrun gateway` prints those on the
+  # line that starts the process.
+  stripe.charge.read:
+    decision: allow
+  stripe.refund.read:
+    decision: allow
