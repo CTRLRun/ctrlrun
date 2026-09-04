@@ -20,11 +20,11 @@ reporting langchain's agent loop and its middleware defaults. And the deprecatio
 finding: it belongs in the README's documentation table under §7.3 rule 7, where a reader can
 see it, rather than in an adapter that quietly moved.
 
-**Never run against a model.** Not run in this repository's CI and not run against a
-chat model anywhere else. On 2026-09-04 it was executed against a real installation —
-`langgraph` 1.2.11 with `langchain` 1.4.0 — and reached the model call, so its documented entry
-points are known to resolve; no scenario completed and no effect reached the remote.
-Nothing this adapter would report is a finding until somebody runs it with a key.
+**Run against a model on 2026-09-05.** Five repetitions of each scenario against `langgraph`
+1.2.11 with `langchain` 1.4.0 driving `gpt-4o-mini`, and every cell agreed with itself five
+times out of five: `double-refund` gave one effect and one request every time.
+`results/2026-09-05.json` is that run, and `../../README.md` says what it does and does not
+establish. Behaviour, not quality.
 """
 
 from __future__ import annotations

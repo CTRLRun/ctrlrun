@@ -1,0 +1,162 @@
+{
+  "schema": "ctrlrun.framework-probe/v1",
+  "run_at": "2026-09-04T19:09:01.581060+00:00",
+  "python": "3.12.3",
+  "remote": "fake-mcp/1",
+  "results": [
+    {
+      "framework": "stub-retrying",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/stub.py",
+      "scenario": "double-refund",
+      "outcome": "executed_twice",
+      "effects_observed": 2,
+      "requests_observed": 2,
+      "config_deviation": null,
+      "notes": "the response was lost on every attempt; 5 runs: executed_twice x5"
+    },
+    {
+      "framework": "stub-retrying",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/stub.py",
+      "scenario": "approval-mutation",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "stub-not-retrying",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/stub.py",
+      "scenario": "double-refund",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "the response was lost on every attempt; 5 runs: executed_once x5"
+    },
+    {
+      "framework": "stub-not-retrying",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/stub.py",
+      "scenario": "approval-mutation",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "mcp-client",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/mcp_client.py",
+      "scenario": "double-refund",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "no retry: a bare client leaves that to its caller; 5 runs: executed_once x5"
+    },
+    {
+      "framework": "mcp-client",
+      "version": "0.4.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/mcp_client.py",
+      "scenario": "approval-mutation",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.11",
+      "adapter": "research/framework-probe/framework_probe/adapters/langgraph.py",
+      "scenario": "double-refund",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.11",
+      "adapter": "research/framework-probe/framework_probe/adapters/langgraph.py",
+      "scenario": "approval-mutation",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "crewai",
+      "version": "",
+      "adapter": "research/framework-probe/framework_probe/adapters/crewai.py",
+      "scenario": "double-refund",
+      "outcome": "error",
+      "effects_observed": 0,
+      "requests_observed": 0,
+      "config_deviation": "Task(expected_output=...) is required by CrewAI's API",
+      "notes": "skipped: crewai is not installed"
+    },
+    {
+      "framework": "crewai",
+      "version": "",
+      "adapter": "research/framework-probe/framework_probe/adapters/crewai.py",
+      "scenario": "approval-mutation",
+      "outcome": "error",
+      "effects_observed": 0,
+      "requests_observed": 0,
+      "config_deviation": "Task(expected_output=...) is required by CrewAI's API",
+      "notes": "skipped: crewai is not installed"
+    },
+    {
+      "framework": "openai-agents",
+      "version": "0.22.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/openai_agents.py",
+      "scenario": "double-refund",
+      "outcome": "executed_twice",
+      "effects_observed": 3,
+      "requests_observed": 3,
+      "config_deviation": null,
+      "notes": "5 runs: executed_twice x5; effects 3-4; requests 3-4"
+    },
+    {
+      "framework": "openai-agents",
+      "version": "0.22.0",
+      "adapter": "research/framework-probe/framework_probe/adapters/openai_agents.py",
+      "scenario": "approval-mutation",
+      "outcome": "executed_once",
+      "effects_observed": 1,
+      "requests_observed": 1,
+      "config_deviation": null,
+      "notes": "5 runs: executed_once x5"
+    },
+    {
+      "framework": "autogen",
+      "version": "",
+      "adapter": "research/framework-probe/framework_probe/adapters/autogen.py",
+      "scenario": "double-refund",
+      "outcome": "error",
+      "effects_observed": 0,
+      "requests_observed": 0,
+      "config_deviation": null,
+      "notes": "skipped: autogen-agentchat is not installed"
+    },
+    {
+      "framework": "autogen",
+      "version": "",
+      "adapter": "research/framework-probe/framework_probe/adapters/autogen.py",
+      "scenario": "approval-mutation",
+      "outcome": "error",
+      "effects_observed": 0,
+      "requests_observed": 0,
+      "config_deviation": null,
+      "notes": "skipped: autogen-agentchat is not installed"
+    }
+  ]
+}

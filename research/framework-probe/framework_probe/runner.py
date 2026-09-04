@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import platform
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -124,19 +125,59 @@ def skipped_row(adapter: Adapter, scenario: Scenario) -> dict[str, Any]:
     }
 
 
+def repeated(adapter: Adapter, scenario: Scenario, times: int) -> dict[str, Any]:
+    """`times` runs of one cell, reported as one row with the tally in `notes` (§7.4).
+
+    One run of an agent against a model is a coin flip, and a table built from coin flips is a
+    table that says something different next week. So a published run repeats, and the row
+    carries what happened across the repetitions rather than only what happened last.
+
+    The reported `outcome` is the **modal** one, ties broken by the closed set's own order.
+    Not the worst: reporting the worst as *the* behaviour would be editorializing, which
+    §7.3 rule 6 forbids — and the tally is right there in the same cell, so a disagreement is
+    visible rather than resolved on the reader's behalf. `effects_observed` and
+    `requests_observed` are the modal run's, and `notes` names the range where they varied,
+    because "it landed the effect somewhere between three and eight times" is the finding and
+    an average would hide it.
+
+    `times == 1` leaves the row exactly as a single run produced it, tally and all, so nothing
+    about an unrepeated run changes shape.
+    """
+    runs = [run_one(adapter, scenario) for _ in range(times)]
+    if times == 1:
+        return runs[0]
+
+    counted = Counter(row["outcome"] for row in runs)
+    order = (EXECUTED_TWICE, EXECUTED_ONCE, REFUSED, ERROR)
+    modal = min(counted, key=lambda outcome: (-counted[outcome], order.index(outcome)))
+    row = dict(next(one for one in runs if one["outcome"] == modal))
+
+    tally = ", ".join(f"{outcome} x{counted[outcome]}" for outcome in order if outcome in counted)
+    parts = [f"{times} runs: {tally}"]
+    for field in ("effects_observed", "requests_observed"):
+        seen = {one[field] for one in runs}
+        if len(seen) > 1:
+            parts.append(f"{field.split('_')[0]} {min(seen)}-{max(seen)}")
+    row["notes"] = "; ".join([row["notes"], *parts]) if row["notes"] else "; ".join(parts)
+    return row
+
+
 def run(
     adapters: Sequence[Adapter] | None = None,
     scenarios: Sequence[Scenario] = SCENARIOS,
     *,
     stubs: bool = True,
+    repeat: int = 1,
 ) -> dict[str, Any]:
     """Every adapter against every scenario, as one `ctrlrun.framework-probe/v1` document."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least 1")
     chosen = tuple(adapters) if adapters is not None else all_adapters(stubs=stubs)
     rows: list[dict[str, Any]] = []
     for adapter in chosen:
         for scenario in scenarios:
             if adapter.available():
-                rows.append(run_one(adapter, scenario))
+                rows.append(repeated(adapter, scenario, repeat))
             else:
                 rows.append(skipped_row(adapter, scenario))
     return {
@@ -158,6 +199,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None, help="Where to write the JSON.")
     parser.add_argument("--markdown", type=Path, default=None, help="Where to write the table.")
     parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="How many times to run each cell. One run against a model is a coin flip; the "
+        "row reports the modal outcome and the tally, so a published table says how stable "
+        "it was rather than what happened once.",
+    )
+    parser.add_argument(
         "--no-stubs",
         action="store_true",
         help="Leave the two stub frameworks out. They are in by default, because a run "
@@ -165,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    document = run(stubs=not arguments.no_stubs)
+    document = run(stubs=not arguments.no_stubs, repeat=arguments.repeat)
     encoded = dumps(document)
     if arguments.out is not None:
         arguments.out.write_text(encoded, encoding="utf-8")

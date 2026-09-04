@@ -8,24 +8,57 @@ of these projects, none of which claims to solve this problem.
 It answers a question CTRLRun has so far only asserted: *what actually happens when the
 response is lost and the framework retries?*
 
-> **The four framework adapters have never been run against a model.** Nothing here is a
-> finding about LangGraph, CrewAI, the OpenAI Agents SDK or AutoGen — and
-> no README, changelog entry or post may say otherwise. The only true statement today is
-> *"adapters written from documented APIs, never run against a model"*. What **has** run, in
-> this repository's CI, is the harness itself: the fake remote, the two stubs and the plain
-> MCP client, end to end over a loopback socket.
+> **Two of the four framework adapters have now been run against a model. Two have not.**
 >
-> **What has now been executed, precisely.** On **2026-09-04** the LangGraph and OpenAI Agents
-> SDK adapters were run against real installations — `langgraph` 1.2.11 with `langchain` 1.4.0,
-> and `openai-agents` 0.22.0 — and reached the model call, which is as far as an unkeyed run
-> goes. That is enough to say their documented entry points resolve, and it is **not** enough
-> to say anything about either framework's behaviour: no scenario completed, no effect reached
-> the remote, and `results/` is still empty. Four defects the run found are fixed below.
-> CrewAI and AutoGen were not installed and remain unexecuted in every sense.
+> On **2026-09-05**, the LangGraph and OpenAI Agents SDK adapters were run against real
+> installations — `langgraph` 1.2.11 with `langchain` 1.4.0 and `langchain-openai`, and
+> `openai-agents` 0.22.0 — driving `gpt-4o-mini`, five repetitions of each scenario. Every cell
+> agreed with itself five times out of five. `results/2026-09-05.json` is that run and
+> `results/2026-09-05.md` is rendered from it.
 >
-> Before any results are published, each adapter has to be run against a real model with a
-> budget set, its framework version recorded, and the table read by the maintainer — these are
-> published findings about other projects, under this project's name.
+> **CrewAI and AutoGen were not installed and remain unexecuted in every sense.** Their rows say
+> so by name. Nothing in this file is a finding about either of them.
+>
+> **This is behaviour, not quality.** Neither LangGraph nor the OpenAI Agents SDK claims to solve
+> duplicate execution, and neither is doing anything its documentation does not describe. The
+> finding is about what an agent stack does *without* an effect-level guard — which is the
+> question this repository exists to answer, asked of somebody else's code so that the answer is
+> not ours to assert.
+
+## What the run found
+
+| | double-refund | approval-mutation |
+|---|---|---|
+| **LangGraph** 1.2.11 | `executed_once`, 5/5 | `executed_once`, 5/5 |
+| **OpenAI Agents SDK** 0.22.0 | `executed_twice`, 5/5 — **3 to 4 effects per run** | `executed_once`, 5/5 |
+| `stub-retrying` | `executed_twice` | `executed_once` |
+| `stub-not-retrying` | `executed_once` | `executed_once` |
+| plain MCP client | `executed_once` | `executed_once` |
+
+**Read the `approval-mutation` column carefully.** `executed_once` there does **not** mean the
+scenario was handled well. It means the *mutated* action — the €50 refund the human never
+approved — reached the remote and committed. Every row shows it, including the two stubs, and
+that is the scenario working as designed: nothing in any of these stacks binds a human's approval
+to the exact action that then runs, because nothing in them is trying to. `outcome` is a closed
+set fixed by SPEC-v0.4 §7.4 and has no value for "the mutation landed", so this paragraph is where
+that is said.
+
+**The double-refund column is the finding.** The remote commits the refund and then drops the
+connection without a response. LangGraph's prebuilt agent surfaced the failure and stopped: one
+effect, one request, every time. The Agents SDK's default handling of a tool that raised is
+`failure_error_function`, which turns the exception into a message the model can act on — and
+the model acted on it, retrying until the refund had landed **three or four times** in a single
+run. `executed_twice` is the closed set's word for "more than once"; the count is in `notes`.
+
+That is not a defect in either project. It is what an agent loop does when the only thing that
+knows an effect already happened is a remote that cannot say so. Both stub rows are there to
+prove the harness can tell the two behaviours apart: without the pair, a harness that reported
+`executed_twice` unconditionally would have said the same thing about both frameworks.
+
+**What this run does not establish.** One model, one prompt, one remote, five repetitions. A
+different model, a longer prompt or a tool description that mentioned idempotency could move
+either row, and none of that was varied. The claim is about these versions on this day, and the
+version each row carries is read at runtime for that reason.
 
 ---
 
@@ -182,6 +215,7 @@ an empty notes column and could not tell a missing credential from a framework t
 It is appended for an `error` row only — a stub whose response was deliberately lost has an
 exception too, and that one is the scenario working.
 
-**No results are checked in.** The runs are made and published by the maintainer; a commit
-carrying findings about other projects that nobody had reviewed is not a commit this
-repository makes.
+**The results checked in are the maintainer's**, read before they were committed. A commit
+carrying findings about other projects that nobody had reviewed is not a commit this repository
+makes — so `results/` holds a run somebody looked at, and the Markdown beside it is rendered from
+the JSON and never written by hand.

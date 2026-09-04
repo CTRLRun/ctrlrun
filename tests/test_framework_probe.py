@@ -385,38 +385,35 @@ def test_the_scenario_text_is_shared_and_not_per_adapter():
 
 # --- nothing anywhere claims the harness has been run against a real framework ---------------
 
-#: The four whose adapters have never been run against a model. The stubs and the MCP client
-#: have — they run in this repository's CI, end to end over a loopback socket.
-#:
-#: "Run against a model" and not "executed": on 2026-09-04 the LangGraph and Agents SDK
-#: adapters were executed against real installations and reached the model call, which is as
-#: far as an unkeyed run goes. That is why the wording moved. It is a narrower claim than the
-#: one it replaces, and it is the one that is true — a sentence that has quietly become
-#: imprecise is the shape of an overclaim, whichever direction it drifted in.
-NEVER_RUN_AGAINST_A_MODEL = ("langgraph", "crewai", "openai-agents", "autogen")
-
-#: The two that were never executed at all -- a strictly stronger claim than the one above, and
-#: the one that keeps the headline honest. Without a test of its own, an edit could level these
-#: two down to the LangGraph wording and leave the README's first line reading as though all
-#: four had been executed, with the whole suite still green.
+#: The two whose adapters have still never been run against a model, and never executed at all.
+#: The stubs and the MCP client have — they run in this repository's CI, end to end over a
+#: loopback socket — and LangGraph and the Agents SDK were run against `gpt-4o-mini` on
+#: 2026-09-05, which is what `results/` holds.
 NEVER_EXECUTED = ("crewai", "autogen")
+
+#: The two that were, with the version each was run against. Read at runtime everywhere else
+#: (T123); written here because the *claim* is about a specific past run, and a claim about a
+#: past run cannot be re-derived from what happens to be installed now.
+MEASURED = {"langgraph": "1.2.11", "openai-agents": "0.22.0"}
 
 #: The two that reached the model call, with the version each was executed against. Read at
 #: runtime everywhere else (T123); written here because the *claim* in the README is about a
 #: specific past run, and a claim about a past run cannot be re-derived from what happens to be
 #: installed now.
-REACHED_THE_MODEL_CALL = {"langgraph": "1.2.11", "openai-agents": "0.22.0"}
 
 
-def test_the_readme_says_the_framework_adapters_have_never_been_run_against_a_model():
-    """The study means nothing until the adapters have run, so the sentence that says they have
-    not is at the top of the harness README rather than in a per-adapter docstring nobody
-    reads. `results/` is empty for the same reason."""
-    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+def test_the_readme_says_which_two_were_run_and_which_two_were_not():
+    """The claim that matters most is the negative one, and it is in the leading blockquote.
 
-    assert "The four framework adapters have never been run against a model" in readme
-    assert "adapters written from documented APIs, never run against a model" in readme
-    assert "no README, changelog entry or post may say otherwise" in readme
+    Two of four were measured; two were not, and nothing in this file is a finding about those
+    two. A sentence that let a reader carry "the frameworks were measured" away from a run that
+    covered half of them is the shape of an overclaim, and this is what stops it."""
+    block = leading_blockquote()
+
+    assert "Two of the four framework adapters have now been run against a model" in block
+    assert "Two have not" in block
+    assert "were not installed and remain unexecuted in every sense" in block
+    assert "Nothing in this file is a finding about either of them" in block
 
 
 def leading_blockquote() -> str:
@@ -432,28 +429,35 @@ def leading_blockquote() -> str:
     return " ".join(" ".join(quoted).split())
 
 
-def test_the_readme_says_exactly_how_far_the_two_executed_adapters_got():
-    """The partial run is stated with its limit attached, **in the same blockquote**.
-
-    "Reached the model call" is a much weaker claim than "executed", and the two are one word
-    apart in a README somebody will quote. So the sentence that makes the claim is required to
-    carry the sentence that bounds it: no scenario completed, and `results/` is still empty."""
+def test_the_measured_run_states_its_date_its_versions_and_its_repetitions():
+    """A published finding about somebody else's project carries what would let a reader
+    reproduce it or date it: which versions, which model, how many times, and when."""
     block = leading_blockquote()
 
-    assert "reached the model call" in block
-    assert "no scenario completed" in block
-    assert "`results/` is still empty" in block
-    for framework, version in REACHED_THE_MODEL_CALL.items():
+    assert "2026-09-05" in block
+    assert "gpt-4o-mini" in block
+    assert "five repetitions" in block
+    for framework, version in MEASURED.items():
         assert version in block, framework
 
 
-def test_the_readme_says_the_other_two_were_never_executed_at_all():
-    """The stronger claim, in the same blockquote as the headline it bounds (see NEVER_EXECUTED)."""
-    block = leading_blockquote()
+def test_the_readme_says_what_the_run_does_not_establish():
+    """One model, one prompt, one remote. A table with other projects' names in it has to say
+    what it did not vary, in the same document and not in a reply to a complaint."""
+    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
 
-    assert "were not installed and remain unexecuted in every sense" in block
-    for framework in NEVER_EXECUTED:
-        assert framework.replace("autogen", "AutoGen").replace("crewai", "CrewAI") in block
+    assert "What this run does not establish" in readme
+    assert "One model, one prompt, one remote" in readme
+
+
+def test_the_readme_explains_that_executed_once_hides_the_mutation():
+    """`executed_once` in the approval-mutation column means the *mutated* action ran, which
+    reads like the opposite of what it is. `outcome` is a closed set fixed by SPEC-v0.4 §7.4
+    and has no value for "the mutation landed", so the README is where that is said."""
+    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+
+    assert "does **not** mean the scenario was handled well" in readme
+    assert "the human never approved" in readme
 
 
 @pytest.mark.parametrize("framework", NEVER_EXECUTED)
@@ -486,8 +490,8 @@ def test_the_readme_agrees_with_itself_about_how_many_defects_the_run_found():
     assert written == {len(rows)}, (written, len(rows))
 
 
-@pytest.mark.parametrize("framework", NEVER_RUN_AGAINST_A_MODEL)
-def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
+@pytest.mark.parametrize("framework", NEVER_EXECUTED)
+def test_an_unexecuted_adapter_says_so_in_its_own_docstring(framework):
     module = __import__(
         f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
     )
@@ -495,25 +499,24 @@ def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
     docstring = " ".join((module.__doc__ or "").lower().split())
 
     assert "never run against a model" in docstring, framework
-    assert "not run in this repository's ci" in docstring, framework
+    assert "never executed at all" in docstring, framework
 
 
-@pytest.mark.parametrize("framework", sorted(REACHED_THE_MODEL_CALL))
-def test_an_adapter_that_reached_the_model_call_says_which_version_it_reached_it_on(framework):
-    """A partial execution is a claim about a specific installation, so the docstring names it.
-
-    Without the version the sentence reads as a standing property of the adapter, and it is
-    not: the next breaking release of either framework can invalidate it, and then the only
-    thing that says so is the version that is no longer the one installed."""
+@pytest.mark.parametrize("framework", sorted(MEASURED))
+def test_a_measured_adapter_says_which_version_and_which_model_it_was_run_on(framework):
+    """A measurement is a claim about a specific installation on a specific day, so the
+    docstring names it. Without the version the sentence reads as a standing property of the
+    adapter, and it is not: the next breaking release can invalidate it, and then the only
+    thing that would say so is a version that is no longer the one installed."""
     module = __import__(
         f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
     )
 
     docstring = " ".join((module.__doc__ or "").split())
 
-    assert "reached the model call" in docstring, framework
-    assert REACHED_THE_MODEL_CALL[framework] in docstring, framework
-    assert "no scenario completed" in docstring, framework
+    assert "2026-09-05" in docstring, framework
+    assert MEASURED[framework] in docstring, framework
+    assert "gpt-4o-mini" in docstring, framework
 
 
 def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
@@ -529,16 +532,50 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
             continue
         text = path.read_text(encoding="utf-8").lower()
         offending += [
-            (name, framework) for framework in NEVER_RUN_AGAINST_A_MODEL if framework in text
+            (name, framework) for framework in NEVER_EXECUTED if framework in text
         ]
 
     assert not offending, offending
 
 
-def test_the_results_directory_holds_nothing_but_its_placeholder():
-    present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
+def test_the_results_directory_holds_a_run_and_the_table_rendered_from_it():
+    """`results/` was empty on purpose until there was a run somebody had read. There is one
+    now, and the Markdown beside it is rendered from the JSON and never written by hand -- so
+    the assertion is that the two agree, not that a file exists."""
+    import json
 
-    assert present == [".gitkeep"], present
+    from framework_probe.results import to_markdown
+
+    present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
+    assert present == [".gitkeep", "2026-09-05.json", "2026-09-05.md"], present
+
+    document = json.loads((PROBE_ROOT / "results" / "2026-09-05.json").read_text())
+    rendered = (PROBE_ROOT / "results" / "2026-09-05.md").read_text()
+
+    assert rendered == to_markdown(document) + "\n", (
+        "the table on disk is not what the JSON renders to; it was edited by hand, or the "
+        "renderer changed and the table was not regenerated"
+    )
+
+
+def test_the_published_run_is_what_the_readme_says_it_is():
+    """The README's numbers and the results file must not drift apart. A README quoting a run
+    that is no longer the one checked in is the shape of every stale finding."""
+    import json
+
+    document = json.loads((PROBE_ROOT / "results" / "2026-09-05.json").read_text())
+    by_cell = {(row["framework"], row["scenario"]): row for row in document["results"]}
+
+    assert by_cell[("langgraph", "double-refund")]["outcome"] == "executed_once"
+    assert by_cell[("openai-agents", "double-refund")]["outcome"] == "executed_twice"
+    # The pair that proves the harness can tell the two apart (SPEC-v0.4 §7, the stubs).
+    assert by_cell[("stub-retrying", "double-refund")]["outcome"] == "executed_twice"
+    assert by_cell[("stub-not-retrying", "double-refund")]["outcome"] == "executed_once"
+    for framework in ("crewai", "autogen"):
+        assert "not installed" in by_cell[(framework, "double-refund")]["notes"]
+    for row in document["results"]:
+        if row["framework"] in MEASURED:
+            assert "5 runs" in row["notes"], row
 
 
 # --- What running the harness against real installations found (item 1) --------------------

@@ -4,11 +4,11 @@ One `Agent` with one `function_tool`, run once through `Runner.run_sync`. No
 `failure_error_function` is supplied, so the SDK's default handling of a tool that raised is
 what the row measures.
 
-**Never run against a model.** Not run in this repository's CI and not run against a
-chat model anywhere else. On 2026-09-04 it was executed against a real installation —
-`openai-agents` 0.22.0 — and reached the model call, so its documented entry
-points are known to resolve; no scenario completed and no effect reached the remote.
-Nothing this adapter would report is a finding until somebody runs it with a key.
+**Run against a model on 2026-09-05.** Five repetitions of each scenario against `openai-agents`
+0.22.0 driving `gpt-4o-mini`, and every cell agreed with itself five times out of five: `double-
+refund` gave three to four effects in a single run, every time. `results/2026-09-05.json` is
+that run, and `../../README.md` says what it does and does not establish. Behaviour, not
+quality.
 """
 
 from __future__ import annotations

@@ -87,6 +87,20 @@ def cell(value: str) -> str:
     return escaped[: NOTE_LIMIT - 1].rstrip() + "…"
 
 
+def _notes_for(notes: Sequence[tuple[str, str]]) -> str:
+    """One cell for a framework's notes, labelled by scenario where the two differ.
+
+    Identical notes collapse: one note repeated for both scenarios says nothing twice. Where
+    they differ they are prefixed, because with per-scenario detail in them — a repetition
+    tally, an effect range — an unlabelled `a; b` leaves a reader guessing which row each
+    belongs to, and a table that has to be guessed at is one that will be quoted wrongly.
+    """
+    distinct = {note for _, note in notes}
+    if len(distinct) <= 1:
+        return next(iter(distinct), "")
+    return " | ".join(f"{scenario}: {note}" for scenario, note in notes)
+
+
 def to_markdown(document: Mapping[str, Any]) -> str:
     """The table §7.4 describes, rendered from the document and never stored.
 
@@ -109,9 +123,8 @@ def to_markdown(document: Mapping[str, Any]) -> str:
         entry["scenarios"][row["scenario"]] = row["outcome"]
         if row["config_deviation"]:
             entry["deviation"] = row["config_deviation"]
-        if row["notes"] and row["notes"] not in entry["notes"]:
-            # Deduplicated: one note repeated for both scenarios says nothing twice.
-            entry["notes"].append(row["notes"])
+        if row["notes"]:
+            entry["notes"].append((row["scenario"], row["notes"]))
 
     lines = [
         f"<!-- Rendered from {document['run_at']} by framework_probe.results.to_markdown. "
@@ -127,7 +140,7 @@ def to_markdown(document: Mapping[str, Any]) -> str:
             f"| {cell(name)} | {cell(entry['version'])} | "
             f"{cell(scenarios.get('double-refund', '-'))} | "
             f"{cell(scenarios.get('approval-mutation', '-'))} | "
-            f"{cell(entry['deviation'] or '')} | {cell('; '.join(entry['notes']))} |"
+            f"{cell(entry['deviation'] or '')} | {cell(_notes_for(entry['notes']))} |"
         )
     lines += [
         "",
