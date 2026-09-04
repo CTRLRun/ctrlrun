@@ -1013,7 +1013,8 @@ adapters that are broken **in one named way each**, and each MUST fail the suite
 | `grants-for-itself` | Takes `ApprovalRequired` with `wait=False`, writes the grant itself, and re-presents. The framework's primitive is never reached | `kernel` |
 | `denial-as-error` | Raises its framework's rejection error instead of carrying the human's `no` back | `denial` — B3's **first** check |
 | `denies-for-itself` | Raises `ActionDenied` itself instead of returning the `no` to the provider: the right exception, and no `APPROVAL_DENIED` behind it | `denial` — B3's **second** check |
-| `falsely-refuses-before-invoking` | Declares `refuses_before_invoking` and then executes the action a human refused | `denial` — the **declaration** rather than a check |
+| `falsely-refuses-before-invoking` | Declares `refuses_before_invoking`, bypasses `Control` and executes the action a human refused — leaving no events, so only the executor count sees it | `denial` — the declaration, caught by **the executor** |
+| `falsely-refuses-after-asking` | Declares `refuses_before_invoking` having been asked the whole way through: proposes the action, reaches the primitive, then raises its framework's rejection error | `denial` — the declaration, caught by **the evidence** |
 | `ignores-authority` | Catches `AuthorityDenied` and returns a value | `authority` |
 | `self-asserts-principal` | Builds a `Principal` from the framework's session and reaches a `Control` with it | `identity` |
 | `echoes-the-payload` | Declares `carries_approved_arguments = True` and returns `pending.arguments` as the answer's `approved_arguments` | `binding` — §3.4's manufactured check |
@@ -1055,13 +1056,27 @@ return a refusal could declare it, skip the suite, and score full marks. §3.8 n
 that relaxes a check, and a declaration that turns a suite off is one.
 
 So B3 no longer returns `not_applicable` on seeing the flag. It drives the refusal anyway and
-holds the adapter to the part of a denial that does not need a proposed action: **the executor
-is not reached, and no `APPROVAL_GRANTED` is recorded.** What such a framework genuinely cannot
-produce is `APPROVAL_DENIED` — the tool is never invoked, so no action is proposed and there is
-nothing in CTRLRun's log to deny — and only that is excused. An adapter that raises `ActionDenied`
-under the declaration fails too, in the milder direction: CTRLRun *was* asked, so the suite
-applies and reporting N/A would hide a passing adapter. §5.3's rule is that N/A is for what an
-adapter cannot do, and the only way to tell that from what it merely did not do is to look.
+then establishes the declaration from the evidence.
+
+**The first attempt at this checked the wrong thing**, and a second independent review broke it
+with one class attribute: `refuses_before_invoking = True` on `denial-as-error` — a fixture this
+table requires to *fail* — reported `not_applicable` with every other suite green. It had asked
+whether the executor ran, which a framework that refuses *inside* CTRLRun satisfies just as well.
+
+The discriminator is **whether CTRLRun was asked at all**. A framework that genuinely refuses
+before invoking proposes no action: no `ACTION_PROPOSED`, no `APPROVAL_REQUESTED`, and the
+framework's own primitive is never reached, because `@protect` never gets far enough to raise
+`ApprovalRequired`. Two checks, and the pair is not redundant — one fixture reaches each and
+neither reaches the other:
+
+- **The executor ran.** Catches an adapter that bypasses `Control` altogether, which leaves no
+  events to be caught by.
+- **CTRLRun was asked** — any of `ACTION_PROPOSED`, `APPROVAL_REQUESTED`, or a non-zero interrupt
+  count. Catches an adapter that went through the whole flow and then mislabelled the result.
+
+Only `APPROVAL_DENIED` is excused, because that is the one such a framework genuinely cannot
+produce. §5.3's rule is that N/A is for what an adapter cannot do, and the only way to tell that
+from what it merely did not do is to look.
 
 **Every suite is named by at least one fixture, and every fixture names a suite that exists.**
 Both directions are asserted (T130), because a fixture pointed at a renamed suite passes its own
@@ -1280,7 +1295,7 @@ same way (§3.8).
 ### Item 3 — The conformance kit (§5)
 
 #### T130 — The kit fails a broken adapter, per suite and by name
-Each of §5.4's fourteen fixtures is driven through `conformance.run`, and each fails **the suite
+Each of §5.4's fifteen fixtures is driven through `conformance.run`, and each fails **the suite
 named in its row**. A fixture that failed nothing, or whose named suite passed, is the failure
 this test catches; incidental failures of other suites are permitted and asserted as such,
 because "and no other" is false of an adapter broken badly enough.

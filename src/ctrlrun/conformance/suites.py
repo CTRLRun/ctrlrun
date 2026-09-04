@@ -17,6 +17,7 @@ Two things every case does, and both are `v0.4 §1.3`'s positive-control rule on
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -729,19 +730,28 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
 
 
 def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
-    """`refuses_before_invoking` is declared true — so check that it is, and then report N/A.
+    """`refuses_before_invoking` is declared — so prove it, and only then report N/A.
 
-    An unchecked `not_applicable` is a pass an adapter awards itself. `carries_approved_arguments`
-    is enforced by core, which refuses a grant that omits the arguments (§3.4); this declaration
-    had nothing behind it, and an adapter whose `interrupt()` simply had no way to return a
-    refusal could set it and score full marks. §5.3's rule is that N/A is for what an adapter
-    **cannot** do, and the only way to tell that from what it merely did not do is to look.
+    An unchecked `not_applicable` is a pass an adapter awards itself. The first version of this
+    checked the wrong things: it drove the refusal and asserted the executor was not reached,
+    which a framework that refuses *inside* CTRLRun satisfies just as well. A second independent
+    review broke it with one class attribute — `refuses_before_invoking = True` on
+    `fixtures.DenialIsAnError`, the fixture §5.4 requires to **fail** this suite — and got
+    `denial: not_applicable` and `report.ok is True`.
 
-    What this SDK-shaped adapter cannot produce is `APPROVAL_DENIED`: the tool is never invoked,
-    so no action is proposed and there is nothing in CTRLRun's log to deny. What it can still be
-    held to is everything a refusal must mean — **the executor is not reached, and no grant is
-    recorded** — and that is checkable without a proposed action. So it is checked here, and the
-    N/A is reported only once it holds.
+    The discriminator is not what the adapter did with the answer; it is **whether CTRLRun was
+    asked at all**. A framework that genuinely refuses before invoking proposes no action: no
+    `ACTION_PROPOSED`, no `APPROVAL_REQUESTED`, and the framework's own primitive is never
+    reached, because `@protect` never got far enough to raise `ApprovalRequired`. An adapter that
+    produced any of those was asked, and the suite applies to it.
+
+    Two checks, and each has a fixture aimed at it (§5.4), because the first version's extra
+    checks were subsumed guards that no fixture reached:
+
+    * **The executor ran** — `falsely-refuses-before-invoking`, which bypasses `Control` and
+      calls the executor directly, so it leaves no events to catch it by.
+    * **CTRLRun was asked** — `falsely-refuses-after-asking`, which goes through `Control`,
+      reaches the primitive, and only then produces its framework's refusal.
     """
     world = World(adapter, APPROVE)
     executor = Executor()
@@ -754,23 +764,11 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
         answer=ApprovalAnswer(granted=False, approver=APPROVER),
     )
 
-    try:
+    # A framework may surface its own refusal however it likes -- its own rejection type, a
+    # runner-level error, `ActionDenied`. The exception carries no verdict here: what it may not
+    # do is have been *asked*, and the checks below establish that from the evidence instead.
+    with contextlib.suppress(Exception):
         adapter.invoke(request)
-    except ActionDenied:
-        # It produced a real denial after all, so it does not refuse before invoking and the
-        # suite should have run. Reporting N/A here would hide a passing adapter, which is the
-        # milder half of the same defect.
-        return failed(
-            "B3",
-            binding_denial.title,
-            f"{adapter.framework} declares refuses_before_invoking, but a refused answer "
-            "produced ActionDenied — CTRLRun was asked after all, so the suite applies",
-        )
-    except Exception:
-        # A framework may surface its own refusal however it likes -- its own rejection type, a
-        # runner-level error, anything. What it may not do is run the action, and the two
-        # assertions below check that either way, so the exception itself carries no verdict.
-        pass
 
     if executor.calls:
         return failed(
@@ -780,12 +778,17 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
             f"{executor.calls} times on a human's no — the declaration is false and the action "
             "a human refused was performed",
         )
-    if "APPROVAL_GRANTED" in world.events():
+
+    events = world.events()
+    asked = [name for name in ("ACTION_PROPOSED", "APPROVAL_REQUESTED") if name in events]
+    if asked or world.watched.calls:
         return failed(
             "B3",
             binding_denial.title,
-            f"{adapter.framework} declares refuses_before_invoking, but a refused answer "
-            "recorded APPROVAL_GRANTED — a human's no became a yes in the evidence log",
+            f"{adapter.framework} declares refuses_before_invoking, but CTRLRun was asked: "
+            f"{asked or 'the framework primitive was reached'}. A framework that refuses before "
+            "it invokes proposes no action at all, so the denial suite applies to this adapter "
+            "and B3 must run",
         )
 
     return na(
@@ -794,8 +797,9 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
         f"{adapter.framework} refuses before it invokes: a tool whose approval was declined "
         "is never called, so no CTRLRun action is proposed and there is nothing to deny. "
         "The refusal is real and it is in the framework's own output; it is not in CTRLRun's "
-        "evidence log, because CTRLRun was never asked. Checked, not taken on trust: the "
-        "executor was not reached and no grant was recorded. The adapter's README says so",
+        "evidence log, because CTRLRun was never asked. Checked, not taken on trust: no action "
+        "was proposed, the primitive was not reached and the executor did not run. "
+        "The adapter's README says so",
     )
 
 

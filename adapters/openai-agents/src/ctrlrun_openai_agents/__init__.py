@@ -103,6 +103,36 @@ def _bound_call(context: ToolContext) -> Iterator[None]:
 CHANNEL = "openai-agents:tool-approval"
 
 
+def _answer_for_this_call(context: ToolContext) -> bool | None:
+    """What a human answered about **this** tool call, or `None` if nobody answered about it.
+
+    Deliberately **not** `RunContextWrapper.is_tool_approved`, which is the obvious call and is
+    wrong here. That method falls back to a *sticky* decision keyed by tool name -- the record
+    `state.approve(item, always_approve=True)` writes -- and returns `True` for every later
+    `call_id` of that tool, including calls no human has seen. Its own source says so: the
+    exact-call lookup comes first, and `if approval_entry.approved is True: return True` is what
+    runs when that misses.
+
+    A human who ticked *always approve refunds* has not approved this refund. CTRLRun's whole
+    claim is that a grant binds to one action -- `v0.1 §4.2` consumes it against an
+    `action_hash` -- and a blanket yes for a tool name is precisely what that exists to refuse.
+    With `carries_approved_arguments = False` there is no binding check in core to catch it
+    afterwards, so this is the only place it can be caught.
+
+    `_get_per_call_approval_status_for_key` returns exact-call decisions only and ignores sticky
+    ones, which is the question worth asking. It is private to the SDK, so its absence is treated
+    as *no answer* rather than falling back to the sticky reading: an SDK release that removes it
+    makes this adapter refuse, loudly and in one place, instead of silently going back to
+    granting on somebody else's blanket yes. `README.md` states the supported framework range and
+    T137 pins it to what CI installed.
+    """
+    per_call = getattr(context, "_get_per_call_approval_status_for_key", None)
+    if per_call is None:  # pragma: no cover - a framework outside the supported range
+        return None
+    answer: bool | None = per_call(context.tool_name, context.tool_call_id)
+    return answer
+
+
 class AgentsInterrupt:
     """The SDK's tool-approval interruption, seen from inside the tool.
 
@@ -174,7 +204,7 @@ class AgentsInterrupt:
                 "`ctrlrun approve`, or drive the call through protected_tool()."
             )
 
-        answered = context.is_tool_approved(context.tool_name, context.tool_call_id)
+        answered = _answer_for_this_call(context)
         if answered is None:
             raise ApprovalNotAsked(
                 f"{pending.action} needs approval, but the OpenAI Agents SDK never gated this "
@@ -328,10 +358,18 @@ def unwrap(error: BaseException) -> BaseException:
     then retry"*. An ambiguous outcome reported as a definite did-not-run, with instructions to
     do it again, on the one path this adapter exists for.
     """
+    # Bounded by the exceptions already visited, because an exception chain is not guaranteed
+    # to be a chain. `raise X from Y` sets `X.__cause__ = Y`, and doing that where `Y.__cause__`
+    # is already `X` closes a **cycle** -- which `run`/`run_sync` below did, so `unwrap` on their
+    # output looped forever on exactly the AMBIGUOUS outcome it exists to preserve. That is
+    # fixed at the raise as well; this is the half that holds for a chain built anywhere else,
+    # and the two are tested separately because either alone would hide the other.
+    walked: set[int] = set()
     seen: BaseException | None = error
-    while seen is not None:
+    while seen is not None and id(seen) not in walked:
         if isinstance(seen, CTRLRunError):
             return seen
+        walked.add(id(seen))
         seen = seen.__cause__
 
     # No `CTRLRunError` in the chain, so this is the other half of `v0.1 §5.5`: an executor that
@@ -344,6 +382,30 @@ def unwrap(error: BaseException) -> BaseException:
     if isinstance(error, UserError) and error.__cause__ is not None:
         return error.__cause__
     return error
+
+
+def _reraise(recovered: BaseException, raised: BaseException) -> None:
+    """Re-raise the kernel's exception, without closing a cycle in the `__cause__` chain.
+
+    `raise recovered from raised` reads naturally and was wrong: `recovered` was found *by
+    walking* `raised.__cause__`, so setting `recovered.__cause__ = raised` points the chain back
+    at something that already points here. `unwrap` then walked it forever, and it did so on the
+    two paths that most need an answer -- an executor whose `TimeoutError` the kernel recorded
+    as AMBIGUOUS and re-raised (`v0.1 §5.5`), and this adapter's own `ApprovalNotAsked`.
+
+    There is no `from` clause at all, and no condition under which one would be right: `recovered`
+    is reachable from `raised` **by construction**, because walking `raised.__cause__` is how it
+    was found. So `raise recovered from raised` closes a cycle every time, not just sometimes --
+    a first attempt at this guarded on `recovered.__cause__ is None` and still built one, because
+    the kernel's exception legitimately has no cause of its own while the SDK's wrapper points
+    at it.
+
+    Nothing is lost. `recovered.__cause__` stays `None`, which is true -- an `ActionDenied` was
+    not *caused by* the `UserError` that wrapped it -- and raising inside an `except` block sets
+    `__context__` to the wrapper, which is what a traceback prints and how the SDK's frames stay
+    visible.
+    """
+    raise recovered
 
 
 async def run(agent: Any, input: Any, **options: Any) -> Any:
@@ -359,7 +421,7 @@ async def run(agent: Any, input: Any, **options: Any) -> Any:
     except BaseException as raised:
         recovered = unwrap(raised)
         if recovered is not raised:
-            raise recovered from raised
+            _reraise(recovered, raised)
         raise
 
 
@@ -372,5 +434,5 @@ def run_sync(agent: Any, input: Any, **options: Any) -> Any:
     except BaseException as raised:
         recovered = unwrap(raised)
         if recovered is not raised:
-            raise recovered from raised
+            _reraise(recovered, raised)
         raise

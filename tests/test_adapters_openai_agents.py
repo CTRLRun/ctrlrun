@@ -668,6 +668,39 @@ def _tool_context(_control, *, approved):
     return context
 
 
+def _approval_item():
+    from agents import Agent
+    from agents.items import ToolApprovalItem
+
+    raw = ResponseFunctionToolCall(
+        arguments='{"payment_id": "txn_1"}',
+        call_id="call_1",
+        name="issue_refund",
+        type="function_call",
+        id="fc_1",
+    )
+    return ToolApprovalItem(agent=Agent(name="a"), raw_item=raw, tool_name="issue_refund")
+
+
+def _approve_always(context) -> None:
+    """What a human does when they tick *always approve* rather than answering one call."""
+    context.approve_tool(_approval_item(), always_approve=True)
+
+
+def _rebind(context, call_id: str):
+    """The same run context, seen from a **different** tool call of the same tool."""
+    from agents.tool_context import ToolContext
+
+    rebound = ToolContext(
+        context=None,
+        tool_name=context.tool_name,
+        tool_call_id=call_id,
+        tool_arguments='{"payment_id": "txn_2", "amount": 100000000}',
+    )
+    rebound._approvals = context._approvals
+    return rebound
+
+
 # --- the answer comes from the SDK, and is never assumed (§2.4, §3.8) -----------------------
 #
 # `interrupt()` returned `granted=True` unconditionally. Its premise -- "a tool body that runs
@@ -926,3 +959,110 @@ def test_the_readme_says_what_happens_when_the_predicate_and_the_kernel_disagree
     assert "ApprovalNotAsked" in text
     assert "is_tool_approved" in text
     assert "must go through `protected_tool`" in text
+
+
+def test_a_sticky_always_approve_is_not_an_answer_for_a_later_call():
+    """`state.approve(item, always_approve=True)` records a decision keyed by **tool name**,
+    and `RunContextWrapper.is_tool_approved` then answers `True` for every later `call_id` of
+    that tool (`run_context.py`: `if approval_entry.approved is True: return True`, reached
+    after the exact-call lookup misses).
+
+    A human who said *always approve refunds* has not seen this refund. CTRLRun's entire claim
+    is that an approval binds to one action -- `v0.1 §4.2` consumes a grant against an
+    `action_hash` -- and a blanket yes for a tool is the thing that claim exists to refuse. With
+    `carries_approved_arguments=False` there is no binding check in core to catch it either, so
+    this is the last line.
+
+    Reading the sticky value would mean a $1,000,000 refund executing on the strength of a $5
+    one a human waved through, with a receipt naming `openai-agents:tool-approval` as approver.
+    """
+    context = _tool_context(None, approved=None)
+    _approve_always(context)
+
+    # The SDK's own sticky answer, which is what the first fix read.
+    assert context.is_tool_approved("issue_refund", "call_999") is True
+
+    # What this adapter must do with it: nobody approved call_999.
+    pending = _pending()
+    with _bound_call(_rebind(context, "call_999")), pytest.raises(ApprovalNotAsked) as refused:
+        AgentsInterrupt().interrupt(pending)
+    assert "call_999" in str(refused.value)
+
+
+def test_the_call_a_human_did_approve_is_still_granted():
+    """The other half: narrowing to per-call answers must not refuse the approved call."""
+    context = _tool_context(None, approved=True)
+
+    with _bound_call(context):
+        answer = AgentsInterrupt().interrupt(_pending())
+
+    assert answer.granted is True and answer.approver == CHANNEL
+
+
+# --- the two defences against a cyclic `__cause__`, opened one at a time ---------------------
+#
+# `unwrap` walking a cycle and `run_sync` building one are independent, and a test that only
+# drove `run_sync` would pass with either fixed. So each window is opened on its own.
+
+
+def test_unwrap_terminates_on_a_cyclic_cause_chain():
+    """Defence one, with the cycle built by hand so the walk is the only thing under test.
+
+    An exception chain is not guaranteed to be a chain: `raise X from Y` where `Y.__cause__` is
+    already `X` closes a loop, and a walk with no seen-set never leaves it. Bounded by the
+    exceptions already visited.
+    """
+    import threading
+
+    from agents.exceptions import UserError
+
+    lost = TimeoutError("the response was lost")
+    wrapper = UserError("Error running tool run_it: ...")
+    wrapper.__cause__ = lost
+    lost.__cause__ = wrapper
+
+    # Bounded, because the failure this guards against is a **hang**, and a hung test is not a
+    # failing test -- it is a CI job that times out an hour later saying nothing. The walk runs
+    # on a daemon thread so an unbounded one leaks rather than blocking the suite, and the
+    # assertion is that it finished at all.
+    done: list[Any] = []
+    walker = threading.Thread(target=lambda: done.append(unwrap(lost)), daemon=True)
+    walker.start()
+    walker.join(timeout=10)
+
+    assert not walker.is_alive(), "unwrap() did not terminate: the __cause__ chain is a cycle"
+    # No CTRLRunError anywhere in the cycle, which is the case that used to spin: the AMBIGUOUS
+    # outcome, where the kernel re-raised the executor's own exception unchanged.
+    assert done == [lost]
+
+
+def test_run_sync_does_not_build_a_cycle_in_the_first_place():
+    """Defence two, checked at the raise rather than through `unwrap`, so it stands on its own.
+
+    `raise recovered from raised` set `recovered.__cause__ = raised` -- but `recovered` was found
+    by walking `raised.__cause__`, so the chain pointed back at itself.
+    """
+    control, _ = build(BANDS)
+
+    @protect("stripe.refund", effect="refund:{payment_id}", wait=True, control=control)
+    def issue_refund(payment_id: str, amount: int) -> str:
+        return "committed"
+
+    async def tool_body(payment_id: str, amount: int = 100000) -> str:
+        """Issue a refund."""
+        return issue_refund(payment_id=payment_id, amount=amount)
+
+    tool = protected_tool(control, "stripe.refund", tool_body, name_override="issue_refund")
+    model = FakeModel("issue_refund", '{"payment_id": "txn_1"}')
+    agent = Agent(name="refunds", instructions="refunds", tools=[tool], model=model)
+
+    with pytest.raises(Exception) as raised:
+        ctrlrun_openai_agents.run_sync(agent, "refund txn_1")
+
+    # Walk the chain to its end with a bound of our own, and assert it terminates.
+    seen: set[int] = set()
+    node: BaseException | None = raised.value
+    while node is not None:
+        assert id(node) not in seen, f"cyclic __cause__ chain at {node!r}"
+        seen.add(id(node))
+        node = node.__cause__

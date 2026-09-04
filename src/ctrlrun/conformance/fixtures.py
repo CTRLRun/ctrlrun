@@ -236,6 +236,29 @@ class FalselyRefusesBeforeInvoking(Reference):
         return super().invoke(request)
 
 
+class FalselyRefusesAfterAsking(DenialIsAnError):  # noqa: N818 - a fixture, not an exception
+    """Declares `refuses_before_invoking` while doing nothing of the kind.
+
+    It goes through `Control`, proposes the action, reaches the framework's primitive, takes the
+    human's `no` -- and then raises its framework's rejection error instead of carrying the
+    answer back, which is `denial-as-error`'s defect. The declaration is what makes it
+    interesting: one class attribute, and a fixture the specification requires to **fail** this
+    suite reported `not_applicable` with every other suite green.
+
+    That is the escape a second independent review found in the first attempt at checking the
+    declaration, which asked whether the executor had run -- something this adapter can satisfy
+    while being asked the whole way through. The check that catches it is whether CTRLRun was
+    asked **at all**: this leaves `ACTION_PROPOSED` and `APPROVAL_REQUESTED` behind, and a
+    framework that truly refuses before invoking leaves neither.
+
+    Its sibling `falsely-refuses-before-invoking` is caught by the *other* check and not this
+    one -- it bypasses `Control` entirely, so it writes no events and only the executor count
+    sees it. Two checks, two fixtures, neither subsuming the other.
+    """
+
+    refuses_before_invoking = True
+
+
 class ReplaysApproval(Reference):
     """Keeps a `request_id` and re-presents it on the next call, reaching past `@protect`.
 
@@ -443,6 +466,7 @@ BROKEN: dict[str, tuple[type[Reference], str]] = {
     "denial-as-error": (DenialIsAnError, "denial"),
     "denies-for-itself": (DeniesForItself, "denial"),
     "falsely-refuses-before-invoking": (FalselyRefusesBeforeInvoking, "denial"),
+    "falsely-refuses-after-asking": (FalselyRefusesAfterAsking, "denial"),
     "ignores-authority": (IgnoresAuthority, "authority"),
     "self-asserts-principal": (SelfAssertsPrincipal, "identity"),
     "echoes-the-payload": (EchoesThePayload, "binding"),
