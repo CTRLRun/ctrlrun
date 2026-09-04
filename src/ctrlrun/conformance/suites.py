@@ -398,28 +398,40 @@ def expect(
 def kernel_lost_response(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, ALLOW)
     executor = Executor(TimeoutError("the response was lost"), None)
-    request = CallRequest(world.control, REFUND, {"payment_id": "t1", "amount": 2000},
-                          "refund:t1", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "t1", "amount": 2000}, "refund:t1", executor
+    )
 
-    problem = expect("T1", kernel_lost_response.title,
-                     lambda: adapter.invoke(request), TimeoutError)
+    problem = expect(
+        "T1", kernel_lost_response.title, lambda: adapter.invoke(request), TimeoutError
+    )
     if problem:
         return problem
     if executor.calls != 1:
-        return failed("T1", kernel_lost_response.title,
-                      f"the executor ran {executor.calls} times on the first attempt, expected 1")
+        return failed(
+            "T1",
+            kernel_lost_response.title,
+            f"the executor ran {executor.calls} times on the first attempt, expected 1",
+        )
 
-    problem = expect("T1", kernel_lost_response.title, lambda: adapter.invoke(request),
-                     AmbiguousEffect)
+    problem = expect(
+        "T1", kernel_lost_response.title, lambda: adapter.invoke(request), AmbiguousEffect
+    )
     if problem:
         return problem
     if executor.calls != 1:
-        return failed("T1", kernel_lost_response.title,
-                      f"the retry reached the executor: {executor.calls} calls, expected 1")
+        return failed(
+            "T1",
+            kernel_lost_response.title,
+            f"the retry reached the executor: {executor.calls} calls, expected 1",
+        )
     record = world.store.get_effect("refund:t1")
     if record is None or str(record.state) != "ambiguous":
-        return failed("T1", kernel_lost_response.title,
-                      f"the effect is {record and record.state}, expected ambiguous")
+        return failed(
+            "T1",
+            kernel_lost_response.title,
+            f"the effect is {record and record.state}, expected ambiguous",
+        )
     return passed("T1", kernel_lost_response.title)
 
 
@@ -428,25 +440,39 @@ def kernel_duplicate_after_approval(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE)
     executor = Executor()
     arguments = {"payment_id": "t4", "amount": 2000}
-    request = CallRequest(world.control, REFUND, arguments, "refund:t4", executor,
-                          answer=granted(arguments))
+    request = CallRequest(
+        world.control, REFUND, arguments, "refund:t4", executor, answer=granted(arguments)
+    )
 
     adapter.invoke(request)
     if executor.calls != 1:
-        return failed("T4", kernel_duplicate_after_approval.title,
-                      f"the approved call ran {executor.calls} times, expected 1")
+        return failed(
+            "T4",
+            kernel_duplicate_after_approval.title,
+            f"the approved call ran {executor.calls} times, expected 1",
+        )
     if not world.watched.calls:
-        return failed("T4", kernel_duplicate_after_approval.title,
-                      "the framework's primitive was never reached: an approval nobody was "
-                      "asked for is not an approval")
+        return failed(
+            "T4",
+            kernel_duplicate_after_approval.title,
+            "the framework's primitive was never reached: an approval nobody was "
+            "asked for is not an approval",
+        )
 
-    problem = expect("T4", kernel_duplicate_after_approval.title,
-                     lambda: adapter.invoke(request), DuplicateEffect)
+    problem = expect(
+        "T4",
+        kernel_duplicate_after_approval.title,
+        lambda: adapter.invoke(request),
+        DuplicateEffect,
+    )
     if problem:
         return problem
     if executor.calls != 1:
-        return failed("T4", kernel_duplicate_after_approval.title,
-                      f"the second attempt reached the executor: {executor.calls} calls")
+        return failed(
+            "T4",
+            kernel_duplicate_after_approval.title,
+            f"the second attempt reached the executor: {executor.calls} calls",
+        )
     return passed("T4", kernel_duplicate_after_approval.title)
 
 
@@ -454,19 +480,31 @@ def kernel_duplicate_after_approval(adapter: ConformanceAdapter) -> CaseResult:
 def kernel_unknown_action(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, EMPTY)
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "t6", "amount": 1},
-                          "refund:t6", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "t6", "amount": 1}, "refund:t6", executor
+    )
 
-    problem = expect("T6", kernel_unknown_action.title, lambda: adapter.invoke(request),
-                     ActionDenied, "unknown_action")
+    problem = expect(
+        "T6",
+        kernel_unknown_action.title,
+        lambda: adapter.invoke(request),
+        ActionDenied,
+        "unknown_action",
+    )
     if problem:
         return problem
     if executor.calls:
-        return failed("T6", kernel_unknown_action.title,
-                      f"a denied action reached the executor {executor.calls} times")
+        return failed(
+            "T6",
+            kernel_unknown_action.title,
+            f"a denied action reached the executor {executor.calls} times",
+        )
     if [receipt.result for receipt in world.receipts()] != ["denied"]:
-        return failed("T6", kernel_unknown_action.title,
-                      f"receipts are {[r.result for r in world.receipts()]}, expected ['denied']")
+        return failed(
+            "T6",
+            kernel_unknown_action.title,
+            f"receipts are {[r.result for r in world.receipts()]}, expected ['denied']",
+        )
     return passed("T6", kernel_unknown_action.title)
 
 
@@ -474,26 +512,37 @@ def kernel_unknown_action(adapter: ConformanceAdapter) -> CaseResult:
 def kernel_failed_permits_retry(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, ALLOW)
     executor = Executor(NotExecuted("the remote rejected it before acting"), None)
-    request = CallRequest(world.control, REFUND, {"payment_id": "t8", "amount": 2000},
-                          "refund:t8", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "t8", "amount": 2000}, "refund:t8", executor
+    )
 
-    problem = expect("T8", kernel_failed_permits_retry.title,
-                     lambda: adapter.invoke(request), NotExecuted)
+    problem = expect(
+        "T8", kernel_failed_permits_retry.title, lambda: adapter.invoke(request), NotExecuted
+    )
     if problem:
         return problem
 
     try:
         adapter.invoke(request)
     except BaseException as refused:
-        return failed("T8", kernel_failed_permits_retry.title,
-                      f"a FAILED effect refused the retry with {type(refused).__name__}: {refused}")
+        return failed(
+            "T8",
+            kernel_failed_permits_retry.title,
+            f"a FAILED effect refused the retry with {type(refused).__name__}: {refused}",
+        )
     if executor.calls != 2:
-        return failed("T8", kernel_failed_permits_retry.title,
-                      f"the executor ran {executor.calls} times, expected 2")
+        return failed(
+            "T8",
+            kernel_failed_permits_retry.title,
+            f"the executor ran {executor.calls} times, expected 2",
+        )
     record = world.store.get_effect("refund:t8")
     if record is None or record.attempt != 2:
-        return failed("T8", kernel_failed_permits_retry.title,
-                      f"attempt is {record and record.attempt}, expected 2")
+        return failed(
+            "T8",
+            kernel_failed_permits_retry.title,
+            f"attempt is {record and record.attempt}, expected 2",
+        )
     return passed("T8", kernel_failed_permits_retry.title)
 
 
@@ -512,24 +561,33 @@ def kernel_expired_approval(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE)
     executor = Executor()
     arguments = {"payment_id": "t5", "amount": 2000}
-    request = CallRequest(world.control, REFUND, arguments, "refund:t5", executor,
-                          answer=granted(arguments))
+    request = CallRequest(
+        world.control, REFUND, arguments, "refund:t5", executor, answer=granted(arguments)
+    )
     world.watched.before = lambda: world.clock.advance(timedelta(hours=1))
 
-    problem = expect("T5", kernel_expired_approval.title, lambda: adapter.invoke(request),
-                     ApprovalTimeout)
+    problem = expect(
+        "T5", kernel_expired_approval.title, lambda: adapter.invoke(request), ApprovalTimeout
+    )
     if problem:
         return problem
     if not world.watched.calls:
-        return failed("T5", kernel_expired_approval.title,
-                      "the framework's primitive was never reached")
+        return failed(
+            "T5", kernel_expired_approval.title, "the framework's primitive was never reached"
+        )
     if executor.calls:
-        return failed("T5", kernel_expired_approval.title,
-                      f"an expired approval reached the executor {executor.calls} times")
+        return failed(
+            "T5",
+            kernel_expired_approval.title,
+            f"an expired approval reached the executor {executor.calls} times",
+        )
     if not world.pending():
-        return failed("T5", kernel_expired_approval.title,
-                      "the request was not left pending: an answer that arrived too late must "
-                      "not move the record a human could still be shown")
+        return failed(
+            "T5",
+            kernel_expired_approval.title,
+            "the request was not left pending: an answer that arrived too late must "
+            "not move the record a human could still be shown",
+        )
     return passed("T5", kernel_expired_approval.title)
 
 
@@ -539,24 +597,34 @@ def kernel_no_interrupt_on_allow(adapter: ConformanceAdapter) -> CaseResult:
     approval case: without it, an adapter that interrupts on everything passes them all."""
     world = World(adapter, ALLOW)
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "a1", "amount": 2000},
-                          "refund:a1", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "a1", "amount": 2000}, "refund:a1", executor
+    )
 
     try:
         adapter.invoke(request)
     except BaseException as raised:
-        return failed("A1", kernel_no_interrupt_on_allow.title,
-                      f"an allowed action raised {type(raised).__name__}: {raised}")
+        return failed(
+            "A1",
+            kernel_no_interrupt_on_allow.title,
+            f"an allowed action raised {type(raised).__name__}: {raised}",
+        )
     if executor.calls != 1:
-        return failed("A1", kernel_no_interrupt_on_allow.title,
-                      f"the executor ran {executor.calls} times, expected 1")
+        return failed(
+            "A1",
+            kernel_no_interrupt_on_allow.title,
+            f"the executor ran {executor.calls} times, expected 1",
+        )
     if "APPROVAL_REQUESTED" in world.events() or world.watched.calls:
-        return failed("A1", kernel_no_interrupt_on_allow.title,
-                      f"the adapter put an action the policy allowed outright to a human "
-                      f"({world.watched.calls} interrupts, "
-                      f"{world.events().count('APPROVAL_REQUESTED')} requests). A human asked "
-                      "about something nobody needed to approve is a human who stops reading "
-                      "the queue")
+        return failed(
+            "A1",
+            kernel_no_interrupt_on_allow.title,
+            f"the adapter put an action the policy allowed outright to a human "
+            f"({world.watched.calls} interrupts, "
+            f"{world.events().count('APPROVAL_REQUESTED')} requests). A human asked "
+            "about something nobody needed to approve is a human who stops reading "
+            "the queue",
+        )
     return passed("A1", kernel_no_interrupt_on_allow.title)
 
 
@@ -576,22 +644,37 @@ def binding_mutated_answer(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE)
     executor = Executor()
     request = CallRequest(
-        world.control, REFUND, {"payment_id": "b1", "amount": 2000}, "refund:b1", executor,
+        world.control,
+        REFUND,
+        {"payment_id": "b1", "amount": 2000},
+        "refund:b1",
+        executor,
         # The human answered about 500. The action proposes 2000.
         answer=granted({"payment_id": "b1", "amount": 500}),
     )
 
-    problem = expect("B1", binding_mutated_answer.title, lambda: adapter.invoke(request),
-                     ApprovalMismatch, "mismatch")
+    problem = expect(
+        "B1",
+        binding_mutated_answer.title,
+        lambda: adapter.invoke(request),
+        ApprovalMismatch,
+        "mismatch",
+    )
     if problem:
         return problem
     if executor.calls:
-        return failed("B1", binding_mutated_answer.title,
-                      f"a mutated answer reached the executor {executor.calls} times")
+        return failed(
+            "B1",
+            binding_mutated_answer.title,
+            f"a mutated answer reached the executor {executor.calls} times",
+        )
     if not world.pending():
-        return failed("B1", binding_mutated_answer.title,
-                      "the refused request was not left pending: a mutated answer must leave the "
-                      "approval the human actually saw still grantable")
+        return failed(
+            "B1",
+            binding_mutated_answer.title,
+            "the refused request was not left pending: a mutated answer must leave the "
+            "approval the human actually saw still grantable",
+        )
     return passed("B1", binding_mutated_answer.title)
 
 
@@ -601,21 +684,31 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE)
     executor = Executor()
     arguments = {"payment_id": "b2", "amount": 2000}
-    request = CallRequest(world.control, REFUND, arguments, "refund:b2", executor,
-                          answer=granted(arguments))
+    request = CallRequest(
+        world.control, REFUND, arguments, "refund:b2", executor, answer=granted(arguments)
+    )
 
     try:
         adapter.invoke(request)
     except BaseException as raised:
-        return failed("B2", binding_matching_answer.title,
-                      f"a matching answer was refused with {type(raised).__name__}: {raised}")
+        return failed(
+            "B2",
+            binding_matching_answer.title,
+            f"a matching answer was refused with {type(raised).__name__}: {raised}",
+        )
     if executor.calls != 1:
-        return failed("B2", binding_matching_answer.title,
-                      f"the executor ran {executor.calls} times, expected 1")
+        return failed(
+            "B2",
+            binding_matching_answer.title,
+            f"the executor ran {executor.calls} times, expected 1",
+        )
     if not world.watched.calls:
-        return failed("B2", binding_matching_answer.title,
-                      "the framework's primitive was never reached: an adapter that granted "
-                      "for itself never asked anybody")
+        return failed(
+            "B2",
+            binding_matching_answer.title,
+            "the framework's primitive was never reached: an adapter that granted "
+            "for itself never asked anybody",
+        )
     approvers = [receipt.approver for receipt in world.receipts()]
     # **Non-empty, not an exact match.** SPEC-v0.5 §2.2 blesses an adapter that cannot name who
     # answered writing what it does know -- a channel like `"openai-agents:tool-approval"` --
@@ -625,9 +718,12 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
     # carry the approver, its own tests assert it; that is the right home for the check, because
     # only they know the framework can.
     if not approvers or not all(name and name.strip() for name in approvers):
-        return failed("B2", binding_matching_answer.title,
-                      f"the receipt names {approvers}: an approval with no approver is evidence "
-                      "that answers the wrong question")
+        return failed(
+            "B2",
+            binding_matching_answer.title,
+            f"the receipt names {approvers}: an approval with no approver is evidence "
+            "that answers the wrong question",
+        )
     return passed("B2", binding_matching_answer.title)
 
 
@@ -645,7 +741,11 @@ def binding_denial(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE)
     executor = Executor()
     request = CallRequest(
-        world.control, REFUND, {"payment_id": "b3", "amount": 2000}, "refund:b3", executor,
+        world.control,
+        REFUND,
+        {"payment_id": "b3", "amount": 2000},
+        "refund:b3",
+        executor,
         answer=ApprovalAnswer(granted=False, approver=APPROVER),
     )
 
@@ -653,14 +753,19 @@ def binding_denial(adapter: ConformanceAdapter) -> CaseResult:
     if problem:
         return problem
     if executor.calls:
-        return failed("B3", binding_denial.title,
-                      f"a denied action reached the executor {executor.calls} times")
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"a denied action reached the executor {executor.calls} times",
+        )
     if not world.watched.calls:
-        return failed("B3", binding_denial.title,
-                      "the framework's primitive was never reached")
+        return failed("B3", binding_denial.title, "the framework's primitive was never reached")
     if "APPROVAL_DENIED" not in world.events():
-        return failed("B3", binding_denial.title,
-                      "no APPROVAL_DENIED: a human's no is an answer, and it belongs in the log")
+        return failed(
+            "B3",
+            binding_denial.title,
+            "no APPROVAL_DENIED: a human's no is an answer, and it belongs in the log",
+        )
     return passed("B3", binding_denial.title)
 
 
@@ -675,23 +780,28 @@ def duplicate_one_commit(adapter: ConformanceAdapter) -> CaseResult:
     that cached a decision, reused a request id, or memoized a receipt."""
     world = World(adapter, ALLOW)
     executor = Executor()
-    first = CallRequest(world.control, REFUND, {"payment_id": "d1", "amount": 2000},
-                        "refund:d1", executor)
-    second = CallRequest(world.control, REFUND, {"payment_id": "d1", "amount": 2000},
-                         "refund:d1", executor)
+    first = CallRequest(
+        world.control, REFUND, {"payment_id": "d1", "amount": 2000}, "refund:d1", executor
+    )
+    second = CallRequest(
+        world.control, REFUND, {"payment_id": "d1", "amount": 2000}, "refund:d1", executor
+    )
 
     adapter.invoke(first)
-    problem = expect("D1", duplicate_one_commit.title, lambda: adapter.invoke(second),
-                     DuplicateEffect)
+    problem = expect(
+        "D1", duplicate_one_commit.title, lambda: adapter.invoke(second), DuplicateEffect
+    )
     if problem:
         return problem
     if executor.calls != 1:
-        return failed("D1", duplicate_one_commit.title,
-                      f"the executor ran {executor.calls} times, expected 1")
+        return failed(
+            "D1", duplicate_one_commit.title, f"the executor ran {executor.calls} times, expected 1"
+        )
     committed = [receipt for receipt in world.receipts() if receipt.result == "committed"]
     if len(committed) != 1:
-        return failed("D1", duplicate_one_commit.title,
-                      f"{len(committed)} committed receipts, expected 1")
+        return failed(
+            "D1", duplicate_one_commit.title, f"{len(committed)} committed receipts, expected 1"
+        )
     return passed("D1", duplicate_one_commit.title)
 
 
@@ -702,20 +812,32 @@ def duplicate_one_commit(adapter: ConformanceAdapter) -> CaseResult:
 def authority_no_grant(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, NO_GRANT)
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "a66", "amount": 2000},
-                          "refund:a66", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "a66", "amount": 2000}, "refund:a66", executor
+    )
 
-    problem = expect("T66", authority_no_grant.title, lambda: adapter.invoke(request),
-                     AuthorityDenied, "no_authority")
+    problem = expect(
+        "T66",
+        authority_no_grant.title,
+        lambda: adapter.invoke(request),
+        AuthorityDenied,
+        "no_authority",
+    )
     if problem:
         return problem
     if executor.calls:
-        return failed("T66", authority_no_grant.title,
-                      f"an unauthorized action reached the executor {executor.calls} times")
+        return failed(
+            "T66",
+            authority_no_grant.title,
+            f"an unauthorized action reached the executor {executor.calls} times",
+        )
     if "POLICY_EVALUATED" in world.events():
-        return failed("T66", authority_no_grant.title,
-                      "POLICY_EVALUATED after an authority denial: authority runs first and a "
-                      "denial there skips policy (v0.3 §4.3)")
+        return failed(
+            "T66",
+            authority_no_grant.title,
+            "POLICY_EVALUATED after an authority denial: authority runs first and a "
+            "denial there skips policy (v0.3 §4.3)",
+        )
     return passed("T66", authority_no_grant.title)
 
 
@@ -723,16 +845,25 @@ def authority_no_grant(adapter: ConformanceAdapter) -> CaseResult:
 def authority_expired(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, EXPIRED_GRANT)
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "a70", "amount": 2000},
-                          "refund:a70", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "a70", "amount": 2000}, "refund:a70", executor
+    )
 
-    problem = expect("T70", authority_expired.title, lambda: adapter.invoke(request),
-                     AuthorityDenied, "authority_expired")
+    problem = expect(
+        "T70",
+        authority_expired.title,
+        lambda: adapter.invoke(request),
+        AuthorityDenied,
+        "authority_expired",
+    )
     if problem:
         return problem
     if executor.calls:
-        return failed("T70", authority_expired.title,
-                      f"an expired grant reached the executor {executor.calls} times")
+        return failed(
+            "T70",
+            authority_expired.title,
+            f"an expired grant reached the executor {executor.calls} times",
+        )
     return passed("T70", authority_expired.title)
 
 
@@ -740,20 +871,30 @@ def authority_expired(adapter: ConformanceAdapter) -> CaseResult:
 def authority_leaves_no_request(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, APPROVE_WITHOUT_AUTHORITY)
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "a74", "amount": 2000},
-                          "refund:a74", executor, answer=granted({"payment_id": "a74",
-                                                                  "amount": 2000}))
+    request = CallRequest(
+        world.control,
+        REFUND,
+        {"payment_id": "a74", "amount": 2000},
+        "refund:a74",
+        executor,
+        answer=granted({"payment_id": "a74", "amount": 2000}),
+    )
 
-    problem = expect("T74", authority_leaves_no_request.title, lambda: adapter.invoke(request),
-                     AuthorityDenied)
+    problem = expect(
+        "T74", authority_leaves_no_request.title, lambda: adapter.invoke(request), AuthorityDenied
+    )
     if problem:
         return problem
     if world.pending():
-        return failed("T74", authority_leaves_no_request.title,
-                      "a human was left a request for an action that could never run")
+        return failed(
+            "T74",
+            authority_leaves_no_request.title,
+            "a human was left a request for an action that could never run",
+        )
     if "APPROVAL_REQUESTED" in world.events():
-        return failed("T74", authority_leaves_no_request.title,
-                      "APPROVAL_REQUESTED after an authority denial")
+        return failed(
+            "T74", authority_leaves_no_request.title, "APPROVAL_REQUESTED after an authority denial"
+        )
     return passed("T74", authority_leaves_no_request.title)
 
 
@@ -764,15 +905,19 @@ def authority_leaves_no_request(adapter: ConformanceAdapter) -> CaseResult:
 def identity_provider_wins(adapter: ConformanceAdapter) -> CaseResult:
     world = World(adapter, ALLOW, principal="the-provider-said-this")
     executor = Executor()
-    request = CallRequest(world.control, REFUND, {"payment_id": "i63", "amount": 2000},
-                          "refund:i63", executor)
+    request = CallRequest(
+        world.control, REFUND, {"payment_id": "i63", "amount": 2000}, "refund:i63", executor
+    )
 
     adapter.invoke(request)
     agents = [receipt.principal.agent for receipt in world.receipts()]
     if agents != ["the-provider-said-this"]:
-        return failed("T63", identity_provider_wins.title,
-                      f"receipts name {agents}, expected ['the-provider-said-this']: an adapter "
-                      "sees the principal and never supplies one (SPEC-v0.5 §4.2)")
+        return failed(
+            "T63",
+            identity_provider_wins.title,
+            f"receipts name {agents}, expected ['the-provider-said-this']: an adapter "
+            "sees the principal and never supplies one (SPEC-v0.5 §4.2)",
+        )
     return passed("T63", identity_provider_wins.title)
 
 
@@ -789,16 +934,25 @@ def identity_no_principal(adapter: ConformanceAdapter) -> CaseResult:
         environment="production",
     )
     executor = Executor()
-    request = CallRequest(bare, REFUND, {"payment_id": "i60", "amount": 2000},
-                          "refund:i60", executor)
+    request = CallRequest(
+        bare, REFUND, {"payment_id": "i60", "amount": 2000}, "refund:i60", executor
+    )
 
-    problem = expect("T60", identity_no_principal.title, lambda: adapter.invoke(request),
-                     ActionDenied, "no_principal")
+    problem = expect(
+        "T60",
+        identity_no_principal.title,
+        lambda: adapter.invoke(request),
+        ActionDenied,
+        "no_principal",
+    )
     if problem:
         return problem
     if executor.calls:
-        return failed("T60", identity_no_principal.title,
-                      f"an unattributed action reached the executor {executor.calls} times")
+        return failed(
+            "T60",
+            identity_no_principal.title,
+            f"an unattributed action reached the executor {executor.calls} times",
+        )
     return passed("T60", identity_no_principal.title)
 
 
@@ -810,9 +964,15 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
     #: that the kit can reach without a hook into the adapter's own primitive. Expiry is
     #: exercised where it lives: at the provider (SPEC-v0.5 T129d, both halves) and in the
     #: kernel (`v0.1 §7` T5). Same treatment T2 and T3 get in §5.3.
-    "kernel": (kernel_lost_response, kernel_duplicate_after_approval, kernel_unknown_action,
-               kernel_failed_permits_retry, kernel_expired_approval,
-               kernel_no_interrupt_on_allow, binding_matching_answer),
+    "kernel": (
+        kernel_lost_response,
+        kernel_duplicate_after_approval,
+        kernel_unknown_action,
+        kernel_failed_permits_retry,
+        kernel_expired_approval,
+        kernel_no_interrupt_on_allow,
+        binding_matching_answer,
+    ),
     #: `binding` is the mutation check **alone**, and that is why it is its own suite. Its
     #: control (B2) and the denial case (B3) live in `kernel`, because both run whatever the
     #: framework carries back -- and a suite containing them would report `pass` for an adapter
@@ -864,8 +1024,9 @@ def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> Confo
                     outcomes.append(item.body(adapter))
                 except BaseException as broke:
                     outcomes.append(
-                        failed(item.id, item.title,
-                               f"the case raised {type(broke).__name__}: {broke}")
+                        failed(
+                            item.id, item.title, f"the case raised {type(broke).__name__}: {broke}"
+                        )
                     )
             results.append(SuiteResult.of(name, tuple(outcomes)))
     finally:

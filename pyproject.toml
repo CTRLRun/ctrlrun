@@ -46,6 +46,12 @@ dev = [
     # de-facto one and the test asserts structurally as well; `xmlschema` is used by that
     # test and by nothing else, and `ctrlrun` never imports it.
     "xmlschema>=3",
+    # SPEC-v0.5 §6.1 - T136 builds the wheel and the sdist and asserts neither carries an
+    # adapter. Without `build` here the test skipped, and it skipped in *both* CI jobs: the
+    # `check` job installs `[dev,gateway,otel,identity]`, and the sdist job installs the same
+    # four. A definition-of-done check that skips everywhere it runs is the false green this
+    # repository keeps finding, so the dependency is named rather than assumed.
+    "build>=1",
 ]
 # SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
 # third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.

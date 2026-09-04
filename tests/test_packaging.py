@@ -475,9 +475,19 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
     """SPEC-v0.5 §6.1. `pip install ctrlrun` must not grow, and an adapter is a **separate**
     distribution that depends on the kernel rather than the reverse.
 
-    The sdist half is not symmetry. v0.2 shipped four policy files it should not have,
-    precisely because `MANIFEST.in` resolves against the working tree — so the prune and the
-    assertion are both here, and both halves are checked.
+    What this test does **not** demonstrate is that `prune adapters` is load-bearing. It is
+    not: `packages.find` looks only in `src/`, so the sdist omits `adapters/` with the prune
+    removed, and mutation-testing it leaves this test green. The prune is belt and braces,
+    and `MANIFEST.in` now says so rather than taking credit.
+
+    What the test does catch is the direction that would actually happen — a
+    `recursive-include adapters *.py` added later by someone making the tests travel — which
+    puts every adapter in the sdist and turns this red. That is worth a test because
+    `MANIFEST.in` resolves against the working tree and not the index, which is how v0.2
+    shipped four policy files that every green build had already accounted for.
+
+    The wheel half is separate and is not subsumed: it fails if an adapter is ever moved
+    under `src/`, where `packages.find` would collect it.
     """
     import subprocess
     import sys
@@ -493,8 +503,15 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
             capture_output=True,
             text=True,
         )
-        if built.returncode != 0:  # pragma: no cover - `build` is a dev dependency
-            pytest.skip(f"python -m build is unavailable: {built.stderr[-300:]}")
+        # `build` is a dev dependency, so the only skip this test admits is the interpreter
+        # not having the module at all. Any *other* non-zero exit is a build that broke, and
+        # skipping on it would turn the one check standing between an adapter and the wheel
+        # into a check that reports nothing. It skipped in both CI jobs until `build` was
+        # named in `[dev]`; a skip that wide is indistinguishable from a pass.
+        if built.returncode != 0:
+            if "No module named build" in built.stderr:  # pragma: no cover - dev dependency
+                pytest.skip("python -m build is not installed")
+            raise AssertionError(f"python -m build failed:\n{built.stderr[-2000:]}")
 
         names: list[str] = []
         for artifact in Path(area).iterdir():
@@ -508,9 +525,7 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
     offending = [
         name
         for name in names
-        if "adapters/" in name
-        or "ctrlrun_langgraph" in name
-        or "ctrlrun_openai_agents" in name
+        if "adapters/" in name or "ctrlrun_langgraph" in name or "ctrlrun_openai_agents" in name
     ]
     assert not offending, offending
 
@@ -536,9 +551,9 @@ def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
     for adapter in sorted((root / "adapters").iterdir()):
         with (adapter / "pyproject.toml").open("rb") as handle:
             project = tomllib.load(handle)["project"]
-        assert any(
-            name.startswith("ctrlrun") for name in project["dependencies"]
-        ), f"{adapter.name} does not depend on ctrlrun"
+        assert any(name.startswith("ctrlrun") for name in project["dependencies"]), (
+            f"{adapter.name} does not depend on ctrlrun"
+        )
 
 
 def test_no_credential_file_is_tracked():

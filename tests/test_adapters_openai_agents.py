@@ -89,14 +89,19 @@ class FakeModel(Model):
         self.turns += 1
         if self.turns == 1:
             call = ResponseFunctionToolCall(
-                arguments=self._arguments, call_id="call_1", name=self._name,
-                type="function_call", id="fc_1",
+                arguments=self._arguments,
+                call_id="call_1",
+                name=self._name,
+                type="function_call",
+                id="fc_1",
             )
             return ModelResponse(output=[call], usage=Usage(), response_id=None)
         message = ResponseOutputMessage(
             id="msg_1",
             content=[ResponseOutputText(annotations=[], text="done", type="output_text")],
-            role="assistant", status="completed", type="message",
+            role="assistant",
+            status="completed",
+            type="message",
         )
         return ModelResponse(output=[message], usage=Usage(), response_id=None)
 
@@ -128,8 +133,9 @@ def agent_for(control: Control, calls: list[Any], *, name: str = "issue_refund")
 
     tool = protected_tool(control, "stripe.refund", tool_body, name_override=name)
     model = FakeModel(name, '{"payment_id": "txn_1", "amount": 2000}')
-    return Agent(name="refunds", instructions="You handle refunds.", tools=[tool],
-                 model=model), model
+    return Agent(
+        name="refunds", instructions="You handle refunds.", tools=[tool], model=model
+    ), model
 
 
 # --- the round trip, through the framework's own primitive ---------------------------------
@@ -277,9 +283,7 @@ class AgentsConformanceAdapter:
         parameters = ", ".join(request.arguments)
         forwarded = ", ".join(f"{name}={name}" for name in request.arguments)
         namespace: dict[str, Any] = {"_executor": request.executor}
-        exec(
-            f"def tool({parameters}):\n    return _executor({forwarded})", namespace
-        )
+        exec(f"def tool({parameters}):\n    return _executor({forwarded})", namespace)
         protected = protect(
             request.action,
             effect=request.effect,
@@ -288,8 +292,9 @@ class AgentsConformanceAdapter:
             control=request.control,
         )(namespace["tool"])
 
-        signature = ", ".join(f"{name}: {type(value).__name__}"
-                              for name, value in request.arguments.items())
+        signature = ", ".join(
+            f"{name}: {type(value).__name__}" for name, value in request.arguments.items()
+        )
         body: dict[str, Any] = {"_protected": protected}
         exec(
             f"async def tool_body({signature}) -> str:\n"
@@ -304,8 +309,11 @@ class AgentsConformanceAdapter:
         # `kernel` case reports "did not raise", which is what this SDK's default does to an
         # exception -- and it is why the helper exists.
         tool = protected_tool(
-            request.control, request.action, body["tool_body"],
-            resource="payment:{payment_id}", name_override="run_it",
+            request.control,
+            request.action,
+            body["tool_body"],
+            resource="payment:{payment_id}",
+            name_override="run_it",
         )
         model = FakeModel("run_it", json.dumps(dict(request.arguments)))
         return Agent(name="kit", instructions="do it", tools=[tool], model=model), model
@@ -368,8 +376,16 @@ def test_T135b_the_adapter_reuses_the_sdks_primitive_and_reimplements_nothing():
 
     assert "_needs_approval" in called, "the predicate is not core's"
     for reimplemented in (
-        "grant_approval", "deny_approval", "reserve_effect", "commit_effect",
-        "put_approval_request", "append_event", "Control", "Principal", "sleep", "input",
+        "grant_approval",
+        "deny_approval",
+        "reserve_effect",
+        "commit_effect",
+        "put_approval_request",
+        "append_event",
+        "Control",
+        "Principal",
+        "sleep",
+        "input",
     ):
         assert reimplemented not in called, reimplemented
     # A **polling** loop, not any loop: `unwrap` walks an exception's `__cause__` chain, which
@@ -377,7 +393,8 @@ def test_T135b_the_adapter_reuses_the_sdks_primitive_and_reimplements_nothing():
     # -- an unbounded loop, or one that sleeps -- because that is a queue of the adapter's own
     # with the serial numbers filed off.
     unbounded = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.While)
         and isinstance(node.test, ast.Constant)
         and node.test.value is True
@@ -513,8 +530,17 @@ def test_the_adapter_never_hands_back_the_arguments_it_was_given():
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
     pending = PendingApproval(
-        "apr_1", "act_1", "stripe.refund", "sha256:x", {"payment_id": "t", "amount": 1},
-        None, "production", "agent", None, now, now,
+        "apr_1",
+        "act_1",
+        "stripe.refund",
+        "sha256:x",
+        {"payment_id": "t", "amount": 1},
+        None,
+        "production",
+        "agent",
+        None,
+        now,
+        now,
     )
 
     answer = AgentsInterrupt().interrupt(pending)

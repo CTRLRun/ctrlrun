@@ -60,9 +60,7 @@ def build(document: str = APPROVE, *, carries: bool = True):
     control = Control(
         Policy.from_yaml(document, source="<test>"),
         store,
-        InterruptApprovalProvider(
-            store, LangGraphInterrupt(carries_approved_arguments=carries)
-        ),
+        InterruptApprovalProvider(store, LangGraphInterrupt(carries_approved_arguments=carries)),
         identity=StaticIdentityProvider("refund-agent"),
         environment="production",
     )
@@ -249,9 +247,7 @@ class LangGraphConformanceAdapter:
         parameters = ", ".join(request.arguments)
         forwarded = ", ".join(f"{name}={name}" for name in request.arguments)
         namespace: dict[str, Any] = {"_executor": request.executor}
-        exec(
-            f"def tool({parameters}):\n    return _executor({forwarded})", namespace
-        )
+        exec(f"def tool({parameters}):\n    return _executor({forwarded})", namespace)
         tool = protect(
             request.action,
             effect=request.effect,
@@ -355,8 +351,16 @@ def test_T135b_the_adapter_reimplements_nothing_and_grants_nothing():
         "the adapter does not use LangGraph's own primitive"
     )
     for reimplemented in (
-        "grant_approval", "deny_approval", "reserve_effect", "commit_effect",
-        "put_approval_request", "append_event", "Control", "Principal", "sleep", "input",
+        "grant_approval",
+        "deny_approval",
+        "reserve_effect",
+        "commit_effect",
+        "put_approval_request",
+        "append_event",
+        "Control",
+        "Principal",
+        "sleep",
+        "input",
     ):
         assert reimplemented not in called, reimplemented
     # A **polling** loop, not any loop: `unwrap` walks an exception's `__cause__` chain, which
@@ -364,7 +368,8 @@ def test_T135b_the_adapter_reimplements_nothing_and_grants_nothing():
     # -- an unbounded loop, or one that sleeps -- because that is a queue of the adapter's own
     # with the serial numbers filed off.
     unbounded = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.While)
         and isinstance(node.test, ast.Constant)
         and node.test.value is True
@@ -382,10 +387,7 @@ def readme() -> str:
 def declared() -> dict[str, str]:
     with (ADAPTER / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
-    return {
-        name.split(">")[0].split("<")[0].strip(): name
-        for name in project["dependencies"]
-    }
+    return {name.split(">")[0].split("<")[0].strip(): name for name in project["dependencies"]}
 
 
 def test_T137_the_readme_and_the_metadata_state_the_same_two_ranges():
@@ -522,9 +524,7 @@ def test_the_approver_names_a_channel_and_not_a_person():
     control = Control(
         Policy.from_yaml(APPROVE, source="<test>"),
         store,
-        InterruptApprovalProvider(
-            store, LangGraphInterrupt(carries_approved_arguments=False)
-        ),
+        InterruptApprovalProvider(store, LangGraphInterrupt(carries_approved_arguments=False)),
         identity=StaticIdentityProvider("refund-agent"),
         environment="production",
     )
@@ -554,8 +554,17 @@ def test_the_pending_approval_the_human_sees_carries_no_object_it_could_act_on()
     payload = pending.to_dict()
 
     assert set(payload) == {
-        "request_id", "action_id", "action", "action_hash", "arguments", "resource",
-        "environment", "agent", "user", "created_at", "expires_at",
+        "request_id",
+        "action_id",
+        "action",
+        "action_hash",
+        "arguments",
+        "resource",
+        "environment",
+        "agent",
+        "user",
+        "created_at",
+        "expires_at",
     }
     assert json.loads(json.dumps(payload)) == payload
 
@@ -564,9 +573,7 @@ def _record(action: Action):
     from datetime import timedelta
 
     store = InMemoryStateStore()
-    provider = InterruptApprovalProvider(
-        store, LangGraphInterrupt(carries_approved_arguments=True)
-    )
+    provider = InterruptApprovalProvider(store, LangGraphInterrupt(carries_approved_arguments=True))
     request = provider.request(action, timedelta(minutes=15))
     record = store.get_approval(request.request_id)
     assert record is not None
