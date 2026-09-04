@@ -63,12 +63,54 @@ def validate(document: Mapping[str, Any]) -> None:
             raise InvalidResults(f"results[{index}]: config_deviation must be null or a string")
 
 
+#: How much of a note reaches the table. Long enough for a sentence a reader can act on, short
+#: enough that one row stays one row.
+NOTE_LIMIT = 200
+
+
+def cell(value: str) -> str:
+    r"""One table cell, safe to render whoever wrote the string.
+
+    `notes` used to be written only by the harness's own authors. It now carries a measured
+    framework's exception text (`runner._notes`), and a `|` or a newline in one of those does
+    not make an ugly cell — it makes a **different table**: the row gains a phantom column and
+    then terminates, and everything after it becomes body text. A table that a framework's
+    error message can restructure is not "rendered from the JSON" in any sense that matters.
+
+    Whitespace collapses, `|` and `\` are escaped, and the result is truncated. The JSON keeps
+    the full string; this is the rendering.
+    """
+    collapsed = " ".join(str(value).split())
+    escaped = collapsed.replace("\\", "\\\\").replace("|", "\\|")
+    if len(escaped) <= NOTE_LIMIT:
+        return escaped
+    return escaped[: NOTE_LIMIT - 1].rstrip() + "…"
+
+
+def _notes_for(notes: Sequence[tuple[str, str]]) -> str:
+    """One cell for a framework's notes, labelled by scenario where the two differ.
+
+    Identical notes collapse: one note repeated for both scenarios says nothing twice. Where
+    they differ they are prefixed, because with per-scenario detail in them — a repetition
+    tally, an effect range — an unlabelled `a; b` leaves a reader guessing which row each
+    belongs to, and a table that has to be guessed at is one that will be quoted wrongly.
+    """
+    distinct = {note for _, note in notes}
+    if len(distinct) <= 1:
+        return next(iter(distinct), "")
+    return " | ".join(f"{scenario}: {note}" for scenario, note in notes)
+
+
 def to_markdown(document: Mapping[str, Any]) -> str:
     """The table §7.4 describes, rendered from the document and never stored.
 
     One row per framework, both scenarios side by side, and `config_deviation` as a column —
     not a footnote, not prose. A deviation a reader has to go looking for is one they will not
     find.
+
+    Every cell goes through `cell()`: some of what lands here was written by the projects the
+    table is about, and a table their exception text can reshape would be a table nobody can
+    trust to say what the JSON says.
     """
     validate(document)
     rows: Sequence[Mapping[str, Any]] = document["results"]
@@ -81,9 +123,8 @@ def to_markdown(document: Mapping[str, Any]) -> str:
         entry["scenarios"][row["scenario"]] = row["outcome"]
         if row["config_deviation"]:
             entry["deviation"] = row["config_deviation"]
-        if row["notes"] and row["notes"] not in entry["notes"]:
-            # Deduplicated: one note repeated for both scenarios says nothing twice.
-            entry["notes"].append(row["notes"])
+        if row["notes"]:
+            entry["notes"].append((row["scenario"], row["notes"]))
 
     lines = [
         f"<!-- Rendered from {document['run_at']} by framework_probe.results.to_markdown. "
@@ -96,10 +137,10 @@ def to_markdown(document: Mapping[str, Any]) -> str:
         entry = frameworks[name]
         scenarios = entry["scenarios"]
         lines.append(
-            f"| {name} | {entry['version']} | "
-            f"{scenarios.get('double-refund', '-')} | "
-            f"{scenarios.get('approval-mutation', '-')} | "
-            f"{entry['deviation'] or ''} | {'; '.join(entry['notes'])} |"
+            f"| {cell(name)} | {cell(entry['version'])} | "
+            f"{cell(scenarios.get('double-refund', '-'))} | "
+            f"{cell(scenarios.get('approval-mutation', '-'))} | "
+            f"{cell(entry['deviation'] or '')} | {cell(_notes_for(entry['notes']))} |"
         )
     lines += [
         "",

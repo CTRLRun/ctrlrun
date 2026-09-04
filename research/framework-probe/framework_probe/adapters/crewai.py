@@ -4,21 +4,23 @@ One agent, one task, one tool, `Crew.kickoff()` with the scenario prompt as the 
 description. `max_retry_limit` is left at its default: CrewAI's documented behaviour when a
 tool raises is what the row measures.
 
-**Never executed.** Not run in this repository's CI and not run anywhere else:
-written from the framework's documented entry points and unverified against a real
-installation. Nothing this adapter would report is a finding until somebody runs it.
+**Never run against a model, and never executed at all.** Not run in this repository's
+CI and not run anywhere else: written from the framework's documented entry points and
+unverified against a real installation, which is a weaker position than the LangGraph and
+Agents SDK adapters are in — those two at least reached a model call against a real
+install. Nothing this adapter would report is a finding until somebody runs it.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from ..scenarios import APPROVAL_MUTATION, Scenario
-from ._framework import call_remote, record_approval
+from ._framework import PROBE_MODEL, call_remote, record_approval
 from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
 
-MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
+#: One `CTRLRUN_PROBE_MODEL` for every adapter, unprefixed — see `_framework.PROBE_MODEL`.
+MODEL = PROBE_MODEL
 
 
 @dataclass
@@ -29,8 +31,14 @@ class CrewAIAdapter:
     #: scenario without one, so this is the single permitted change and it is in the table.
     config_deviation: str | None = "Task(expected_output=...) is required by CrewAI's API"
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `run()` imports nothing outside `crewai`.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ()
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)

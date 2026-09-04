@@ -17,11 +17,21 @@ results (§7.4), and why `README.md` records the version each adapter was writte
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
 
 REQUEST_TIMEOUT = 30.0
+
+#: The one model every adapter drives, so the table compares frameworks and not models
+#: (§7.3 rule 2). **Unprefixed**, and shared rather than repeated per adapter: it was
+#: `openai:gpt-4o-mini` in the LangGraph adapter and `gpt-4o-mini` in the Agents SDK's, so a
+#: maintainer who set `CTRLRUN_PROBE_MODEL` to either value broke the other framework's run,
+#: and the two defaults were quietly different models-as-written for one env var. LangChain's
+#: `init_chat_model` resolves a bare `gpt-*` to `ChatOpenAI` — checked against langchain 1.4.0,
+#: not assumed — and the Agents SDK takes the bare name, so one string serves both.
+PROBE_MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
 
 #: What a lost response surfaces as. An adapter must let its framework see these rather than
 #: swallowing them: whether the framework retries is the measurement.
