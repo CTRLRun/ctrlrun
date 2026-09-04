@@ -780,6 +780,60 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
     is_flag=True,
     help="Permit an http:// webhook url, loopback only.",
 )
+@click.option(
+    "--authority",
+    "authority_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Load the authority: section from a separate YAML document (SPEC-v0.3 §8.3).",
+)
+@click.option("--identity-jwt", is_flag=True, help="Verify a bearer JWT (ctrlrun[identity]).")
+@click.option("--identity-jwt-jwks-url", default=None, help="Fetch keys from this JWKS (HTTPS).")
+@click.option(
+    "--identity-jwt-public-key",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="A PEM public key file.",
+)
+@click.option(
+    "--identity-jwt-secret-file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read the HS* shared secret from here. Never a flag value: a secret on a command "
+    "line is in every process listing on the host.",
+)
+@click.option(
+    "--identity-jwt-algorithms",
+    "identity_jwt_algorithms",
+    multiple=True,
+    help="Repeatable, required. There is no default and no wildcard.",
+)
+@click.option("--identity-jwt-issuer", default=None, help="Matched exactly. Required.")
+@click.option("--identity-jwt-audience", default=None, help="Matched by membership. Required.")
+@click.option(
+    "--identity-jwt-token-type",
+    default=None,
+    help='Required. The token\'s typ, e.g. at+jwt. Pass "" for "this issuer sets no typ".',
+)
+@click.option("--identity-jwt-header", default="authorization", show_default=True)
+@click.option("--identity-jwt-agent-claim", default="sub", show_default=True)
+@click.option("--identity-jwt-user-claim", default=None, help="Which claim is principal.user.")
+@click.option(
+    "--identity-jwt-claim",
+    "identity_jwt_claims",
+    multiple=True,
+    help="Repeatable: which verified claims reach the receipt. An allow-list.",
+)
+@click.option("--identity-jwt-leeway", type=float, default=60.0, show_default=True)
+@click.option("--identity-jwt-jwks-min-refresh", type=float, default=30.0, show_default=True)
+@click.option(
+    "--identity-jwt-http-timeout",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="Bounds the JWKS fetch. Deliberately not --upstream-timeout: the fetch runs on the "
+    "request thread before any decision, so the two must not be one knob.",
+)
 @click.option("--otel", is_flag=True, help="Export one span per action (ctrlrun[otel]).")
 @click.option(
     "--otel-arguments",
@@ -805,6 +859,22 @@ def gateway(
     webhook_url: str | None,
     webhook_secret_file: str | None,
     allow_insecure_webhook: bool,
+    authority_path: str | None,
+    identity_jwt: bool,
+    identity_jwt_jwks_url: str | None,
+    identity_jwt_public_key: str | None,
+    identity_jwt_secret_file: str | None,
+    identity_jwt_algorithms: tuple[str, ...],
+    identity_jwt_issuer: str | None,
+    identity_jwt_audience: str | None,
+    identity_jwt_token_type: str | None,
+    identity_jwt_header: str,
+    identity_jwt_agent_claim: str,
+    identity_jwt_user_claim: str | None,
+    identity_jwt_claims: tuple[str, ...],
+    identity_jwt_leeway: float,
+    identity_jwt_jwks_min_refresh: float,
+    identity_jwt_http_timeout: float,
     otel: bool,
     otel_arguments: bool,
 ) -> None:
@@ -827,8 +897,9 @@ def gateway(
         # §6.5 — before anything else this command prints. The removed-flag guard above is a
         # usage error and runs first deliberately: it must not depend on a policy being
         # loadable, or a gateway started in a directory with no policy would report the wrong
-        # problem.
-        _announce_actions_without_an_effect(_loaded_policy())
+        # problem. The rest of §8.4's startup block is printed by `serve`, which is where the
+        # identity provider and the authority section are actually resolved.
+        _loaded_policy()
         serve(
             upstream=upstream,
             alias=alias,
@@ -847,6 +918,22 @@ def gateway(
             webhook_url=webhook_url,
             webhook_secret_file=webhook_secret_file,
             allow_insecure_webhook=allow_insecure_webhook,
+            authority=authority_path,
+            identity_jwt=identity_jwt,
+            identity_jwt_jwks_url=identity_jwt_jwks_url,
+            identity_jwt_public_key=identity_jwt_public_key,
+            identity_jwt_secret_file=identity_jwt_secret_file,
+            identity_jwt_algorithms=tuple(identity_jwt_algorithms),
+            identity_jwt_issuer=identity_jwt_issuer,
+            identity_jwt_audience=identity_jwt_audience,
+            identity_jwt_token_type=identity_jwt_token_type,
+            identity_jwt_header=identity_jwt_header,
+            identity_jwt_agent_claim=identity_jwt_agent_claim,
+            identity_jwt_user_claim=identity_jwt_user_claim,
+            identity_jwt_claims=tuple(identity_jwt_claims),
+            identity_jwt_leeway=identity_jwt_leeway,
+            identity_jwt_jwks_min_refresh=identity_jwt_jwks_min_refresh,
+            identity_jwt_http_timeout=identity_jwt_http_timeout,
             otel=otel,
             otel_arguments=otel_arguments,
         )
@@ -854,22 +941,6 @@ def gateway(
         raise _fail(exc) from exc
     except KeyboardInterrupt:  # pragma: no cover - an operator pressing ctrl-c
         click.echo("")
-
-
-def _announce_actions_without_an_effect(policy: Policy) -> None:
-    """SPEC-v0.2 §3.2 — print the actions with no `effect:` at startup.
-
-    A write with no effect key is exactly the configuration this product exists to prevent,
-    and it should be visible on the line that starts the process rather than discovered in a
-    receipt three weeks later.
-    """
-    keyless = sorted(name for name in policy.actions if policy.effect_template(name) is None)
-    if not keyless:
-        return
-    click.echo(f"{len(keyless)} action(s) have no effect: template and get no reservation:")
-    for name in keyless:
-        click.echo(f"  {name}")
-    click.echo("That is right for a read, and wrong for anything that changes the world.")
 
 
 def _receipt_line(receipt: Receipt) -> str:

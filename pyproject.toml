@@ -63,10 +63,11 @@ otel = [
 # third party: verifying somebody else's signature. Everything else — grants, containment,
 # delegation, observe mode — is stdlib and the YAML parser that is already a dependency.
 #
-# Empty until build-list item 5, which adds the verifier and the `pyjwt` line it needs. The
-# extra is declared now so `pip install 'ctrlrun[identity]'` names something real for the whole
-# of the 0.3 development series, and so CI installs it without a second edit.
-identity = []
+# `[crypto]` rather than bare `pyjwt`: without it PyJWT can only do `HS*`, and every
+# asymmetric algorithm — which is what a JWKS deployment uses — raises at verification time
+# rather than at install time. An extra that installs cleanly and then cannot verify an RS256
+# token is worse than one that names its dependency.
+identity = ["pyjwt[crypto]>=2.8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -137,6 +138,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # The OTel sink holds objects from a lazily-imported SDK: annotating them would mean
 # importing `opentelemetry` at module scope, which is the one thing §1.1 forbids.
 "src/ctrlrun/otel.py" = ["ANN401"]
+# Same reasoning for the JWT provider: the verifier, its exceptions and the key material a
+# JWK parses into all come from a lazily-imported `jwt`, and naming their types would mean
+# importing it at module scope. The claims themselves are untyped JSON off somebody else's
+# wire, validated at the boundary before anything reaches a `Principal`.
+"src/ctrlrun/jwt_identity.py" = ["ANN401"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]

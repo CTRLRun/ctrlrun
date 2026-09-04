@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias
 
 from ..action import Action, Principal
@@ -30,12 +31,20 @@ from ..errors import (
     AmbiguousEffect,
     ApprovalMismatch,
     ApprovalRequired,
+    AuthorityDenied,
     CTRLRunError,
     DuplicateEffect,
     EffectKeyError,
+    IdentityError,
     InvalidArgument,
     NotExecuted,
     Suspended,
+)
+from ..identity import (
+    HeaderIdentityProvider,
+    IdentityContext,
+    IdentityProvider,
+    StaticIdentityProvider,
 )
 from ..policy import OBSERVE
 from ..receipt import Receipt
@@ -88,6 +97,11 @@ NO_PRINCIPAL: Final = (-41007, "ctrlrun.no_principal", 403)
 UNREPRESENTABLE: Final = (-41008, "ctrlrun.unrepresentable_argument", 400)
 UNKNOWN_CONTINUATION: Final = (-41009, "ctrlrun.unknown_continuation", 400)
 UPSTREAM_AMBIGUOUS: Final = (-41010, "ctrlrun.upstream_ambiguous", 502)
+
+#: SPEC-v0.3 §8.4, frozen in §11. `-41001` means this action is not permitted to anyone in
+#: this configuration; `-41012` means it is not permitted to *you*. The second is worth a
+#: different message to a client and, in a multi-tenant deployment, a different alert.
+UNAUTHORIZED: Final = (-41012, "ctrlrun.unauthorized", 403)
 
 #: §6.8 — the `_meta` key every intercepted response carries, so a client is not left
 #: guessing what CTRLRun recorded. `com.ctrlrun/` is a legal prefix under the revision's
@@ -154,6 +168,28 @@ class GatewayConfig:
     max_elicitation_rounds: int = DEFAULT_MAX_ELICITATION_ROUNDS
     webhook_secret: str | None = None
     replay_window: float = 300.0
+    #: SPEC-v0.3 §8.2 — the third identity source. `--principal` and `--principal-header` are
+    #: understood as constructors for `StaticIdentityProvider` and `HeaderIdentityProvider`;
+    #: this one constructs `JWTIdentityProvider` out of `ctrlrun[identity]`.
+    identity_jwt: bool = False
+    identity_jwt_jwks_url: str | None = None
+    identity_jwt_public_key: str | None = None
+    identity_jwt_secret_file: str | None = None
+    identity_jwt_algorithms: tuple[str, ...] = ()
+    identity_jwt_issuer: str | None = None
+    identity_jwt_audience: str | None = None
+    #: `None` means the operator did not choose, and is refused; `""` is the explicit "this
+    #: issuer sets no `typ`" of §8.2. The two must stay distinguishable, because a default
+    #: would make RFC 8725 §3.11's cross-JWT defence something nobody ever saw.
+    identity_jwt_token_type: str | None = None
+    identity_jwt_header: str = "authorization"
+    identity_jwt_agent_claim: str = "sub"
+    identity_jwt_user_claim: str | None = None
+    identity_jwt_claims: tuple[str, ...] = ()
+    identity_jwt_leeway: float = 60.0
+    identity_jwt_jwks_min_refresh: float = 30.0
+    #: SPEC-v0.3 §3.4's default. Separate from `upstream_timeout` deliberately; see below.
+    identity_jwt_http_timeout: float = 5.0
 
     def __post_init__(self) -> None:
         import re
@@ -170,23 +206,129 @@ class GatewayConfig:
                 f"--path {self.path!r} must start with '/' and must not overlap "
                 f"{CTRLRUN_PREFIX!r}, which is reserved for the approvals endpoint"
             )
-        sources = [self.principal is not None, self.principal_header is not None]
+        sources = [
+            self.principal is not None,
+            self.principal_header is not None,
+            self.identity_jwt,
+        ]
         if sum(sources) != 1:
             raise InvalidArgument(
-                "exactly one of --principal or --principal-header is required; there is no "
-                "default, because an Action cannot exist without a principal (SPEC-v0.2 §6.5)"
+                "exactly one of --principal, --principal-header or --identity-jwt is required; "
+                "there is no default, because an Action cannot exist without a principal "
+                "(SPEC-v0.2 §6.5, SPEC-v0.3 §8.2)"
             )
         if self.user_header is not None and self.principal_header is None:
             # SPEC-v0.3 §8.2 — a flag that cannot take effect is a flag the operator believes
             # took effect.
             raise InvalidArgument(
-                "--user-header is only meaningful with --principal-header; with --principal "
-                "there is no request to read a user from"
+                "--user-header is only meaningful with --principal-header; with --identity-jwt "
+                "the user comes from --identity-jwt-user-claim, and with --principal from nowhere"
             )
+        self._check_jwt_flags()
         if self.host not in ("127.0.0.1", "localhost", "::1") and not self.allow_remote:
             raise InvalidArgument(
                 f"--listen {self.host} is not loopback; pass --allow-remote to mean it"
             )
+
+    def _check_jwt_flags(self) -> None:
+        """§8.2 — every `--identity-jwt-*` flag is accepted only with `--identity-jwt`.
+
+        And when it *is* given, the four settings that have no safe default must be there:
+        the algorithms, the issuer, the audience and the token type. The provider refuses the
+        same things at construction; this refuses them before the extra is even imported, so
+        an operator who has not installed it still learns what they got wrong.
+        """
+        given = {
+            "--identity-jwt-jwks-url": self.identity_jwt_jwks_url is not None,
+            "--identity-jwt-public-key": self.identity_jwt_public_key is not None,
+            "--identity-jwt-secret-file": self.identity_jwt_secret_file is not None,
+            "--identity-jwt-algorithms": bool(self.identity_jwt_algorithms),
+            "--identity-jwt-issuer": self.identity_jwt_issuer is not None,
+            "--identity-jwt-audience": self.identity_jwt_audience is not None,
+            "--identity-jwt-token-type": self.identity_jwt_token_type is not None,
+            "--identity-jwt-user-claim": self.identity_jwt_user_claim is not None,
+            "--identity-jwt-claim": bool(self.identity_jwt_claims),
+            "--identity-jwt-header": self.identity_jwt_header != "authorization",
+            "--identity-jwt-agent-claim": self.identity_jwt_agent_claim != "sub",
+            "--identity-jwt-leeway": self.identity_jwt_leeway != 60.0,
+            "--identity-jwt-jwks-min-refresh": self.identity_jwt_jwks_min_refresh != 30.0,
+            "--identity-jwt-http-timeout": self.identity_jwt_http_timeout != 5.0,
+        }
+        if not self.identity_jwt:
+            stray = sorted(name for name, present in given.items() if present)
+            if stray:
+                raise InvalidArgument(
+                    f"{', '.join(stray)} needs --identity-jwt; a flag that cannot take effect "
+                    "is a flag the operator believes took effect (SPEC-v0.3 §8.2)"
+                )
+            return
+        required = (
+            "--identity-jwt-algorithms",
+            "--identity-jwt-issuer",
+            "--identity-jwt-audience",
+            "--identity-jwt-token-type",
+        )
+        missing = sorted(name for name in required if not given[name])
+        if missing:
+            raise InvalidArgument(
+                f"--identity-jwt needs {', '.join(missing)}. There is no default for any of "
+                "them: an unpinned algorithm, issuer or audience is a token from somewhere "
+                'else, and an unpinned type is an ID token (pass "" to mean "this issuer sets '
+                'no typ")'
+            )
+
+
+def identity_provider(config: GatewayConfig) -> IdentityProvider:
+    """The provider this gateway's flags name (SPEC-v0.3 §8.2).
+
+    `--principal` is a `StaticIdentityProvider`, `--principal-header` a
+    `HeaderIdentityProvider`, `--identity-jwt` a `JWTIdentityProvider` out of
+    `ctrlrun[identity]`. Exactly one, checked by `GatewayConfig`, so this never has to decide
+    between two.
+
+    The JWT import is here rather than at module scope: `import ctrlrun` must not pull in
+    `jwt` (§1.1), and an operator who selected the extra without installing it gets
+    `MissingDependency` naming the command rather than a `ModuleNotFoundError`.
+    """
+    if config.principal is not None:
+        return StaticIdentityProvider(agent=config.principal)
+    if config.principal_header is not None:
+        return HeaderIdentityProvider(
+            agent_header=config.principal_header, user_header=config.user_header
+        )
+    from ..jwt_identity import JWTIdentityProvider
+
+    assert config.identity_jwt_issuer is not None
+    assert config.identity_jwt_audience is not None
+    assert config.identity_jwt_token_type is not None
+    secret = None
+    if config.identity_jwt_secret_file is not None:
+        # §8.2 — from a file, never from a flag value: a shared secret on a command line is in
+        # every process listing on the host.
+        secret = Path(config.identity_jwt_secret_file).read_text(encoding="utf-8").strip()
+    return JWTIdentityProvider(
+        jwks_url=config.identity_jwt_jwks_url,
+        public_key=config.identity_jwt_public_key,
+        secret=secret,
+        algorithms=config.identity_jwt_algorithms,
+        issuer=config.identity_jwt_issuer,
+        audience=config.identity_jwt_audience,
+        # §8.2 — `""` on the command line is the explicit "this issuer sets no typ", which the
+        # provider spells `None` and warns about at construction.
+        token_type=config.identity_jwt_token_type or None,
+        header=config.identity_jwt_header,
+        agent_claim=config.identity_jwt_agent_claim,
+        user_claim=config.identity_jwt_user_claim,
+        claim_names=config.identity_jwt_claims,
+        leeway=timedelta(seconds=config.identity_jwt_leeway),
+        jwks_min_refresh_interval=timedelta(seconds=config.identity_jwt_jwks_min_refresh),
+        # §3.4's own default, **not** `--upstream-timeout`. The fetch runs synchronously on
+        # the request thread, before authority and before policy, so borrowing the upstream's
+        # timeout would mean an operator who raised it for a slow tool server had silently
+        # made every unknown-`kid` request stall that long — two unrelated knobs, coupled in
+        # the fail-slow direction, in a value nothing documents.
+        http_timeout=timedelta(seconds=config.identity_jwt_http_timeout),
+    )
 
 
 @dataclass
@@ -232,10 +374,23 @@ class Gateway:
         self._config = config
         self._control = control
         self._forward = forwarder
+        # SPEC-v0.3 §8.2 — `--principal` and `--principal-header` are constructors now, not a
+        # second way of naming a principal. One code path resolves every identity, so a
+        # provider's decline and its refusal mean the same thing here as they do in-process.
+        self._identity = identity_provider(config)
 
     @property
     def config(self) -> GatewayConfig:
         return self._config
+
+    @property
+    def identity(self) -> IdentityProvider:
+        """The provider this gateway resolves every principal from (SPEC-v0.3 §8.2).
+
+        Exposed so the startup block can name it without constructing a second one — and a
+        second one would warn twice, which is how a warning that matters gets filtered.
+        """
+        return self._identity
 
     # --- the request path ---------------------------------------------------------------
 
@@ -303,18 +458,55 @@ class Gateway:
 
     def _intercept(self, parsed: ParsedRequest, headers: Mapping[str, str]) -> _Response:
         request_id = parsed.document.get("id")
-        principal = self._principal(parsed, headers)
+        # §8.2 — the action name is resolved first because `IdentityContext.action` carries it:
+        # a provider is told what it is resolving a principal *for*.
+        action_name = f"mcp.{self._config.alias}.{parsed.tool_name}"
+        code, token, status = NO_PRINCIPAL
+        try:
+            principal = self._identity.resolve(
+                IdentityContext(
+                    action=action_name,
+                    environment=self._control.environment,
+                    headers={name.lower(): value for name, value in headers.items()},
+                )
+            )
+        except IdentityError as refused:
+            # §8.2 — a distinct message, and nothing about why. The client learns that its
+            # credential was rejected, which is the correct amount to tell an unauthenticated
+            # caller. No receipt and no events: no principal was produced (§9).
+            _LOG.warning("refused %s: %s", action_name, refused)
+            return _json(
+                status,
+                json_rpc_error(request_id, code, token, "the credential offered was rejected"),
+            )
+        except Exception as exc:
+            # §3.2 — one exception type for a caller to catch. `Control._ask_provider` applies
+            # this rule in-process and the gateway does not go through it, so without this a
+            # custom provider hitting a transient error reaches `socketserver`, which closes
+            # the socket with no response. `IdentityProvider` is public API: this is any
+            # deployment's own provider on a bad day, not an attack.
+            #
+            # A `BaseException` that is not an `Exception` propagates, for v0.1 §5.5's reason.
+            _LOG.warning(
+                "refused %s: identity provider %s raised %s: %s",
+                action_name,
+                type(self._identity).__name__,
+                type(exc).__name__,
+                exc,
+            )
+            return _json(
+                status,
+                json_rpc_error(request_id, code, token, "the credential offered was rejected"),
+            )
         if principal is None:
             # §6.5 — no principal to attribute the refusal to, so it does not belong in the
             # evidence log; and it must not be silent either.
             _LOG.warning("refused %s: no principal derivable from the request", parsed.tool_name)
-            code, token, status = NO_PRINCIPAL
             return _json(
                 status,
                 json_rpc_error(request_id, code, token, "no principal could be derived"),
             )
 
-        action_name = f"mcp.{self._config.alias}.{parsed.tool_name}"
         try:
             action = self._action(action_name, parsed, principal)
         except _Unrepresentable as refused:
@@ -330,23 +522,6 @@ class Gateway:
             return _json(status, json_rpc_error(request_id, code, token, str(refused)))
 
         return self._execute(action, parsed, headers, request_id)
-
-    def _principal(self, parsed: ParsedRequest, headers: Mapping[str, str]) -> Principal | None:
-        """§6.5 — exactly one source, configured at startup, and no default."""
-        agent: str | None = None
-        if self._config.principal is not None:
-            agent = self._config.principal
-        else:
-            assert self._config.principal_header is not None
-            agent = _header(headers, self._config.principal_header.lower())
-        if not isinstance(agent, str) or not agent:
-            return None
-        user = (
-            _header(headers, self._config.user_header.lower())
-            if self._config.user_header is not None
-            else None
-        )
-        return Principal(agent=agent, user=user or None)
 
     def _action(self, action_name: str, parsed: ParsedRequest, principal: Principal) -> Action:
         """§6.6 — the Action a `tools/call` becomes.
@@ -480,6 +655,35 @@ class Gateway:
         code, token, status = UNKNOWN_CONTINUATION
         try:
             receipt = self._control.resume(presented, executor)
+        except AuthorityDenied as refused:
+            # SPEC-v0.3 §5.6.1 — an operator ran `ctrlrun revoke` while a human was answering
+            # an elicitation, and the lease extension is refused. Without this the exception
+            # leaves `handle` and `socketserver` closes the socket with no response at all,
+            # which a client reads as a transport failure and retries — the one thing this
+            # library exists to prevent.
+            code, token, status = UNAUTHORIZED
+            return _json(
+                status,
+                json_rpc_error(
+                    request_id,
+                    code,
+                    token,
+                    str(refused),
+                    reason=refused.reason,
+                    action_id=action.action_id,
+                ),
+            )
+        except IdentityError as refused:
+            _LOG.warning("refused a continuation for %s: %s", action.name, refused)
+            # §2.3.1 — the credential expired mid-round-trip. Same shape, same reason: the
+            # reservation is not held, the lease lapses, and the record becomes AMBIGUOUS by
+            # the ordinary path. What must not happen is the client learning that by having
+            # its connection dropped.
+            code, token, status = NO_PRINCIPAL
+            return _json(
+                status,
+                json_rpc_error(request_id, code, token, "the credential offered was rejected"),
+            )
         except Suspended:
             key = self._control.policy.effect_template(action.name)
             resolved = None if key is None else resolve_effect_key(key, action)
@@ -514,7 +718,11 @@ class Gateway:
         from ..control import with_approval
 
         approval = None
-        if self._control.policy.evaluate(action).decision.value == "approve":
+        # SPEC-v0.3 §8.3 — the **combined** decision of §4.6, not the policy axis alone.
+        # `Control.evaluate` reads the store to resolve delegations and still writes nothing.
+        # Left as `Policy.evaluate`, an action a grant forbids outright would still have its
+        # approval flow run, and a human would be asked about a call that could never run.
+        if self._control.evaluate(action).decision.value == "approve":
             approval = self._control.store.find_granted_approval(action.action_hash)
             if approval is None and self._control.policy.mode != OBSERVE:
                 # SPEC-v0.3 §6.2 — §6.10's pre-check exists to spare a human, and it spares
@@ -532,6 +740,23 @@ class Gateway:
                     receipt = self._control.execute(action, executor, effect_key)
             else:
                 receipt = self._control.execute(action, executor, effect_key)
+        except AuthorityDenied as refused:
+            # SPEC-v0.3 §8.4 — **before** `ActionDenied`, which it subclasses. The other order
+            # makes this branch unreachable and reports every authority denial as `-41001`,
+            # while every test asserting only "it was refused" stays green. T91 pins both
+            # halves so the discrimination cannot quietly collapse.
+            code, token, status = UNAUTHORIZED
+            return _json(
+                status,
+                json_rpc_error(
+                    request_id,
+                    code,
+                    token,
+                    str(refused),
+                    reason=refused.reason,
+                    action_id=action.action_id,
+                ),
+            )
         except ActionDenied as refused:
             code, token, status = DENIED
             return _json(
@@ -544,6 +769,20 @@ class Gateway:
                     reason=refused.reason,
                     action_id=action.action_id,
                 ),
+            )
+        except IdentityError as refused:
+            # SPEC-v0.3 §2.3 — `Control.execute` refuses an expired principal with
+            # `IdentityError`, which is deliberately **not** an `ActionDenied` (§11): an agent
+            # loop's `except ActionDenied` is written for a policy saying no. So it needs its
+            # own clause here, and it is routinely reachable rather than adversarial —
+            # `JWTIdentityProvider` admits a token up to `leeway` past its `exp` and then
+            # stamps `Principal.expires_at` with that exact `exp`, so every token presented
+            # inside that window is admitted by the provider and refused by the kernel.
+            _LOG.warning("refused %s: %s", action.name, refused)
+            code, token, status = NO_PRINCIPAL
+            return _json(
+                status,
+                json_rpc_error(request_id, code, token, "the credential offered was rejected"),
             )
         except ApprovalRequired as pending:
             return self._awaiting(action, pending, request_id)
@@ -746,7 +985,16 @@ def _repeated_identity_header(
     it does not recognize.
     """
     watched = {
-        name.lower() for name in (config.principal_header, config.user_header) if name is not None
+        name.lower()
+        for name in (
+            config.principal_header,
+            config.user_header,
+            # §8.2 — the JWT provider reads a header too, and it is the one that carries the
+            # credential. Leaving it out would make §3.1's rule apply to the weaker sources
+            # and not to the strong one.
+            config.identity_jwt_header if config.identity_jwt else None,
+        )
+        if name is not None
     }
     if not watched:
         return None
@@ -950,3 +1198,13 @@ def serve_forever(gateway: Gateway) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+class _Unreachable(Exception):
+    """Never raised. It exists so a mutation table can make one `except` clause dead.
+
+    Swapping a clause's exception type for this one is the only way to ask "does anything
+    exercise this handler?" without deleting the branch and changing the shape of the code
+    around it. Three of these handlers had no test at all until an independent review found
+    them, and each answered a refusal by dropping the client's connection.
+    """

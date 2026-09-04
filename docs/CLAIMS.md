@@ -41,7 +41,7 @@ Every sentence the README gained in this release, mapped the same way.
 |---|---|---|
 | "Point the client at the gateway instead of at the tool server" | `Gateway.handle` — `gateway/server.py:135`; `serve` — `gateway/server.py:892` | `test_T19_the_upstream_receives_the_canonical_arguments` |
 | "No agent changes" | `tools/call` is intercepted and every other method relayed unchanged — `gateway/mcp.py:84` | `test_a_non_intercepted_method_is_relayed_with_no_ctrlrun_outcome` |
-| "The gateway prints … every action in your policy that has no `effect:` template" | `_announce_actions_without_an_effect` — `cli/main.py` | Shown in the README block; produced by `Policy.effect_template` — `policy.py:281` |
+| "The gateway prints … every action in your policy that has no `effect:` template" | `_announce` — `gateway/__init__.py` (it moved out of `cli/main.py` with SPEC-v0.3 §8.4, which added the environment, the identity provider and the authority section to the same block) | `test_the_startup_block_names_the_environment_identity_and_authority`, `test_the_startup_block_says_so_when_there_is_no_authority_section` |
 | "Tools become actions named `mcp.<alias>.<tool>`" | `Gateway._intercept` — `gateway/server.py` | `test_T19_the_action_is_named_for_the_alias_and_the_tool` |
 | "Declare their effect and resource templates there" | `Policy.effect_template` / `resource_template` — `policy.py:281`; `McpOptions` — `policy.py:187` | `test_T16_a_v2_document_loads_and_exposes_its_templates`, `test_T16_a_decorator_and_a_policy_template_produce_the_same_action_hash` |
 | "Everything but `tools/call` is relayed untouched" | `parse_request(...).intercept` — `gateway/mcp.py:84` | `test_every_other_method_is_relayed_not_intercepted` |

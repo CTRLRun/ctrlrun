@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -875,3 +876,703 @@ def test_a_call_inside_the_grant_is_forwarded(authority_client, upstream):
 
     assert len(upstream.calls) == 1
     assert "error" not in response.json()
+
+
+# --- T91: the gateway enforces authority, distinguishably (SPEC-v0.3 §8.4) --------------
+
+
+@pytest.mark.authority
+def test_T91_a_call_outside_the_grant_is_41012_and_never_reaches_the_upstream(
+    authority_client, upstream, store
+):
+    """§8.4 — `-41001` means this action is not permitted to anyone in this configuration;
+    `-41012` means it is not permitted to *you*. A client answers the two differently."""
+    response = _post(
+        authority_client,
+        _call(arguments={"amount": 200, "payment_id": "pi_1"}),
+        headers={"X-Agent": "someone-else"},
+    )
+
+    assert response.status_code == 403
+    assert _error(response)["code"] == -41012
+    assert _error(response)["data"]["error"] == "ctrlrun.unauthorized"
+    assert _error(response)["data"]["reason"] == "no_authority"
+    assert upstream.calls == []
+    assert store.receipts()[-1].result is ReceiptResult.DENIED
+    assert store.receipts()[-1].decision_reason == "no_authority"
+
+
+@pytest.mark.authority
+def test_T91_a_policy_denial_under_the_same_authority_section_is_still_41001(upstream, store):
+    """The other half, and the one that pins the discrimination: widening the
+    `AuthorityDenied` handler to `ActionDenied`, or ordering the two `except` clauses the
+    other way, returns a plausible code and fails *this* test rather than the one above."""
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: everything
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.**"]
+"""
+    from ctrlrun import Authority
+
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(grant, standalone=True))
+    body = _call(arguments={"amount": 90000000, "payment_id": "pi_9"})
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    assert response.status == 403
+    error = json.loads(response.body)["error"]
+    assert error["code"] == -41001
+    assert error["data"]["error"] == "ctrlrun.denied"
+    assert upstream.calls == []
+
+
+@pytest.mark.authority
+def test_T91_a_call_inside_the_grant_reaches_the_upstream(authority_client, upstream):
+    upstream.respond({"resultType": "complete", "content": []})
+
+    response = _post(
+        authority_client,
+        _call(arguments={"amount": 1000, "payment_id": "pi_2"}),
+        headers={"X-Agent": "refund-agent"},
+    )
+
+    assert len(upstream.calls) == 1
+    assert "error" not in response.json()
+
+
+def _lowered(headers):
+    return {name.lower(): value for name, value in headers.items()}
+
+
+def _gateway_with(store, upstream, authority, *, mode="enforce", **config_overrides):
+    """One `Gateway` over a real forwarder, with the authority section a test wants."""
+    document = POLICY.replace("ctrlrun.policy/v2", f"ctrlrun.policy/v3\nmode: {mode}")
+    control = Control(Policy.from_yaml(document), store, authority=authority)
+    base = {
+        "upstream": upstream.url,
+        "alias": "acme",
+        "principal_header": "X-Agent",
+        "port": 0,
+    }
+    config = GatewayConfig(**{**base, **config_overrides})
+    return Gateway(config, control, httpx_forwarder(config))
+
+
+# --- T91b: the approval gate uses the combined decision (§8.3) --------------------------
+
+
+@pytest.mark.authority
+def test_T91b_the_approval_flow_works_with_an_authority_section_loaded(upstream, store):
+    """§8.3 — three places in shipped v0.2 code read `Policy.evaluate` directly, and the
+    gateway's `tools/call` path is one. Left alone, this flow still works, so the change is
+    pinned by what it *stops*: a call a grant forbids no longer runs the approval flow."""
+    from ctrlrun import Authority
+
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: everything
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.**"]
+"""
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(grant, standalone=True))
+    upstream.respond({"resultType": "complete", "content": []})
+    body = _call(arguments={"amount": 500000, "payment_id": "pi_3"})
+    headers = _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+
+    first = gateway.handle(json.dumps(body).encode(), headers)
+
+    assert json.loads(first.body)["error"]["code"] == -41002
+    assert upstream.calls == []
+
+    request_id = json.loads(first.body)["error"]["data"]["request_id"]
+    store.grant_approval(request_id, "human:test")
+    second = gateway.handle(json.dumps(body).encode(), headers)
+
+    assert "error" not in json.loads(second.body)
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.authority
+def test_T91b_an_action_a_grant_forbids_never_reaches_the_approval_flow(upstream, store):
+    """The half that only the combined decision gets right: with `Policy.evaluate` alone the
+    pre-check would run the approval flow for a call the grant forbids outright, and a human
+    would be paged about an action that could never run."""
+    from ctrlrun import Authority
+
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: small-refunds-only
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.create_refund"]
+      constraints: { amount_lte: 20000 }
+"""
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(grant, standalone=True))
+    body = _call(arguments={"amount": 500000, "payment_id": "pi_4"})
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    assert json.loads(response.body)["error"]["code"] == -41012
+    assert store.approvals_for(store.receipts()[-1].action_hash) == ()
+    assert "APPROVAL_REQUESTED" not in [str(event.type) for event in store.events()]
+
+
+# --- T91c: in observe mode the gateway forwards everything (§8.4) ----------------------
+
+
+@pytest.mark.authority
+def test_T91c_in_observe_mode_a_call_outside_the_grant_is_forwarded(upstream, store):
+    """§8.4 — no `-41001`, no `-41012`, no `-41002`; the client sees the upstream's response
+    and the would-have decision lives in the receipt. A gateway that returned an error while
+    claiming not to enforce would be enforcing."""
+    from ctrlrun import Authority
+
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: someone-else-entirely
+      subject: { agent: "other-agent" }
+      actions: ["mcp.acme.**"]
+"""
+    gateway = _gateway_with(
+        store, upstream, Authority.from_yaml(grant, standalone=True), mode="observe"
+    )
+    upstream.respond({"resultType": "complete", "content": []})
+    body = _call(arguments={"amount": 200, "payment_id": "pi_5"})
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    assert "error" not in json.loads(response.body)
+    assert len(upstream.calls) == 1
+    receipt = store.receipts()[-1]
+    assert receipt.result is ReceiptResult.OBSERVED
+    assert receipt.would_have.blocked_reason == "no_authority"
+
+
+@pytest.mark.authority
+def test_T91c_the_same_call_under_enforce_is_refused(upstream, store):
+    """The control: without it, an upstream that was never reachable would satisfy the test
+    above by returning an error for a different reason."""
+    from ctrlrun import Authority
+
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: someone-else-entirely
+      subject: { agent: "other-agent" }
+      actions: ["mcp.acme.**"]
+"""
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(grant, standalone=True))
+    body = _call(arguments={"amount": 200, "payment_id": "pi_5"})
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    assert json.loads(response.body)["error"]["code"] == -41012
+    assert upstream.calls == []
+
+
+# --- SPEC-v0.3 §8.2: exactly one identity source, and no flag that cannot take effect ----
+
+
+IDENTITY_BASE = {"upstream": "http://127.0.0.1:1/mcp", "alias": "acme"}
+JWT_MINIMUM = {
+    "identity_jwt": True,
+    "identity_jwt_secret_file": None,
+    "identity_jwt_public_key": None,
+    "identity_jwt_jwks_url": "https://issuer.example/jwks",
+    "identity_jwt_algorithms": ("RS256",),
+    "identity_jwt_issuer": "https://issuer.example",
+    "identity_jwt_audience": "https://ctrlrun.example",
+    "identity_jwt_token_type": "at+jwt",
+}
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {},
+        {"principal": "bot", "principal_header": "X-Agent"},
+        {"principal": "bot", **JWT_MINIMUM},
+        {"principal_header": "X-Agent", **JWT_MINIMUM},
+        {"principal": "bot", "principal_header": "X-Agent", **JWT_MINIMUM},
+    ],
+    ids=["none", "two-classic", "static-and-jwt", "header-and-jwt", "all-three"],
+)
+def test_exactly_one_identity_source_is_required_and_the_three_are_named(sources):
+    """§8.2 — giving two, or none, exits non-zero naming the three. There is still no
+    default, because an Action cannot exist without a principal."""
+    with pytest.raises(InvalidArgument) as refused:
+        GatewayConfig(**IDENTITY_BASE, **sources)
+
+    message = str(refused.value)
+    assert "--principal" in message
+    assert "--principal-header" in message
+    assert "--identity-jwt" in message
+
+
+def _cli_jwt_flags():
+    """Every `--identity-jwt-*` option `ctrlrun gateway` actually declares.
+
+    Read off the command rather than written out here, and deliberately **not** off the
+    implementation's own `given` map: a list copied from the code under test mirrors it, and
+    cannot fail for the flag the code forgot. Two were forgotten, and the earlier version of
+    this test — parametrized from that map — was structurally unable to notice.
+    """
+    from ctrlrun.cli.main import gateway as gateway_command
+
+    return sorted(
+        parameter.name
+        for parameter in gateway_command.params
+        if parameter.name is not None
+        and parameter.name.startswith("identity_jwt_")
+        and parameter.name != "identity_jwt"
+    )
+
+
+#: A value for each that is different from its default, so "was it given" is unambiguous.
+_STRAY_VALUES = {
+    "identity_jwt_jwks_url": "https://x/jwks",
+    "identity_jwt_public_key": "/tmp/k.pem",
+    "identity_jwt_secret_file": "/tmp/s",
+    "identity_jwt_algorithms": ("RS256",),
+    "identity_jwt_issuer": "https://issuer.example",
+    "identity_jwt_audience": "https://ctrlrun.example",
+    "identity_jwt_token_type": "at+jwt",
+    "identity_jwt_user_claim": "email",
+    "identity_jwt_claims": ("scope",),
+    "identity_jwt_header": "x-token",
+    "identity_jwt_agent_claim": "client_id",
+    "identity_jwt_leeway": 99999.0,
+    "identity_jwt_jwks_min_refresh": 99999.0,
+    "identity_jwt_http_timeout": 99999.0,
+}
+
+
+def test_the_stray_value_table_covers_every_cli_flag():
+    """The guard on the guard: a new `--identity-jwt-*` option with no value here would make
+    the test below silently skip it."""
+    assert set(_cli_jwt_flags()) == set(_STRAY_VALUES), set(_cli_jwt_flags()) ^ set(_STRAY_VALUES)
+
+
+@pytest.mark.parametrize("flag", _cli_jwt_flags())
+def test_every_identity_jwt_flag_needs_identity_jwt(flag):
+    """§8.2 — a flag that cannot take effect is a flag the operator believes took effect."""
+    with pytest.raises(InvalidArgument, match="--identity-jwt"):
+        GatewayConfig(**IDENTITY_BASE, principal="bot", **{flag: _STRAY_VALUES[flag]})
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "identity_jwt_algorithms",
+        "identity_jwt_issuer",
+        "identity_jwt_audience",
+        "identity_jwt_token_type",
+    ],
+)
+def test_identity_jwt_refuses_the_four_settings_with_no_safe_default(missing):
+    """An unpinned algorithm, issuer or audience is a token from somewhere else, and an
+    unpinned type is an ID token. Refused before the extra is even imported, so an operator
+    who has not installed it still learns what they got wrong."""
+    options = dict(JWT_MINIMUM)
+    options[missing] = () if missing.endswith("algorithms") else None
+
+    with pytest.raises(InvalidArgument) as refused:
+        GatewayConfig(**IDENTITY_BASE, **options)
+
+    assert missing.replace("_", "-").replace("identity-jwt-", "--identity-jwt-") in str(
+        refused.value
+    )
+
+
+def test_an_empty_token_type_is_the_explicit_no_typ_and_is_accepted():
+    """§8.2 — `""` means "this issuer sets no typ", and it must stay distinguishable from
+    "not passed": a default would make RFC 8725 §3.11's defence something nobody ever saw."""
+    config = GatewayConfig(**IDENTITY_BASE, **{**JWT_MINIMUM, "identity_jwt_token_type": ""})
+
+    assert config.identity_jwt_token_type == ""
+
+
+def test_user_header_is_refused_with_identity_jwt():
+    with pytest.raises(InvalidArgument, match="--identity-jwt-user-claim"):
+        GatewayConfig(**IDENTITY_BASE, **JWT_MINIMUM, user_header="X-User")
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"principal": "bot"}, "StaticIdentityProvider"),
+        ({"principal_header": "X-Agent"}, "HeaderIdentityProvider"),
+        (JWT_MINIMUM, "JWTIdentityProvider"),
+    ],
+    ids=["static", "header", "jwt"],
+)
+def test_each_flag_constructs_the_provider_it_names(config, expected):
+    """§8.2 — `--principal` and `--principal-header` are understood as constructors now, not
+    as a second way of naming a principal."""
+    from ctrlrun.gateway.server import identity_provider
+
+    provider = identity_provider(GatewayConfig(**IDENTITY_BASE, **config))
+
+    assert type(provider).__name__ == expected
+
+
+def test_the_jwt_secret_is_read_from_a_file_and_never_from_a_flag(tmp_path):
+    """§8.2 — a shared secret on a command line is in every process listing on the host."""
+    from ctrlrun.gateway.server import identity_provider
+
+    secret_file = tmp_path / "secret"
+    secret_file.write_text("  hunter2  \n")
+    config = GatewayConfig(
+        **IDENTITY_BASE,
+        identity_jwt=True,
+        identity_jwt_secret_file=str(secret_file),
+        identity_jwt_algorithms=("HS256",),
+        identity_jwt_issuer="https://issuer.example",
+        identity_jwt_audience="https://ctrlrun.example",
+        identity_jwt_token_type="at+jwt",
+    )
+
+    provider = identity_provider(config)
+
+    assert type(provider).__name__ == "JWTIdentityProvider"
+    assert not any("hunter2" in str(value) for value in vars(config).values())
+
+
+def test_the_jwt_identity_header_is_watched_for_repetition(tmp_path):
+    """§3.1's rule has to reach the header that carries the *credential*, not only the weaker
+    sources. Without this it applies to `--principal-header` and not to `--identity-jwt`."""
+    from ctrlrun.gateway.server import _repeated_identity_header
+
+    config = GatewayConfig(**IDENTITY_BASE, **{**JWT_MINIMUM, "identity_jwt_header": "x-token"})
+    pairs = [("Content-Type", "application/json"), ("X-Token", "a"), ("x-token", "b")]
+
+    assert _repeated_identity_header(config, pairs) == "x-token"
+
+
+# --- SPEC-v0.3 §8.3: --authority loads the section from a separate document --------------
+
+
+AUTHORITY_DOCUMENT = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: refunds-only
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.create_refund"]
+      constraints: { amount_lte: 20000 }
+"""
+
+
+@pytest.mark.authority
+def test_the_authority_flag_loads_the_section_from_its_own_document(tmp_path, store):
+    """§8.3 — the person who writes grants and the person who writes per-action autonomy are
+    often not the same person, and a gateway is where that separation shows up first."""
+    from ctrlrun.gateway import _authority
+
+    path = tmp_path / "authority.yaml"
+    path.write_text(AUTHORITY_DOCUMENT)
+    control = Control(Policy.from_yaml(POLICY), store)
+
+    loaded = _authority(control, str(path))
+
+    assert set(loaded.grants) == {"refunds-only"}
+
+
+@pytest.mark.authority
+def test_declaring_authority_in_both_places_refuses_to_start(tmp_path, store):
+    """§8.3 — two sources for one section is the ambiguity `v0.1 §5.1` refuses for
+    `{resource}`. Silently preferring either would mean an operator who edited the wrong file
+    saw no effect and no error."""
+    from ctrlrun import Authority
+    from ctrlrun.gateway import _authority
+
+    path = tmp_path / "authority.yaml"
+    path.write_text(AUTHORITY_DOCUMENT)
+    control = Control(
+        Policy.from_yaml(POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v3")),
+        store,
+        authority=Authority.from_yaml(AUTHORITY_ONLY, standalone=True),
+    )
+
+    with pytest.raises(InvalidArgument) as refused:
+        _authority(control, str(path))
+
+    assert str(path) in str(refused.value)
+    assert control.policy.source in str(refused.value)
+
+
+@pytest.mark.parametrize("key", ["actions", "mode"])
+def test_an_authority_document_is_not_a_policy_document(tmp_path, store, key):
+    """§8.3 — its top-level key set is closed at exactly `schema` and `authority`. Two sources
+    for `mode:` would be two switches, which is the one thing §6.1 says there is not."""
+    from ctrlrun.errors import PolicyError
+    from ctrlrun.gateway import _authority
+
+    path = tmp_path / "authority.yaml"
+    extra = "actions:\n  x:\n    decision: allow\n" if key == "actions" else "mode: observe\n"
+    path.write_text(AUTHORITY_DOCUMENT + extra)
+
+    with pytest.raises(PolicyError) as refused:
+        _authority(Control(Policy.from_yaml(POLICY), store), str(path))
+
+    assert str(path) in str(refused.value)
+    assert key in str(refused.value)
+
+
+# --- SPEC-v0.3 §8.4: the startup block ---------------------------------------------------
+
+
+@pytest.mark.authority
+def test_the_startup_block_names_the_environment_identity_and_authority(capsys, store, upstream):
+    """§8.4 — everything here is something an operator can get wrong in a way that is
+    invisible until an incident. It goes on the line that starts the process."""
+    from ctrlrun import Authority
+    from ctrlrun.gateway import _announce
+
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(AUTHORITY_ONLY, standalone=True))
+    _announce(gateway._control, gateway.config, gateway.identity, None)
+    printed = capsys.readouterr().out
+
+    assert "environment  production" in printed
+    assert "HeaderIdentityProvider" in printed
+    assert "trusts the header 'X-Agent'" in printed
+    assert "1 grant(s)" in printed
+    assert "mcp.acme.read_only" in printed  # the action with no effect: template
+
+
+def test_the_startup_block_says_so_when_there_is_no_authority_section(capsys, store, upstream):
+    """§8.4 — so an operator who believes they configured authority finds out on the line that
+    starts the process, rather than from a receipt three weeks later."""
+    from ctrlrun.gateway import _announce
+
+    gateway = _gateway_with(store, upstream, None)
+    _announce(gateway._control, gateway.config, gateway.identity, None)
+
+    assert "no authority: section — every principal is unrestricted" in capsys.readouterr().out
+
+
+# --- No refusal reaches a client as a dropped connection (SPEC-v0.3 §8.2, §8.4) ---------
+#
+# `do_POST` has no top-level `try`, and `socketserver` answers an escaping exception by
+# logging a traceback and closing the socket with **nothing written**. A client reads that as
+# a transport failure — which is the one signal it retries on, and the one thing this library
+# exists to stop. Three v0.3 paths landed there; each has a clause and each has a test.
+
+
+class _Raising:
+    """An identity provider that raises whatever it was told to.
+
+    It refuses everything the real providers refuse — it never *names* anybody — so it cannot
+    let a call through that a real provider would have stopped.
+    """
+
+    def __init__(self, error) -> None:
+        self._error = error
+
+    def resolve(self, context):
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ValueError("the token service was unreachable"), id="ValueError"),
+        pytest.param(RuntimeError("boom"), id="RuntimeError"),
+        pytest.param(KeyError("kid"), id="KeyError"),
+    ],
+)
+def test_a_provider_raising_anything_answers_41007_rather_than_dropping_the_connection(
+    upstream, store, error, monkeypatch
+):
+    """§3.2 — "anything else is logged and re-raised as `IdentityError`". `Control` applies
+    that rule in `_ask_provider`; the gateway does not go through it, so it needs its own.
+    `IdentityProvider` is public API, so this is a deployment's own provider on a bad day."""
+    gateway = _gateway_with(store, upstream, None)
+    monkeypatch.setattr(gateway, "_identity", _Raising(error))
+    body = _call()
+
+    response = gateway.handle(json.dumps(body).encode(), _lowered(_headers(body)))
+
+    assert response.status == 403
+    assert json.loads(response.body)["error"]["code"] == -41007
+    assert upstream.calls == []
+    assert store.receipts() == ()
+    assert store.events() == ()
+
+
+def test_an_expired_principal_answers_41007_rather_than_dropping_the_connection(
+    upstream, store, monkeypatch
+):
+    """§2.3 — `Control.execute` refuses an expired principal with `IdentityError`, which is
+    deliberately not an `ActionDenied`, so it needs its own clause in `_through_control`.
+
+    Routinely reachable rather than adversarial: `JWTIdentityProvider` admits a token up to
+    `leeway` (60 s by default) past its `exp` and then stamps `Principal.expires_at` with that
+    exact `exp` — so every token presented inside that window is admitted by the provider and
+    refused by the kernel. Before this clause, that dropped the connection.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from ctrlrun import StaticIdentityProvider
+
+    gateway = _gateway_with(store, upstream, None)
+    lapsed = datetime.now(UTC) - timedelta(minutes=1)
+    monkeypatch.setattr(
+        gateway, "_identity", StaticIdentityProvider(agent="refund-agent", expires_at=lapsed)
+    )
+    body = _call()
+
+    response = gateway.handle(json.dumps(body).encode(), _lowered(_headers(body)))
+
+    assert response.status == 403
+    assert json.loads(response.body)["error"]["code"] == -41007
+    assert upstream.calls == []
+    # The receipt is written — there *is* a principal to attribute it to — and it says why.
+    assert store.receipts()[-1].decision_reason == "principal_expired"
+
+
+@pytest.mark.authority
+def test_a_continuation_whose_authority_lapsed_answers_41012_not_a_dropped_connection(
+    upstream, store, monkeypatch
+):
+    """§5.6.1 — an operator runs `ctrlrun revoke` while a human is answering an elicitation.
+    `Control.resume` refuses the lease extension with `AuthorityDenied`, and `_continue`
+    caught neither that nor `IdentityError`."""
+    from ctrlrun import Authority
+    from ctrlrun.errors import AuthorityDenied
+
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(AUTHORITY_ONLY, standalone=True))
+
+    def refuse(*args, **kwargs):
+        raise AuthorityDenied("authority no longer covers this action", reason="authority_revoked")
+
+    monkeypatch.setattr(gateway._control, "resume", refuse)
+    body = _call(arguments={"amount": 1000, "payment_id": "pi_7"})
+    body["params"]["requestState"] = "continuation-token"
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    assert response.status == 403
+    error = json.loads(response.body)["error"]
+    assert error["code"] == -41012
+    assert error["data"]["reason"] == "authority_revoked"
+
+
+def test_a_continuation_whose_credential_expired_answers_41007(upstream, store, monkeypatch):
+    """§2.3.1 — the other half of the same hole: holding a continuation extends a lease, and
+    an extension is a request to keep authority the credential no longer carries."""
+    from ctrlrun.errors import IdentityError
+
+    gateway = _gateway_with(store, upstream, None)
+
+    def refuse(*args, **kwargs):
+        raise IdentityError("the principal's credential expired at 2026-01-01T00:00:00Z")
+
+    monkeypatch.setattr(gateway._control, "resume", refuse)
+    body = _call()
+    body["params"]["requestState"] = "continuation-token"
+
+    response = gateway.handle(json.dumps(body).encode(), _lowered(_headers(body)))
+
+    assert response.status == 403
+    assert json.loads(response.body)["error"]["code"] == -41007
+
+
+def test_the_gateway_identity_refusal_message_says_nothing_about_why(upstream, store, monkeypatch):
+    """§8.2 — "a distinct message; the client learns that its credential was rejected and
+    learns nothing about why, which is the correct amount to tell an unauthenticated caller".
+    This handler had no test at all, which is how the three holes above went unnoticed."""
+    from ctrlrun.errors import IdentityError
+
+    gateway = _gateway_with(store, upstream, None)
+    monkeypatch.setattr(
+        gateway, "_identity", _Raising(IdentityError("kid 'rotated' is unknown after a refresh"))
+    )
+    body = _call()
+
+    response = gateway.handle(json.dumps(body).encode(), _lowered(_headers(body)))
+    message = json.loads(response.body)["error"]["message"]
+
+    assert message == "the credential offered was rejected"
+    assert "kid" not in message and "rotated" not in message
+
+
+def test_a_declining_provider_is_a_different_message_from_a_refusing_one(
+    upstream, store, monkeypatch
+):
+    """The two are different things (§3.2) and a client that saw one message could not tell
+    "you sent no credential" from "the one you sent was rejected"."""
+
+    class _Declines:
+        def resolve(self, context):
+            return None
+
+    gateway = _gateway_with(store, upstream, None)
+    monkeypatch.setattr(gateway, "_identity", _Declines())
+    body = _call()
+
+    response = gateway.handle(json.dumps(body).encode(), _lowered(_headers(body)))
+
+    assert json.loads(response.body)["error"]["code"] == -41007
+    assert json.loads(response.body)["error"]["message"] == "no principal could be derived"
+
+
+@pytest.mark.authority
+def test_T91b_the_pre_check_must_not_answer_for_an_action_the_grant_forbids(upstream, store):
+    """§8.3, and the half that `Policy.evaluate` gets **observably** wrong.
+
+    With the policy axis alone, an action the grant forbids still reaches
+    `_before_asking_a_human` — which refuses on the effect record before authority is ever
+    consulted. The client then gets `-41004 duplicate_effect`: the wrong reason, and a
+    disclosure that this effect exists to a principal holding no grant over it. The combined
+    decision means the pre-check is never entered, so the answer is `-41012`.
+
+    Without this test, reverting to `Policy.evaluate` changes nothing any assertion can see:
+    the earlier version reached the same `-41012` by a longer route.
+    """
+    from ctrlrun import Authority
+
+    grant = """
+schema: ctrlrun.policy/v3
+authority:
+  grants:
+    - id: small-refunds-only
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.create_refund"]
+      constraints: { amount_lte: 20000 }
+"""
+    gateway = _gateway_with(store, upstream, Authority.from_yaml(grant, standalone=True))
+    # The key this call would use is already committed by somebody else.
+    store.reserve_effect("refund:pi_8", "act_earlier", timedelta(minutes=5))
+    store.begin_execution("refund:pi_8", "act_earlier")
+    store.commit_effect("refund:pi_8", "act_earlier", None)
+    # Policy says `approve` for this amount; the grant forbids it outright.
+    body = _call(arguments={"amount": 500000, "payment_id": "pi_8"})
+
+    response = gateway.handle(
+        json.dumps(body).encode(), _lowered(_headers(body, **{"X-Agent": "refund-agent"}))
+    )
+
+    error = json.loads(response.body)["error"]
+    assert error["code"] == -41012, "the effect pre-check answered before authority did"
+    assert error["data"]["reason"] == "authority_constraint"
+    assert upstream.calls == []
