@@ -1,0 +1,182 @@
+name: CTRLRun verify
+description: >-
+  Run CTRLRun's declared guarantees against your policy and grants, and report what passed,
+  what failed, and what could not be tested at all.
+author: CTRLRun
+
+branding:
+  icon: shield
+  color: blue
+
+# SPEC-v0.4 §5.1. Composite, so it is what it looks like: a few steps a reader can follow,
+# with no container to trust and nothing running that the workflow log does not show.
+#
+# **There is no input that makes a failure not fail the job.** A `continue-on-error`-shaped
+# flag here would be a flag that makes a consequential thing permissive by default, which
+# `v0.1 §3.4` refuses everywhere else. A workflow that wants to tolerate a failure has
+# `continue-on-error` on the step already, where it is visible in the workflow rather than
+# hidden in an action's defaults.
+
+inputs:
+  policy:
+    description: Path to the policy document.
+    required: false
+    default: ctrlrun.yaml
+  authority:
+    description: >-
+      Path to a standalone authority document, as `ctrlrun gateway --authority` takes. Leave
+      empty where the `authority:` section is in the policy document itself.
+    required: false
+    default: ""
+  only:
+    description: >-
+      Comma-separated guarantee ids, e.g. `G1,G3`. Empty runs the whole catalogue. A partial
+      run writes no badge (SPEC-v0.4 §4.6).
+    required: false
+    default: ""
+  python-version:
+    description: The Python to run verify on.
+    required: false
+    default: "3.11"
+  install:
+    description: >-
+      The pip requirement to install. Defaults to the published package; set it to `.` to
+      verify with the checkout rather than with the last release.
+    required: false
+    default: ctrlrun
+  badge-path:
+    description: >-
+      Where to write the Shields endpoint JSON. The action writes it and never publishes it:
+      publishing is your decision, in your own workflow, with whatever permissions you choose
+      (SPEC-v0.4 §5.2, `docs/verify.md`).
+    required: false
+    default: verify-badge.json
+  upload-artifact:
+    description: Upload the report, the JUnit file and the badge as one artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: The artifact's name.
+    required: false
+    default: ctrlrun-verify
+
+outputs:
+  passed:
+    description: Guarantees that passed.
+    value: ${{ steps.verify.outputs.passed }}
+  failed:
+    description: Guarantees that failed.
+    value: ${{ steps.verify.outputs.failed }}
+  applicable:
+    description: Guarantees this configuration can exercise. The badge's denominator.
+    value: ${{ steps.verify.outputs.applicable }}
+  not-applicable:
+    description: Guarantees this configuration cannot exercise. Never counted as passes.
+    value: ${{ steps.verify.outputs.not-applicable }}
+  badge-message:
+    description: The badge's message, `verified N/M`, or empty where no badge was written.
+    value: ${{ steps.verify.outputs.badge-message }}
+  report-path:
+    description: The `ctrlrun.verify/v1` document.
+    value: ${{ steps.verify.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install CTRLRun
+      shell: bash
+      env:
+        CTRLRUN_INSTALL: ${{ inputs.install }}
+      run: |
+        python -m pip install --upgrade pip
+        pip install "$CTRLRUN_INSTALL"
+
+    # One run. The job summary and the badge are rendered from the JSON this step wrote, not
+    # from a second verify, so the badge and the artifact can never disagree about what
+    # happened (§5.1).
+    - name: Verify
+      id: verify
+      shell: bash
+      env:
+        # Inputs reach the shell through the environment and never through `${{ }}`
+        # interpolation into a script: a path is somebody else's string, and a policy path
+        # that closed a quote would be running whatever came after it.
+        CTRLRUN_CONFIG: ${{ inputs.policy }}
+        CTRLRUN_AUTHORITY: ${{ inputs.authority }}
+        CTRLRUN_ONLY: ${{ inputs.only }}
+        CTRLRUN_BADGE: ${{ inputs.badge-path }}
+      run: |
+        set -uo pipefail
+        arguments=(--json --junit verify-report.xml)
+        if [ -n "$CTRLRUN_AUTHORITY" ]; then arguments+=(--authority "$CTRLRUN_AUTHORITY"); fi
+        if [ -n "$CTRLRUN_ONLY" ]; then arguments+=(--only "$CTRLRUN_ONLY"); fi
+
+        status=0
+        ctrlrun verify "${arguments[@]}" > verify-report.json || status=$?
+        echo "ctrlrun verify exited $status"
+
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        echo "report-path=verify-report.json" >> "$GITHUB_OUTPUT"
+
+        if [ ! -s verify-report.json ]; then
+          # Exit 2 and exit 3 print to stderr and write no document. There is nothing to
+          # render, no badge to write, and the job fails below.
+          {
+            echo "### CTRLRun verify"
+            echo
+            echo "The configuration was refused, or verify failed internally"
+            echo "(exit \`$status\`). No report was produced and no badge was written."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        python -c 'import sys; from ctrlrun.verify.report import main; sys.exit(main())' \
+          --report verify-report.json \
+          --summary "$GITHUB_STEP_SUMMARY" \
+          --badge "$CTRLRUN_BADGE"
+
+        python - <<'PY' >> "$GITHUB_OUTPUT"
+        import json
+        import os
+        import pathlib
+
+        document = json.loads(pathlib.Path("verify-report.json").read_text(encoding="utf-8"))
+        summary = document["summary"]
+        badge = pathlib.Path(os.environ["CTRLRUN_BADGE"])
+        message = json.loads(badge.read_text(encoding="utf-8"))["message"] if badge.exists() else ""
+        print(f"passed={summary['passed']}")
+        print(f"failed={summary['failed']}")
+        print(f"applicable={summary['applicable']}")
+        print(f"not-applicable={summary['not_applicable']}")
+        print(f"badge-message={message}")
+        PY
+
+    - name: Upload the report
+      if: ${{ inputs.upload-artifact == 'true' && always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          verify-report.json
+          verify-report.xml
+          ${{ inputs.badge-path }}
+        if-no-files-found: warn
+
+    # Last, so the report is on the job summary and the artifact is uploaded even when the
+    # job is about to go red. A failure an operator cannot read is a failure they will learn
+    # to ignore.
+    - name: Fail the job on a failed guarantee or a refused configuration
+      shell: bash
+      env:
+        STATUS: ${{ steps.verify.outputs.status }}
+      run: |
+        case "$STATUS" in
+          0) echo "every applicable guarantee passed"; exit 0 ;;
+          1) echo "::error::a declared guarantee failed; see the job summary"; exit 1 ;;
+          2) echo "::error::the configuration was refused or is unusable"; exit 1 ;;
+          *) echo "::error::ctrlrun verify failed internally (exit $STATUS)"; exit 1 ;;
+        esac
