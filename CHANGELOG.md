@@ -11,6 +11,48 @@ any change to one appears here.
 
 ### Added
 
+- **`ctrlrun verify`** — the guarantee catalogue, the scenario engine and all ten guarantees
+  (SPEC-v0.4 §2, §3). `ctrlrun.verify` is **core**: stdlib, `pyyaml` and `click`, because a
+  verification tool that needed an extra installed is one half the deployments never run. It is
+  not re-exported from `ctrlrun` and `import ctrlrun` does not import it.
+
+  It reads the operator's policy document, and the authority document beside it where
+  `--authority` names one, derives concrete actions, principals and delegations the
+  configuration actually admits, and runs the failure scenarios of `v0.1 §7`, `v0.2 §10` and
+  `v0.3 §10` against them — in a scratch store, with in-process fake executors, reaching no
+  network. `G1` mutated approval refused · `G2` replayed approval refused · `G3` duplicate
+  effect refused · `G4` one winner under concurrency, across real OS processes · `G5` ambiguous
+  blocks a blind retry · `G6` unknown action refused · `G7` no principal refused · `G8` expired
+  authority refused · `G9` delegation cannot escalate, on every dimension the parent constrains
+  including the omission case · `G10` unknown exception is ambiguous, never failed.
+
+  **Every guarantee carries a positive control.** A refusal is satisfied just as well by a
+  scenario in which nothing ever ran, and that scenario passes against a kernel with the guard
+  deleted — so each scenario runs a companion establishing that the observable would have been
+  visible had the guard not fired. A control that does not behave as specified makes the
+  guarantee `fail` with `reason: "control failed"`: never a pass, and never an N/A.
+
+  There is no randomness anywhere — not seeded randomness, none. Selection is sorted by
+  codepoint, values come from a fixed table, the candidate search is bounded at 64, and two runs
+  against one document produce byte-identical JSON once the timestamps are removed.
+
+- `ctrlrun verify [--authority PATH] [--json] [--junit PATH] [--only G1,G3] [--store-url URL]`,
+  replacing the v0.3 stub. Exit codes: 0 every applicable guarantee passed and at least one was
+  applicable, 1 a guarantee failed, 2 the configuration was refused or is unusable, 3 an
+  internal error in verify itself.
+
+### Changed
+
+- **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the
+  commit that made it true: `ctrlrun verify` exits 2 under `mode: observe` with a message naming
+  the mode, and runs under `mode: enforce`. The banner assertions for every other command are
+  untouched. A frozen test whose subject was explicitly temporary is amended rather than
+  deleted.
+- **`docs/SPEC-v0.3.md` §4.3.1 gains an informational row** for `ctrlrun.verify.run` (SPEC-v0.4
+  §3.9, §9.4 item 3). Verify is not a new entry point: it proposes no action of its own and
+  drives the rows already there. The row exists because a reader will look for one.
+- `docs/ARCHITECTURE.md` §6's module map gains `verify/`, above `control.py` and beside `cli/`.
+
 - **`docs/SPEC-v0.4.md`** — the v0.4 contract, a delta over v0.1, v0.2 and v0.3. v0.4 answers
   the question the first three releases could not: *does it hold in **my** setup?* Everything
   CTRLRun guarantees is proven today by this repository's tests against this repository's

@@ -946,15 +946,34 @@ def test_T85_the_banner_keeps_json_stdout_parseable(cli):
     assert json.loads(result.stdout)["schema"] == STATS_SCHEMA
 
 
-@pytest.mark.parametrize("mode", [OBSERVE, ENFORCE])
-def test_T85_verify_exits_2_naming_v0_4(cli, mode):
-    _write_policy(cli, mode)
+def test_T85_verify_exits_2_under_observe_mode_naming_the_mode(cli):
+    """Amended by SPEC-v0.4 §9.4, item 2, in the commit that made `ctrlrun verify` real.
+
+    The frozen sentence was *"`ctrlrun verify` exits 2 in both modes with a message naming
+    v0.4"*, and its subject was explicitly temporary. It now exits 2 under `mode: observe`
+    only, with a message naming the mode: observe mode enforces nothing, so every refusal the
+    guarantees assert would be recorded rather than made, and there is nothing to verify
+    (SPEC-v0.4 §3.8). The banner assertions for every other command are untouched.
+    """
+    _write_policy(cli, OBSERVE)
 
     result = _run("verify")
 
     assert result.exit_code == 2
-    assert "0.4" in result.stderr
+    assert OBSERVE_BANNER in result.stderr
+    assert "observe" in result.stderr
     assert result.stdout == ""
+
+
+def test_T85_verify_runs_under_enforce_mode(cli):
+    """The other half of the same amendment: under `mode: enforce` it runs, and reports."""
+    _write_policy(cli, ENFORCE)
+
+    result = _run("verify")
+
+    assert result.exit_code == 0, result.output
+    assert OBSERVE_BANNER not in result.output
+    assert "declared guarantees pass" in result.stdout
 
 
 def test_T85_a_policy_that_cannot_be_loaded_exits_non_zero_without_a_banner(cli):

@@ -1046,6 +1046,12 @@ implementer that delegation is authenticated.
 | `Control.delegate` / `Control.revoke` | no — creates authority | checks `by` is unexpired (§5.3 rule 0) | the six checks of §5.3 |
 | The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) |
 | `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) |
+| `ctrlrun.verify.run` | no - it drives the rows above | no - it synthesizes principals for a scratch store | no - it asserts that the rows above do |
+
+The last row is **informational**, added by `SPEC-v0.4.md` §3.9 and §9.4. `ctrlrun verify`
+proposes no action of its own: it constructs `Control` objects against a scratch store and calls
+the entry points already listed, asserting that each applies the checks this table requires. It
+is in the table because a reader will look for it, not because it is a new way in.
 
 **A new entry point is a specification amendment before it is code.** Adding one — a framework
 adapter, a second protocol, a batch runner — means adding a row here and saying what it does about
