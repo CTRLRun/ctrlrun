@@ -292,21 +292,32 @@ invention, not as an implementation of anything.
 renamed.
 
 ```python
-_NO_CLAIMS: Final = MappingProxyType({})             # shared; a dataclass default must be immutable
+_NO_CLAIMS: Final = MappingProxyType({})             # shared; see the default_factory note
 
 @dataclass(frozen=True)
 class Principal:
     agent: str                                       # required, e.g. "refund-agent"
     user: str | None = None                          # human on whose behalf, if any
-    claims: Mapping[str, str | int | bool] = _NO_CLAIMS   # verified, from the provider (§3)
+    claims: Mapping[str, str | int | bool] = field(default_factory=lambda: _NO_CLAIMS)
     issuer: str | None = None                        # who verified it, e.g. a JWT `iss`
     expires_at: datetime | None = None               # when the credential stops being valid
 ```
 
 `Principal` stays `frozen=True` and stays **unhashable**, as it is today: `Mapping` is not
-hashable, and a dataclass whose default were a bare `{}` would not even reach class definition.
-Nothing in v0.1 or v0.2 hashes a `Principal` — `Action.__hash__` is `hash(action_id)` (`v0.1
-§2.1`) — so this costs nothing; it is stated because a reader of the dataclass will wonder.
+hashable. Nothing in v0.1 or v0.2 hashes a `Principal` — `Action.__hash__` is `hash(action_id)`
+(`v0.1 §2.1`) — so this costs nothing; it is stated because a reader of the dataclass will
+wonder.
+
+**The default is a `default_factory`, and it has to be.** A bare `{}` never reaches class
+definition on any version. A `MappingProxyType({})` is worse, because it reaches class
+definition on **3.12 and later and not on 3.11**: 3.12 made `mappingproxy` hashable when its
+underlying mapping is, and `dataclasses` refuses a default whose class says it is unhashable.
+So the bare-proxy form imports cleanly on a modern developer machine and raises `ValueError` at
+import on the version `pyproject.toml` declares as the floor. Every `Mapping`-typed dataclass
+field in this package takes a `default_factory` for that reason, and
+`test_no_dataclass_field_has_an_unhashable_default` pins it by *attempting the hash* rather than
+reading `__class__.__hash__` — reading it would ask the running version's question and miss the
+one the floor asks.
 
 `agent` and `user` keep every rule of `v0.1 §2.1`: non-empty, `user` either `None` or
 non-empty, empty string → `InvalidArgument`.
@@ -2833,7 +2844,7 @@ from .errors import AuthorityDenied, AuthorityEscalation, IdentityError
 class Principal:                       # extended, v0.1 §2.1
     agent: str
     user: str | None = None
-    claims: Mapping[str, str | int | bool] = _NO_CLAIMS
+    claims: Mapping[str, str | int | bool] = field(default_factory=lambda: _NO_CLAIMS)
     issuer: str | None = None
     expires_at: datetime | None = None
 

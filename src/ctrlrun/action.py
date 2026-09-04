@@ -7,6 +7,7 @@ import json
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
@@ -21,6 +22,18 @@ PlainValue: TypeAlias = "str | int | bool | list[PlainValue] | dict[str, PlainVa
 FrozenValue: TypeAlias = (
     "str | int | bool | tuple[FrozenValue, ...] | Mapping[str, FrozenValue] | None"
 )
+
+#: The claim value types SPEC-v0.3 §2.1 allows. `float` is absent for v0.1 §2.3's reason, and
+#: containers are absent because a provider flattens or drops a structured claim rather than
+#: storing one here.
+ClaimValue: TypeAlias = "str | int | bool"
+
+#: A `Principal` with no claims. Shared, because it is immutable — but it is handed out by a
+#: `default_factory` rather than used as a bare default: Python 3.11 refuses *any* unhashable
+#: dataclass default, `mappingproxy` included, and 3.11 is the floor this package supports.
+#: 3.12 relaxed that check to `list`/`dict`/`set` only, so the bare form passes there and fails
+#: on the minimum version — which is exactly the shape a local run cannot see.
+NO_CLAIMS: Final[Mapping[str, ClaimValue]] = MappingProxyType({})
 
 _ID_HEX_BYTES: Final = 16  # "act_" + 32 hex chars
 
@@ -56,6 +69,33 @@ def _frozen_mapping(value: Mapping[Any, Any], path: str) -> Mapping[str, FrozenV
     return MappingProxyType(result)
 
 
+def _frozen_claims(claims: object) -> Mapping[str, ClaimValue]:
+    """Validate and snapshot a claim mapping (SPEC-v0.3 §2.1).
+
+    Snapshotted for the reason `Action.arguments` is (v0.1 §2.2): a caller holding the original
+    object must not be able to change a constructed Principal.
+    """
+    if not isinstance(claims, Mapping):
+        raise InvalidArgument("principal.claims must be a mapping")
+    result: dict[str, ClaimValue] = {}
+    for key, value in claims.items():
+        if not isinstance(key, str) or not key:
+            raise InvalidArgument(f"principal.claims keys must be non-empty strings, got {key!r}")
+        if isinstance(value, float):
+            raise InvalidArgument(
+                f"principal.claims[{key!r}] is a float; use an int or a decimal string, for the "
+                "reason v0.1 §2.3 rejects one in an argument"
+            )
+        if not isinstance(value, str | int):  # bool is a subclass of int, and is allowed
+            raise InvalidArgument(
+                f"principal.claims[{key!r}] is {type(value).__name__}; a claim value must be "
+                "str, int or bool — a structured claim is flattened or dropped by the provider "
+                "that read it"
+            )
+        result[key] = value
+    return MappingProxyType(result)
+
+
 def _plain_value(value: FrozenValue) -> PlainValue:
     """Return the JSON-serializable counterpart of a stored (frozen) argument value."""
     if isinstance(value, Mapping):
@@ -71,10 +111,19 @@ def _plain_mapping(value: Mapping[str, FrozenValue]) -> dict[str, PlainValue]:
 
 @dataclass(frozen=True)
 class Principal:
-    """Who is acting: an agent, optionally on behalf of a human."""
+    """Who is acting: an agent, optionally on behalf of a human.
+
+    `claims`, `issuer` and `expires_at` are what an `IdentityProvider` verified (SPEC-v0.3 §2.1).
+    None of the three is part of the canonical form (§2.2): an approval binds to an action hash,
+    and a hash that moved when a token rotated would invalidate it for a reason no human could
+    see and no agent could fix.
+    """
 
     agent: str
     user: str | None = None
+    claims: Mapping[str, ClaimValue] = field(default_factory=lambda: NO_CLAIMS)
+    issuer: str | None = None
+    expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         # SPEC: §2.1 does not say what an empty identity means; treat it as invalid.
@@ -82,6 +131,21 @@ class Principal:
             raise InvalidArgument("principal.agent must be a non-empty string")
         if self.user is not None and not self.user:
             raise InvalidArgument("principal.user must be a non-empty string or None")
+        if self.issuer is not None and not self.issuer:
+            raise InvalidArgument("principal.issuer must be a non-empty string or None")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            # SPEC-v0.3 §2.1 — an expiry in an unstated timezone cannot be checked, and
+            # guessing UTC would silently extend or shorten it.
+            raise InvalidArgument(
+                "principal.expires_at must be timezone-aware; a naive datetime states an "
+                "instant nobody can compare a clock against"
+            )
+        object.__setattr__(self, "claims", _frozen_claims(self.claims))
+
+    @property
+    def claim_names(self) -> tuple[str, ...]:
+        """The claim names, sorted. What evidence shows where values are withheld (§2.4)."""
+        return tuple(sorted(self.claims))
 
 
 @dataclass(frozen=True, eq=False)

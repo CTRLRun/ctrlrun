@@ -173,7 +173,14 @@ class OTelEventSink:
             f"{PREFIX}result": str(receipt.result),
             f"{PREFIX}receipt_id": receipt.receipt_id,
         }
+        # SPEC-v0.3 §2.4 — the issuer, and the claim *names*, sorted. Never the values: a
+        # claim can hold an employee number, a case id or a licence, and a span goes to a
+        # third party by default while a receipt is evidence meant to be read. The two make
+        # opposite trades deliberately, and `--otel-arguments` does not widen this one.
+        if receipt.principal.claim_names:
+            attributes[f"{PREFIX}principal.claims"] = ",".join(receipt.principal.claim_names)
         for name, value in (
+            (f"{PREFIX}principal.issuer", receipt.principal.issuer),
             (f"{PREFIX}principal.user", receipt.principal.user),
             (f"{PREFIX}resource", receipt.resource),
             (f"{PREFIX}effect_key", receipt.effect_key),

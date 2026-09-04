@@ -605,11 +605,11 @@ def test_disallowed_operand_type_is_a_policy_error(condition: str, operand: str)
     "text",
     [
         pytest.param("actions:\n  customer.read:\n    decision: allow\n", id="missing-schema"),
-        # `ctrlrun.policy/v2` stood here until SPEC-v0.2 §3.1 made it a schema v0.2 loads.
-        # The rule under test is unchanged — an unsupported schema is refused — so the
-        # example moves forward to one that is still unsupported.
+        # `ctrlrun.policy/v2` stood here until SPEC-v0.2 §3.1 made it a schema v0.2 loads,
+        # and `v3` until SPEC-v0.3 §12.1 did the same. The rule under test is unchanged — an
+        # unsupported schema is refused — so the example moves forward each time.
         pytest.param(
-            "schema: ctrlrun.policy/v3\nactions:\n  customer.read:\n    decision: allow\n",
+            "schema: ctrlrun.policy/v9\nactions:\n  customer.read:\n    decision: allow\n",
             id="future-schema",
         ),
         pytest.param(
@@ -906,9 +906,9 @@ actions:
         Policy.from_yaml(document)
 
 
-def test_T16_an_unknown_schema_names_both_supported_ones():
+def test_T16_an_unknown_schema_names_every_supported_one():
     with pytest.raises(PolicyError) as raised:
-        Policy.from_yaml("schema: ctrlrun.policy/v3\nactions: {}\n")
+        Policy.from_yaml("schema: ctrlrun.policy/v9\nactions: {}\n")
 
-    assert "ctrlrun.policy/v1" in str(raised.value)
-    assert "ctrlrun.policy/v2" in str(raised.value)
+    for known in ("ctrlrun.policy/v1", "ctrlrun.policy/v2", "ctrlrun.policy/v3"):
+        assert known in str(raised.value)

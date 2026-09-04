@@ -23,7 +23,11 @@ from typing import Any, Final, Protocol
 from .action import Principal
 from .policy import Decision
 
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v1"
+#: SPEC-v0.3 §12.2. The bump lands with build-list item 1, because that is when the first v2
+#: field appears — the principal's claims, issuer and expiry. `execution` and `would_have` are
+#: carried as `null` from here and populated by observe mode in item 4, so the shape a reader
+#: parses is settled once rather than changing twice under one version string.
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v2"
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
 RECEIPTS_FILENAME: Final = "receipts.jsonl"
@@ -39,6 +43,22 @@ def new_receipt_id() -> str:
 def iso_timestamp(moment: datetime) -> str:
     """UTC ISO-8601 with a `Z` suffix, as in SPEC-v0.1 §6.1."""
     return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _principal_dict(principal: Principal) -> dict[str, Any]:
+    """The principal as receipt data (SPEC-v0.3 §2.4).
+
+    Receipts carry the whole thing — claims, issuer and expiry — because a receipt is the
+    record and §2.1's distinction between "the provider stated no expiry" and "nothing was
+    stored" is load-bearing. Spans make the opposite trade (§2.4): values are withheld there.
+    """
+    return {
+        "agent": principal.agent,
+        "user": principal.user,
+        "claims": dict(principal.claims),
+        "issuer": principal.issuer,
+        "expires_at": None if principal.expires_at is None else iso_timestamp(principal.expires_at),
+    }
 
 
 class ReceiptResult(StrEnum):
@@ -143,7 +163,7 @@ class Receipt:
             "action_id": self.action_id,
             "action": self.action,
             "action_hash": self.action_hash,
-            "principal": {"agent": self.principal.agent, "user": self.principal.user},
+            "principal": _principal_dict(self.principal),
             "resource": self.resource,
             "arguments": dict(self.arguments),
             "environment": self.environment,
@@ -154,6 +174,9 @@ class Receipt:
             "effect_key": self.effect_key,
             "attempt": self.attempt,
             "result": str(self.result),
+            # SPEC-v0.3 §6.3 — `null` in enforce mode, which is every mode until item 4.
+            "execution": None,
+            "would_have": None,
             "error": self.error,
             "started_at": iso_timestamp(self.started_at),
             "finished_at": iso_timestamp(self.finished_at),
@@ -167,12 +190,21 @@ class Receipt:
     def from_dict(cls, document: Mapping[str, Any]) -> Receipt:
         """The inverse of `to_dict`: a receipt read back out of a store or a JSONL file."""
         principal = document["principal"]
+        expires_at = principal.get("expires_at")
         return cls(
             receipt_id=document["receipt_id"],
             action_id=document["action_id"],
             action=document["action"],
             action_hash=document["action_hash"],
-            principal=Principal(agent=principal["agent"], user=principal["user"]),
+            # `.get` for the three v0.3 fields: a receipt written by 0.2 carries only the two
+            # older keys, and must parse back rather than raise (SPEC-v0.3 §2.4).
+            principal=Principal(
+                agent=principal["agent"],
+                user=principal["user"],
+                claims=principal.get("claims") or {},
+                issuer=principal.get("issuer"),
+                expires_at=None if expires_at is None else datetime.fromisoformat(expires_at),
+            ),
             resource=document["resource"],
             arguments=document["arguments"],
             environment=document["environment"],

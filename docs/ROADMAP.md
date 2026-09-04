@@ -6,6 +6,8 @@ Standards rule: integrate first, map second, never claim compliance. A standard 
 
 Sector rule: every pack cites its sources and ships its `REVIEW.md`. No compliance claims.
 
+Track rule: kernel versions ship correctness; content tracks (packs, templates, mappings) ship on their own cadence and never block or share a version with the kernel.
+
 ## v0.1 — Kernel (current)
 
 Action · Policy (ALLOW/APPROVE/DENY) · `@protect` · exact-action approval (hash, single-use, expiry) · effect key · SQLite atomic reservation · COMMITTED/FAILED/AMBIGUOUS · receipts + events (JSONL) · CLI · `ctrlrun demo` with four scenarios.
@@ -22,7 +24,7 @@ Standards: none. `THREAT_MODEL.md` is the only compliance-adjacent claim.
 - `ctrlrun inspect <action_id>`.
 - Reconciliation hook: `@protect(..., reconcile=...)` resolves AMBIGUOUS automatically, and only where its answer points.
 - `examples/` directory with standalone scripts per scenario (`double-refund/`, `approval-mutation/`, `agent-race/`, `approval-replay/`). In v0.1 `ctrlrun demo` is the example; separate scripts earn their keep once there is more than one way to wire CTRLRun in.
-- Sector policy templates: `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare, legal, security, government, hr. Header comment: *"Starting point on the v0.1 kernel. Adapt before use."* Uses only v0.1 primitives.
+- Sector policy templates: `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare, legal, security, government, hr. Header comment: *"Starting point on the v0.1 kernel. Adapt before use."* Uses only v0.1 primitives. Tier one of the sector-pack content track below.
 
 Adoption story: *existing MCP server + one CTRLRun gateway = action safety.*
 
@@ -67,13 +69,27 @@ Standards: first mapping doc — each `ctrlrun verify` guarantee mapped to the O
 
 Standards: none new.
 
-## v0.6 — Production durability
+## v0.6 — Durable runtime
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity (hash chain / signatures).
-- Sector packs, full depth, all nine sectors: each pack ships a control registry, approver roles, data scope, consequence defaults, and worked examples. Each pack is authored in one AI session and reviewed in a separate AI session that did not author it, against the cited public sources for that sector (PCI DSS and PSD2 for payments; HIPAA Security Rule for healthcare; SOX/COSO and maker-checker guidance for finance and insurance; ABA Model Rules for legal; NIST SP 800-53 AC/AU families for security; CIS Kubernetes benchmarks for devops; public-sector records-management rules for government; employment-law basics for hr). The review produces `packs/<sector>/REVIEW.md` listing every control, the source clause it derives from, and each gap or uncertainty found; unresolved gaps stay listed. Each pack README states: *"Authored and reviewed by AI against the cited public sources."* No pack describes itself as compliant with any regulation.
+- Control registry and data-scope primitives: the kernel-side objects a sector pack configures, shipped here so that a pack is configuration rather than code.
+
+Exit: the v0.1 concurrency and mutation standard met against a real Postgres on two hosts under failure injection; a soak of at least one week with no unexplained AMBIGUOUS; a receipt chain tamper test.
 
 Standards: `docs/CONTROL-MAPPING.md` — clause-level mapping of receipt integrity/retention to EU AI Act Art. 12 and SOC 2 CC6/CC7, and of exact-action approval to Art. 14. Each row points at a test. Written only when a design partner asks.
+
+## Sector packs — their own version line
+
+Versioned as `packs-<sector>-MAJOR.MINOR` — `packs-payments-1.0`, `packs-healthcare-1.0` — and never as a kernel version. A pack depends on the v0.6 control registry and data-scope primitives and on nothing after them, which is why the track is listed here; it is not a step in the chain. It appears in no kernel milestone's exit criteria, and v0.7 follows v0.6 whether or not a single pack exists.
+
+**Templates (shipped in v0.2).** `examples/policies/<sector>.yaml`, written against v0.1 primitives only, each headed *"Starting point on the v0.1 kernel. Adapt before use."*
+
+**Full depth (after v0.6).** The same nine sectors — devops, payments, e-commerce, insurance, healthcare, legal, security, government, hr — each pack shipping a control registry, approver roles, data scope, consequence defaults, and worked examples. Each pack is authored in one AI session and reviewed in a separate AI session that did not author it, against the cited public sources for that sector (PCI DSS and PSD2 for payments; HIPAA Security Rule for healthcare; SOX/COSO and maker-checker guidance for finance and insurance; ABA Model Rules for legal; NIST SP 800-53 AC/AU families for security; CIS Kubernetes benchmarks for devops; public-sector records-management rules for government; employment-law basics for hr). The review produces `packs/<sector>/REVIEW.md` listing every control, the source clause it derives from, and each gap or uncertainty found; unresolved gaps stay listed. Each pack README states: *"Authored and reviewed by AI against the cited public sources."* No pack describes itself as compliant with any regulation.
+
+Released individually as `packs/<sector>/`, each when its own review is clean. A pack's major version tracks its own breaking changes — a renamed control, a removed approver role, a narrowed data scope — and never the kernel's; a pack and the kernel it runs on are two independent version numbers, and the compatibility statement is a supported kernel range in the pack's README. A pack never gates a kernel release and is never gated by one: nine packs is a list, not a milestone, and eight unwritten packs do not hold up v0.7.
+
+Standards: none of its own. The sector rule above applies in full.
 
 ## v0.7 — Multi-agent
 

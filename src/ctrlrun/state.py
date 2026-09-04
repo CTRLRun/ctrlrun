@@ -157,7 +157,21 @@ def _action_json(action: Action) -> str:
             "action_id": action.action_id,
             "name": action.name,
             "arguments": action.canonical_arguments,
-            "principal": {"agent": action.principal.agent, "user": action.principal.user},
+            # SPEC-v0.3 §2.4 — the whole principal, not just the two v0.1 fields. Without
+            # this every receipt written by `Control.resume` reports no claims and no expiry,
+            # on the only receipt an MCP multi-round-trip action ever gets. A value change
+            # inside an existing TEXT column, not a schema migration.
+            "principal": {
+                "agent": action.principal.agent,
+                "user": action.principal.user,
+                "claims": dict(action.principal.claims),
+                "issuer": action.principal.issuer,
+                "expires_at": (
+                    None
+                    if action.principal.expires_at is None
+                    else action.principal.expires_at.isoformat()
+                ),
+            },
             "resource": action.resource,
             "environment": action.environment,
         },
@@ -169,10 +183,19 @@ def _action_json(action: Action) -> str:
 def _action_from_json(text: str) -> Action:
     document = json.loads(text)
     principal = document["principal"]
+    expires_at = principal.get("expires_at")
     return Action(
         name=document["name"],
         arguments=document["arguments"],
-        principal=Principal(agent=principal["agent"], user=principal["user"]),
+        # `.get` for the three v0.3 fields: a row written by 0.2 carries only the two older
+        # keys and must parse back with v0.1 §2.1's defaults rather than raising (§2.4).
+        principal=Principal(
+            agent=principal["agent"],
+            user=principal["user"],
+            claims=principal.get("claims") or {},
+            issuer=principal.get("issuer"),
+            expires_at=None if expires_at is None else datetime.fromisoformat(expires_at),
+        ),
         resource=document["resource"],
         environment=document["environment"],
         action_id=document["action_id"],
