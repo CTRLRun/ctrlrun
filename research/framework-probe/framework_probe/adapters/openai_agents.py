@@ -1,0 +1,64 @@
+"""OpenAI Agents SDK. SPEC-v0.4 §7.3; version and defaults in `../../README.md`.
+
+One `Agent` with one `function_tool`, run once through `Runner.run_sync`. No
+`failure_error_function` is supplied, so the SDK's default handling of a tool that raised is
+what the row measures.
+
+**Not run in this repository's CI.**
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+from ..scenarios import APPROVAL_MUTATION, Scenario
+from ._framework import call_remote, record_approval
+from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
+
+MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
+
+
+@dataclass
+class OpenAIAgentsAdapter:
+    name: str = "openai-agents"
+    distribution: str = "openai-agents"
+    config_deviation: str | None = None
+
+    def available(self) -> bool:
+        return is_installed(self.distribution)
+
+    def version(self) -> str:
+        return read_version(self.distribution)
+
+    def run(self, scenario: Scenario, url: str) -> Attempt:
+        from agents import Agent, Runner, function_tool
+
+        if scenario.name == APPROVAL_MUTATION:
+            assert scenario.approved is not None
+            record_approval(approve_endpoint(url), scenario.approved)
+
+        endpoint = tool_endpoint(url)
+
+        def issue_refund(payment_id: str, amount: int) -> str:
+            return call_remote(endpoint, {"payment_id": payment_id, "amount": amount})
+
+        # The SDK reads the tool's description from its docstring, so the docstring comes
+        # from the scenario. One copy of that text, in `scenarios.py` (§7.3 rule 2).
+        issue_refund.__doc__ = scenario.tool_description
+        tool = function_tool(issue_refund, name_override=scenario.tool_name)
+
+        agent = Agent(
+            name="support agent",
+            instructions="You handle refunds for an online store.",
+            tools=[tool],
+            model=MODEL,
+        )
+        try:
+            Runner.run_sync(agent, scenario.prompt)
+        except Exception as failure:
+            return Attempt(error=f"{type(failure).__name__}: {failure}")
+        return Attempt()
+
+
+ADAPTER = OpenAIAgentsAdapter()
