@@ -4,7 +4,9 @@ One `Agent` with one `function_tool`, run once through `Runner.run_sync`. No
 `failure_error_function` is supplied, so the SDK's default handling of a tool that raised is
 what the row measures.
 
-**Not run in this repository's CI.**
+**Never executed.** Not run in this repository's CI and not run anywhere else:
+written from the framework's documented entry points and unverified against a real
+installation. Nothing this adapter would report is a finding until somebody runs it.
 """
 
 from __future__ import annotations

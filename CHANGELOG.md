@@ -150,11 +150,22 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   maintainer; a commit carrying findings about other projects that nobody had reviewed is not
   one this repository makes.
 
-- **`docs/SPEC-v0.4.md` gains a §12**, recording the four readings the implementation had to
-  take where the specification could not be satisfied as written. A specification that
+- **The badge this repository shows is published**, by a `badge` job scoped as narrowly as the
+  thing it does: `contents: write` at **job level** (the workflow is `contents: read`, so
+  nothing else in it can write), running on a push to `main` and on nothing else — a pull
+  request from a fork must not be able to write the badge, and a read-only fork token is a
+  default rather than a refusal — and publishing the badge the `verify` job already produced,
+  downloaded as an artifact rather than regenerated, so §5.1's one-run rule holds across the
+  job boundary. `docs/verify.md` shows the job and names the permission it costs.
+
+- **`docs/SPEC-v0.4.md` gains a §12**, recording the readings the implementation had to take
+  where the specification could not be satisfied as written. A specification that
   disagrees with the code it describes is worse than one that admits a gap: G6 drives a
-  `Control` composed from the policy alone, because authority is evaluated first and its
-  observable would otherwise be unreachable in every configuration with grants; G7 is `N/A`
+  a guarantee's invariant is the **behaviour** and not one reason string — G6 asserts that an
+  unlisted action never executes, against the `Control` the operator's configuration actually
+  composes, accepting any reason that configuration can produce and reporting which one fired,
+  because under an `authority:` section the refusal correctly arrives from the authority axis
+  before policy is reached; G7 is `N/A`
   where no action in the policy can run, because §2.2 said "never" and §1.3 requires a control
   that such a policy cannot supply; G8 gains a fourth N/A reason for a layered document; G9's
   control names the delegation only where the parent's subject does not also match it; and

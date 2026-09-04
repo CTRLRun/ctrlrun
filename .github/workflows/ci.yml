@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default, so the single `contents: write` below is visibly an exception rather
+# than something the whole workflow happens to have.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -80,6 +85,49 @@ jobs:
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml
+
+  # SPEC-v0.4 §5.2 — the action *writes* the badge and never publishes it, because publishing
+  # needs `contents: write` and asking every consumer for that is a bad trade for a tool whose
+  # subject is least privilege. Publishing is this project's own decision, and this job is it.
+  #
+  # Three constraints, and each is load-bearing:
+  #
+  #   - `contents: write` is **job-level**. The workflow is read-only; nothing else here can
+  #     write to the repository.
+  #   - It runs on a **push to `main`** and on nothing else. A pull request never reaches it —
+  #     a PR from a fork must not be able to write the badge, and relying on the fork token
+  #     being read-only would be relying on a default rather than refusing.
+  #   - It publishes the badge the `verify` job already produced, downloaded as an artifact
+  #     rather than regenerated. §5.1's rule holds across the job boundary: the badge, the job
+  #     summary and the uploaded report all come from one verify run.
+  badge:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ctrlrun-verify-authority
+          path: badge
+
+      - name: Publish to the badges branch
+        run: |
+          set -eu
+          test -s badge/verify-badge.json
+          message=$(python -c 'import json;print(json.load(open("badge/verify-badge.json"))["message"])')
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin badges 2>/dev/null && git switch badges || git switch --orphan badges
+          # An orphan branch carries the working tree across; the badge branch holds one file.
+          git rm -rq --cached . 2>/dev/null || true
+          cp badge/verify-badge.json verify-badge.json
+          git add -f verify-badge.json
+          git commit -m "verify: $message" || { echo "badge unchanged"; exit 0; }
+          git push origin badges
 
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being

@@ -4,7 +4,9 @@ One `AssistantAgent` with one tool, run once through `run()`. AutoGen's document
 is a conversational retry — the agent reflects on the failure and tries again — and whether
 that reaches the remote a second time is exactly the row.
 
-**Not run in this repository's CI.**
+**Never executed.** Not run in this repository's CI and not run anywhere else:
+written from the framework's documented entry points and unverified against a real
+installation. Nothing this adapter would report is a finding until somebody runs it.
 """
 
 from __future__ import annotations

@@ -457,3 +457,66 @@ def test_the_readme_says_what_not_applicable_means():
     assert "never `10/10`" in section
     assert "There is no flag that folds one into the count" in section
     assert "declared guarantees pass" in section
+
+
+# --- publishing the badge: the one place this repository asks for write access ---------------
+
+
+def test_the_badge_job_is_the_only_thing_that_can_write_to_the_repository():
+    """SPEC-v0.4 §5.2 — the action writes the badge and never publishes it, because publishing
+    needs `contents: write`. This repository publishes its own, and that grant is scoped to one
+    job rather than to the workflow: a workflow-level grant would hand every job in it write
+    access to buy one file."""
+    workflow = _workflow()
+
+    assert workflow["permissions"] == {"contents": "read"}
+    elevated = [name for name, job in workflow["jobs"].items() if "permissions" in job]
+    assert elevated == ["badge"], elevated
+    assert workflow["jobs"]["badge"]["permissions"] == {"contents": "write"}
+
+
+def test_the_badge_job_never_runs_on_a_pull_request():
+    """A pull request from a fork must not be able to write the badge.
+
+    Asserted on the condition rather than on the token: a fork's `GITHUB_TOKEN` is read-only
+    anyway, but relying on that is relying on a default instead of refusing.
+    """
+    guard = _workflow()["jobs"]["badge"]["if"]
+
+    assert "github.event_name == 'push'" in guard
+    assert "github.ref == 'refs/heads/main'" in guard
+
+
+def test_the_badge_job_publishes_the_badge_the_verify_job_produced():
+    """§5.1 across the job boundary: one verify run, so the badge, the job summary and the
+    uploaded report cannot disagree about what happened."""
+    badge = _workflow()["jobs"]["badge"]
+    steps = badge["steps"]
+    downloads = [
+        step for step in steps if str(step.get("uses", "")).startswith("actions/download-")
+    ]
+    script = "\n".join(step.get("run", "") for step in steps)
+
+    assert badge["needs"] == "verify"
+    assert downloads, "the badge job regenerates the badge instead of downloading it"
+    assert downloads[0]["with"]["name"] == "ctrlrun-verify-authority"
+    assert "ctrlrun verify" not in script
+    assert "git push origin badges" in script
+
+
+def test_the_readme_badge_points_at_the_branch_the_job_publishes():
+    """A badge whose URL and whose publisher disagree is a 404 on the front page."""
+    readme = _repository_file(README)
+    script = "\n".join(step.get("run", "") for step in _workflow()["jobs"]["badge"]["steps"])
+
+    assert "raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" in readme
+    assert "origin badges" in script
+    assert "verify-badge.json" in script
+
+
+def test_the_verify_page_documents_the_permission_the_publish_costs():
+    """§5.2 — the cost is shown once, where the reader can see it, and not buried."""
+    page = " ".join(_repository_file(VERIFY_DOC).split())
+
+    assert "contents: write" in page
+    assert "least privilege" in page
