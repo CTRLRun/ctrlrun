@@ -106,6 +106,29 @@ any change to one appears here.
   the four places where a third summary disagreed are named. That correction is what SPEC-v0.4
   §6.2 marked its own provisional list as needing.
 
+- **`research/framework-probe/`** (SPEC-v0.4 §7) — a research harness that drives the
+  double-refund and approval-mutation scenarios through third-party agent frameworks against a
+  fake remote, and emits a table. It lives outside `src/`, is never imported by `ctrlrun`, and
+  its per-framework dependencies are never installed by `ctrlrun` or by any of its extras.
+
+  Its README's first paragraph says what the table is: **behaviour, not quality**. A framework
+  that retries a lost response is doing what its documentation says it does; the finding is
+  about what an agent stack does *without* an effect-level guard.
+
+  One fake remote for every framework, with three behaviours — commit-then-drop,
+  commit-then-timeout, capture-what-was-approved — counting **effects by identity, not by
+  request**, so "executed twice" means two effects and not two HTTP calls. Every outcome is
+  derived from what the remote saw and never from anything an adapter reports about itself.
+
+  Two stub frameworks run by default and disagree: one retries and reports `executed_twice`,
+  one does not and reports `executed_once`. Without the pair, a harness hard-coded to say
+  `executed_twice` would pass its own tests and say the same thing about every real framework
+  it ever ran.
+
+  **No results are checked in**, and a test asserts it. The runs are made and published by the
+  maintainer; a commit carrying findings about other projects that nobody had reviewed is not
+  one this repository makes.
+
 ### Changed
 
 - **`docs/SPEC-v0.3.md` §10 T85 is amended**, as SPEC-v0.4 §9.4 item 2 requires and in the

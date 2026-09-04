@@ -154,6 +154,15 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # refusal names follow this codebase's convention (DuplicateEffect, AmbiguousEffect), not the
 # suffix rule, as `errors.py` already does.
 "src/ctrlrun/verify/*.py" = ["ANN401", "N818"]
+# The research harness is outside `src/` and outside the package (SPEC-v0.4 §7.1). It keeps
+# the line length and the import rules, because those are about reading it — but it is not
+# held to the kernel's typing discipline: its subject matter is a `BaseHTTPRequestHandler`
+# override whose signature is stdlib's, and untyped JSON off a loopback socket. N818: the
+# refusal names follow this codebase's convention, as `errors.py` already does. PLC0415: an
+# adapter imports its framework inside `run()` on purpose — a missing framework must be a
+# skipped row and not an import error at module scope.
+"research/framework-probe/*.py" = ["ANN401", "N818", "PLC0415"]
+"research/framework-probe/**/*.py" = ["ANN401", "N818", "PLC0415"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]
