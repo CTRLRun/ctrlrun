@@ -125,8 +125,23 @@ the approval. It is — but only for a call the SDK's gate actually asked about,
 `False` path it had not. An independent review found it: a $1,000 refund executing with no human
 and a receipt naming `openai-agents:tool-approval` as the approver, which is a grant nobody made
 written into the evidence log. `interrupt()` now reads
-`RunContextWrapper.is_tool_approved(tool_name, call_id)` — `True`, `False`, or `None` for a call
-nobody was asked about — and only the first two are answers.
+the SDK's **per-call** approval record — `True`, `False`, or `None` for a call nobody was asked
+about — and only the first two are answers. Not the public `is_tool_approved`, which falls back
+to a sticky per-tool decision that `always_approve=True` sets and would answer `True` for later
+calls no human saw.
+
+Two further bindings, because that record answers for a **tool call** and a tool body may raise
+`ApprovalRequired` more than once:
+
+- **The answer is bound to the action `protected_tool` gated.** A refund's yes does not
+  authorize a `bank.wire` raised beside it in the same body — a different action, a different
+  policy row, a different authority scope, and no approval item a human ever saw.
+- **One answer authorizes one request.** A second approval request under the same tool call is a
+  decision nobody made.
+
+Both are refused with `ApprovalNotAsked`: nothing is written and the request stays `pending`.
+`always_approve=True` is refused the same way — it records a decision about the tool rather than
+about the call, and this adapter will not read it as an answer for a specific action.
 
 **So `@protect(wait=True)` on this `Control` must go through `protected_tool`.** A plain
 `function_tool`, a background job, or any other protected call on the same `Control` reaches the

@@ -32,7 +32,8 @@ from typing import TYPE_CHECKING, Any
 from ctrlrun import ApprovalAnswer, PendingApproval
 from ctrlrun.adapter import banner
 from ctrlrun.adapter import needs_approval as _needs_approval
-from ctrlrun.errors import CTRLRunError, InvalidArgument
+from ctrlrun.errors import InvalidArgument
+from ctrlrun.policy import OBSERVE
 
 if TYPE_CHECKING:  # pragma: no cover - an adapter constructs no Control (SPEC-v0.5 §2.3)
     from agents.tool_context import ToolContext
@@ -64,10 +65,17 @@ class ApprovalNotAsked(RuntimeError):
       call is in scope at all -- a plain `function_tool`, a background job, or any other
       `@protect(wait=True)` on the same `Control`. The provider hangs off the `Control` and not
       off the tool, so nothing else links the two.
-    * The SDK's own gate never asked about this call, which `is_tool_approved` reports as
-      `None`. That happens whenever `needs_approval` and the kernel disagree -- the predicate
-      sees the arguments the model sent, `Control.execute` sees the arguments the function was
-      called with after Python applied its defaults (§3.5).
+    * The SDK's own gate never asked about **this call**, which the per-call approval lookup
+      reports as `None`. That happens whenever `needs_approval` and the kernel disagree -- the
+      predicate sees the arguments the model sent, `Control.execute` sees the arguments the
+      function was called with after Python applied its defaults (§3.5) -- and also when the
+      human answered with `always_approve`, which records a decision about the *tool* and not
+      about this call.
+    * The approval belongs to a **different action**. One tool body may raise
+      `ApprovalRequired` more than once; the SDK's record is keyed by the tool call, so without
+      this a single yes authorized every action raised under it.
+    * A **second** approval request arrives under one tool call. One human answer authorizes
+      one request.
     """
 
 
@@ -82,14 +90,37 @@ class ApprovalNotAsked(RuntimeError):
 #: global would let one call read another's answer. Bound and reset around each invocation, so
 #: it is empty everywhere else -- which is what makes the "no SDK call in scope" path detectable
 #: rather than silently stale.
-_CURRENT_CALL: ContextVar[ToolContext | None] = ContextVar(
+class _GatedCall:
+    """One SDK tool call, and **the one action its approval answers for**.
+
+    The action matters as much as the call. The SDK's approval record is keyed by
+    `(tool_name, call_id)`, and a tool body may raise `ApprovalRequired` more than once, for
+    different actions -- a refund and then a wire. Every one of them arrives at `interrupt()`
+    under that same key, so reading the record without asking *what is being approved* answers
+    yes to all of them. A human who approved a $5 refund would be recorded as having approved a
+    $1,000,000 wire they were never shown.
+
+    `answered` bounds it further: one human answer authorizes **one** approval request. A second
+    distinct `request_id` under the same tool call is a second decision nobody made, even when
+    it is for the same action with the same arguments.
+    """
+
+    __slots__ = ("action", "answered", "context")
+
+    def __init__(self, context: ToolContext, action: str) -> None:
+        self.context = context
+        self.action = action
+        self.answered: set[str] = set()
+
+
+_CURRENT_CALL: ContextVar[_GatedCall | None] = ContextVar(
     "ctrlrun_openai_agents_current_call", default=None
 )
 
 
 @contextmanager
-def _bound_call(context: ToolContext) -> Iterator[None]:
-    token = _CURRENT_CALL.set(context)
+def _bound_call(context: ToolContext, action: str) -> Iterator[None]:
+    token = _CURRENT_CALL.set(_GatedCall(context, action))
     try:
         yield
     finally:
@@ -184,9 +215,14 @@ class AgentsInterrupt:
         nobody was — a grant fabricated into the evidence log, which is what §2.3's ban on
         `StateStore.append_event` exists to prevent, reached through the sanctioned door.
 
-        `RunContextWrapper.is_tool_approved(tool_name, call_id)` is the SDK's own record and has
-        exactly the three states this needs: `True` (a human approved), `False` (a human
-        refused) and `None` (this call was never put to anyone). Only the first two are answers.
+        The SDK's record is read **per call** by `_answer_for_this_call`, which has the three
+        states this needs: `True` (a human approved this call), `False` (a human refused it) and
+        `None` (nobody was asked about it). Only the first two are answers, and the public
+        `is_tool_approved` is not what is read -- see that helper for why.
+
+        The record answers for a **tool call**, and a tool body may raise `ApprovalRequired`
+        more than once. So the answer is bound to the action `protected_tool` gated and to one
+        request: a refund's yes does not authorize a wire raised beside it.
 
         A **rejection** normally never reaches here: the SDK does not invoke a tool whose
         approval was refused, so the run ends with the rejection in its own output and no
@@ -195,8 +231,8 @@ class AgentsInterrupt:
         denial rather than assumed unreachable — a human's *no* is an answer, and §2.4 says it
         is recorded by the provider like any other.
         """
-        context = _CURRENT_CALL.get()
-        if context is None:
+        call = _CURRENT_CALL.get()
+        if call is None:
             raise ApprovalNotAsked(
                 f"{pending.action} reached the approval interrupt outside a tool call driven by "
                 "protected_tool, so the OpenAI Agents SDK was never asked and holds no answer. "
@@ -204,16 +240,37 @@ class AgentsInterrupt:
                 "`ctrlrun approve`, or drive the call through protected_tool()."
             )
 
+        context = call.context
+        if pending.action != call.action:
+            raise ApprovalNotAsked(
+                f"{pending.action} needs approval, but the OpenAI Agents SDK gated "
+                f"{call.action!r} for this tool call ({context.tool_name}/"
+                f"{context.tool_call_id}). The human answered about {call.action!r} and was "
+                f"never shown {pending.action}: a different action, a different policy row and "
+                "a different authority scope. Nothing was granted and the request is still "
+                "pending: answer it with `ctrlrun approve`, or gate this action with its own "
+                "protected_tool()."
+            )
+        if call.answered and pending.request_id not in call.answered:
+            raise ApprovalNotAsked(
+                f"{pending.action} needs a second approval under one tool call "
+                f"({context.tool_name}/{context.tool_call_id}), which was answered once. One "
+                "human answer authorizes one request; the second is a decision nobody made. "
+                "Nothing was granted and the request is still pending."
+            )
+
         answered = _answer_for_this_call(context)
         if answered is None:
             raise ApprovalNotAsked(
                 f"{pending.action} needs approval, but the OpenAI Agents SDK never gated this "
                 f"call ({context.tool_name}/{context.tool_call_id}) and so holds no answer. "
-                "The needs_approval predicate and Control.execute disagreed about the "
-                "arguments (SPEC-v0.5 §3.5). Nothing was granted and the request is still "
-                "pending: answer it with `ctrlrun approve`."
+                "Either the needs_approval predicate and Control.execute disagreed about the "
+                "arguments (SPEC-v0.5 §3.5), or the human answered with always_approve, which "
+                "records a decision about the tool and not about this call. Nothing was granted "
+                "and the request is still pending: answer it with `ctrlrun approve`."
             )
 
+        call.answered.add(pending.request_id)
         return ApprovalAnswer(granted=answered, approver=CHANNEL)
 
 
@@ -271,7 +328,7 @@ def protected_tool(
     invoke = tool.on_invoke_tool
 
     async def _invoke_bound(context: ToolContext, arguments: str) -> Any:
-        with _bound_call(context):
+        with _bound_call(context, action):
             return await invoke(context, arguments)
 
     return dataclasses.replace(tool, on_invoke_tool=_invoke_bound)
@@ -309,7 +366,7 @@ def approval_gate(
 
     In neither direction does an action execute that a human did not approve. That sentence was
     not true while `interrupt()` granted unconditionally: a wrong `False` executed. It is the
-    interrupt's reading of `is_tool_approved` that makes it true, not this predicate.
+    interrupt's reading of the SDK's per-call record that makes it true, not this predicate.
 
     Pass the same `resource=` template the decorator has, and give the tool no defaulted
     parameters, and the two agree and no call is refused this way.
@@ -324,13 +381,31 @@ def approval_gate(
     banner(control)
 
     async def gate(context: Any, params: Mapping[str, Any], call_id: str) -> bool:
+        if control.policy.mode == OBSERVE:
+            # SPEC-v0.5 §3.6: an adapter never interrupts in observe mode. §3.6 argues it
+            # through `Control.execute` -- `ApprovalRequired` is never raised, so `wait()` is
+            # never called -- which is true of the resumed-in-place shape and **not of this
+            # one**: the primitive is reached from this predicate, one step earlier, and
+            # `needs_approval` is `Control.evaluate`, which `v0.3 §6.2` evaluates identically
+            # under observe mode. So without this the gate returned True, the SDK stopped the
+            # run, and a human was asked.
+            #
+            # The consequence is worse than the rule: this SDK does not invoke a tool whose
+            # approval was declined, so a human's *no* under observe mode would **stop the
+            # action** -- and observe mode's whole promise is that nothing is enforced. The
+            # action still runs, is still decided in full, and is still recorded; §12.9 has it.
+            return False
         return _needs_approval(control, action, dict(params), resource=resource)
 
     return gate
 
 
 def unwrap(error: BaseException) -> BaseException:
-    """The `CTRLRunError` behind an SDK wrapper, or the error unchanged.
+    """What the tool actually raised, with the SDK's wrappers taken off.
+
+    Usually that is a `CTRLRunError` -- an `ActionDenied`, a `DuplicateEffect` -- which is the
+    case §12.7 is about. It is deliberately **not** "the first `CTRLRunError` in the chain":
+    see the walk below for why that reached past the outcome into a nested failure.
 
     This SDK wraps whatever a tool raises in `agents.exceptions.UserError` -- *"Error running
     tool run_it: ..."* -- and chains the original as `__cause__`. So an operator's
@@ -364,24 +439,32 @@ def unwrap(error: BaseException) -> BaseException:
     # output looped forever on exactly the AMBIGUOUS outcome it exists to preserve. That is
     # fixed at the raise as well; this is the half that holds for a chain built anywhere else,
     # and the two are tested separately because either alone would hide the other.
+    # Descend through the SDK's **own wrappers only**, and stop at the first thing that is not
+    # one -- whatever type that is.
+    #
+    # Walking every link instead, and returning the first `CTRLRunError` found anywhere, reached
+    # past the outcome. Any nested protected call whose error was chained (`raise X from inner`,
+    # which is idiomatic) puts a foreign `CTRLRunError` deeper in the chain: a refund recorded
+    # AMBIGUOUS came back to the caller as the audit call's `NotExecuted`, whose whole contract
+    # is *definitely did not run, safe to retry*. Acting on that retries a refund that may have
+    # landed, which is what `v0.1 §5.5` exists to prevent -- the same defect the `__context__`
+    # half of this walk was fixed for, left open on the `__cause__` side.
+    #
+    # Bounded by what it has visited, because a chain is not guaranteed to be acyclic: `raise X
+    # from Y` where `Y.__cause__` is already `X` closes a loop, and an unbounded walk never
+    # leaves it. `_reraise` keeps this module from building one; this holds for a chain built
+    # anywhere else, and the two are tested separately because either alone would hide the other.
+    from agents.exceptions import AgentsException, UserError
+
     walked: set[int] = set()
-    seen: BaseException | None = error
-    while seen is not None and id(seen) not in walked:
-        if isinstance(seen, CTRLRunError):
-            return seen
+    seen: BaseException = error
+    while isinstance(seen, UserError | AgentsException) and id(seen) not in walked:
         walked.add(id(seen))
+        if seen.__cause__ is None:
+            # A wrapper the SDK raised about its own configuration, with nothing behind it.
+            break
         seen = seen.__cause__
-
-    # No `CTRLRunError` in the chain, so this is the other half of `v0.1 §5.5`: an executor that
-    # raised something of its own -- a `TimeoutError`, a connection error -- which the kernel
-    # recorded as `AMBIGUOUS` and then re-raised unchanged, because the caller has to see what
-    # actually happened. The SDK wrapped that too. A wrapper with a cause is one to unwrap; a
-    # `UserError` the SDK raised about its own configuration has none, and is left alone.
-    from agents.exceptions import UserError
-
-    if isinstance(error, UserError) and error.__cause__ is not None:
-        return error.__cause__
-    return error
+    return seen
 
 
 def _reraise(recovered: BaseException, raised: BaseException) -> None:
