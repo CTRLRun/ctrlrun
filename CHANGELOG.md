@@ -25,7 +25,7 @@ somebody tries it.
   Five decisions are written into it **with their arguments**, because a decision whose
   reasoning lives only in a build note is one the next session re-litigates:
   `ApprovalRequired` + `with_approval` rather than `Suspended` + `Control.resume`; a Protocol
-  rather than a base class; `ctrlrun[conformance]` rather than core or a third distribution;
+  rather than a base class; the conformance kit in this repository rather than a third distribution;
   one repository with separate distributions; and an adapter that **sees** the principal and
   never supplies one.
 
@@ -46,8 +46,20 @@ somebody tries it.
   `Control.resolve_principal` is promoted from private for it: the identity seam an adapter may
   **read** and may not supply.
 
-- **`conformance` extra** in `pyproject.toml` (`pytest`). `dependencies` is unchanged:
-  `pyyaml` and `click`.
+- **`ctrlrun.adapter`** — the adapter surface: the `FrameworkInterrupt` Protocol,
+  `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval` and
+  `banner`. Core and stdlib, re-exported from `ctrlrun`, and `Control.resolve_principal` is
+  promoted from private for it — the identity seam an adapter may **read** and may not supply.
+
+- **`ctrlrun.conformance`** — the adapter conformance kit: the `SPEC-v0.1.md` §7 and
+  `SPEC-v0.3.md` §10 acceptance suites runnable against any adapter through that surface, and
+  **eleven adapters broken in one named way each**, written before the reference adapters because
+  "two adapters pass the suites" means nothing until the suite can fail.
+
+  It is **core and stdlib-only**, not the extra `SPEC-v0.5.md` §5.1 originally specified. The
+  premise there was that a kit needs `pytest`; building it showed otherwise, and an extra with
+  no dependency behind it is an install line that installs nothing. §12.1 records the change.
+  `dependencies` is unchanged: `pyyaml` and `click`.
 
 ### Changed
 

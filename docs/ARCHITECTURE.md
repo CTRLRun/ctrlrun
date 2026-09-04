@@ -152,12 +152,13 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `identity.py` | `IdentityProvider`, `IdentityContext`, static and header providers | policy, authority, storage |
 | `authority.py` | `Grant`, `Subject`, `Authority`, matching, containment, delegation planning | approvals, effect state, executors, sinks |
 | `approval.py` | request/grant/consume, providers | executors |
-| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | policy internals, authority, effect state, executors, sinks, any framework |
+| `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | the policy evaluator, authority, effect state, executors, sinks, any framework |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
 | `control.py` | `Control` orchestration, decorator, context, suspend/resume | CLI |
 | `receipt.py` | Receipt/Event models, `EventSink`, JSONL sink | everything else |
 | `verify/` | the guarantee registry, scenario derivation, the scratch store, reporting | the gateway, `otel`, `jwt_identity`; anything from an extra |
+| `conformance/` | the adapter suites, the broken-adapter fixtures, the report | the gateway, `otel`, `jwt_identity`; anything from an extra |
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.
@@ -187,9 +188,16 @@ security-critical enough that a second copy of it is worse than the import. Poli
 nothing of effect state — no records, no transitions, no reservations — and `effect.py` does not
 import `policy.py`, so there is no cycle.
 
+v0.5 adds `conformance/` beside `verify/` and `cli/`, above `control.py`: it composes the
+kernel the way an application does, nothing in the kernel imports it, and `import ctrlrun` does
+not reach it. It is core, and adds no dependency, for `verify/`'s reason — a check somebody has to
+remember to install is a check that does not run — and `SPEC-v0.5.md` §12.1 records why it is
+not the extra it was planned as.
+
 v0.5 adds `adapter.py` below `control.py` and does not change the direction. It imports
-`action.py` and `approval.py`, and takes a `Control` as a **parameter** in `needs_approval` and
-`banner` rather than importing it at module scope, so there is no cycle and no second composer:
+`action.py`, `approval.py`, `effect.py`, `errors.py` and two names from `policy.py` — `OBSERVE`
+for the banner and `Decision` for the predicate — and takes a `Control` as a **parameter** in
+`needs_approval` and `banner` rather than importing it at module scope, so there is no cycle and no second composer:
 it appends no event, owns no sink, and reserves nothing. The one place it writes is
 `grant_approval`/`deny_approval` in `InterruptApprovalProvider.wait`, which is the same call
 `ctrlrun approve` and the webhook make — and it is the *only* place, so no adapter can grow a

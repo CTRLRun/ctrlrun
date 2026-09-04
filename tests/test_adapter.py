@@ -905,6 +905,31 @@ def test_an_unrepresentable_answer_is_refused_at_the_gate():
         provider.wait(request.request_id, None)
 
 
+def test_a_refusal_is_never_refused_for_carrying_no_arguments():
+    """SPEC-v0.5 §3.4, §12.2. An answer of `granted=False` authorizes nothing, so there is
+    nothing to bind it to -- and requiring `approved_arguments` on one turned a human's *no*
+    into an `ApprovalMismatch`, when §2.4 is explicit that a denial is an answer and gets
+    `APPROVAL_DENIED` then `ACTION_DENIED`.
+
+    The conformance kit found this by driving a denial through a declared carrier. It has a
+    test here too, because a defect in `adapter.py` whose only coverage is `conformance/` is a
+    defect that comes back the moment somebody edits one without running the other.
+    """
+    store = InMemoryStateStore()
+    double = CountingInterrupt(
+        ApprovalAnswer(granted=False, approver="double:interrupt"), carries=True
+    )
+    provider = InterruptApprovalProvider(store, double)
+    request = provider.request(_action(), timedelta(minutes=15))
+
+    assert provider.wait(request.request_id, None) is None
+
+    record = store.get_approval(request.request_id)
+    assert record is not None
+    assert str(record.status) == "denied"
+    assert record.approver == "double:interrupt"
+
+
 def test_a_non_carrier_is_not_checked_and_says_so():
     """§3.4's second bullet: attribution, declared. The kit turns this into `not_applicable`."""
     store = InMemoryStateStore()
