@@ -775,12 +775,19 @@ def test_every_documented_install_names_a_distribution_this_repository_builds():
     known |= {f"{kernel['name']}[{extra}]" for extra in kernel.get("optional-dependencies", {})}
 
     adapters = root / "adapters"
-    if adapters.is_dir():
-        for path in sorted(adapters.iterdir()):
-            manifest = path / "pyproject.toml"
-            if manifest.is_file():
-                with manifest.open("rb") as handle:
-                    known.add(tomllib.load(handle)["project"]["name"])
+    if not adapters.is_dir():  # pragma: no cover - running from an unpacked sdist
+        # `adapters/` is pruned from the sdist (SPEC-v0.5 §6.1) while the README that names
+        # them ships inside it, so here the invariant is **unverifiable rather than violated**.
+        # Same reasoning as T136's other half, and the same narrowness: it holds in a checkout,
+        # which is where a doc is written, and the `adapters` CI job runs it with the tree
+        # present. Asserting from the sdist would fail every adapter name on principle.
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+
+    for path in sorted(adapters.iterdir()):
+        manifest = path / "pyproject.toml"
+        if manifest.is_file():
+            with manifest.open("rb") as handle:
+                known.add(tomllib.load(handle)["project"]["name"])
 
     documents = [root / "README.md", root / "docs" / "adapters.md"]
     documents += sorted((root / "adapters").glob("*/README.md")) if adapters.is_dir() else []
