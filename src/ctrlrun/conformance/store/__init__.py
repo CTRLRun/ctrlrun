@@ -29,10 +29,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ...errors import InvalidArgument
 from ..report import CaseResult, SuiteResult, SuiteStatus
 from .backends import InMemoryBackend, SQLiteBackend, StoreBackend
 from .report import StoreReport
-from .suites import SUITES, all_case_ids, failed, selected
+from .suites import CONTENDERS, SUITES, all_case_ids, failed, selected
 
 __all__ = [
     "SUITES",
@@ -48,17 +49,29 @@ __all__ = [
 ]
 
 
-def run(backend: StoreBackend, *, only: Sequence[str] = ()) -> StoreReport:
+def run(
+    backend: StoreBackend, *, only: Sequence[str] = (), processes: int = CONTENDERS
+) -> StoreReport:
     """Drive every case against `backend` and report what each came to (SPEC-v0.6 §2).
 
     `only` selects case ids; an unknown name **raises** rather than silently running everything
     or nothing. It is a keyword and not a CLI flag -- §9.4 adds no command, so there is nothing
     for an unknown name to exit from.
 
+    `processes` is how many contenders the two E1 cases run, in threads and in OS processes
+    respectively. It is `v0.1 §7` T3's eight by default. A review found it named in §2.4, §9.1
+    and T143 while the code used a module constant, so the parameter that the specification
+    freezes did not exist.
+
     Every case gets a freshly `reset()` backend, so no case can see another's rows. A case that
     raises out of its own body is reported as a failed case naming the exception, never as a
     crashed run: one broken case must not hide the twenty that worked.
     """
+    if processes < 2:
+        raise InvalidArgument(
+            f"processes must be at least 2 to contend, got {processes}; a single contender "
+            "cannot demonstrate that anything was refused"
+        )
     chosen = selected(only)
     results = []
     for name, cases in SUITES.items():
@@ -68,8 +81,8 @@ def run(backend: StoreBackend, *, only: Sequence[str] = ()) -> StoreReport:
                 continue
             backend.reset()
             try:
-                outcomes.append(item.body(backend))
-            except BaseException as broke:
+                outcomes.append(item.body(backend, processes))
+            except Exception as broke:
                 outcomes.append(
                     failed(item.id, item.title, f"the case raised {type(broke).__name__}: {broke}")
                 )

@@ -17,6 +17,9 @@ would have left the other subsumed.
 
 from __future__ import annotations
 
+import atexit
+import shutil
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -111,6 +114,24 @@ class _ReleasesAnExpiredLease(_Wrapped):
                     lease_expires_at=now + lease,
                 )
         return self._inner.reserve_effect(effect_key, action_id, lease)
+
+
+class _RefusesWithTheWrongError(_Wrapped):
+    """Refuses a duplicate reservation with a plain `RuntimeError`.
+
+    `v0.1 §5.4`'s refusals are `DuplicateEffect` and `AmbiguousEffect`, and an agent loop's
+    `except DuplicateEffect` -- written to handle exactly this -- would not catch a
+    `RuntimeError`. The refusal happens; the *taxonomy* does not, and a case asserting only
+    "something was raised" cannot tell the difference. Mutation found the check unfixtured.
+    """
+
+    def reserve_effect(
+        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+    ) -> Reservation:
+        try:
+            return self._inner.reserve_effect(effect_key, action_id, lease)
+        except Exception as refused:
+            raise RuntimeError(f"could not reserve: {refused}") from refused
 
 
 # --- approval --------------------------------------------------------------------------------
@@ -356,9 +377,17 @@ class Fixture:
         return self.cases[suite]
 
     def backend(self, root: Path | None = None) -> StoreBackend:
-        import tempfile
+        """A backend for this fixture. `root` is the caller's to clean up.
 
-        return self.build(Path(root or tempfile.mkdtemp(prefix="ctrlrun-fixture-")))
+        Where none is given a temporary directory is made and **registered for removal at
+        interpreter exit** rather than leaked: T140 builds one backend per fixture per test, and
+        the first version left about twenty-six directories behind on every run.
+        """
+        if root is not None:
+            return self.build(Path(root))
+        made = tempfile.mkdtemp(prefix="ctrlrun-fixture-")
+        atexit.register(shutil.rmtree, made, True)
+        return self.build(Path(made))
 
 
 def _wrapping(
@@ -388,6 +417,12 @@ FIXTURES: Sequence[Fixture] = (
         {"reservation": "e1-in-process"},
         _wrapping("two-winners", _TwoWinners),
         because="contenders reserved one effect key",
+    ),
+    Fixture(
+        "refuses-with-the-wrong-error",
+        {"reservation": "e1-in-process"},
+        _wrapping("refuses-with-the-wrong-error", _RefusesWithTheWrongError),
+        because="v0.1 §5.4's refusals are",
     ),
     Fixture(
         "releases-an-expired-lease",

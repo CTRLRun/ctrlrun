@@ -107,7 +107,7 @@ def test_T141_the_shipped_backends_pass(backend, tmp_path):
 def test_T141_sqlite_reports_no_not_applicable(tmp_path):
     """SQLite has durable, shareable storage, so nothing about it is inapplicable."""
     report = run(SQLiteBackend(tmp_path))
-    assert report.not_applicable == (), report.to_text()
+    assert report.not_applicable_cases == (), report.to_text()
 
 
 def test_T141_in_memory_reports_exactly_the_two_honest_na(tmp_path):
@@ -125,6 +125,44 @@ def test_T141_in_memory_reports_exactly_the_two_honest_na(tmp_path):
         for case in suite.cases:
             if case.status is SuiteStatus.NOT_APPLICABLE:
                 assert case.reason, f"{suite.name}/{case.id}: an N/A with no reason"
+
+
+def test_T141_the_denominator_counts_cases_not_suites(tmp_path):
+    """SPEC-v0.6 §2.4. An N/A **case** inside a passing **suite** must not vanish.
+
+    The in-memory backend's `e1-cross-process` is N/A while `reservation` as a whole passes. Under
+    a suite-level tally the report read `7/7 (1 not applicable)` and the three inapplicable cases
+    were invisible to the fraction -- `v0.4 §3.8`'s "6/6 with two uncounted" in the other costume.
+    Found by review; this test is what stops it coming back, and a mutation reverting
+    `StoreReport.ok` to the suite-level tally fails here.
+    """
+    report = run(InMemoryBackend(tmp_path))
+
+    na_cases = [
+        case
+        for suite in report.suites
+        for case in suite.cases
+        if case.status is SuiteStatus.NOT_APPLICABLE
+    ]
+    assert na_cases, "the in-memory backend should report inapplicable cases"
+
+    # At least one of them sits inside a suite that otherwise passes -- the shape a suite-level
+    # count cannot see. Without this the test would pass against the tally it exists to forbid.
+    hidden = [
+        suite.name
+        for suite in report.suites
+        if suite.status is SuiteStatus.PASS
+        and any(c.status is SuiteStatus.NOT_APPLICABLE for c in suite.cases)
+    ]
+    assert hidden, "no N/A case is hidden inside a passing suite; this test proves nothing"
+
+    assert len(report.not_applicable_cases) == len(na_cases)
+    assert len(report.applicable_cases) == len(report.cases) - len(na_cases)
+    assert len(report.cases) > len(report.suites), "the two tallies would be indistinguishable"
+
+    tail = report.to_text().rsplit("\n", 1)[-1]
+    assert f"/{len(report.applicable_cases)}" in tail, tail
+    assert f"({len(na_cases)} not applicable)" in tail, tail
 
 
 # --- T142: the report refuses a degenerate run ---------------------------------------------

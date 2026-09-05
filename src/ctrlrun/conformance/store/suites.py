@@ -22,7 +22,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -41,7 +41,7 @@ from ...policy import Decision
 from ...receipt import Event, EventType, Receipt, ReceiptResult
 from ...state import DelegationRecord, StateStore
 from ..report import CaseResult, SuiteStatus
-from .backends import StoreBackend
+from .backends import StoreBackend, store_from_url
 
 #: A fixed instant, so a case that turns on expiry is exact rather than nearly exact. Every
 #: clock the suite injects is one only the suite moves: `v0.4 §3.6` -- no sleeps, anywhere.
@@ -52,10 +52,15 @@ LEASE = timedelta(minutes=5)
 #: check fails red rather than hanging CI.
 CONTENDERS = 8
 
-#: A backend that cannot inject a clock cannot be graded on anything time decides -- a lapsed
-#: lease, a lapsed approval -- and `v0.4 §3.6` forbids reaching for a sleep instead. It is a
-#: failure rather than an N/A: the seam is on the protocol (§2.2) and every shipped store takes it.
-NO_CLOCK = "the backend's store does not accept an injected clock"
+#: How many times `e1-in-process` repeats its contention.
+#:
+#: One round catches a store with **no** check every time, and a *check-then-act* store -- read
+#: the record, then insert without a lock, which is the realistic bug -- only about 40% of the
+#: time. A review measured it. One round would therefore have made `reservation` a flaky grade
+#: for the store shape it most needs to catch, and CI would eventually have seen a red that was
+#: not a regression. Twelve rounds puts a 40%-per-round miss below one in a hundred thousand,
+#: and the case still runs in well under a second.
+ROUNDS = 12
 
 
 # --- case plumbing --------------------------------------------------------------------------
@@ -65,11 +70,11 @@ NO_CLOCK = "the backend's store does not accept an injected clock"
 class Case:
     id: str
     title: str
-    body: Callable[[StoreBackend], CaseResult]
+    body: Callable[[StoreBackend, int], CaseResult]
 
 
 def case(identifier: str, title: str) -> Callable[..., Case]:
-    def wrap(body: Callable[[StoreBackend], CaseResult]) -> Case:
+    def wrap(body: Callable[..., CaseResult]) -> Case:
         return Case(identifier, title, body)
 
     return wrap
@@ -124,6 +129,19 @@ def _named(error: Any) -> str:
     if isinstance(error, tuple):
         return " or ".join(item.__name__ for item in error)
     return str(error.__name__)
+
+
+def _differing_field(wrote: Any, read: Any) -> tuple[str, Any, Any] | None:
+    """The first field on which two records of one dataclass differ, or `None`.
+
+    A shallow walk rather than `dataclasses.asdict`, which deep-copies and cannot handle the
+    read-only mappings `Action` freezes its arguments into (`v0.1 §2.2`).
+    """
+    for spec in fields(wrote):
+        mine, theirs = getattr(wrote, spec.name), getattr(read, spec.name, None)
+        if mine != theirs:
+            return spec.name, mine, theirs
+    return None
 
 
 def an_action(payment_id: str = "txn_1", amount: int = 2000, **extra: Any) -> Action:
@@ -186,7 +204,7 @@ def dishonest(case_id: str, title: str, what: str) -> CaseResult:
 
 
 @case("e1-in-process", "E1 holds against contenders in one process")
-def reservation_e1_in_process(backend: StoreBackend) -> CaseResult:
+def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """SPEC-v0.6 §2.4. The case a broken-store fixture can fail.
 
     All contenders are released from a barrier at once. The suite cannot open the window
@@ -196,55 +214,73 @@ def reservation_e1_in_process(backend: StoreBackend) -> CaseResult:
     """
     title = reservation_e1_in_process.title
     store = backend.open()
-    barrier = threading.Barrier(CONTENDERS)
-    won: list[str] = []
-    refused: list[BaseException] = []
-    lock = threading.Lock()
 
-    def contend(index: int) -> None:
-        action_id = f"act_{index:032x}"
-        barrier.wait(timeout=30)
-        try:
-            store.reserve_effect("refund:e1", action_id, LEASE)
-        except BaseException as refusal:
+    for round_number in range(ROUNDS):
+        key = f"refund:e1-{round_number}"
+        barrier = threading.Barrier(processes)
+        won: list[str] = []
+        refused: list[Exception] = []
+        lock = threading.Lock()
+
+        def contend(
+            index: int,
+            key: str = key,
+            barrier: threading.Barrier = barrier,
+            lock: threading.Lock = lock,
+            won: list[str] = won,
+            refused: list[Exception] = refused,
+        ) -> None:
+            # Every per-round object is bound as a default. They are rebuilt each round, and a
+            # closure over the loop variable would have a thread from round N appending to
+            # round N+1's list the moment the join ever became less than total.
+            action_id = f"act_{index:032x}"
+            barrier.wait(timeout=30)
+            try:
+                store.reserve_effect(key, action_id, LEASE)
+            except Exception as refusal:
+                with lock:
+                    refused.append(refusal)  # noqa: B023 - `except`-bound, not loop-bound
+                return
             with lock:
-                refused.append(refusal)
-            return
-        with lock:
-            won.append(action_id)
+                won.append(action_id)
 
-    threads = [threading.Thread(target=contend, args=(i,)) for i in range(CONTENDERS)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=30)
-        if thread.is_alive():
-            return failed("e1-in-process", title, "a contender did not finish within its bound")
+        threads = [threading.Thread(target=contend, args=(i,)) for i in range(processes)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            if thread.is_alive():
+                return failed("e1-in-process", title, "a contender did not finish within its bound")
 
-    if len(won) != 1:
-        return failed(
-            "e1-in-process",
-            title,
-            f"{len(won)} contenders reserved one effect key; exactly one may",
-            winners=won,
-        )
-    if len(refused) != CONTENDERS - 1:
-        return failed("e1-in-process", title, f"{len(refused)} refusals, expected {CONTENDERS - 1}")
-    for refusal in refused:
-        if not isinstance(refusal, DuplicateEffect):
+        if len(won) != 1:
             return failed(
                 "e1-in-process",
                 title,
-                f"a loser saw {type(refusal).__name__}: {refusal}; expected DuplicateEffect",
+                f"{len(won)} contenders reserved one effect key; exactly one may "
+                f"(round {round_number + 1} of {ROUNDS})",
+                winners=won,
+                round=round_number,
             )
-    record = store.get_effect("refund:e1")
-    if record is None or record.action_id != won[0]:
-        return failed("e1-in-process", title, "the record does not name the winner")
+        if len(refused) != processes - 1:
+            return failed(
+                "e1-in-process", title, f"{len(refused)} refusals, expected {processes - 1}"
+            )
+        for refusal in refused:
+            if not isinstance(refusal, DuplicateEffect | AmbiguousEffect):
+                return failed(
+                    "e1-in-process",
+                    title,
+                    f"a loser saw {type(refusal).__name__}: {refusal}; v0.1 §5.4's refusals are "
+                    "DuplicateEffect and AmbiguousEffect",
+                )
+        record = store.get_effect(key)
+        if record is None or record.action_id != won[0]:
+            return failed("e1-in-process", title, "the record does not name the winner")
     return passed("e1-in-process", title)
 
 
 @case("e1-cross-process", "E1 holds across OS processes")
-def reservation_e1_cross_process(backend: StoreBackend) -> CaseResult:
+def reservation_e1_cross_process(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.1 §7` T3's standard, reached through the suite rather than reimplemented."""
     title = reservation_e1_cross_process.title
     url = backend.url()
@@ -256,9 +292,13 @@ def reservation_e1_cross_process(backend: StoreBackend) -> CaseResult:
             title,
             "this backend's storage cannot be opened from another process",
         )
-    backend.reset()
-    backend.open().close()  # create the storage before the children race for it
-    with tempfile.TemporaryDirectory() as marker_dir:
+    # Create the storage BEFORE the children race for it, on the url they are given -- not
+    # through `backend.open()`, which a later `reset()` would point at a different file. An
+    # independent review found the first version creating `conformance-0.db` for the children
+    # and then reading `conformance-1.db` back, so "one committed record" was unverifiable.
+    store_from_url(url).close()
+
+    with tempfile.TemporaryDirectory() as marker_dir, tempfile.TemporaryDirectory() as gate:
         payloads = [
             json.dumps(
                 {
@@ -266,9 +306,12 @@ def reservation_e1_cross_process(backend: StoreBackend) -> CaseResult:
                     "effect_key": "refund:e1x",
                     "action_id": f"act_{index:032x}",
                     "marker_dir": marker_dir,
+                    "rendezvous_dir": gate,
+                    "contenders": processes,
+                    "rendezvous_timeout": 30,
                 }
             )
-            for index in range(CONTENDERS)
+            for index in range(processes)
         ]
         children = [
             subprocess.Popen(
@@ -280,37 +323,90 @@ def reservation_e1_cross_process(backend: StoreBackend) -> CaseResult:
             )
             for _ in payloads
         ]
-        results = []
+        # **Every stdin is written and closed before any child is collected.** `communicate()`
+        # in the collection loop was the defect: a child blocks on `stdin.read()` until its own
+        # stdin closes, so collecting one at a time fed them one at a time and the eight
+        # contenders never overlapped. The worker's own rendezvous is the barrier; this is what
+        # lets every worker reach it.
         for child, payload in zip(children, payloads, strict=True):
+            assert child.stdin is not None
+            child.stdin.write(payload)
+            child.stdin.close()
+
+        results = []
+        for child in children:
             try:
-                out, err = child.communicate(payload, timeout=60)
+                child.wait(timeout=90)
             except subprocess.TimeoutExpired:
                 child.kill()
-                return failed("e1-cross-process", title, "a contender did not finish in 60s")
+                return failed("e1-cross-process", title, "a contender did not finish in 90s")
+            assert child.stdout is not None and child.stderr is not None
+            out, err = child.stdout.read(), child.stderr.read()
+            child.stdout.close()
+            child.stderr.close()
             if child.returncode != 0:
                 return failed(
                     "e1-cross-process", title, f"a contender exited {child.returncode}: {err}"
                 )
             results.append(json.loads(out))
         called = os.listdir(marker_dir)
+        arrived = len(os.listdir(gate))
 
+    if arrived != processes:
+        return failed(
+            "e1-cross-process",
+            title,
+            f"only {arrived} of {processes} contenders reached the barrier, so they did not "
+            "contend; this case would have graded serialization rather than the store",
+        )
     winners = [result for result in results if result["won"]]
     if len(winners) != 1:
         return failed(
             "e1-cross-process",
             title,
-            f"{len(winners)} of {CONTENDERS} processes reserved one key; exactly one may",
+            f"{len(winners)} of {processes} processes reserved one key; exactly one may",
             results=results,
         )
     if winners[0]["error"] is not None:
         return failed("e1-cross-process", title, f"the winner broke: {winners[0]['message']}")
     if called != ["called"]:
         return failed("e1-cross-process", title, f"the fake remote was called {len(called)} times")
+    for result in results:
+        if result["won"]:
+            continue
+        if result["error"] not in ("DuplicateEffect", "AmbiguousEffect"):
+            return failed(
+                "e1-cross-process",
+                title,
+                f"a loser saw {result['error']}: {result['message']}; v0.1 §5.4's refusals are "
+                "DuplicateEffect and AmbiguousEffect",
+            )
+    # The record is read back on the url the children actually used. Without this the case
+    # asserts what the children *reported* and never what the store *holds*.
+    holder = store_from_url(url)
+    try:
+        record = holder.get_effect("refund:e1x")
+    finally:
+        holder.close()
+    if record is None:
+        return failed(
+            "e1-cross-process", title, "no record exists for the key eight processes contended for"
+        )
+    if record.state is not EffectState.COMMITTED:
+        return failed(
+            "e1-cross-process", title, f"the record is {record.state}, expected committed"
+        )
+    if record.action_id != winners[0]["action_id"]:
+        return failed(
+            "e1-cross-process",
+            title,
+            f"the record names {record.action_id}, but {winners[0]['action_id']} reported winning",
+        )
     return passed("e1-cross-process", title)
 
 
 @case("retry-table", "the retry table of v0.1 §5.4, every row")
-def reservation_retry_table(backend: StoreBackend) -> CaseResult:
+def reservation_retry_table(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = reservation_retry_table.title
     store = backend.open()
 
@@ -334,6 +430,19 @@ def reservation_retry_table(backend: StoreBackend) -> CaseResult:
         "retry-table",
         title,
         lambda: store.reserve_effect("refund:live", "act_d", LEASE),
+        DuplicateEffect,
+        state=IN_PROGRESS_EFFECT,
+    )
+    if problem:
+        return problem
+
+    # EXECUTING with a live lease -> refused, the other half of §5.4's in-progress row
+    store.reserve_effect("refund:running", "act_c2", LEASE)
+    store.begin_execution("refund:running", "act_c2")
+    problem = expect(
+        "retry-table",
+        title,
+        lambda: store.reserve_effect("refund:running", "act_d2", LEASE),
         DuplicateEffect,
         state=IN_PROGRESS_EFFECT,
     )
@@ -371,7 +480,7 @@ def reservation_retry_table(backend: StoreBackend) -> CaseResult:
 
 
 @case("lease-expiry", "an expired lease becomes AMBIGUOUS and is never released")
-def reservation_lease_expiry(backend: StoreBackend) -> CaseResult:
+def reservation_lease_expiry(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.1 §5.3 E3`, and SPEC-v0.6 §4.2.2's first kept write.
 
     The refusal is not the whole assertion: the record MUST be `AMBIGUOUS` afterwards. A store
@@ -381,8 +490,6 @@ def reservation_lease_expiry(backend: StoreBackend) -> CaseResult:
     title = reservation_lease_expiry.title
     now = T0
     store = backend.open()
-    if not _accepts_clock(backend):
-        return failed("lease-expiry", title, NO_CLOCK)
 
     store = _clocked(backend, lambda: now)
     store.reserve_effect("refund:lapsed", "act_i", timedelta(seconds=1))
@@ -414,10 +521,8 @@ def reservation_lease_expiry(backend: StoreBackend) -> CaseResult:
 
 
 @case("binding", "an approval authorizes one action_hash and no other")
-def approval_binding(backend: StoreBackend) -> CaseResult:
+def approval_binding(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = approval_binding.title
-    if not _accepts_clock(backend):
-        return failed("binding", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
     action = an_action(amount=2000)
     approval_id = granted_approval(store, action)
@@ -443,10 +548,8 @@ def approval_binding(backend: StoreBackend) -> CaseResult:
 
 
 @case("single-use", "an approval is consumed exactly once")
-def approval_single_use(backend: StoreBackend) -> CaseResult:
+def approval_single_use(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = approval_single_use.title
-    if not _accepts_clock(backend):
-        return failed("single-use", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
     action = an_action(payment_id="txn_su")
     approval_id = granted_approval(store, action)
@@ -470,11 +573,9 @@ def approval_single_use(backend: StoreBackend) -> CaseResult:
 
 
 @case("expiry", "expiry is checked at consumption, and the lapse is recorded")
-def approval_expiry(backend: StoreBackend) -> CaseResult:
+def approval_expiry(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.1 §4.2 A3`, and SPEC-v0.6 §4.2.2's second kept write."""
     title = approval_expiry.title
-    if not _accepts_clock(backend):
-        return failed("expiry", title, NO_CLOCK)
     now = T0
     store = _clocked(backend, lambda: now)
     action = an_action(payment_id="txn_exp")
@@ -502,7 +603,7 @@ def approval_expiry(backend: StoreBackend) -> CaseResult:
 
 
 @case("atomic-with-reservation", "a refused reservation leaves the approval granted")
-def approval_atomic(backend: StoreBackend) -> CaseResult:
+def approval_atomic(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.1 §7` T12, driven against the real store rather than an injected failure.
 
     v0.1's T12 injects a store whose `reserve_effect` fails. Here the reservation is refused
@@ -510,8 +611,6 @@ def approval_atomic(backend: StoreBackend) -> CaseResult:
     own transaction rather than a double's.
     """
     title = approval_atomic.title
-    if not _accepts_clock(backend):
-        return failed("atomic-with-reservation", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
     action = an_action(payment_id="txn_atomic")
     approval_id = granted_approval(store, action)
@@ -543,12 +642,10 @@ def approval_atomic(backend: StoreBackend) -> CaseResult:
 
 
 @case("approval-checked-first", "the approval's refusal is the one raised")
-def approval_checked_first(backend: StoreBackend) -> CaseResult:
+def approval_checked_first(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.1 §7` T4's ordering: when a replayed approval and a duplicate effect both apply,
     the approval is checked first and its error is what the caller sees."""
     title = approval_checked_first.title
-    if not _accepts_clock(backend):
-        return failed("approval-checked-first", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
     action = an_action(payment_id="txn_order")
     approval_id = granted_approval(store, action)
@@ -575,7 +672,7 @@ def approval_checked_first(backend: StoreBackend) -> CaseResult:
 
 
 @case("only-ambiguous", "only an AMBIGUOUS record resolves")
-def resolution_only_ambiguous(backend: StoreBackend) -> CaseResult:
+def resolution_only_ambiguous(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = resolution_only_ambiguous.title
     store = backend.open()
 
@@ -607,11 +704,28 @@ def resolution_only_ambiguous(backend: StoreBackend) -> CaseResult:
         lambda: store.resolve_effect("refund:absent", EffectState.COMMITTED, "cli:human"),
         InvalidArgument,
     )
-    return problem or passed("only-ambiguous", title)
+    if problem:
+        return problem
+    # The refusal is not the whole assertion. A store that raised and moved the record anyway
+    # would pass every line above, and a `resolve` that could overwrite a live record is a way
+    # to release a reservation `v0.1 §5.3` says there is none of.
+    for key, want in (
+        ("refund:res1", EffectState.COMMITTED),
+        ("refund:res2", EffectState.RESERVED),
+    ):
+        record = store.get_effect(key)
+        if record is None or record.state is not want:
+            got = record.state if record else "gone"
+            return failed(
+                "only-ambiguous",
+                title,
+                f"a refused resolve moved {key!r} to {got}; it must leave the record alone",
+            )
+    return passed("only-ambiguous", title)
 
 
 @case("two-resolutions", "an AMBIGUOUS record resolves to COMMITTED or FAILED, and nothing else")
-def resolution_two_targets(backend: StoreBackend) -> CaseResult:
+def resolution_two_targets(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = resolution_two_targets.title
     store = backend.open()
 
@@ -639,13 +753,24 @@ def resolution_two_targets(backend: StoreBackend) -> CaseResult:
     resolved = store.resolve_effect("refund:res4", EffectState.FAILED, "cli:human")
     if resolved.state is not EffectState.FAILED:
         return failed("two-resolutions", title, f"resolved to {resolved.state}, expected failed")
+    # Read back, not merely returned. A store that fabricated the returned record and wrote
+    # nothing passed every line above -- found by review.
+    for key, want in (("refund:res3", EffectState.COMMITTED), ("refund:res4", EffectState.FAILED)):
+        record = store.get_effect(key)
+        if record is None or record.state is not want:
+            got = record.state if record else "gone"
+            return failed(
+                "two-resolutions",
+                title,
+                f"resolve_effect returned {want} for {key!r} but the record says {got}",
+            )
     return passed("two-resolutions", title)
 
 
 # --- outcome (v0.1 §5.5, one layer down; SPEC-v0.6 §2.5) ------------------------------------
 
 
-def _every_refusal(store: StateStore) -> list[tuple[str, Callable[[], Any]]]:
+def _every_refusal(store: StateStore) -> list[tuple[str | None, Callable[[], Any]]]:
     """Every refusal path the protocol has, as (effect_key, call) pairs.
 
     Built once and used by both `outcome` cases, so neither can drift into driving fewer
@@ -676,14 +801,16 @@ def _every_refusal(store: StateStore) -> list[tuple[str, Callable[[], Any]]]:
         ("refund:o1", lambda: store.extend_lease("refund:o1", "act_s", T0 + timedelta(hours=1))),
         ("refund:o1", lambda: store.resolve_effect("refund:o1", EffectState.FAILED, "cli:h")),
         ("refund:absent", lambda: store.begin_execution("refund:absent", "act_y")),
-        ("refund:o1", lambda: store.consume_approval(approval_id, action.action_hash)),
-        ("refund:o1", lambda: store.take_continuation("not-a-real-continuation")),
-        ("refund:o1", lambda: store.revoke_delegation("dlg_" + "0" * 32, by=None, at=T0)),
+        # These three touch no effect record, so pairing them with one made their per-row
+        # assertion vacuous. `None` says so, and the caller checks every record instead.
+        (None, lambda: store.consume_approval(approval_id, action.action_hash)),
+        (None, lambda: store.take_continuation("not-a-real-continuation")),
+        (None, lambda: store.revoke_delegation("dlg_" + "0" * 32, by=None, at=T0)),
     ]
 
 
 @case("no-failed-on-refusal", "no refusal writes FAILED")
-def outcome_no_failed_on_refusal(backend: StoreBackend) -> CaseResult:
+def outcome_no_failed_on_refusal(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """SPEC-v0.6 §2.5.
 
     `fail_effect` and `resolve_effect` write `FAILED` as their **purpose** and neither is a
@@ -692,37 +819,44 @@ def outcome_no_failed_on_refusal(backend: StoreBackend) -> CaseResult:
     into "it definitely did not happen", which is the failure this library exists to prevent.
     """
     title = outcome_no_failed_on_refusal.title
-    if not _accepts_clock(backend):
-        return failed("no-failed-on-refusal", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
-    for effect_key, call in _every_refusal(store):
-        before = store.get_effect(effect_key)
-        with contextlib.suppress(BaseException):
+    watched = ("refund:o1", "refund:o2", "refund:o3")
+    for _row_key, call in _every_refusal(store):
+        # Every watched record, not only the one this row names: a refusal that moved a
+        # *different* key to FAILED is the same defect and a per-row check cannot see it.
+        snapshot = {key: store.get_effect(key) for key in watched}
+        with contextlib.suppress(Exception):
             call()  # a refusal is expected here; the record it leaves is the subject
-        after = store.get_effect(effect_key)
-        if after is None:
-            continue
-        was_failed = before is not None and before.state is EffectState.FAILED
-        if after.state is EffectState.FAILED and not was_failed:
-            return failed(
-                "no-failed-on-refusal",
-                title,
-                f"a refusal moved {effect_key!r} to FAILED; only fail_effect and resolve_effect "
-                "may write it, and neither is a refusal path (§2.5)",
-            )
+        for key in watched:
+            before, after = snapshot[key], store.get_effect(key)
+            if after is None:
+                if before is not None:
+                    return failed(
+                        "no-failed-on-refusal",
+                        title,
+                        f"a refusal deleted the record for {key!r}; nothing in this protocol "
+                        "removes an effect record",
+                    )
+                continue
+            was_failed = before is not None and before.state is EffectState.FAILED
+            if after.state is EffectState.FAILED and not was_failed:
+                return failed(
+                    "no-failed-on-refusal",
+                    title,
+                    f"a refusal moved {key!r} to FAILED; only fail_effect and resolve_effect "
+                    "may write it, and neither is a refusal path (§2.5)",
+                )
     return passed("no-failed-on-refusal", title)
 
 
 @case("no-not-executed", "no store method raises NotExecuted")
-def outcome_no_not_executed(backend: StoreBackend) -> CaseResult:
+def outcome_no_not_executed(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`NotExecuted` is the executor's opt-in to `FAILED` and the one exception an agent may
     read as permission to retry. A store raising it would be asserting something about a remote
     it has never spoken to."""
     title = outcome_no_not_executed.title
-    if not _accepts_clock(backend):
-        return failed("no-not-executed", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
-    for _, call in _every_refusal(store):
+    for _key, call in _every_refusal(store):
         try:
             call()
         except NotExecuted as wrong:
@@ -741,7 +875,7 @@ def outcome_no_not_executed(backend: StoreBackend) -> CaseResult:
 
 
 @case("ambiguous-survives", "AMBIGUOUS survives a reopen and still refuses a blind retry")
-def durability_ambiguous(backend: StoreBackend) -> CaseResult:
+def durability_ambiguous(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = durability_ambiguous.title
     store = backend.open()
     store.reserve_effect("refund:dur1", "act_z", LEASE)
@@ -772,7 +906,7 @@ def durability_ambiguous(backend: StoreBackend) -> CaseResult:
 
 
 @case("terminal-states-survive", "every terminal record survives a reopen")
-def durability_terminal(backend: StoreBackend) -> CaseResult:
+def durability_terminal(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = durability_terminal.title
     store = backend.open()
     finishers: tuple[tuple[str, str, Callable[[StateStore, str, str], None]], ...] = (
@@ -807,7 +941,7 @@ def durability_terminal(backend: StoreBackend) -> CaseResult:
 
 
 @case("action-round-trip", "an Action round-trips without coercion")
-def evidence_action_round_trip(backend: StoreBackend) -> CaseResult:
+def evidence_action_round_trip(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """The store holds the Action a human approved. A round trip that coerced an `int` to a
     `float`, truncated a string, or dropped a claim would change the `action_hash` -- which is
     the whole of `v0.1 §4.2 A1`, reached through storage."""
@@ -823,7 +957,17 @@ def evidence_action_round_trip(backend: StoreBackend) -> CaseResult:
             "tags": ["a", "b"],
             "nested": {"z": 1, "a": {"deep": None}},
         },
-        principal=Principal(agent="conformance-agent", user="ada"),
+        # `v0.3 §10` T60c is *about* claims, issuer and expiry, and all three are deliberately
+        # outside the canonical form (`v0.3 §2.2`) -- so the `action_hash` comparison below
+        # cannot see them, and a store that dropped all three passed this case until a review
+        # built one. They are asserted separately, which is the only way they can be.
+        principal=Principal(
+            agent="conformance-agent",
+            user="ada",
+            claims={"dept": "finance", "level": 3},
+            issuer="https://issuer.example",
+            expires_at=T0 + timedelta(hours=1),
+        ),
         resource="payment:txn_rt",
     )
     request = build_request(action, timedelta(minutes=15), T0)
@@ -849,14 +993,27 @@ def evidence_action_round_trip(backend: StoreBackend) -> CaseResult:
                 f"expected {type(value).__name__} {value!r}",
             )
     if back.principal != action.principal:
-        return failed("action-round-trip", title, f"the principal changed: {back.principal}")
+        return failed(
+            "action-round-trip",
+            title,
+            f"the principal changed across the store: {back.principal!r}",
+        )
+    for name in ("claims", "issuer", "expires_at"):
+        got, want = getattr(back.principal, name), getattr(action.principal, name)
+        if got != want:
+            return failed(
+                "action-round-trip",
+                title,
+                f"principal.{name} came back {got!r}, expected {want!r}. It is outside the "
+                "action hash by design (v0.3 §2.2), so nothing else here can see it",
+            )
     if back.resource != action.resource or back.environment != action.environment:
         return failed("action-round-trip", title, "resource or environment changed")
     return passed("action-round-trip", title)
 
 
 @case("event-ids", "append_event returns the event as stored")
-def evidence_event_ids(backend: StoreBackend) -> CaseResult:
+def evidence_event_ids(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.2 §4.1`: `Control` hands every event to its sinks with the id the store assigned, and
     the store is the only thing that knows it. A sink that could not join its export back to the
     record would be exporting something else."""
@@ -864,7 +1021,14 @@ def evidence_event_ids(backend: StoreBackend) -> CaseResult:
     store = backend.open()
     stored = [
         store.append_event(
-            Event(event_id=0, ts=T0, type=EventType.ACTION_PROPOSED, action_id=f"act_e{i}", data={})
+            Event(
+                event_id=0,
+                ts=T0,
+                type=EventType.ACTION_PROPOSED,
+                action_id=f"act_e{i}",
+                effect_key=f"refund:e{i}",
+                data={"reason": "rule[1]", "amount": 2000, "nested": {"a": [1, 2]}},
+            )
         )
         for i in range(4)
     ]
@@ -887,18 +1051,28 @@ def evidence_event_ids(backend: StoreBackend) -> CaseResult:
             title,
             "append_event returned the id it was handed, not the one it stored",
         )
-    held = {event.event_id for event in store.events()}
+    by_id = {event.event_id: event for event in store.events()}
+    held = set(by_id)
     if not set(ids) <= held:
         return failed(
             "event-ids",
             title,
             f"append_event returned ids {ids} the store does not hold: {sorted(held)}",  # type: ignore[type-var]
         )
+    # The payload too, not only the id. A store that replaced every event's `data` passed this
+    # case while the ids matched, and an event log whose data is not the data is not evidence.
+    for event in stored:
+        differs = _differing_field(event, by_id[event.event_id])
+        if differs is not None:
+            name, mine, theirs = differs
+            return failed(
+                "event-ids", title, f"event.{name} came back {theirs!r}, expected {mine!r}"
+            )
     return passed("event-ids", title)
 
 
 @case("receipt-round-trip", "a receipt round-trips")
-def evidence_receipt(backend: StoreBackend) -> CaseResult:
+def evidence_receipt(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = evidence_receipt.title
     store = backend.open()
     action = an_action(payment_id="txn_rcp")
@@ -923,8 +1097,17 @@ def evidence_receipt(backend: StoreBackend) -> CaseResult:
     back = [held for held in store.receipts() if held.receipt_id == receipt.receipt_id]
     if not back:
         return failed("receipt-round-trip", title, "the receipt did not come back")
-    if back[0].action_hash != receipt.action_hash or back[0].result is not receipt.result:
-        return failed("receipt-round-trip", title, f"the receipt changed: {back[0]}")
+    # Every field, not two of seventeen. A store that mangled `decision`, `approver`,
+    # `arguments`, `attempt` or the timestamps passed this case while the two it compared
+    # survived -- and receipt fidelity is what §6's chain rests on.
+    differs = _differing_field(receipt, back[0])
+    if differs is not None:
+        name, mine, theirs = differs
+        return failed(
+            "receipt-round-trip",
+            title,
+            f"receipt.{name} came back {theirs!r}, expected {mine!r}",
+        )
     return passed("receipt-round-trip", title)
 
 
@@ -932,10 +1115,8 @@ def evidence_receipt(backend: StoreBackend) -> CaseResult:
 
 
 @case("one-resumption", "one suspension admits exactly one resumption")
-def continuation_one_resumption(backend: StoreBackend) -> CaseResult:
+def continuation_one_resumption(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = continuation_one_resumption.title
-    if not _accepts_clock(backend):
-        return failed("one-resumption", title, NO_CLOCK)
     store = _clocked(backend, lambda: T0)
     action = an_action(payment_id="txn_cont")
     store.reserve_effect("refund:cont", action.action_id, LEASE)
@@ -959,12 +1140,10 @@ def continuation_one_resumption(backend: StoreBackend) -> CaseResult:
 
 
 @case("extend-lease-refusals", "extend_lease refuses what it must")
-def continuation_extend_lease(backend: StoreBackend) -> CaseResult:
+def continuation_extend_lease(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.2 §10` T26b. An expired lease is extendable by nothing, and an expired reservation is
     still released by nobody."""
     title = continuation_extend_lease.title
-    if not _accepts_clock(backend):
-        return failed("extend-lease-refusals", title, NO_CLOCK)
     now = T0
     store = _clocked(backend, lambda: now)
 
@@ -1024,7 +1203,7 @@ def _delegation(delegation_id: str, *, revoked: bool = False) -> DelegationRecor
 
 
 @case("insert-not-upsert", "put_delegation inserts and never upserts")
-def delegation_insert(backend: StoreBackend) -> CaseResult:
+def delegation_insert(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.3 §5.2`: an upsert on an existing id would clear `revoked_at`, which is `unrevoke` by
     another door in a release that says there is no such thing."""
     title = delegation_insert.title
@@ -1056,7 +1235,7 @@ def delegation_insert(backend: StoreBackend) -> CaseResult:
 
 
 @case("revoke-atomic-idempotent", "revoke_delegation is atomic, idempotent and strict")
-def delegation_revoke(backend: StoreBackend) -> CaseResult:
+def delegation_revoke(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = delegation_revoke.title
     store = backend.open()
     identifier = "dlg_" + "b" * 32
@@ -1077,11 +1256,32 @@ def delegation_revoke(backend: StoreBackend) -> CaseResult:
         lambda: store.revoke_delegation("dlg_" + "c" * 32, by="cli:human", at=T0),
         InvalidArgument,
     )
-    return problem or passed("revoke-atomic-idempotent", title)
+    if problem:
+        return problem
+    # `True` is not the assertion; the row is. A store reporting a successful revoke while the
+    # delegation stays live is a `v0.3` authorization hole, and this case graded it `pass` until
+    # a review built one.
+    record = store.get_delegation(identifier)
+    if record is None:
+        return failed("revoke-atomic-idempotent", title, "the delegation vanished")
+    if record.revoked_at is None:
+        return failed(
+            "revoke-atomic-idempotent",
+            title,
+            "revoke_delegation reported True and the row is still live; a revoke that only "
+            "reports success is an authorization hole",
+        )
+    if record.revoked_by != "cli:human":
+        return failed(
+            "revoke-atomic-idempotent",
+            title,
+            f"the row records revoked_by={record.revoked_by!r}, not the revoker",
+        )
+    return passed("revoke-atomic-idempotent", title)
 
 
 @case("grant-json-round-trip", "grant_json round-trips with its offset retained")
-def delegation_grant_json(backend: StoreBackend) -> CaseResult:
+def delegation_grant_json(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     """`v0.3 §5.2`: `expires_at` retains the offset it was written with, not normalized to UTC,
     so a grant round-trips to an equal `Grant`."""
     title = delegation_grant_json.title
@@ -1120,10 +1320,6 @@ def delegation_grant_json(backend: StoreBackend) -> CaseResult:
 
 
 # --- clock plumbing -------------------------------------------------------------------------
-
-
-def _accepts_clock(backend: StoreBackend) -> bool:
-    return hasattr(backend, "open_with_clock")
 
 
 def _clocked(backend: StoreBackend, clock: Callable[[], datetime]) -> StateStore:
