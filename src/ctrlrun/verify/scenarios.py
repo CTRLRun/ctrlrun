@@ -66,7 +66,15 @@ from ..errors import (
     PolicyError,
 )
 from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
-from ..receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, verify_chain
+from ..receipt import (
+    Event,
+    EventType,
+    Receipt,
+    ReceiptResult,
+    iso_timestamp,
+    new_receipt_id,
+    verify_chain,
+)
 from ..state import InMemoryStateStore, SQLiteStateStore, StateStore
 from . import guarantees as reg
 from .report import Counterexample, GuaranteeResult, Status
@@ -1963,7 +1971,6 @@ class Engine:
         control, store, recorder, _ = self._control_for("G11", selection)
 
         def body(detail: dict[str, Any]) -> None:
-            returned: list[Receipt] = []
             for index in range(3):
                 action = selection.build()
                 key = (
@@ -1975,14 +1982,12 @@ class Engine:
                 # `DENY` is an acceptable selection here: the chain does not care what the
                 # decision was, only that a receipt reached the store.
                 with suppress(CTRLRunError):
-                    returned.append(
-                        self.execute(
-                            control,
-                            action,
-                            _Executor(lambda: f"{APPROVER}-result"),
-                            key,
-                            self.approve(control, store, action, selection),
-                        )
+                    self.execute(
+                        control,
+                        action,
+                        _Executor(lambda: f"{APPROVER}-result"),
+                        key,
+                        self.approve(control, store, action, selection),
                     )
             # From the store, because a denied action raises and returns nothing while still
             # writing its receipt. `returned` is what `put_receipt` handed back, which is a
@@ -2002,13 +2007,25 @@ class Engine:
                 "every stored receipt has its place in the chain",
                 "a stored receipt has no seq or no hash",
             )
-            # And what the caller was handed carries it too (§6.3). Without this a store could
-            # chain correctly and return an unchained receipt, and every sink would export a
-            # document with no `seq` -- which §6.4's "verifiable by recomputation" rests on.
+            # And what `put_receipt` **returns** carries it too (§6.3). Without this a store
+            # could chain correctly and hand back an unchained receipt, and every sink would
+            # export a document with no `seq` -- which §6.4's "verifiable by recomputation"
+            # rests on.
+            #
+            # Asked of `put_receipt` **directly**, not of what `execute` returned. A first
+            # version checked the receipts `execute` handed back, which is empty on a policy
+            # that denies everything -- and `all([])` is `True`, so the control this scenario
+            # added asserted nothing on exactly the configuration that made `DENY` selectable.
+            # A review found it. Two guards written a day apart, and the second made the first
+            # vacuous.
+            handed_back = store.put_receipt(replace(written[-1], receipt_id=new_receipt_id()))
             _expect_control(
-                all(item.seq is not None and item.hash is not None for item in returned),
-                "every receipt `put_receipt` returned carries its place in the chain",
-                "put_receipt returned a receipt with no seq or no hash",
+                handed_back.seq is not None
+                and handed_back.prev_hash is not None
+                and handed_back.hash is not None,
+                "put_receipt returns the receipt with its place in the chain",
+                f"put_receipt returned seq={handed_back.seq!r} prev_hash={handed_back.prev_hash!r} "
+                f"hash={handed_back.hash!r}",
             )
 
             # Now alter one, exactly as §6.5's first row describes, and require the break to be

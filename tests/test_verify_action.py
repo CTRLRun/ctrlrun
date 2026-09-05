@@ -454,7 +454,7 @@ def test_the_readme_says_what_not_applicable_means():
     section = " ".join(_readme_verify_section().split())
 
     assert "Not applicable is not a pass" in section
-    assert "never `10/10`" in section
+    assert "never `11/11`" in section
     assert "There is no flag that folds one into the count" in section
     assert "declared guarantees pass" in section
 

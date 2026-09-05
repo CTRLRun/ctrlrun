@@ -1362,29 +1362,38 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   If a sentence anywhere could be read as "signed", it is rewritten.
 - **Not an adversary who can rewrite every row including the head.** A database administrator with
   full write access recomputes the chain and it verifies. `THREAT_MODEL.md` already lists a
-  malicious administrator as out of scope, and v0.6 does not change that — it narrows it.
+  malicious administrator as out of scope, and v0.6 does not change that.
 
-  **What the chain buys is a cost, and the cost is stated exactly**, because an earlier draft of
-  this bullet described the excluded case as *"a rewrite of the whole log"* and that is not where
-  the boundary falls. Tampering with receipt *n* requires rewriting *n*, every receipt after it,
-  and the head. So:
+  **What the chain buys is one specific cost, and two drafts of this bullet overstated it.** The
+  first said the excluded case was *"a rewrite of the whole log"*. The second said tampering with
+  receipt *n* costs a rewrite of *n*, everything after it, and the head — which is true of
+  **altering** *n*, and false of erasing it. A review measured the real numbers:
 
-  | Where | What it costs |
-  |---|---|
-  | a receipt in the middle | rewrite it, every later receipt, and the head |
-  | the **last** receipt | **two writes**: the receipt and the head |
-  | the whole log | rewrite everything, which nothing here prevents |
+  | What an attacker wants | Statements | Detected |
+  |---|---|---|
+  | change what receipt *n* says, keeping every later receipt | rewrite *n*, each of *n+1…N*, and the head | yes, if any one is skipped |
+  | change receipt *n* and stop there | 1 | `content_altered` at *n*, `link_broken` at *n+1* |
+  | **erase receipt *n* and everything after it, rewinding the head** | **2** | **no** |
+  | erase a suffix and forget the head | 1 | `head_mismatch` |
+  | **append a well-formed receipt, updating the head** | **2** | **no** |
+  | delete from the middle, keeping the rest | 1 | `missing`, then `link_broken` |
 
-  The tail is protected by the head row alone, so the newest receipt — the one an incident
-  investigation reads first — is the cheapest to forge. A review measured it at two `UPDATE`s.
-  Saying "every row" would have implied a difficulty that is not there.
+  So the property is narrower than "tampering is expensive": **the chain makes it expensive to
+  change what a receipt says while keeping the receipts after it.** Erasing the end, or extending
+  it, costs two statements and is not detected at all.
+
+  **The head is a row in the same database, not an anchor.** It raises the cost of *forgetting* —
+  an attacker who deletes rows and stops is caught — and it cannot raise the cost of deciding to
+  erase, because whoever can write the receipts table can write the head. §6.3's *"only a head
+  that still names a `seq` and a `hash` no row carries catches it"* is true of exactly that
+  attacker and no other. An anchor outside this database is what would close it, and §11 keeps
+  signing and anchoring out of v0.6.
 
 - **Not evidence that a receipt was written by CTRLRun.** A well-formed row appended at the end,
-  with a correct `prev_hash` and a head updated to match, is indistinguishable from a real one:
-  one `INSERT` and one `UPDATE`. No chain without an external anchor can detect an append, and
+  with a correct `prev_hash` and a head updated to match, is indistinguishable from a real one.
   §6.1's *"altering, deleting or reordering"* did not list insertion because insertion is not in
-  the set it closes. §11 keeps signing and anchoring out of v0.6, so this is a bound on what the
-  chain means and not a defect in it.
+  the set it closes.
+
 - **Not a signature.** §11 has the argument.
 - **Not that every action wrote a receipt.** The chain proves that the receipts which were
   written were not altered. A receipt whose write failed (§6.3.1) leaves no gap in `seq` — the
@@ -1398,15 +1407,24 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   the stored head detects. A reader with the file alone can prove the file was not altered
   internally and cannot prove it is complete.
 
-### 6.5 Detection, and the five names
+### 6.5 Detection, and the six names
 
 A break is reported with a name, because a chain that only catches the easy case is worse than
 none: it gets quoted as if it caught all of them.
 
+**`hash_missing` was the fifth name and is the sixth**, added by item 6's review. It exists
+because the check against the stored hash was *skipped* when the column was absent rather than
+failed, so `UPDATE receipts SET hash = NULL` — one statement, no `WHERE` — destroyed every
+independent copy of every receipt's hash and the chain reported itself intact. A check that
+cannot be evaluated is not a check that passed (`v0.4 §3.8`). It is distinct from `unchained`,
+which is a receipt written *before* the chain existed and has no `seq`; a row with a `seq` and no
+`hash` was chained and has been stripped.
+
 | Name | Condition |
 |---|---|
 | `content_altered` | the recomputed hash of receipt `n` ≠ the stored `hash` for `n` |
-| `link_broken` | receipt `n`'s `prev_hash` ≠ receipt `n-1`'s `hash` |
+| `hash_missing` | receipt `n` has a `seq` and **no stored `hash`**, so nothing can be compared |
+| `link_broken` | receipt `n`'s `prev_hash` ≠ what receipt `n-1`'s **document** hashes to |
 | `missing` | a gap in `seq` |
 | `head_mismatch` | the stored head's `seq`/`hash` ≠ the last receipt's |
 | `unchained` | `seq` is `NULL` — a receipt written before the chain existed (§3.7) |
@@ -2018,11 +2036,12 @@ The derived label set matches the declared `data:` map; `contains`, `in` and `no
 `policy.py`'s evaluator behaves elsewhere; a condition or an argument named `data_scope` in a
 document of **any** schema version is refused at load, with the message naming the reservation.
 
-#### T177 — Redaction covers evidence and never the approval payload
-A redacted argument is `sha256:…` in the receipt, the events and the JSONL export; it is the real
-value in `ApprovalRequest.action`, `PendingApproval` and `ctrlrun approve`'s output; and
-`action_hash` is unchanged by redaction. **If item 7 cuts `redact:` (§7.4), this test is deleted
-and §12 records the cut.**
+#### T177 — deleted with `redact:`
+§7.4 said *"if item 7 cuts `redact:`, this test is deleted and §12 records the cut"*, and item 7
+cut it: §7.5's configuration needed labels a rule could see and did not need values hidden. What
+replaces it is one assertion in the throwaway configuration's own file — that `redact: true` is
+**refused at load with the reason**, rather than accepted and ignored, because an operator who
+writes it and gets no error believes the value is hidden.
 
 #### T177c — The CLI surfaces exist and no command was added
 `ctrlrun receipts --verify-chain` reports a break by `seq` and by name against a tampered store,

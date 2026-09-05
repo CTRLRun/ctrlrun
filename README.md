@@ -159,7 +159,7 @@ policy, *your* grants and *your* store.
 
 ```console
 $ ctrlrun verify
-CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+CTRLRun verify — ctrlrun 0.5.0, catalogue ctrlrun.guarantees/v2
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -174,6 +174,7 @@ G7   no principal refused             PASS  stripe.refund
 G8   expired authority refused        PASS  head-of-support
 G9   delegation cannot escalate       PASS  head-of-support (6 of 6 dimensions)
 G10  unknown exception is ambiguous   PASS  stripe.refund
+G11  an altered receipt is detected   PASS  stripe.refund
 
 11/11 declared guarantees pass. 0 not applicable.
 ```
@@ -184,7 +185,7 @@ before and after.
 
 **Not applicable is not a pass.** A policy with no `approve` rule cannot exercise the
 approval-binding guarantees, so they are reported `N/A` with the reason, excluded from the
-denominator and listed separately — `5/5 (5 not applicable)`, never `10/10`. There is no flag
+denominator and listed separately — `6/6 (5 not applicable)`, never `11/11`. There is no flag
 that folds one into the count.
 
 The badge means the **declared guarantees pass** — every guarantee this configuration can

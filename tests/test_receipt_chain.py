@@ -209,6 +209,47 @@ def test_T164b_canonical_bytes_refuses_a_float_at_any_depth() -> None:
     assert canonical_bytes({"a": 1, "b": "x", "c": True, "d": None, "e": [1, {"f": 2}]})
 
 
+def test_T164b_canonical_bytes_refuses_a_non_string_key() -> None:
+    """§6.2's canonicalizer has string keys only, and the first version silently coerced them.
+
+    `str(key)` made `{"1": "a", 1: "b"}` and `{1: "b", "1": "a"}` the same two bytes with one key
+    dropped, and *which* value survived depended on insertion order -- two distinct payloads, one
+    canonical form, in a frozen security-critical primitive. It also admitted a Python `repr`
+    into a canonical form, since a tuple key rendered as `"(1, 2)"`, which plain `json.dumps`
+    refuses outright: the promoted function was strictly **more permissive** than the primitive
+    it claims to be, while its own message said "JSON with no extensions".
+
+    Unreachable from an `Action`, whose keys are validated at construction -- so this is the test
+    for the public entry point, and a review found the fix shipping without one.
+    """
+    from ctrlrun.action import canonical_bytes
+
+    for payload in (
+        {1: "x"},
+        {True: "x"},
+        {(1, 2): "x"},
+        {"outer": {1: "x"}},
+        {"items": [{2: "x"}]},
+    ):
+        try:
+            canonical_bytes(payload)
+        except InvalidArgument as refused:
+            assert "string keys" in str(refused), refused
+        else:
+            raise AssertionError(f"canonical_bytes accepted a non-string key in {payload!r}")
+
+    # The collision the coercion produced, asserted directly: these must not be one document.
+    one, two = {"1": "a", 1: "b"}, {1: "b", "1": "a"}
+    assert one != two or list(one) != list(two)
+    for payload in (one, two):
+        try:
+            canonical_bytes(payload)
+        except InvalidArgument:
+            pass
+        else:
+            raise AssertionError("two payloads still canonicalize to one form")
+
+
 def test_T164b_canonicalize_is_canonical_bytes(monkeypatch) -> None:
     """§6.2 forbids a second canonicalizer **by name**, so one implementation is the assertion.
 
@@ -1172,4 +1213,173 @@ def test_verify_chain_reads_a_postgres_store_through_store_url(tmp_path, pg_sche
     assert "hash_missing" in broken.output, broken.output
     assert "2 of 3" in broken.output, (
         f"the summary counts a stripped receipt as verified:\n{broken.output}"
+    )
+
+
+# --- §6.4: what the chain does NOT close, asserted rather than described -----------------------
+
+
+def test_erasing_a_suffix_and_rewinding_the_head_is_two_statements_and_undetected(
+    tmp_path,
+) -> None:
+    """SPEC-v0.6 §6.4's cost table, the row that took three drafts to state correctly.
+
+    The first draft said the excluded case was *"a rewrite of the whole log"*. The second said
+    tampering with receipt *n* costs a rewrite of *n*, everything after it, and the head -- true
+    of **altering** *n*, and false of erasing it. A review measured this one: **two statements**,
+    any suffix, and the chain reports itself intact.
+
+    This is a test of a **limit**, and it is here so the limit cannot quietly stop being true in
+    either direction. If a later change detects this, the documentation is wrong and this test
+    says so; until then the documentation is right and this is what it is right about.
+    """
+    import sqlite3
+
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    a_chain(store, 5)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    statements = [
+        "DELETE FROM receipts WHERE seq > 2",
+        "UPDATE receipt_chain SET seq = 2, hash = (SELECT hash FROM receipts WHERE seq = 2) "
+        "WHERE id = 1",
+    ]
+    for statement in statements:
+        connection.execute(statement)
+    connection.commit()
+    connection.close()
+    assert len(statements) == 2
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert report.ok, (
+        "erasing a suffix is now detected. That is an improvement, and it means §6.4's cost "
+        "table, THREAT_MODEL.md and the OWASP row all overstate what the chain fails to do -- "
+        "correct them in the same commit"
+    )
+    assert report.verified == 2
+
+    # And the half the head *does* catch: forget the second statement and it is reported.
+    other = tmp_path / "forgotten.db"
+    store = SQLiteStateStore(other, clock=lambda: T0)
+    a_chain(store, 5)
+    store.close()
+    connection = sqlite3.connect(other)
+    connection.execute("DELETE FROM receipts WHERE seq > 2")
+    connection.commit()
+    connection.close()
+    reopened = SQLiteStateStore(other, clock=lambda: T0)
+    forgotten = verify_chain(reopened)
+    reopened.close()
+    assert not forgotten.ok
+    assert [break_.name for break_ in forgotten.breaks] == ["head_mismatch"], (
+        "the head is what catches an attacker who deletes rows and stops; that is the whole of "
+        "what it buys, and §6.3 should not claim more"
+    )
+
+
+def test_appending_a_well_formed_receipt_is_two_statements_and_undetected(tmp_path) -> None:
+    """§6.4's other admitted case. No chain without an external anchor can detect an append, and
+    §11 keeps anchoring out of v0.6 -- so this is a bound on what the chain means."""
+    import sqlite3
+
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    receipts = a_chain(store, 3)
+    store.close()
+
+    forged = replace(
+        receipts[-1],
+        receipt_id="ctr_" + "f" * 12,
+        seq=4,
+        prev_hash=receipts[-1].hash,
+        hash=None,
+    )
+    digest = forged.chain_hash()
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO receipts(receipt_id, action_id, effect_key, result, json, ts, seq, "
+        "prev_hash, hash) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            forged.receipt_id,
+            forged.action_id,
+            forged.effect_key,
+            str(forged.result),
+            forged.to_json(),
+            "2026-01-01T12:00:00.000Z",
+            4,
+            forged.prev_hash,
+            digest,
+        ),
+    )
+    connection.execute("UPDATE receipt_chain SET seq = 4, hash = ? WHERE id = 1", (digest,))
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_chain(reopened)
+    reopened.close()
+    assert report.ok, (
+        "an appended receipt is now detected; §6.4 and the OWASP row say it is not, and one of "
+        "the two has to change"
+    )
+    assert report.verified == 4
+
+
+# --- MJ-7: `verified` means verified, and `chained` is the total -------------------------------
+
+
+def test_the_summary_counts_verified_receipts_and_not_rows_with_a_seq(tmp_path) -> None:
+    """§6.5's summary line, and the fix that shipped without a test.
+
+    `verified` counted rows that *had* a `seq`, so the CLI said "3 of 3 receipts verified" beside
+    three forgeries. Both halves are asserted here -- the field and the line the operator reads --
+    because a review found each surviving the whole suite on its own.
+    """
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from ctrlrun.cli import main as cli
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / ".ctrlrun" / "state.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    a_chain(store, 3)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipts SET hash = NULL WHERE seq = 2")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_chain(reopened)
+    reopened.close()
+    assert report.chained == 3, "every row still carries a seq"
+    assert report.verified == 2, (
+        f"verified={report.verified}: a receipt named in a break is not a receipt that verified"
+    )
+    assert report.to_dict()["chained"] == 3
+    assert report.to_dict()["verified"] == 2
+
+    monkey = CliRunner()
+    import os
+
+    os.environ["CTRLRUN_STATE"] = str(database)
+    try:
+        result = monkey.invoke(cli.main, ["receipts", "--verify-chain"])
+    finally:
+        del os.environ["CTRLRUN_STATE"]
+    assert "2 of 3" in result.output, (
+        f"the operator's line is the denominator that matters:\n{result.output}"
     )
