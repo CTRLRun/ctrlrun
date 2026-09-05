@@ -1647,6 +1647,12 @@ class Control:
             started_at=started_at,
             finished_at=self._clock(),
             error=error,
+            # SPEC-v0.6 §7.1 — what decided this action, on every receipt. The hash is the
+            # policy's content and the version is the operator's label for it; §7.1 makes the
+            # first authoritative and says the second never is.
+            policy_hash=self._policy.policy_hash,
+            policy_version=self._policy.version,
+            controls=evaluation.controls,
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained
