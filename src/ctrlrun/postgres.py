@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -105,6 +106,37 @@ _UNFINISHED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING, Eff
 #: ambiguous case, and a cancellation that arrived while the server was committing may or may not
 #: have prevented it.
 STATED_ABORTS: Final = frozenset({"40001", "40P01"})
+
+_LOG = logging.getLogger(__name__)
+
+#: SPEC-v0.6 §4.3.4. The closed set of §4.3.2 branches, reported on the `ctrlrun.postgres` logger
+#: as `branch=` so a test -- and an operator reading a log after an incident -- can tell **which
+#: row** of Table A a lost `COMMIT` took.
+#:
+#: This exists because §8's T155 asks that "the events name which branch of §4.3.2 ran" and
+#: nothing implemented it, which made the test unfalsifiable: the outcome T155 asserted (a
+#: reservation that is ours, a blind retry refused) is *also* what a store that never re-read
+#: produces, because in that scenario the write did land. A review replaced
+#: `_resolve_lost_insert` with `return` and T155 still passed.
+#:
+#: Reported at WARNING because reaching any of these means a store write's outcome was
+#: unobservable, which is worth a line in an operator's log whether or not it resolved cleanly.
+A1_OURS: Final = "a1.row1.ours"
+A1_REINSERT: Final = "a1.row2.reinsert"
+A1_REFUSE: Final = "a1.row3.refuse"
+A2_LANDED: Final = "a2.row1.landed"
+A2_REISSUE: Final = "a2.row2.reissue"
+A2_REFUSE: Final = "a2.row3.refuse"
+
+
+def _took(branch: str, effect_key: str) -> None:
+    """Say which row of §4.3.2's tables resolved an ambiguous store write."""
+    _LOG.warning(
+        "ambiguous store write on effect %r resolved by %s",
+        effect_key,
+        branch,
+        extra={"branch": branch, "effect_key": effect_key},
+    )
 
 
 def _psycopg() -> Any:
@@ -570,12 +602,15 @@ class PostgresStateStore:
         if found is None:
             raise InvalidArgument(f"no reservation for effect {effect_key!r}")
         if found.action_id == reservation.action_id and found.state is EffectState.RESERVED:
+            _took(A2_LANDED, effect_key)
             return  # the commit landed
         if found.state is EffectState.FAILED:
+            _took(A2_REISSUE, effect_key)
             self._authorize_and_reserve(
                 None, None, effect_key, reservation.action_id, lease, retrying=True
             )
             return
+        _took(A2_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
             raise plan.refusal
@@ -606,13 +641,16 @@ class PostgresStateStore:
             # operation was a double-spend: the effect was reserved, the caller was handed an
             # `Approval`, and the approval row was still `granted`, so the same approval then
             # authorised a second effect key. Found by review.
+            _took(A1_REINSERT, effect_key)
             self._authorize_and_reserve(
                 approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
             return
         expected = _reserved(reservation, None, now)
         if _is_our_own_write(found, expected):
+            _took(A1_OURS, effect_key)
             return  # the commit landed; we hold it
+        _took(A1_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
             raise plan.refusal
@@ -849,6 +887,7 @@ class PostgresStateStore:
         *,
         result: Any = None,
         error: str | None = None,
+        retrying: bool = False,
     ) -> None:
         """One compare-and-set, with the row count checked (§4.2).
 
@@ -906,6 +945,15 @@ class PostgresStateStore:
         try:
             self._commit(connection)
         except AmbiguousWrite:
+            if retrying:
+                # §4.2's bound, the one `_authorize_and_reserve` already had and this path did
+                # not. Table A2's re-issue calls back into `_transition`, whose `COMMIT` can be
+                # lost again, which re-entered the same resolution with nothing to stop it.
+                # Driven by a proxy that swallows every `COMMIT`, it recursed 96 deep and escaped
+                # as `RecursionError` -- outside this library's closed set of errors, so no caller
+                # could classify it -- leaving the record stranded `EXECUTING`. Found by review.
+                # *Every loop in this project is bounded*, and a re-read path is a loop.
+                raise
             self._resolve_lost_update(effect_key, action_id, state, expected, result, error)
 
     def _resolve_lost_update(
@@ -934,10 +982,15 @@ class PostgresStateStore:
         if found is None:
             raise InvalidArgument(f"no reservation for effect {effect_key!r}")
         if found.state is state and found.action_id == action_id:
+            _took(A2_LANDED, effect_key)
             return  # the commit landed
         if found.action_id == action_id and found.state in expected:
-            self._transition(effect_key, action_id, state, expected, result=result, error=error)
+            _took(A2_REISSUE, effect_key)
+            self._transition(
+                effect_key, action_id, state, expected, result=result, error=error, retrying=True
+            )
             return
+        _took(A2_REFUSE, effect_key)
         _checked(found, effect_key, action_id, expected, self._clock())
 
     def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:

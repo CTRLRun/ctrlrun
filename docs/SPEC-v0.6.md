@@ -1003,6 +1003,36 @@ a reused `action_id` at any other instant, with any other lease, or at a differe
 number differs in a column and is refused. Only a clock frozen *across processes* — which is a
 test harness, not a deployment — produces two rows a store cannot tell apart.
 
+### 4.3.4 Which row ran is observable
+
+A store that takes any branch of §4.3.2 MUST say which one, on the `ctrlrun.postgres` logger, at
+`WARNING`, with a `branch` attribute drawn from this closed set:
+
+| `branch` | Meaning |
+|---|---|
+| `a1.row1.ours` | Table A1: the record is identical to the row we attempted to write (§4.3.3); the commit landed and we hold the key |
+| `a1.row2.reinsert` | Table A1: no record; the commit did not land, and the same operation is re-issued once |
+| `a1.row3.refuse` | Table A1: a record that is not ours; back through `plan_reservation`, which refuses |
+| `a2.row1.landed` | Table A2: the record is in the state we were writing, and ours; the commit landed |
+| `a2.row2.reissue` | Table A2: the record is unchanged and still ours; the conditional `UPDATE` is re-issued |
+| `a2.row3.refuse` | Table A2: anything else; back through the same predicate, which refuses |
+
+Reaching any of them means a store write's outcome was unobservable, which is worth a line in an
+operator's log whether or not it resolved cleanly. That is the smaller reason.
+
+The larger one is that **without it, §8's T155 cannot fail.** The outcome T155 asserts — a
+reservation that is ours, and a blind retry refused — is also exactly what a store that never
+re-read at all produces, because on that path the write *did* land. A review replaced
+`_resolve_lost_insert` with `return` and every assertion in T155 still passed. §8 had asked for
+this ("the events name which branch of §4.3.2 ran"); nothing implemented it, and the test that
+depended on it was green for a year of nobody noticing. A test that asserts an outcome rather
+than which guard produced it is this repository's first and most common mutation pattern, and the
+most important test in this milestone was an instance of it.
+
+This is not a new event type and does not touch §9's frozen names: `ctrlrun.receipt.Event` is
+unchanged, and nothing here reaches a sink. It is a log line, which is what this project already
+uses for everything a receipt does not carry.
+
 ### 4.4 Connections, encoding and collation
 
 - **One connection per thread**, as `SQLiteStateStore` does. `psycopg` connections are not
