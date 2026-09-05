@@ -89,7 +89,7 @@ Exit: every acceptance test in `SPEC-v0.4.md §8` passes, and every one in v0.1,
 
 Standards: first mapping doc — `docs/OWASP-AGENTIC-TOP10.md`, each guarantee mapped to the OWASP Top 10 for Agentic Applications entries it mitigates, and the four entries CTRLRun does not address listed by name. A reading of somebody else's taxonomy, and it says so on its first line.
 
-## v0.5 — Adapter contract (Current)
+## v0.5 — Adapter contract (Released 2026-09-05)
 
 - The adapter contract, documented. It is one of the six contracts v1.0 freezes, so it is written to be lived with.
 - Two reference adapters, to prove the contract is real rather than aspirational: OpenAI Agents SDK and LangGraph. Each reuses the framework's own HITL primitives — LangGraph's `interrupt()` and checkpointers, the Agents SDK's tool-approval interruption — mapped onto **`ApprovalRequired` / `with_approval`**, which v0.1 has shipped since the kernel. Never a second approval path beside the framework's own. They ship on the adapters track under their own versions like every other adapter; what v0.5 owns is the requirement that two exist and that the contract survived writing them.
@@ -114,7 +114,7 @@ Versioned as `adapters-<framework>-MAJOR.MINOR` — `adapters-crewai-1.0`, `adap
 
 Standards: none of its own.
 
-## v0.6 — Durable runtime
+## v0.6 — Durable runtime (Current)
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity (hash chain / signatures).

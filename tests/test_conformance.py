@@ -103,7 +103,7 @@ def test_T131_a_correct_adapter_passes_every_suite():
     assert report.ok is True
     assert [suite.status for suite in report.suites] == [SuiteStatus.PASS] * len(SUITES)
     assert report.not_applicable == ()
-    assert report.to_text().endswith("reference: 5/5")
+    assert report.to_text().endswith("reference: 6/6")
 
 
 def test_T131_the_reference_adapter_is_the_surface_and_nothing_else():
@@ -152,8 +152,11 @@ def test_T132_the_denominator_counts_applicable_suites_only():
     report = run(Reference(carries=False, framework="no-carry"))
 
     assert len(report.applicable) == len(SUITES) - 1
-    assert report.to_text().endswith("no-carry: 4/4 (1 not applicable)")
-    assert "5/5" not in report.to_text()
+    assert report.to_text().endswith("no-carry: 5/5 (1 not applicable)")
+    # The count an N/A folded in would produce, and the whole point of the case. It moves with
+    # `SUITES`: when `denial` was split out of `kernel` this line still read "5/5", which by
+    # then was the *correct* answer -- the guard had quietly become a guard against nothing.
+    assert "6/6" not in report.to_text()
     assert report.ok is True
 
 
@@ -166,11 +169,43 @@ def test_T132_there_is_no_flag_that_folds_an_na_into_the_count():
 
 
 def test_T132_the_binding_suite_is_the_mutation_check_alone():
-    """Its control and the denial case live in `kernel` on purpose: a `binding` suite containing
-    them would report `pass` for an adapter that cannot perform the one check it is named for,
-    which is an N/A folded into the count one level down."""
+    """Its control lives in `kernel` on purpose: a `binding` suite containing it would report
+    `pass` for an adapter that cannot perform the one check it is named for, which is an N/A
+    folded into the count one level down."""
     assert [case.id for case in SUITES["binding"]] == ["B1"]
-    assert {case.id for case in SUITES["kernel"]} >= {"B2", "B3"}
+    assert {case.id for case in SUITES["kernel"]} >= {"B2"}
+
+
+def test_T130_the_denial_fixtures_fail_B3_for_different_reasons():
+    """B3 has two checks and `expect` returns at the first unmet one, so one fixture exercises
+    exactly one of them. Asserting only that `denial` failed is the subsumed-guard shape:
+    delete either check and the other still fails the suite, and the mutation table reads green
+    for a check nothing reached. So each fixture is pinned to the reason it is aimed at."""
+    reasons = {}
+    for name in ("denial-as-error", "denies-for-itself"):
+        broken, _ = BROKEN[name]
+        report = run(broken(framework=name))
+        suite = next(s for s in report.suites if s.name == "denial")
+        case = next(c for c in suite.cases if c.id == "B3")
+        assert case.status is SuiteStatus.FAIL, name
+        reasons[name] = case.reason or ""
+
+    # A no reported as a fault: the wrong exception reaches the caller.
+    assert "expected ActionDenied" in reasons["denial-as-error"], reasons["denial-as-error"]
+    assert "APPROVAL_DENIED" not in reasons["denial-as-error"]
+
+    # A no the adapter answered on the human's behalf: the right exception, no evidence.
+    assert "APPROVAL_DENIED" in reasons["denies-for-itself"], reasons["denies-for-itself"]
+    assert "expected ActionDenied" not in reasons["denies-for-itself"]
+
+
+def test_T132_the_denial_suite_is_the_refusal_case_alone():
+    """B3 was in `kernel` until the second reference adapter: a framework that refuses *before*
+    it invokes proposes no action, so there is nothing to deny, and B3 folded into `kernel`
+    would have reported `pass` on six cases that always run. Same argument as `binding`, one
+    suite along (SPEC-v0.5 §12.6)."""
+    assert [case.id for case in SUITES["denial"]] == ["B3"]
+    assert "B3" not in {case.id for case in SUITES["kernel"]}
 
 
 # --- T132b / T132c: refusal, and a zero denominator ----------------------------------------
@@ -246,13 +281,31 @@ def test_a_suite_is_not_applicable_only_when_every_case_is():
 # --- T133: neither the kit nor an adapter reaches the network ------------------------------
 
 
+#: Refuses the network and nothing else.
+#:
+#: `AF_UNIX` is allowed **on purpose**, and the exception is what makes this guard usable at
+#: all: `asyncio` builds every event loop with a `socketpair()` for its self-pipe, so a guard
+#: that refused `socket.socket` outright refused the event loop rather than the network. That is
+#: why T133's requirement to run *each reference adapter's* kit under it (§3.7) went
+#: unimplemented -- the `openai-agents` harness drives a real `Runner` through `asyncio.run`,
+#: and the guard stopped it at loop construction with `AF_UNIX, SOCK_STREAM`, one frame inside
+#: `asyncio/selector_events.py:_make_self_pipe`. A local IPC pipe is not reaching the network,
+#: and a test that called it one would be `v0.4 §1.3`'s false positive rather than a finding.
+#:
+#: `AF_INET` and `AF_INET6` are refused, and so are `create_connection` and `getaddrinfo`, which
+#: is the whole of what "an adapter opens no socket" means. The precondition test proves the
+#: narrower guard can still see one.
 NO_SOCKETS = textwrap.dedent(
     """
     import socket
 
+    _ALLOWED = {getattr(socket, "AF_UNIX", None)}
+
     class _Refused(socket.socket):
-        def __init__(self, *args, **kwargs):
-            raise OSError("the conformance kit opened a socket")
+        def __init__(self, family=socket.AF_INET, *args, **kwargs):
+            if family not in _ALLOWED:
+                raise OSError(f"the conformance kit opened a network socket ({family!r})")
+            super().__init__(family, *args, **kwargs)
 
     socket.socket = _Refused
     socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(OSError("no network"))

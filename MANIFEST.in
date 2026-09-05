@@ -34,4 +34,15 @@ recursive-include examples *.md
 prune internal
 prune .ctrlrun
 prune .github
+# SPEC-v0.5 §6.1 — an adapter is a separate distribution and ships from `adapters/` under its
+# own version line. This line is **belt and braces like the three above it, not the thing that
+# keeps adapters out**: `[tool.setuptools.packages.find]` looks only in `src/`, so nothing
+# under `adapters/` is a package here and the sdist omits it whether or not this line exists.
+# Removing it was mutation-tested and T136 stayed green.
+#
+# What T136 actually guards is the other direction — a `recursive-include adapters *.py` added
+# later, which does put them in the sdist and does turn the test red. That is the failure worth
+# a test, because `MANIFEST.in` resolves against the working tree rather than the index, which
+# is how v0.2 shipped four files it should not have.
+prune adapters
 global-exclude *.py[cod] .DS_Store

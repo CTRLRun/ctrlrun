@@ -166,7 +166,7 @@ def init() -> None:
 
 @main.command()
 def demo() -> None:
-    """Run the four failure scenarios, in process, with no network."""
+    """Run the five scenarios, in process, with no network."""
     run_demo(Path.cwd())
 
 

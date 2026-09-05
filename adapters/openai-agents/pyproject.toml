@@ -1,0 +1,37 @@
+# ctrlrun-openai-agents — a separate distribution on the adapters track (SPEC-v0.5 §6).
+#
+# `pip install ctrlrun` must not grow. This depends on `ctrlrun`, never the reverse, and the
+# `ctrlrun` wheel and sdist contain no `adapters/` path (T136).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctrlrun-openai-agents"
+version = "1.0.0"
+description = "Route a CTRLRun APPROVE through the OpenAI Agents SDK's tool-approval interruption."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Arpan Ghoshal", email = "contact@arpanghoshal.com"}]
+license = "Apache-2.0"
+keywords = ["openai-agents", "ctrlrun", "human-in-the-loop", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+# SPEC-v0.5 §6.3's two ranges. Ranges and not floors: the adapter contract is frozen at v1.0 and
+# not before, so `>=0.5` would claim compatibility with a surface not yet written. T137 asserts
+# the README states these and that CI ran inside them.
+dependencies = [
+    "ctrlrun>=0.5,<0.6",
+    "openai-agents>=0.20,<1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/CTRLRun/ctrlrun"
+Repository = "https://github.com/CTRLRun/ctrlrun"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -17,6 +17,7 @@ Two things every case does, and both are `v0.4 §1.3`'s positive-control rule on
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -153,6 +154,13 @@ class ConformanceAdapter(Protocol):
     framework: str
     interrupt: FrameworkInterrupt
 
+    #: Does this framework refuse a tool call **before** invoking it? Optional, defaulting to
+    #: `False`, because that is the shape most frameworks have and a declaration nobody needs
+    #: to make is one nobody gets wrong. `True` makes the `denial` suite `not_applicable` with
+    #: the adapter's reason -- never a pass -- and it is not free: it says in the report, and in
+    #: the adapter's README, that a refusal leaves no CTRLRun evidence.
+    refuses_before_invoking: bool
+
     def invoke(self, request: CallRequest) -> Any: ...
 
 
@@ -198,6 +206,16 @@ def unwrapped(interrupt: FrameworkInterrupt) -> FrameworkInterrupt:
 class Watched:
     """The adapter's own interrupt, with a call count the kit can read.
 
+    **At least once, not exactly once.** A resumed-in-place framework reaches its primitive
+    **twice** per approval -- once to ask, and once on the replayed pass to receive the answer
+    -- because `@protect(wait=True)` raises `ApprovalRequired` again on that pass and creates
+    its own request (SPEC-v0.5 §3.2.1). The LangGraph reference adapter is what showed it: the
+    kit asserted `== 1` and a correct adapter scored 4/5. Demanding an exact count would be
+    asserting a *framework's* shape rather than an adapter's behaviour, which is the line
+    `v0.4 §7.3` rule 6 draws in the other direction. What the count is for is distinguishing
+    "the framework was asked" from "it was not", and `>= 1` does that exactly. A1 keeps `== 0`,
+    because there the claim is that nobody was asked at all.
+
     It exists because of a fixture. `GrantsForItself` wrote the grant before `@protect` ever
     reached `wait()`, so the provider found the record already `granted`, returned it, and the
     framework's primitive was never called -- and every suite passed. The provider is right to
@@ -206,9 +224,10 @@ class Watched:
     there: it is that a suite asserting a *refusal* cannot tell "the human said no through the
     framework" from "the framework was never asked".
 
-    So the kit counts. A case that expects a human asserts the count is 1, and one that expects
-    none asserts it is 0. `v0.4 §1.3` again: a refusal proves nothing unless the thing it
-    forbids would otherwise have been visible.
+    So the kit counts. A case that expects a human asserts the count is **at least 1** -- per
+    the first paragraph, which is the rule -- and one that expects none asserts it is exactly 0.
+    `v0.4 §1.3` again: a refusal proves nothing unless the thing it forbids would otherwise
+    have been visible.
     """
 
     #: The proxy's own attributes. Everything else belongs to the adapter's interrupt and is
@@ -434,12 +453,12 @@ def kernel_duplicate_after_approval(adapter: ConformanceAdapter) -> CaseResult:
             kernel_duplicate_after_approval.title,
             f"the approved call ran {executor.calls} times, expected 1",
         )
-    if world.watched.calls != 1:
+    if not world.watched.calls:
         return failed(
             "T4",
             kernel_duplicate_after_approval.title,
-            f"the framework's primitive was reached {world.watched.calls} times, "
-            "expected 1: an approval nobody was asked for is not an approval",
+            "the framework's primitive was never reached: an approval nobody was "
+            "asked for is not an approval",
         )
 
     problem = expect(
@@ -554,11 +573,9 @@ def kernel_expired_approval(adapter: ConformanceAdapter) -> CaseResult:
     )
     if problem:
         return problem
-    if world.watched.calls != 1:
+    if not world.watched.calls:
         return failed(
-            "T5",
-            kernel_expired_approval.title,
-            f"the framework's primitive was reached {world.watched.calls} times, expected 1",
+            "T5", kernel_expired_approval.title, "the framework's primitive was never reached"
         )
     if executor.calls:
         return failed(
@@ -687,25 +704,109 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
             binding_matching_answer.title,
             f"the executor ran {executor.calls} times, expected 1",
         )
-    if world.watched.calls != 1:
+    if not world.watched.calls:
         return failed(
             "B2",
             binding_matching_answer.title,
-            f"the framework's primitive was reached {world.watched.calls} times, "
-            "expected 1: an adapter that granted for itself never asked anybody",
+            "the framework's primitive was never reached: an adapter that granted "
+            "for itself never asked anybody",
         )
     approvers = [receipt.approver for receipt in world.receipts()]
-    if approvers != [APPROVER]:
+    # **Non-empty, not an exact match.** SPEC-v0.5 §2.2 blesses an adapter that cannot name who
+    # answered writing what it does know -- a channel like `"openai-agents:tool-approval"` --
+    # because that SDK records *that* a call was approved and not by whom. Asserting the kit's
+    # own approver here would fail a correct adapter for a property the contract never promised,
+    # and the OpenAI Agents SDK reference adapter is what showed it. Where a framework *does*
+    # carry the approver, its own tests assert it; that is the right home for the check, because
+    # only they know the framework can.
+    if not approvers or not all(name and name.strip() for name in approvers):
         return failed(
             "B2",
             binding_matching_answer.title,
-            f"the receipt names {approvers}, expected [{APPROVER!r}]",
+            f"the receipt names {approvers}: an approval with no approver is evidence "
+            "that answers the wrong question",
         )
     return passed("B2", binding_matching_answer.title)
 
 
+def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
+    """`refuses_before_invoking` is declared — so prove it, and only then report N/A.
+
+    An unchecked `not_applicable` is a pass an adapter awards itself. The first version of this
+    checked the wrong things: it drove the refusal and asserted the executor was not reached,
+    which a framework that refuses *inside* CTRLRun satisfies just as well. A second independent
+    review broke it with one class attribute — `refuses_before_invoking = True` on
+    `fixtures.DenialIsAnError`, the fixture §5.4 requires to **fail** this suite — and got
+    `denial: not_applicable` and `report.ok is True`.
+
+    The discriminator is not what the adapter did with the answer; it is **whether CTRLRun was
+    asked at all**. A framework that genuinely refuses before invoking proposes no action: no
+    `ACTION_PROPOSED`, no `APPROVAL_REQUESTED`, and the framework's own primitive is never
+    reached, because `@protect` never got far enough to raise `ApprovalRequired`. An adapter that
+    produced any of those was asked, and the suite applies to it.
+
+    Two checks, and each has a fixture aimed at it (§5.4), because the first version's extra
+    checks were subsumed guards that no fixture reached:
+
+    * **The executor ran** — `falsely-refuses-before-invoking`, which bypasses `Control` and
+      calls the executor directly, so it leaves no events to catch it by.
+    * **CTRLRun was asked** — `falsely-refuses-after-asking`, which goes through `Control`,
+      reaches the primitive, and only then produces its framework's refusal.
+    """
+    world = World(adapter, APPROVE)
+    executor = Executor()
+    request = CallRequest(
+        world.control,
+        REFUND,
+        {"payment_id": "b3", "amount": 2000},
+        "refund:b3",
+        executor,
+        answer=ApprovalAnswer(granted=False, approver=APPROVER),
+    )
+
+    # A framework may surface its own refusal however it likes -- its own rejection type, a
+    # runner-level error, `ActionDenied`. The exception carries no verdict here: what it may not
+    # do is have been *asked*, and the checks below establish that from the evidence instead.
+    with contextlib.suppress(Exception):
+        adapter.invoke(request)
+
+    if executor.calls:
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"{adapter.framework} declares refuses_before_invoking, but the executor ran "
+            f"{executor.calls} times on a human's no — the declaration is false and the action "
+            "a human refused was performed",
+        )
+
+    events = world.events()
+    asked = [name for name in ("ACTION_PROPOSED", "APPROVAL_REQUESTED") if name in events]
+    if asked or world.watched.calls:
+        return failed(
+            "B3",
+            binding_denial.title,
+            f"{adapter.framework} declares refuses_before_invoking, but CTRLRun was asked: "
+            f"{asked or 'the framework primitive was reached'}. A framework that refuses before "
+            "it invokes proposes no action at all, so the denial suite applies to this adapter "
+            "and B3 must run",
+        )
+
+    return na(
+        "B3",
+        binding_denial.title,
+        f"{adapter.framework} refuses before it invokes: a tool whose approval was declined "
+        "is never called, so no CTRLRun action is proposed and there is nothing to deny. "
+        "The refusal is real and it is in the framework's own output; it is not in CTRLRun's "
+        "evidence log, because CTRLRun was never asked. Checked, not taken on trust: no action "
+        "was proposed, the primitive was not reached and the executor did not run. "
+        "The adapter's README says so",
+    )
+
+
 @case("B3", "a refused answer is a denial and not an error")
 def binding_denial(adapter: ConformanceAdapter) -> CaseResult:
+    if getattr(adapter, "refuses_before_invoking", False):
+        return _denial_not_applicable(adapter)
     world = World(adapter, APPROVE)
     executor = Executor()
     request = CallRequest(
@@ -726,12 +827,8 @@ def binding_denial(adapter: ConformanceAdapter) -> CaseResult:
             binding_denial.title,
             f"a denied action reached the executor {executor.calls} times",
         )
-    if world.watched.calls != 1:
-        return failed(
-            "B3",
-            binding_denial.title,
-            f"the framework's primitive was reached {world.watched.calls} times, expected 1",
-        )
+    if not world.watched.calls:
+        return failed("B3", binding_denial.title, "the framework's primitive was never reached")
     if "APPROVAL_DENIED" not in world.events():
         return failed(
             "B3",
@@ -944,7 +1041,6 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         kernel_expired_approval,
         kernel_no_interrupt_on_allow,
         binding_matching_answer,
-        binding_denial,
     ),
     #: `binding` is the mutation check **alone**, and that is why it is its own suite. Its
     #: control (B2) and the denial case (B3) live in `kernel`, because both run whatever the
@@ -952,6 +1048,12 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
     #: that cannot perform the one check the suite is named for. That is `8/8` with an N/A
     #: folded in, one level down.
     "binding": (binding_mutated_answer,),
+    #: `denial` is its own suite for the reason `binding` is: it is `not_applicable` for a
+    #: framework that refuses **before** it invokes -- the OpenAI Agents SDK does -- and a suite
+    #: containing it alongside cases that always run would report `pass` for an adapter that
+    #: cannot exercise the one thing it is named for. That is an N/A folded into the count, and
+    #: the second reference adapter is what found it.
+    "denial": (binding_denial,),
     "duplicate": (duplicate_one_commit,),
     "authority": (authority_no_grant, authority_expired, authority_leaves_no_request),
     "identity": (identity_provider_wins, identity_no_principal),

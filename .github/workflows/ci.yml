@@ -139,6 +139,61 @@ jobs:
           git commit -m "verify: $message" || { echo "badge unchanged"; exit 0; }
           git push origin badges
 
+  # SPEC-v0.5 §6, T135/T135b/T137. Both adapter test modules are module-level
+  # `pytest.importorskip`, and neither framework nor either adapter distribution is installed
+  # by any other job -- so before this job existed, every test that proves a reference adapter
+  # passes the conformance kit skipped on every machine but its author's. That is the same
+  # false green as T136 skipping for a missing `build`, one file over, and it was found by an
+  # independent review rather than by CI, which is the point.
+  #
+  # A job of its own rather than dependencies added to `check`: these are two agent frameworks
+  # and their transitive trees, they are not dependencies of `ctrlrun`, and pulling them into
+  # the matrix would make every kernel run pay for them. §6.3's "read from what its CI actually
+  # ran against" is what this job makes true of the declared framework ranges.
+  adapters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the kernel, the frameworks and both adapters
+        # `--no-deps` for the adapters: each declares `ctrlrun>=0.5,<0.6` and the checkout is
+        # `0.5.0.dev0`, which pip orders *below* `0.5` -- so resolving them would reach PyPI for
+        # a release that does not exist yet and install it over the checkout. The kernel under
+        # test must be this checkout, so its dependencies are installed on the line above and
+        # the adapters are installed against it.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,gateway,otel,identity]"
+          pip install langgraph langchain langchain-openai openai-agents
+          pip install --no-deps -e adapters/langgraph -e adapters/openai-agents
+
+      # The frameworks are installed, so a skip here is a failure and not a configuration.
+      # `-p no:randomly` is not used and no marker is filtered: this is the whole of both files.
+      - name: The adapter suites actually ran
+        run: |
+          set -eu
+          python -m pytest -q -rs \
+            tests/test_adapters_langgraph.py \
+            tests/test_adapters_openai_agents.py \
+            --junitxml=adapters.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("adapters.xml").getroot()
+          totals = suite.find("testsuite") if suite.tag == "testsuites" else suite
+          tests = int(totals.get("tests", 0))
+          skipped = int(totals.get("skipped", 0))
+          print(f"{tests} adapter tests, {skipped} skipped")
+          # The guard this job exists for: `importorskip` at module scope turns a missing
+          # framework into a green run of nothing. A skip here means the install step above
+          # stopped working, which must be a red build and not a quiet one.
+          assert tests > 0, "no adapter tests were collected"
+          assert skipped == 0, f"{skipped} adapter tests skipped; the frameworks did not install"
+          PY
+
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being
   # true. This job runs them against an installed wheel, the way a new user meets them.

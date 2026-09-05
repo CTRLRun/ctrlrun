@@ -128,6 +128,137 @@ class SwallowsDenial(Reference):
             return "committed"
 
 
+class FrameworkRejectedError(Exception):
+    """A framework's own "the user rejected this" error, for `DenialIsAnError` to raise."""
+
+
+class _RaisesOnRefusal(Courier):
+    """A `Courier` that carries a grant back and raises on a refusal."""
+
+    def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
+        answer = super().interrupt(pending)
+        if not answer.granted:
+            raise FrameworkRejectedError("the user rejected this tool call")
+        return answer
+
+
+class DenialIsAnError(Reference):
+    """Raises its framework's rejection error instead of carrying the human's `no` back.
+
+    The `denial` suite's own fixture, and it is aimed rather than incidental. `SwallowsDenial`
+    would fail `denial` too -- it catches the `ActionDenied` that a refusal produces -- but it
+    is aimed at `kernel`, where it swallows T6's denial of an unknown action, and §5.4's rule
+    is that a suite whose only fixture fails it by accident is a suite nothing is aimed at.
+    That is why `IgnoresAuthority` exists beside it, and this is the same argument one suite
+    further along.
+
+    The mistake is an authentic one, and it is the opposite of `SwallowsDenial`'s: not a no
+    reported as a yes, but a no reported as a *fault*. An author whose framework raises when a
+    human declines -- most do -- lets that exception stand as the outcome, reasoning that the
+    call did not happen and the framework already said why. It did not happen, and CTRLRun's
+    evidence log is where that has to be visible: `APPROVAL_DENIED` then `ACTION_DENIED`
+    (`v0.1 §6.2`, SPEC-v0.5 §2.4). Under this adapter a human's answer is indistinguishable
+    from the primitive having crashed -- §10's row for that says the request stays `pending`
+    with no grant, no denial and no receipt, which is right for a crash and a silent loss of
+    the record for an answer.
+
+    It fails B3 on the **first** of that case's two checks -- what propagates is not
+    `ActionDenied` -- and `DeniesForItself` is the pair that fails it on the second, because
+    `expect` returns as soon as one is unmet and a single fixture therefore exercises exactly
+    one. Two checks with one fixture between them is a subsumed guard: remove either and the
+    other still fails the suite, and a test asserting only that the suite failed cannot tell
+    which ran.
+
+    It reaches the primitive, which is the point. The count cannot tell this from a correct
+    adapter -- a human *was* asked and did answer -- so only the case's own checks can.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.interrupt = _RaisesOnRefusal(carries=self.interrupt.carries_approved_arguments)
+        self.interrupt.framework = self.framework
+
+
+class _DeniesByRaising(Courier):
+    """A `Courier` that translates a refusal into `ActionDenied` itself."""
+
+    def interrupt(self, pending: PendingApproval) -> ApprovalAnswer:
+        answer = super().interrupt(pending)
+        if not answer.granted:
+            # The reason it picks is its own guess, and that is part of the mistake: the
+            # kernel's would have come from the record `deny_approval` wrote.
+            raise ActionDenied("the user rejected this tool call", reason="approval_denied")
+        return answer
+
+
+class DeniesForItself(Reference):
+    """Raises `ActionDenied` itself instead of returning the human's `no` to the provider.
+
+    `GrantsForItself` at the other end of the answer. That one writes the grant and never asks;
+    this one asks, gets an answer, and then writes the *consequence* of the answer rather than
+    handing the answer over -- which §2.4 forbids in one sentence covering both: an adapter
+    returns an `ApprovalAnswer` and `InterruptApprovalProvider` records it. An author writes
+    this because the caller sees exactly what a correct adapter produces: `ActionDenied`, no
+    execution, the primitive reached once. Every check but one is satisfied.
+
+    The one is the evidence. `deny_approval` was never called, so the request is still `pending`
+    and the log has no `APPROVAL_DENIED` -- a human said no and CTRLRun cannot show it. That is
+    B3's second check, and this fixture is the only thing that reaches it: `DenialIsAnError`
+    fails the first and `expect` returns there.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.interrupt = _DeniesByRaising(carries=self.interrupt.carries_approved_arguments)
+        self.interrupt.framework = self.framework
+
+
+class FalselyRefusesBeforeInvoking(Reference):
+    """Declares `refuses_before_invoking` and executes the action anyway.
+
+    The declaration's whole effect is to make the `denial` suite `not_applicable`, and until it
+    was checked that was a pass an adapter awarded itself: `carries_approved_arguments` is
+    enforced by core, which refuses a grant missing the arguments, while this one cost nothing
+    in either direction. §3.8 calls a setting that relaxes a check exactly that, and §5.4 says
+    every claim needs a fixture aimed at it.
+
+    This is the dangerous direction rather than the tidy one. It says *the framework never
+    invokes a tool whose approval was refused* and then invokes it -- so a human's `no` is
+    followed by the action, and the suite that would have noticed has been declared away.
+    """
+
+    refuses_before_invoking = True
+
+    def invoke(self, request: CallRequest) -> Any:
+        if request.answer is not None and not request.answer.granted:
+            # The refusal is ignored: the executor runs regardless of what the human said.
+            return request.executor(**dict(request.arguments))
+        return super().invoke(request)
+
+
+class FalselyRefusesAfterAsking(DenialIsAnError):  # noqa: N818 - a fixture, not an exception
+    """Declares `refuses_before_invoking` while doing nothing of the kind.
+
+    It goes through `Control`, proposes the action, reaches the framework's primitive, takes the
+    human's `no` -- and then raises its framework's rejection error instead of carrying the
+    answer back, which is `denial-as-error`'s defect. The declaration is what makes it
+    interesting: one class attribute, and a fixture the specification requires to **fail** this
+    suite reported `not_applicable` with every other suite green.
+
+    That is the escape a second independent review found in the first attempt at checking the
+    declaration, which asked whether the executor had run -- something this adapter can satisfy
+    while being asked the whole way through. The check that catches it is whether CTRLRun was
+    asked **at all**: this leaves `ACTION_PROPOSED` and `APPROVAL_REQUESTED` behind, and a
+    framework that truly refuses before invoking leaves neither.
+
+    Its sibling `falsely-refuses-before-invoking` is caught by the *other* check and not this
+    one -- it bypasses `Control` entirely, so it writes no events and only the executor count
+    sees it. Two checks, two fixtures, neither subsuming the other.
+    """
+
+    refuses_before_invoking = True
+
+
 class ReplaysApproval(Reference):
     """Keeps a `request_id` and re-presents it on the next call, reaching past `@protect`.
 
@@ -332,6 +463,10 @@ BROKEN: dict[str, tuple[type[Reference], str]] = {
     "interrupts-on-allow": (InterruptsOnAllow, "kernel"),
     "interrupts-only-when-unasked": (InterruptsOnlyWhenUnasked, "kernel"),
     "grants-for-itself": (GrantsForItself, "kernel"),
+    "denial-as-error": (DenialIsAnError, "denial"),
+    "denies-for-itself": (DeniesForItself, "denial"),
+    "falsely-refuses-before-invoking": (FalselyRefusesBeforeInvoking, "denial"),
+    "falsely-refuses-after-asking": (FalselyRefusesAfterAsking, "denial"),
     "ignores-authority": (IgnoresAuthority, "authority"),
     "self-asserts-principal": (SelfAssertsPrincipal, "identity"),
     "echoes-the-payload": (EchoesThePayload, "binding"),

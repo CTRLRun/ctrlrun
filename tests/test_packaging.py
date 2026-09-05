@@ -468,6 +468,111 @@ def test_every_test_docs_claims_cites_exists():
     )
 
 
+# --- T136: `adapters/` is packaged by neither the wheel nor the sdist -----------------------
+
+
+def test_T136_the_ctrlrun_distributions_contain_no_adapter():
+    """SPEC-v0.5 §6.1. `pip install ctrlrun` must not grow, and an adapter is a **separate**
+    distribution that depends on the kernel rather than the reverse.
+
+    What this test does **not** demonstrate is that `prune adapters` is load-bearing. It is
+    not: `packages.find` looks only in `src/`, so the sdist omits `adapters/` with the prune
+    removed, and mutation-testing it leaves this test green. The prune is belt and braces,
+    and `MANIFEST.in` now says so rather than taking credit.
+
+    What the test does catch is the direction that would actually happen — a
+    `recursive-include adapters *.py` added later by someone making the tests travel — which
+    puts every adapter in the sdist and turns this red. That is worth a test because
+    `MANIFEST.in` resolves against the working tree and not the index, which is how v0.2
+    shipped four policy files that every green build had already accounted for.
+
+    The wheel half is separate and is not subsumed: it fails if an adapter is ever moved
+    under `src/`, where `packages.find` would collect it.
+    """
+    import subprocess
+    import sys
+    import tarfile
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as area:
+        built = subprocess.run(
+            [sys.executable, "-m", "build", "--outdir", area, str(root)],
+            capture_output=True,
+            text=True,
+        )
+        # `build` is a dev dependency, so the only skip this test admits is the interpreter
+        # not having the module at all. Any *other* non-zero exit is a build that broke, and
+        # skipping on it would turn the one check standing between an adapter and the wheel
+        # into a check that reports nothing. It skipped in both CI jobs until `build` was
+        # named in `[dev]`; a skip that wide is indistinguishable from a pass.
+        if built.returncode != 0:
+            if "No module named build" in built.stderr:  # pragma: no cover - dev dependency
+                pytest.skip("python -m build is not installed")
+            raise AssertionError(f"python -m build failed:\n{built.stderr[-2000:]}")
+
+        names: list[str] = []
+        for artifact in Path(area).iterdir():
+            if artifact.suffix == ".whl":
+                names += zipfile.ZipFile(artifact).namelist()
+            elif artifact.name.endswith(".tar.gz"):
+                with tarfile.open(artifact) as archive:
+                    names += archive.getnames()
+
+    assert names, "nothing was built"
+    offending = [
+        name
+        for name in names
+        if "adapters/" in name or "ctrlrun_langgraph" in name or "ctrlrun_openai_agents" in name
+    ]
+    assert not offending, offending
+
+
+def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
+    """The direction, asserted rather than assumed: `ctrlrun`'s own metadata names no adapter
+    and no framework, in `dependencies` or in any extra.
+
+    **The kernel half runs everywhere; the adapter half runs where there are adapters.** The
+    sdist job unpacks the distribution and runs this suite from inside it, and `adapters/` is
+    not there -- which is the other half of T136 holding, not a problem. Reading it there was a
+    `FileNotFoundError`, found by that job on this branch's first run.
+
+    The skip is narrow on purpose. It fires only when the directory is absent, and the absence
+    is itself asserted by `test_T136_the_ctrlrun_distributions_contain_no_adapter` in the same
+    file, so there is no configuration in which both halves go unchecked: in a checkout this
+    loop runs, and in an sdist the other test is what proves the directory should be missing.
+    """
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        kernel = tomllib.load(handle)["project"]
+
+    declared = list(kernel["dependencies"])
+    for extra in kernel.get("optional-dependencies", {}).values():
+        declared += list(extra)
+    lowered = " ".join(declared).lower()
+
+    for framework in ("langgraph", "langchain", "openai-agents", "crewai", "autogen"):
+        assert framework not in lowered, framework
+
+    adapters = root / "adapters"
+    if not adapters.is_dir():  # pragma: no cover - running from an unpacked sdist
+        pytest.skip("no adapters/ here, which is what the sdist half of T136 asserts")
+
+    found = sorted(path for path in adapters.iterdir() if (path / "pyproject.toml").is_file())
+    assert found, "adapters/ exists but holds no distribution"
+    for adapter in found:
+        with (adapter / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        assert any(name.startswith("ctrlrun") for name in project["dependencies"]), (
+            f"{adapter.name} does not depend on ctrlrun"
+        )
+
+
 def test_no_credential_file_is_tracked():
     """`.env` is what the framework probe reads its OpenAI key from (SPEC-v0.4 §7), and it
     sits at the repository root where `git add -A` sweeps it up without asking. It was staged
@@ -496,3 +601,153 @@ def test_no_credential_file_is_tracked():
     ]
 
     assert offending == [], offending
+
+
+# --- T139: the README's adapter section, and `docs/adapters.md` -----------------------------
+
+
+def _readme() -> str:
+    path = REPO_ROOT / "README.md"
+    if not path.exists():  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+    return path.read_text(encoding="utf-8")
+
+
+def test_T139_the_adapter_section_says_when_you_do_not_need_one_up_front():
+    """SPEC-v0.5 §1.1, and the definition of done: the **introducing paragraph** says when you do
+    not need an adapter.
+
+    Not a footnote at the end. `@protect` covers anything in this process and the gateway covers
+    anything over MCP, so most readers of this section need neither — and a section that led with
+    the install line would sell an adapter to every one of them. The position is the requirement,
+    so the assertion is on the position.
+    """
+    text = _readme()
+
+    assert "## Using it inside an agent framework" in text
+    section = text.split("## Using it inside an agent framework", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    opening = section.strip().split("\n\n", 1)[0]
+
+    assert "do not need an adapter" in opening.lower(), opening
+    # And it says what covers you instead, in the same breath.
+    assert "@protect" in opening and "gateway" in opening.lower(), opening
+    # The install line comes after that paragraph, never before it.
+    assert section.index("pip install") > section.index("do not need an adapter")
+
+
+def test_T139_the_adapter_section_names_prevention_and_attribution():
+    """§7 item 4 makes this the sentence a security reviewer reads first, so the README carries
+    it too rather than leaving it to each adapter's own page."""
+    text = _readme()
+    section = text.split("## Using it inside an agent framework", 1)[1].split("\n## ", 1)[0]
+
+    assert "prevention" in section and "attribution" in section
+    assert "ctrlrun-langgraph" in section and "ctrlrun-openai-agents" in section
+
+
+#: Words this project will not claim before the milestone that earns them. They may still be
+#: *written* -- the badge paragraph says a passing run "does not mean secure, safe, compliant,
+#: certified or audited", and `docs/adapters.md` says no adapter describes itself as conformant.
+#: Forbidding the strings outright would delete those sentences, which are the honest half.
+CLAIM_WORDS = ("conformant", "compliant", "certified", "aligned with")
+
+#: What makes an occurrence a disclaimer rather than a claim.
+NEGATORS = ("not ", "no ", "never", "cannot", "n't", "without")
+
+
+def _claims(text: str) -> list[str]:
+    """Sentences using a claim word **affirmatively**."""
+    import re
+
+    offending = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n\n", text):
+        lowered = sentence.lower()
+        if any(word in lowered for word in CLAIM_WORDS) and not any(
+            negator in lowered for negator in NEGATORS
+        ):
+            offending.append(sentence.strip())
+    return offending
+
+
+def test_T139_the_readme_makes_no_conformance_claim():
+    """A "conformance kit" names this repository's own acceptance tests run against an adapter
+    (§5.1). It is not a certification, and no adapter is described as conformant.
+
+    The check is on the **claim**, not the word. A test that forbade the strings would have
+    deleted the badge paragraph's disclaimer -- *"does not mean secure, safe, compliant,
+    certified or audited"* -- which is the sentence most worth keeping. So an occurrence is
+    allowed where its sentence negates it, and flagged where it does not.
+    """
+    assert _claims(_readme()) == []
+
+
+def test_T139_the_claim_check_can_see_a_claim():
+    """The precondition, without which the test above passes on any document at all: a sentence
+    that *does* make the claim must be caught."""
+    assert _claims("CTRLRun is fully compliant with the standard.") != []
+    assert _claims("This adapter is conformant.") != []
+    # And the shapes that must stay allowed.
+    assert _claims("It does not mean secure, safe, compliant, certified or audited.") == []
+    assert _claims("No adapter describes itself as conformant.") == []
+
+
+def test_T139_docs_adapters_exists_and_leads_with_the_three_ways_in():
+    path = REPO_ROOT / "docs" / "adapters.md"
+    if not path.exists():  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+    text = path.read_text(encoding="utf-8")
+
+    assert "You probably do not need one" in text
+    assert "@protect" in text and "gateway" in text
+    # Item 6's list is the evidence the contract was read by somebody who could not read the code.
+    assert "§12.10" in text
+    assert _claims(text) == []
+
+
+def test_the_claims_table_line_numbers_point_at_what_they_name():
+    """`docs/CLAIMS.md` says *"Line numbers refer to that tag"*, and until this test they did not:
+    seven of twenty-nine resolvable references had drifted by the time v0.5 was cut, pointing at
+    a string literal, a comment, or the middle of another function.
+
+    A claims table is evidence, and a reference that lands on the wrong line is the same failure
+    as a cited test that does not exist -- which the test below this one has caught since v0.4.
+    Both are cheap and both are the only thing standing between the table and rot.
+
+    Only references whose cell **names** a symbol are checked, since those are the ones that can
+    be resolved mechanically. A drifted line for a reference with no symbol is not caught here,
+    which is stated rather than left to be assumed.
+    """
+    import re
+
+    claims = REPO_ROOT / "docs" / "CLAIMS.md"
+    if not claims.exists():  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+
+    text = claims.read_text(encoding="utf-8")
+    reference = re.compile(r"`([a-z_]+\.py):(\d+)`")
+    identifier = re.compile(r"`@?([A-Za-z_][\w.]*)")
+
+    stale = []
+    checked = 0
+    for row in text.splitlines():
+        found_refs = reference.findall(row)
+        if not found_refs:
+            continue
+        # A cell may name several symbols -- "Only `NotExecuted` maps to `FAILED`" -- and the
+        # cited line legitimately contains any one of them. Requiring the *nearest* one is how
+        # this test first failed against references that were in fact correct.
+        named = {name.split(".")[-1] for name in identifier.findall(row)}
+        for filename, number in found_refs:
+            source = REPO_ROOT / "src" / "ctrlrun" / filename
+            if not source.exists():
+                continue
+            lines = source.read_text(encoding="utf-8").splitlines()
+            index = int(number)
+            line = lines[index - 1] if 0 < index <= len(lines) else ""
+            checked += 1
+            if not any(name in line for name in named):
+                stale.append(f"{filename}:{index} is {line.strip()[:60]!r}, names {sorted(named)}")
+
+    assert checked, "CLAIMS.md cites no code locations at all"
+    assert stale == [], stale

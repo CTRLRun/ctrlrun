@@ -1,0 +1,38 @@
+# ctrlrun-langgraph — a separate distribution on the adapters track (SPEC-v0.5 §6).
+#
+# `pip install ctrlrun` must not grow. This depends on `ctrlrun`, never the reverse, and the
+# `ctrlrun` wheel and sdist contain no `adapters/` path (T136).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctrlrun-langgraph"
+version = "1.0.0"
+description = "Route a CTRLRun APPROVE through LangGraph's own interrupt()."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Arpan Ghoshal", email = "contact@arpanghoshal.com"}]
+license = "Apache-2.0"
+keywords = ["langgraph", "ctrlrun", "human-in-the-loop", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+# The two ranges SPEC-v0.5 §6.3 requires, and they are ranges rather than floors: the adapter
+# contract is frozen at v1.0 and not before, so `>=0.5` would be claiming compatibility with a
+# surface that has not been written. The README states the same two, and T137 asserts that what
+# it states is what CI installed.
+dependencies = [
+    "ctrlrun>=0.5,<0.6",
+    "langgraph>=1.0,<2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/CTRLRun/ctrlrun"
+Repository = "https://github.com/CTRLRun/ctrlrun"
+
+[tool.setuptools.packages.find]
+where = ["src"]

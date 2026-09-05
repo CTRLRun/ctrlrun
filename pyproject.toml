@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctrlrun"
-version = "0.5.0.dev0"
+version = "0.5.0"
 description = "Make consequential AI-agent actions safe to execute."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -46,6 +46,12 @@ dev = [
     # de-facto one and the test asserts structurally as well; `xmlschema` is used by that
     # test and by nothing else, and `ctrlrun` never imports it.
     "xmlschema>=3",
+    # SPEC-v0.5 §6.1 - T136 builds the wheel and the sdist and asserts neither carries an
+    # adapter. Without `build` here the test skipped, and it skipped in *both* CI jobs: the
+    # `check` job installs `[dev,gateway,otel,identity]`, and the sdist job installs the same
+    # four. A definition-of-done check that skips everywhere it runs is the false green this
+    # repository keeps finding, so the dependency is named rather than assumed.
+    "build>=1",
 ]
 # SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
 # third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.
@@ -128,6 +134,12 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Error class names are frozen by SPEC-v0.1 §8; no "Error" suffix.
 "src/ctrlrun/errors.py" = ["N818"]
+# An adapter's own refusals follow this codebase's convention and not the suffix rule, for the
+# same reason `errors.py` does: they sit beside `ActionDenied`, `ApprovalRequired` and
+# `DuplicateEffect` in an operator's `except` clause, and `ApprovalNotAskedError` next to those
+# would be the odd one out. Adapters are separate distributions (SPEC-v0.5 §6.1) and are not
+# packaged with the kernel; they are linted here because they live in this repository.
+"adapters/*/src/*/__init__.py" = ["N818"]
 # SPEC-v0.1 §5.3 freezes `commit_effect(effect_key, action_id, result: Any)`. An executor's
 # return value has no narrower type, and the store only serializes it.
 "src/ctrlrun/state.py" = ["ANN401"]
@@ -159,6 +171,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # `state.py`'s `commit_effect(result: Any)`. `ConformanceAdapter.invoke -> Any` is frozen in
 # SPEC-v0.5 §9 for that reason.
 "src/ctrlrun/conformance/*.py" = ["ANN401"]
+# An adapter's subject matter is whatever its framework hands back: LangGraph's resume value is
+# `Any` by that framework's own signature, and narrowing it to a lie would be worse than saying
+# `Any` and validating at the boundary — which is exactly what `LangGraphInterrupt.answer` does.
+"adapters/*/src/**/*.py" = ["ANN401"]
 # The research harness is outside `src/` and outside the package (SPEC-v0.4 §7.1). It keeps
 # the line length and the import rules, because those are about reading it — but it is not
 # held to the kernel's typing discipline: its subject matter is a `BaseHTTPRequestHandler`
