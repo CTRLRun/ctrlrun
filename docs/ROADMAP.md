@@ -117,7 +117,9 @@ Standards: none of its own.
 ## v0.6 — Durable runtime (Current)
 
 - Postgres StateStore (cross-host reservation).
-- Schema migrations, recovery on restart, policy versioning, receipt integrity (hash chain / signatures).
+- Schema migrations, recovery on restart, policy versioning, receipt integrity — a hash chain, which detects **alteration** and not authorship.
+
+  **This line said "hash chain / signatures" until `SPEC-v0.6.md` was written, and the slash was the problem.** A chain says the log was not altered after the fact; a signature proves origin, and proving origin brings key generation, rotation and revocation with it — which is *issuing*, and this project verifies what it is handed (`SPEC-v0.3.md` §1.1). Signing is out of scope for v0.6 and `SPEC-v0.6.md` §11 argues it, noting that a chain plus an external timestamp or anchor gets most of the benefit without keys, as a v0.8+ option rather than a gap. The correction is recorded here rather than made silently, on the rule `SPEC-v0.4.md` §9.4 set for the threat model's sentence about a check verify could not deliver.
 - Control registry and data-scope primitives: the kernel-side objects a sector pack configures, shipped here so that a pack is configuration rather than code.
 
 Exit: the v0.1 concurrency and mutation standard met against a real Postgres on two hosts under failure injection; a soak of at least one week with no unexplained AMBIGUOUS; a receipt chain tamper test.
