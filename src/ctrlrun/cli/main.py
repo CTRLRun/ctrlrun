@@ -354,9 +354,20 @@ def deny(request_id: str, store_url: str | None) -> None:
     is_flag=True,
     help="Check the receipt chain and report every break by seq and by name.",
 )
+@click.option(
+    "--control",
+    "control_id",
+    default=None,
+    metavar="ID",
+    help="Show only receipts citing this control id (SPEC-v0.6 §7.3).",
+)
 @STORE_URL_OPTION
 def receipts(
-    last: int | None, as_json: bool, verify_chain_flag: bool, store_url: str | None
+    last: int | None,
+    as_json: bool,
+    verify_chain_flag: bool,
+    control_id: str | None,
+    store_url: str | None,
 ) -> None:
     """Show the receipts this store holds."""
     store = _store(store_url)
@@ -367,10 +378,22 @@ def receipts(
     if verify_chain_flag:
         _report_chain(store, as_json=as_json)
         return
+    if control_id is not None:
+        # SPEC-v0.6 §7.3's last line: *"`ctrlrun receipts --control <id>` filters on it -- a
+        # flag, not a command (§9.4)."* An independent review found the flag missing entirely:
+        # `Receipt.controls` was written on every receipt and could not be queried, which makes
+        # the registry's whole "go from a control to its evidence" argument unreachable from
+        # the CLI.
+        #
+        # **A filter and not a lookup.** It does not consult the policy, so an id that no
+        # document defines is not an error here -- it matches nothing, which is the right answer
+        # for a reader running against a store whose policy has since changed. A dangling
+        # citation is a *load* error, in the place that can see the registry.
+        found = tuple(receipt for receipt in found if control_id in receipt.controls)
     if last is not None:
         found = found[-last:]
     if not found:
-        click.echo("no receipts yet")
+        click.echo("no receipts yet" if control_id is None else f"no receipts cite {control_id!r}")
         return
     for receipt in found:
         click.echo(receipt.to_json() if as_json else _receipt_line(receipt))

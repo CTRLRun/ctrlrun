@@ -1407,6 +1407,26 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   the stored head detects. A reader with the file alone can prove the file was not altered
   internally and cannot prove it is complete.
 
+- **Not stable across a receipt-schema addition, and this one is the operator's problem rather
+  than an attacker's.** `chain_hash()` recomputes over `to_dict()`, so **adding a field to the
+  receipt reports every receipt written before it as `content_altered`.** Item 7 added
+  `policy_hash`, `policy_version` and `controls`, and an independent review verified the effect:
+  a database written by an item-6 build verifies as tampered under an item-7 build, in §6.5's
+  own tamper vocabulary, with nothing distinguishing a schema addition from a rewrite.
+
+  The blast radius is bounded and is stated exactly. A genuine **v0.5** receipt has no `seq` at
+  all and reports `unchained`, which is the documented pre-chain case and not a break. Only
+  databases written by a build *between* the chain landing and a later field being added are
+  affected — in practice a development box or a CI artefact, since neither build was released.
+
+  It is nonetheless a **durable property of the design** and is written here rather than treated
+  as an item-7 accident: forward-only means there is no rehash (§3.6), so any future additive
+  receipt field does this again. An operator meeting it accepts the break window for receipts
+  written before the upgrade — `verify_chain` names the `seq` range, so the window is legible —
+  or truncates. §9.5's *"every `v2` field keeps its meaning"* and *"a `v2` reader tolerating
+  unknown keys survives"* are both still true and neither one covers this: they are about
+  **reading** an old receipt, and this is about **rehashing** one.
+
 ### 6.5 Detection, and the six names
 
 A break is reported with a name, because a chain that only catches the easy case is worse than
@@ -1550,6 +1570,13 @@ It is still right, for three reasons that bound the exposure:
   grant (`v0.1 §4.2 A3`), and the refusal is recorded against the approval so the history shows a
   grant that met a denial.
 
+  **That last clause was not implemented and is now.** `Control.execute` raises on `DENY` before
+  `_secure` runs, so an independent review found `ACTION_DENIED` appended with `approval_id=None`
+  and the receipt carrying neither the id nor the approver: nothing in the store or the log
+  connected the live grant to the refusal it met. Item 7 passes the presented id to both. It
+  changes nothing about the approval — that is the whole point of this row, and it stays
+  `granted`, unspent, for the action a human really did answer.
+
 The asymmetry, stated in one line: the `ALLOW` row closes a token that would otherwise outlive
 **an action that ran**; the `DENY` row keeps one for **an action that did not**.
 
@@ -1683,8 +1710,27 @@ are two different checks.** The distinction is what makes the feature implementa
 
 | Check | `data_scope` | Where it lives |
 |---|---|---|
-| May an **argument** be called this? | **No** — `PolicyError` at load | `RESERVED_ARGUMENTS`, as `claims`, `issuer` and `expires_at` are |
-| May a **condition key** split to this subject? | **Yes** | the condition splitter, which today refuses every reserved name |
+| May an **argument** be called this? | **No** — `PolicyError` at load | `_refuse_reserved`, over `DERIVED_SUBJECTS`, at every place an argument is named |
+| May a **condition key** split to this subject? | **Yes** | the condition splitter, which refuses every *other* reserved name |
+
+**Amended in item 7, because the first row named a check that did not exist.** `RESERVED_ARGUMENTS`
+is consulted in exactly one place — the condition splitter — and `DERIVED_SUBJECTS` exempts
+`data_scope` there, so for the one name v0.6 added the set was **inert**. An independent review
+loaded a `data:` key called `data_scope`, an `effect:` template containing `{data_scope}`, and a
+`@protect`-ed function taking it as a parameter, all without a murmur, while this table said all
+three were load errors and `_Rule.matches`'s docstring leaned on it. The acceptance test was worse
+than absent: `test_T176_data_scope_is_refused_as_an_argument_in_a_document_of_any_schema` had **no
+`pytest.raises`** and asserted the documents *loaded*.
+
+The check now exists, at all three sites, and it is over **`DERIVED_SUBJECTS` and not
+`RESERVED_ARGUMENTS`** — a narrowing found by writing it the wide way first and watching two
+shipped tests go red. The two halves of `RESERVED_ARGUMENTS` are different rules. `agent`, `user`,
+`claims`, `issuer` and `expires_at` are refused as **condition subjects**, because a rule must not
+read who is acting (`v0.3 §4.5`); an *argument* of one of those names collides with nothing, since
+policy cannot see the principal at all, and `user` has been a legal `@protect` parameter since
+v0.3. A **derived** subject is different in kind: `_ActionPolicy.evaluate` merges
+`{**arguments, **derived}` into one mapping, so `data_scope` really would be two things at one
+evaluation, resolved by merge order in another function.
 
 Today those are one check: the splitter refuses a condition whose subject is in
 `RESERVED_ARGUMENTS`, which is exactly how `claims_eq:` becomes a load error. Adding `data_scope`
@@ -1703,30 +1749,42 @@ one name meaning two things in two files, which is the ambiguity `v0.1 §3.2` re
 address `data_scope`: the derived-subject allow-list is the policy evaluator's, and a grant that
 named one is refused as it always was (§11).
 
-**Redaction, and where it does not apply.** A label may be declared `redact: true`:
+**The shape of a label.**
 
 ```yaml
 data:
-  diagnosis: {label: phi, redact: true}
+  diagnosis: {label: phi}     # `redact:` was described here and cut; see below
 ```
 
-A redacted argument's value is replaced **in the evidence** — the receipt, the events, the JSONL
-export — by `"sha256:<hex>"` of its canonical form. The value is gone; two different values are
-still distinguishable; the `action_hash` is **unchanged**, because it is computed over the real
-arguments as it always was, so a reader can still check the binding.
+The mapping form remains because a label may gain a second key later; today `label:` is its only
+one, and `diagnosis: phi` is the shorthand for it.
 
-**Redaction never applies to the approval payload.** `ApprovalRequest.action`, `PendingApproval`
-(`v0.5 §2.2`) and `ctrlrun approve`'s display carry the real values. A human must see what they
-approve — that is the whole of `v0.1 §4.2` — and a redacted approval screen is an approval of
-something nobody read.
-
-**`redact:` is on probation and item 7 must earn it.** It is the primitive here that exists most
+**`redact:` was on probation and item 7 cut it.** It was the primitive here that existed most
 plausibly because an imagined sector might want it, and `v0.6`'s scope rule is that a field added
-for a pack nobody is writing is a guess that gets frozen. Item 7 writes one throwaway sector
-configuration (§7.5). If that configuration does not need `redact:`, **item 7 cuts it** and
-records the cut in §12. The registry and the labels are not on probation: a receipt that cannot
-say which control governed an action, and a rule that cannot see that an argument is PHI, are the
-two things a pack cannot be written without.
+for a pack nobody is writing is a guess that gets frozen. §7.5's throwaway configuration was to
+earn it, and did not:
+
+- The configuration needed a rule that could **see** an argument was PHI, which `data:` gives it.
+  That primitive is not on probation and is not cut.
+- It did not need the value hidden from the evidence. A deployment that may not hold a diagnosis
+  in its receipt store may not hold it upstream either, so redacting here would be a weaker
+  second copy of a control that has to live elsewhere.
+- The approval payload carries the real value regardless, because a human must see what they
+  approve (`v0.1 §4.2`). Once that is true, redacting the same value in the receipt hides it from
+  the auditor and from nobody else.
+
+So there is no `redact:` key, and **it is refused at load rather than ignored** — with a message
+saying it was cut and why. An operator who writes `redact: true` and gets no error believes the
+value is hidden, which is worse than not having the feature. §12 records the cut.
+
+The registry and the labels stay: a receipt that cannot say which control governed an action, and
+a rule that cannot see that an argument is PHI, are the two things a pack cannot be written
+without.
+
+**`data:` labels an argument and not a return value**, and §7.5's configuration is where that
+became worth stating. A protected function that *returns* PHI declares nothing, and `data_scope`
+sees only what went in. That is the right scope for a decision made **before** the call — a label
+on the result could not inform it — but a pack author will expect otherwise.
 
 ### 7.5 The throwaway configuration
 
@@ -2176,8 +2234,55 @@ strings out at each call site is how a closed set stops being one. Listing them 
 correction the conformance package's paragraph above records: a draft that says *"and no other
 public name"* while the module has an `__all__` is a sentence nobody can obey.
 
+### 9.1.1 What item 7 added, listed because a draft's "no other public name" did not hold
+
+An independent review found eleven public names added by item 7 and named by nothing here, on a
+milestone whose central claim is that the surface did not grow. `policy.py` has no `__all__`, so
+every one is importable. §9.5's schema rows authorize the **YAML keys**; they say nothing about
+the Python surface, and this project's rule is that a frozen name changes in the same PR as the
+document. Listed rather than left, on the same reasoning the two paragraphs above record:
+
+```python
+# ctrlrun.policy — §7.1, §7.3, §7.4
+class Policy:
+    @property
+    def policy_hash(self) -> str: ...        # §7.1, over the parsed decision inputs
+    @property
+    def version(self) -> str | None: ...     # §7.1, the operator's label, never authoritative
+    @property
+    def controls(self) -> Mapping[str, PolicyControl]: ...   # §7.3, the registry
+    def data_scope(self, action: Action) -> frozenset[str]: ...  # §7.4
+
+class PolicyControl:                          # §7.3 — a registry entry: id, title, source
+class DataLabel:                              # §7.4 — one `data:` entry
+DERIVED_SUBJECTS: frozenset[str]              # §7.4 — names resolved at evaluation
+def hash_with_authority(policy: Policy, authority: Authority | None) -> str: ...  # §7.1
+
+# ctrlrun.authority — §7.1
+def canonical_grants(authority: Authority | None) -> Any: ...
+
+# ctrlrun.approval — §7.1
+def policy_in_force(policy_hash: str) -> ContextManager[None]: ...
+class ApprovalRequest:  policy_hash: str | None
+class ApprovalRecord:   policy_hash_at_approval: str | None
+
+# ctrlrun.receipt — §7.1, §7.3
+class Receipt:  policy_hash: str | None; policy_version: str | None; controls: tuple[str, ...]
+```
+
+**`PolicyControl`, not `Control`.** The registry entry shipped as `ctrlrun.policy.Control`, which
+is a second `Control` in a package whose central object is `Control` — a collision nobody should
+have to disambiguate at a call site, and one that would have been frozen for a long time. Renamed
+in the same change that lists it.
+
+`hash_with_authority` and `canonical_grants` exist because §7.1 promises that a separately-loaded
+`--authority` document is folded into the hash and `Policy` cannot see one. They clear §9.2's bar
+the same way `canonical_bytes` does: without them the alternative is `Control` growing a second,
+private canonicalizer for grants, and §6.2 forbids exactly that.
+
 **And no other public name.** No new `Control` method, no new store method, no new event type, no
-new CLI command, no new approval provider, no new sink.
+new CLI command, no new approval provider, no new sink. `ctrlrun receipts --control` is a **flag**
+on a command that already exists (§7.3, §9.4).
 
 ### 9.2 The two bars, stated separately
 
@@ -2499,3 +2604,61 @@ Four questions are already known to be open, and each names the item that closes
 - **Whether item 3 needs anything from the `StateStore` protocol.** §9.2 expects nothing, and says
   what happens if that expectation is wrong: the item stops.
 - **What the soak's unattributed count is.** §8.1 requires it published either way.
+
+### 12.1 `redact:` did not survive item 7, and the reason is the interesting part
+
+**Closed: cut.** §7.4 put the key on probation and made §7.5's throwaway sector configuration the
+thing that had to earn it. A hospital's patient-record system was chosen precisely because it
+looked like the strongest case — patient identifiers, diagnoses, a clinical governance document to
+cite — and it did not need the key once.
+
+Three reasons, and none of them is "we ran out of time":
+
+1. **The receipt already does not carry argument values.** `v0.1 §6.1` writes the action's
+   canonical arguments into the receipt, and the thing `redact:` was for is deciding what an
+   *event sink* exports. That is `OTelEventSink`'s existing `record_arguments` switch, one layer
+   up, and a second control over the same question in the policy would be two places to get it
+   wrong.
+2. **A label already says what a value is.** `data: {diagnosis: phi}` plus a sink that does not
+   export PHI is the same outcome with one primitive rather than two, and the sink is where an
+   operator's export policy actually lives.
+3. **Redacting in the kernel would weaken the hash.** A receipt whose arguments were redacted
+   before hashing hashes something that is not the action, and `v0.1 §2.3` is the reason the
+   binding works at all. Redacting *after* would put the unredacted value in the hash's preimage
+   and change nothing an adversary can see.
+
+`data:` itself is **not** on probation and is not cut: it is what a rule reads, and the throwaway
+configuration used it for exactly that. `_CUT_DATA_KEYS` refuses `redact:` at load with the reason,
+rather than ignoring it, so a document written against the draft fails loudly.
+
+### 12.2 The reservation `RESERVED_ARGUMENTS` promised was not implemented
+
+**Closed: implemented, and narrowed.** §7.4's table said an argument may not be called
+`data_scope`, and no check existed — the set is read only by the condition splitter, which exempts
+derived subjects. An independent review found three ways to name one and loaded all three. The
+acceptance test that should have caught it had no `pytest.raises` at all.
+
+What the fix settled, which the draft had not thought about: **the reserved set is two rules, not
+one.** Refusing every reserved name as an argument broke shipped code immediately, because `user`
+has been in that set since v0.3 and protected functions take a `user` parameter. Names are refused
+as *condition subjects* so a rule cannot read who is acting; only a **derived** subject collides
+with an argument, because only a derived subject is merged into the mapping the arguments are read
+from. §7.4's table row now says that.
+
+### 12.3 A separately-loaded `--authority` document reached no hash
+
+**Closed: `hash_with_authority` and `canonical_grants`, listed in §9.1.1.** §7.1 promised both were
+folded into one canonical structure; `_canonical_policy` read the **policy document only**, so the
+gateway's shape — policy from one file, `Authority.from_yaml` from another — hashed nothing of its
+grants. Two deployments with different limits produced byte-identical provenance, and one with no
+authority hashed the same as one with grants.
+
+Two things the fix had to decide, neither of them in the draft:
+
+- **Over the parsed grants, not the document's bytes**, so the same grants hash the same from an
+  inline section and from a `--authority` file. That is `_canonical_policy`'s own argument about
+  `source` applied one level down.
+- **A substitution, not a merge.** A `Control` handed a policy with an inline `authority:` section
+  and no `authority=` argument does not enforce that section, so the hash records `None`. The
+  receipt's job is to say what decided the action, and a merge would have named grants that
+  governed nothing.

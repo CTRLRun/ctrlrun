@@ -93,6 +93,10 @@ SPEC_RECEIPT_FIELDS = (
     # deliberately absent: a document cannot contain its own hash, so it is a column.
     "seq",
     "prev_hash",
+    # SPEC-v0.6 §7.1, §7.3 — `ctrlrun.receipt/v3`.
+    "policy_hash",
+    "policy_version",
+    "controls",
 )
 
 

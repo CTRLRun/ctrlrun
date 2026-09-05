@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from .action import Principal, canonical_bytes
+from .errors import InvalidArgument
 from .policy import Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
@@ -221,6 +222,25 @@ class _WouldHave:
         )
 
 
+def _controls_of(value: object) -> tuple[str, ...]:
+    """A receipt's `controls`, parsed rather than coerced (SPEC-v0.6 §7.3).
+
+    `tuple(value or ())` turned the string `"abc"` into `('a', 'b', 'c')` -- three controls that
+    were never cited, in a document a reader would take as evidence. Everything else in
+    `from_dict` parses into a closed set; this did not, and an independent review found it.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        raise InvalidArgument(
+            f"a receipt's 'controls' must be a list of control ids, got {type(value).__name__}"
+        )
+    for item in value:
+        if not isinstance(item, str):
+            raise InvalidArgument(f"a control id must be a string, got {item!r}")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class Receipt:
     """Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1)."""
@@ -263,6 +283,17 @@ class Receipt:
     seq: int | None = None
     #: The `hash` of receipt `seq - 1`, or `GENESIS_HASH` for `seq == 1` (§6.2).
     prev_hash: str | None = None
+    #: SPEC-v0.6 §7.1 — the hash of the policy that decided this action, and the operator's own
+    #: label for it. The hash is authoritative and the label is for humans: two documents sharing
+    #: a `version:` and differing in content are two different policies, and the hash says so.
+    #: `None` on a receipt written before v0.6.
+    policy_hash: str | None = None
+    policy_version: str | None = None
+    #: §7.3 — the control ids the matched rule cited, unioned with the action's. **Attribution,
+    #: not prevention**: citing a control does not cause an approval, the rule's `decision:`
+    #: does. This says which written expectation the rule exists to serve, so a receipt can
+    #: answer "under what".
+    controls: tuple[str, ...] = ()
     #: The hash **as the store recorded it**, filled in on read and `None` on a receipt that has
     #: not been written. Not in `to_dict()`: a document cannot contain its own hash, which is why
     #: §6.2 makes this a column. Keeping it here rather than behind a store method is what lets
@@ -308,6 +339,9 @@ class Receipt:
             "finished_at": iso_timestamp(self.finished_at),
             "seq": self.seq,
             "prev_hash": self.prev_hash,
+            "policy_hash": self.policy_hash,
+            "policy_version": self.policy_version,
+            "controls": list(self.controls),
         }
 
     def to_json(self) -> str:
@@ -361,6 +395,9 @@ class Receipt:
             # `unchained`, which is never a pass.
             seq=document.get("seq"),
             prev_hash=document.get("prev_hash"),
+            policy_hash=document.get("policy_hash"),
+            policy_version=document.get("policy_version"),
+            controls=_controls_of(document.get("controls")),
         )
 
     @classmethod

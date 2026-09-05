@@ -679,6 +679,12 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         # deliberately absent: a document cannot contain its own hash, so it is a column.
         "seq",
         "prev_hash",
+        # SPEC-v0.6 §7.1, §7.3 — `ctrlrun.receipt/v3`. What decided this action, and which
+        # written expectation the rule that decided it serves. `controls` is **attribution**:
+        # citing one does not cause a decision.
+        "policy_hash",
+        "policy_version",
+        "controls",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")

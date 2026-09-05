@@ -501,8 +501,8 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
-                f"granted_at, expires_at, consumed_at FROM {self._q}.approvals WHERE "
-                f"approval_id = %s",
+                "granted_at, expires_at, consumed_at, policy_hash_at_approval "
+                f"FROM {self._q}.approvals WHERE approval_id = %s",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -515,6 +515,7 @@ class PostgresStateStore:
                 action=_action_from_json(str(row[3])),
                 created_at=datetime.fromisoformat(str(row[5])),
                 expires_at=datetime.fromisoformat(str(row[7])),
+                policy_hash=None if row[9] is None else str(row[9]),
             ),
             status=ApprovalStatus(row[2]),
             approver=row[4],
@@ -1092,8 +1093,9 @@ class PostgresStateStore:
                 cursor.execute(
                     f"INSERT INTO {self._q}.approvals("
                     "approval_id, action_hash, status, action_json, "
-                    "approver, created_at, granted_at, expires_at, consumed_at) "
-                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL)",
+                    "approver, created_at, granted_at, expires_at, consumed_at, "
+                    "policy_hash_at_approval) "
+                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s)",
                     (
                         request.request_id,
                         request.action_hash,
@@ -1101,6 +1103,7 @@ class PostgresStateStore:
                         _action_json(request.action),
                         _iso(request.created_at),
                         _iso(request.expires_at),
+                        request.policy_hash,
                     ),
                 )
         except Exception as duplicate:

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import secrets
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -82,6 +84,15 @@ class ApprovalRequest:
     action: Action
     created_at: datetime
     expires_at: datetime
+    #: SPEC-v0.6 §7.1 — the `policy_hash` in force when this request was created, or `None`.
+    #:
+    #: **At request time, not at grant time**, and §7.1 says why: the store has no policy, and
+    #: giving `ctrlrun approve` one would make a malformed policy a failure of an evidence
+    #: command -- the same argument §9.4 makes for `receipts` and `inspect` not loading one.
+    #: The two instants differ only if the policy changed between the request and the answer,
+    #: which is a narrower window than the one §7.2 is about and is recorded by the receipt's
+    #: own `policy_hash` either way.
+    policy_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -134,6 +145,16 @@ class ApprovalRecord:
     @property
     def approval_id(self) -> str:
         return self.request.request_id
+
+    @property
+    def policy_hash_at_approval(self) -> str | None:
+        """Which policy was in force when this approval was created (SPEC-v0.6 §7.1).
+
+        Where it differs from the receipt's `policy_hash`, the policy changed between the grant
+        and its consumption -- which is what §7.2's table is about, and which no other field can
+        say: the approval binds to an `action_hash`, and that is silent about the policy.
+        """
+        return self.request.policy_hash
 
     @property
     def action_hash(self) -> str:
@@ -301,6 +322,31 @@ class ApprovalProvider(Protocol):
         ...
 
 
+#: SPEC-v0.6 §7.1 — the `policy_hash` in force while a request is being built, set by `Control`
+#: around the provider call and read here.
+#:
+#: A context variable for the reason `_PRESENTED_APPROVAL` is one: the `ApprovalProvider`
+#: protocol is `request(action, ttl)` and §9.1 freezes it, so a provider cannot be handed a
+#: policy — and giving one to every provider would put the policy in the hands of things whose
+#: whole job is to ask a human. `Control` is the only object that has both, and this is how it
+#: reaches the one function every shipped provider builds its requests with.
+#:
+#: **The residual, stated:** a provider that constructs an `ApprovalRequest` itself rather than
+#: through `build_request` records no policy hash. All three shipped providers use it, and a
+#: fourth that did not would get `None`, which reads as "not recorded" and never as a wrong hash.
+_POLICY_AT_REQUEST: ContextVar[str | None] = ContextVar("ctrlrun_policy_at_request", default=None)
+
+
+@contextmanager
+def policy_in_force(policy_hash: str | None) -> Iterator[None]:
+    """Record `policy_hash` on any request built inside this block (SPEC-v0.6 §7.1)."""
+    token = _POLICY_AT_REQUEST.set(policy_hash)
+    try:
+        yield
+    finally:
+        _POLICY_AT_REQUEST.reset(token)
+
+
 def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequest:
     """Build a request for `action`, validating the ttl. Package-internal, not public API.
 
@@ -314,6 +360,7 @@ def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequ
         request_id=new_request_id(),
         action_hash=action.action_hash,
         action=action,
+        policy_hash=_POLICY_AT_REQUEST.get(),
         created_at=now,
         expires_at=now + ttl,
     )
