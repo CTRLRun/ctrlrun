@@ -36,7 +36,7 @@ from ..receipt import (
     ReceiptResult,
     iso_timestamp,
 )
-from ..state import RESOLUTIONS, SQLiteStateStore
+from ..state import RESOLUTIONS, SQLiteStateStore, StateStore
 from .demo import run_demo
 
 #: Who the CLI records as the answer's author. Free text in v0.1 (SPEC-v0.1 §4.1).
@@ -99,9 +99,60 @@ actions:
 """
 
 
-def _store() -> SQLiteStateStore:
-    """Open the store this working tree's agents use (SPEC-v0.1 §8)."""
-    return SQLiteStateStore(state_path())
+#: `--store-url`, on every command that reads or resolves the operator's own store (§9.4).
+STORE_URL_OPTION = click.option(
+    "--store-url",
+    "store_url",
+    default=None,
+    envvar="CTRLRUN_STORE_URL",
+    help="The store to open. Default: the SQLite database under CTRLRUN_HOME.",
+)
+
+#: CTRLRun's own parameter on a Postgres URL, peeled off before the URL reaches the driver. The
+#: same spelling `ctrlrun.conformance.store` uses, because an operator who has seen one should not
+#: have to learn the other.
+SCHEMA_PARAM: Final = "ctrlrun_schema"
+
+SQLITE_SCHEME: Final = "sqlite://"
+POSTGRES_SCHEMES: Final = ("postgres://", "postgresql://")
+
+
+def _store(store_url: str | None = None) -> StateStore:
+    """Open the store the operator names, or the one this working tree's agents use.
+
+    Until v0.6 this returned `SQLiteStateStore(state_path())` unconditionally, which meant that
+    on the backend this milestone exists for, `ctrlrun resolve` could not reach a record --
+    §5.3's human authority had no route -- `ctrlrun effects` could not show a lapsed lease, and
+    `resolved_by` had no read surface outside a Python session. A review found it.
+
+    **It creates nothing.** `PostgresStateStore` creates no schema and this does not either: a
+    command an operator runs to *read* evidence must not have a side effect on the database it
+    reads, which is `v0.4 §3.5`'s argument for verify's scratch store pointed the other way. A
+    schema that is not there is an error, not an invitation.
+    """
+    if store_url is None:
+        return SQLiteStateStore(state_path())
+    if store_url.startswith(SQLITE_SCHEME):
+        return SQLiteStateStore(Path(store_url[len(SQLITE_SCHEME) :]))
+    if store_url.startswith(POSTGRES_SCHEMES):
+        from ..postgres import PostgresStateStore
+
+        bare, schema = _peel_schema(store_url)
+        return PostgresStateStore(bare, schema=schema)
+    raise click.ClickException(
+        f"no store backend for {store_url!r}; expected a 'sqlite://' path or a 'postgresql://' URL"
+    )
+
+
+def _peel_schema(url: str) -> tuple[str, str]:
+    """Take CTRLRun's own schema parameter off a Postgres URL before the driver sees it."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    pairs = parse_qsl(parts.query)
+    schema = dict(pairs).get(SCHEMA_PARAM, "public")
+    rest = [(key, value) for key, value in pairs if key != SCHEMA_PARAM]
+    return urlunsplit(parts._replace(query=urlencode(rest))), schema
 
 
 def _loaded_policy() -> Policy:
@@ -175,9 +226,10 @@ def demo() -> None:
 
 @main.command()
 @click.argument("request_id")
-def approve(request_id: str) -> None:
+@STORE_URL_OPTION
+def approve(request_id: str, store_url: str | None) -> None:
     """Grant a pending approval request."""
-    store = _store()
+    store = _store(store_url)
     try:
         record = store.get_approval(request_id)
         approval = store.grant_approval(request_id, CLI_APPROVER)
@@ -199,9 +251,10 @@ def approve(request_id: str) -> None:
 
 @main.command()
 @click.argument("request_id")
-def deny(request_id: str) -> None:
+@STORE_URL_OPTION
+def deny(request_id: str, store_url: str | None) -> None:
     """Refuse a pending approval request."""
-    store = _store()
+    store = _store(store_url)
     try:
         record = store.get_approval(request_id)
         store.deny_approval(request_id, CLI_APPROVER)
@@ -222,10 +275,11 @@ def deny(request_id: str) -> None:
 @main.command()
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show only the last N.")
 @click.option("--json", "as_json", is_flag=True, help="Print the portable receipt JSON.")
-def receipts(last: int | None, as_json: bool) -> None:
+@STORE_URL_OPTION
+def receipts(last: int | None, as_json: bool, store_url: str | None) -> None:
     """Show the receipts this store holds."""
     try:
-        found = _store().receipts()
+        found = _store(store_url).receipts()
     except CTRLRunError as exc:
         raise _fail(exc) from exc
     if last is not None:
@@ -244,10 +298,11 @@ def receipts(last: int | None, as_json: bool) -> None:
     default=None,
     help="Show only effects in this state.",
 )
-def effects(state: str | None) -> None:
+@STORE_URL_OPTION
+def effects(state: str | None, store_url: str | None) -> None:
     """Show the logical effects this store knows about."""
     try:
-        found = _store().list_effects(None if state is None else EffectState(state))
+        found = _store(store_url).list_effects(None if state is None else EffectState(state))
     except CTRLRunError as exc:
         raise _fail(exc) from exc
     if not found:
@@ -261,7 +316,8 @@ def effects(state: str | None) -> None:
 @click.argument("effect_key")
 @click.option("--committed", is_flag=True, help="The effect did happen at the remote.")
 @click.option("--failed", is_flag=True, help="The effect provably did not happen.")
-def resolve(effect_key: str, committed: bool, failed: bool) -> None:
+@STORE_URL_OPTION
+def resolve(effect_key: str, committed: bool, failed: bool, store_url: str | None) -> None:
     """Say what actually happened to an effect with an unknown outcome."""
     if committed == failed:
         # SPEC §5.2 — a resolution is a human's claim about the real world, and the two
@@ -271,7 +327,7 @@ def resolve(effect_key: str, committed: bool, failed: bool) -> None:
             f"({'|'.join(sorted(RESOLUTIONS))} are the only answers)"
         )
     outcome = EffectState.COMMITTED if committed else EffectState.FAILED
-    store = _store()
+    store = _store(store_url)
     try:
         record = store.resolve_effect(effect_key, outcome, CLI_APPROVER)
         store.append_event(
@@ -294,9 +350,10 @@ def resolve(effect_key: str, committed: bool, failed: bool) -> None:
 @main.command()
 @click.argument("action_id")
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
-def inspect(action_id: str, as_json: bool) -> None:
+@STORE_URL_OPTION
+def inspect(action_id: str, as_json: bool, store_url: str | None) -> None:
     """Show one action's whole history: proposal, decision, approval, effect, receipt."""
-    store = _store()
+    store = _store(store_url)
     try:
         events = tuple(event for event in store.events() if event.action_id == action_id)
         receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
@@ -332,7 +389,7 @@ def inspect(action_id: str, as_json: bool) -> None:
 
 
 def _approvals_for(
-    store: SQLiteStateStore, receipt: Receipt | None, events: tuple[Event, ...]
+    store: StateStore, receipt: Receipt | None, events: tuple[Event, ...]
 ) -> tuple[ApprovalRecord, ...]:
     """Every approval carrying this action's hash (SPEC-v0.2 §5).
 
@@ -356,7 +413,7 @@ def _approvals_for(
 
 
 def _effect_of(
-    store: SQLiteStateStore, receipt: Receipt | None, events: tuple[Event, ...]
+    store: StateStore, receipt: Receipt | None, events: tuple[Event, ...]
 ) -> EffectRecord | None:
     """This action's effect record, or `None` where it has no effect key (SPEC-v0.2 §5)."""
     key = receipt.effect_key if receipt is not None else None
@@ -398,7 +455,13 @@ def _inspection_lines(
     for record in approvals:
         lines.append(f"approval    {_approval_summary(record)}")
     if effect is not None:
-        lines.append(f"effect      {effect.effect_key}  {effect.state}  attempt {effect.attempt}")
+        effect_line = f"effect      {effect.effect_key}  {effect.state}  attempt {effect.attempt}"
+        if effect.resolved_by is not None:
+            # §5.3 names this command as a read surface for the resolver, beside `ctrlrun
+            # effects`. Only one of the two had it, so on the command the section points an
+            # operator at, the answer was not there in either form.
+            effect_line += f"  resolved by {effect.resolved_by}"
+        lines.append(effect_line)
     if receipt is not None:
         lines.append(f"receipt     {receipt.receipt_id}  {receipt.result}")
     else:
@@ -475,6 +538,9 @@ def _effect_dict(record: EffectRecord) -> dict[str, Any]:
             None if record.lease_expires_at is None else iso_timestamp(record.lease_expires_at)
         ),
         "error": record.error,
+        #: Which authority moved this out of `AMBIGUOUS`, or `None` (§5.3). Additive to
+        #: `ctrlrun.inspection/v2`: a reader that does not know the key ignores it.
+        "resolved_by": record.resolved_by,
     }
 
 
@@ -500,7 +566,8 @@ def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
     "offset, or <n>m / <n>h / <n>d.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
-def stats(since: str | None, as_json: bool) -> None:
+@STORE_URL_OPTION
+def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
     """Count what this store's receipts say, from the local store and nothing else.
 
     No network, no aggregation service, no upload: this reads the SQLite file the process it
@@ -511,7 +578,7 @@ def stats(since: str | None, as_json: bool) -> None:
     try:
         counted = [
             receipt
-            for receipt in _store().receipts()
+            for receipt in _store(store_url).receipts()
             if boundary is None or receipt.finished_at >= boundary
         ]
     except CTRLRunError as exc:

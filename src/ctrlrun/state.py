@@ -1409,8 +1409,14 @@ class SQLiteStateStore:
             # Only a FAILED record is renewable (§5.4); the WHERE clause says so again, so a
             # record that changed under us refuses instead of overwriting an attempt.
             updated = connection.execute(
+                # `resolved_by` is cleared with them, and its own line says why: a human
+                # resolving to FAILED is saying *"this may be retried"*, not committing the
+                # retry. Leaving the column set attributes the agent's next outcome to the
+                # person who merely permitted it -- and v0.5 got this right only by accident,
+                # because the resolver used to live inside the `error` this UPDATE clears.
                 "UPDATE effects SET state=?, action_id=?, attempt=?, lease_expires_at=?, "
-                "result_json=NULL, error=NULL, updated_at=? WHERE effect_key=? AND state=?",
+                "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=? "
+                "WHERE effect_key=? AND state=?",
                 (
                     str(record.state),
                     record.action_id,
@@ -1605,8 +1611,32 @@ def _only(value: _T | None, what: str) -> _T:
 
 
 def _approver(approver: str) -> str:
+    """The one place a resolver's or approver's name is checked before it becomes evidence.
+
+    Non-empty, and **no control characters**. `ctrlrun effects` and `ctrlrun approvals` print one
+    record per line, so a newline in this string forges a whole row in the evidence output:
+
+        refund:z     committed  attempt 1  act_a  2026-01-01T12:00:00.000Z  resolved by cli:eve
+        refund:fake  committed  attempt 1  act_x  2026-01-01T12:00:00.000Z
+
+    -- a second effect that does not exist, in a listing an operator reads to decide what
+    happened. Not reachable through the shipped CLI, which writes a constant, and reachable by
+    any caller holding the store; `resolve_effect` and `grant_approval` are on the frozen
+    `StateStore` protocol, so every backend gets this by going through here.
+
+    It is a refusal, not an escape. Escaping would make the stored value differ from the one the
+    caller passed, and a record of who decided that is not what anybody typed is worse than a
+    rejected write. §5.3's "a reader must be able to tell them apart" needs the strings to be
+    what they say they are.
+    """
     if not approver:
         raise InvalidArgument("approver must be a non-empty string")
+    if any(character < " " or character == "\x7f" for character in approver):
+        raise InvalidArgument(
+            f"approver must not contain control characters, got {approver!r}: this string is "
+            "printed one per line by `ctrlrun effects` and `ctrlrun approvals`, and a newline in "
+            "it forges a row in the evidence"
+        )
     return approver
 
 

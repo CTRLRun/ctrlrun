@@ -7,7 +7,7 @@ because a seam in shipping code that exists only for a test is what §1.1's last
 
 from __future__ import annotations
 
-import contextlib
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +77,9 @@ class StoreBackend(Protocol):
     def reset(self) -> None:
         """Discard everything. Called between cases; the suite never reuses state."""
         ...
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class SQLiteBackend:
@@ -259,6 +262,17 @@ class PostgresBackend:
         for store in self._open:
             store.close()
         self._open.clear()
-        with contextlib.suppress(Exception):
+        try:
             PostgresStateStore.drop_schema(self._url, self._schema)
+        except Exception as refused:
+            # Not suppressed. `contextlib.suppress` cannot catch a *block*, and this used to
+            # wait forever behind one connection the suite had not closed -- a child process
+            # left alive by an early return. Now `drop_schema` gives up, and a cleanup that
+            # could not run says so instead of leaving a schema nobody will look for.
+            _LOG.warning(
+                "could not drop conformance schema %r: %s. It is left behind; drop it by hand "
+                "if this database is not disposable",
+                self._schema,
+                refused,
+            )
         self._serial += 1

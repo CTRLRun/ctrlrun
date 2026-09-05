@@ -23,7 +23,6 @@ to break:
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import itertools
 import json
@@ -536,14 +535,29 @@ class Engine:
         return PostgresStateStore(self._store_url, schema=schema, clock=clock), self._urls[gid]
 
     def drop_scratch_schemas(self) -> None:
-        """Remove every schema this run created. Called even when the run ends by exception."""
+        """Remove every schema this run created. Called even when the run ends by exception.
+
+        A drop that cannot run is **reported**, not suppressed. `contextlib.suppress` around a
+        `DROP SCHEMA … CASCADE` cannot catch the case that actually happens -- the statement
+        blocking behind somebody else's open transaction and never returning -- and it silently
+        swallows the case where it does fail, which is how a database accumulates scratch schemas
+        nobody is looking for. `drop_schema` is bounded by a `lock_timeout` for the first half;
+        this is the second.
+        """
         if not self._on_postgres:
             return
         from ..postgres import PostgresStateStore
 
         for schema in self._schemas:
-            with contextlib.suppress(Exception):
+            try:
                 PostgresStateStore.drop_schema(self._store_url, schema)
+            except Exception as refused:
+                _LOG.warning(
+                    "verify could not drop its scratch schema %r: %s. It holds no real data and "
+                    "is safe to drop by hand",
+                    schema,
+                    refused,
+                )
         self._schemas.clear()
 
     # --- derivation ---------------------------------------------------------------------

@@ -139,6 +139,12 @@ def _took(branch: str, effect_key: str) -> None:
     )
 
 
+#: How long `drop_schema` waits for the locks it needs before giving up. Long enough that an
+#: ordinary short read does not fail a cleanup, short enough that a forgotten open transaction
+#: produces an error rather than a hung run.
+DROP_LOCK_TIMEOUT: Final = "10s"
+
+
 def _psycopg() -> Any:
     """The driver, imported lazily so `import ctrlrun` never reaches it (T153)."""
     try:
@@ -270,14 +276,27 @@ class PostgresStateStore:
             connection.close()
 
     @staticmethod
-    def drop_schema(url: str, schema: str) -> None:
+    def drop_schema(url: str, schema: str, *, timeout: str = DROP_LOCK_TIMEOUT) -> None:
         """Remove a schema and everything in it. Verify's scratch store is dropped when the run
-        ends, including when it ends by exception (§4.1)."""
+        ends, including when it ends by exception (§4.1).
+
+        **Bounded.** `DROP SCHEMA … CASCADE` takes an `ACCESS EXCLUSIVE` lock on every table in
+        it, so a single connection left idle inside a transaction -- a child process the caller
+        forgot to kill, a `psql` somebody left open -- blocks this forever. A review measured it:
+        `reset()` had not returned after 25 seconds, with the dropping backend sitting in
+        `wait_event_type=Lock` behind one `idle in transaction` reader. A cleanup that hangs turns
+        a broken backend into a hung CI run instead of a red report, which is this project's rule
+        about timeouts inverted.
+
+        `lock_timeout` makes it raise instead, and the caller decides. It is set on the session
+        rather than passed to the driver so it covers the `DROP` and nothing else.
+        """
         if not schema or not schema.replace("_", "").isalnum():
             raise InvalidArgument(f"schema must be a plain identifier, got {schema!r}")
         psycopg = _psycopg()
         connection = psycopg.connect(url, autocommit=True)
         try:
+            connection.execute(f"SET lock_timeout = '{timeout}'")
             connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         finally:
             connection.close()
@@ -737,9 +756,14 @@ class PostgresStateStore:
             # record that changed under us refuses instead of overwriting an attempt.
             with connection.cursor() as cursor:
                 cursor.execute(
+                    # `resolved_by` is cleared with them, and its own line says why: a human
+                    # resolving to FAILED is saying *"this may be retried"*, not committing the
+                    # retry. Leaving the column set attributes the agent's next outcome to the
+                    # person who merely permitted it -- and v0.5 got this right only by accident,
+                    # because the resolver used to live inside the `error` this UPDATE clears.
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
-                    "result_json=NULL, error=NULL, updated_at=%s "
+                    "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=%s "
                     "WHERE effect_key=%s AND state=%s",
                     (
                         str(record.state),
