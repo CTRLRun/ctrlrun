@@ -33,6 +33,7 @@ version of this file passed while exercising almost none of what it named:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ from pathlib import Path
 import pytest
 
 from ctrlrun.effect import EffectState
-from ctrlrun.errors import AmbiguousEffect, DuplicateEffect, NotExecuted
+from ctrlrun.errors import AmbiguousEffect, CTRLRunError, DuplicateEffect, NotExecuted
 from failure_injection import Proxy, upstream_of
 
 URL = os.environ.get("CTRLRUN_TEST_POSTGRES")
@@ -169,6 +170,55 @@ def test_the_kill_trigger_reads_frames_and_not_the_payload():
     seen = [m for i in range(len(stream)) for m in split.feed(stream[i : i + 1])]
     assert sum(1 for kind, body, _ in seen if is_commit(kind, body)) == 1
     assert len(seen) == 5
+
+
+@postgres
+def test_a_partition_that_began_mid_frame_leaves_the_injector_working(proxy, schema):
+    """The injector's second control: a restored partition must not blind it.
+
+    The first version released a partition by writing the held chunks straight to the socket,
+    which bypassed the frame parser. A partition that began **mid-frame** therefore left
+    `_Frontend` permanently misaligned: the server executed every later statement, the client saw
+    nothing wrong, and `commits_seen` stayed at zero for the rest of the connection. Measured
+    before the fix -- a `COMMIT` the server ran, with `commits_seen = 0, clients_killed = 0`.
+
+    A silent injector is worse than a broken one. Every `commits_seen` and `clients_killed`
+    assertion in this file is downstream of the parser still being aligned, so this is the control
+    for all of them.
+    """
+    store = store_on(proxy.url(URL), schema)
+    store.reserve_effect("refund:midframe", "act_m", timedelta(minutes=5))
+
+    # Partition mid-conversation, then restore. The store's next call spans the boundary.
+    proxy.partition = True
+    done = threading.Event()
+
+    def call() -> None:
+        try:
+            store.begin_execution("refund:midframe", "act_m")
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    assert not done.wait(1.5), "nothing was held; this control has no window"
+    proxy.partition = False
+    assert done.wait(30.0), "the restored call never completed"
+    worker.join(timeout=5.0)
+
+    # And the injector still works on the very next COMMIT.
+    proxy.reset_counters()
+    proxy.kill_on_commit = True
+    with contextlib.suppress(Exception):
+        store.commit_effect("refund:midframe", "act_m", {"ok": True})
+    proxy.kill_on_commit = False
+
+    assert proxy.commits_seen >= 1, (
+        "the parser lost its place across the partition, so the injector stopped injecting and "
+        "every assertion in this file that counts a COMMIT would have been silently vacuous"
+    )
+    assert proxy.clients_killed >= 1
+    store.close()
 
 
 # --- T155: the connection dies during COMMIT ------------------------------------------------
@@ -471,6 +521,198 @@ def test_T155f_a_second_lost_commit_on_the_same_operation_fails_closed(proxy, sc
     store.close()
 
 
+@postgres
+@pytest.mark.parametrize("lost", ["forwarded", "swallowed"])
+def test_T155g_a_lost_commit_on_a_RENEWAL_reports_the_renewal_branch(
+    proxy, schema, lost, resolutions
+):
+    """§4.3.4 on `_resolve_lost_renewal` -- the third resolution path, and the untested one.
+
+    A reservation over a `FAILED` record is an `UPDATE`, not an `INSERT` (`v0.1 §5.4`'s one
+    automatic retry), so its lost `COMMIT` is Table **A2** and not A1. A verification pass found
+    that this whole function could report any branch name it liked: making it say `a1.row1.ours`
+    for both of its rows left every test green, because nothing drove a renewal through the
+    injector at all.
+    """
+    store = store_on(proxy.url(URL), schema)
+    key = f"refund:renew-{lost}"
+    store.reserve_effect(key, "act_first", timedelta(minutes=5))
+    store.begin_execution(key, "act_first")
+    store.fail_effect(key, "act_first", "the remote refused before acting")
+    resolutions.clear()
+    proxy.reset_counters()
+
+    if lost == "forwarded":
+        proxy.kill_on_commit = True  # the renewal's COMMIT lands; the re-read sees it
+        with contextlib.suppress(Exception):
+            store.reserve_effect(key, "act_second", timedelta(minutes=5))
+        proxy.kill_on_commit = False
+        want = "a2.row1.landed"
+    else:
+        proxy.drop_before_commit = 1  # the renewal's COMMIT never arrives; it re-issues
+        store.reserve_effect(key, "act_second", timedelta(minutes=5))
+        want = "a2.row2.reissue"
+
+    assert proxy.clients_killed == 1, "the window never opened"
+    assert branches(resolutions) == [want], (
+        f"a lost COMMIT on a RENEWAL reported {branches(resolutions)}, expected [{want!r}]. A "
+        "renewal is an UPDATE and belongs to Table A2; reporting an A1 row would describe the "
+        "wrong table to whoever reads the log after an incident"
+    )
+
+    checker = store_on(URL, schema)
+    record = checker.get_effect(key)
+    assert record is not None
+    assert record.state is EffectState.RESERVED
+    assert record.action_id == "act_second"
+    assert record.attempt == 2, "a renewal is the next attempt, not the same one"
+    checker.close()
+    store.close()
+
+
+@postgres
+def test_T155h_a_foreign_record_found_by_the_re_read_is_REFUSED_and_says_so(
+    proxy, schema, resolutions
+):
+    """§4.3.2 Table A1 **row 3**, and §4.3.4's `a1.row3.refuse`.
+
+    The row nothing could reach: it needs somebody else to have taken the key in the window
+    between our lost `COMMIT` and our re-read, which is a race a test can only hope for. The
+    proxy's `on_drop` hook makes it deterministic -- it fires on the proxy's own thread, after
+    the client is dropped and before the store can reconnect to re-read.
+
+    This is the safe direction and the important one: our `INSERT` did not land, somebody else's
+    did, and §4.3.3 says anything that is not byte-for-byte our own write goes back through
+    `plan_reservation`. Concluding "our `action_id`, therefore ours" here is the double execution
+    this milestone's review found.
+    """
+    store = store_on(proxy.url(URL), schema)
+    rival = store_on(URL, schema)
+
+    def somebody_else_takes_it() -> None:
+        rival.reserve_effect("refund:foreign", "act_rival", timedelta(minutes=5))
+
+    proxy.reset_counters()
+    proxy.on_drop = somebody_else_takes_it
+    proxy.drop_before_commit = 1
+
+    with pytest.raises(DuplicateEffect) as refused:
+        store.reserve_effect("refund:foreign", "act_ours", timedelta(minutes=5))
+
+    assert proxy.commits_dropped == 1, "our COMMIT was not swallowed; the window never opened"
+    assert branches(resolutions) == ["a1.row3.refuse"], (
+        f"the store reported {branches(resolutions)}; a record that is not ours is Table A1's "
+        "third row and must say so"
+    )
+    assert refused.value.state == "in_progress"
+
+    checker = store_on(URL, schema)
+    record = checker.get_effect("refund:foreign")
+    assert record is not None
+    assert record.action_id == "act_rival", "our refusal overwrote somebody else's reservation"
+    assert record.state is EffectState.RESERVED
+    checker.close()
+    rival.close()
+    store.close()
+
+
+@postgres
+def test_T155h_a_record_moved_under_a_transition_is_REFUSED_and_says_so(proxy, schema, resolutions):
+    """§4.3.2 Table A2 **row 3**, and §4.3.4's `a2.row3.refuse`.
+
+    Our `UPDATE`'s `COMMIT` was lost and, in that window, the record moved somewhere we were not
+    writing. Re-issuing would be wrong -- the conditional `UPDATE` would match nothing anyway --
+    and concluding it landed would be worse. It goes back through the same predicate, which
+    refuses.
+    """
+    store = store_on(proxy.url(URL), schema)
+    mover = store_on(URL, schema)
+    store.reserve_effect("refund:moved", "act_m2", timedelta(minutes=5))
+    store.begin_execution("refund:moved", "act_m2")
+    resolutions.clear()
+
+    def somebody_else_moves_it() -> None:
+        # Out of `EXECUTING`, which is the pre-state our UPDATE was conditional on. Moving it to
+        # `AMBIGUOUS` would not do: that is still a state a commit may be re-issued from, so the
+        # re-read would take row 2 and re-issue -- correctly.
+        mover.fail_effect("refund:moved", "act_m2", "somebody else called it a failure")
+
+    proxy.reset_counters()
+    proxy.on_drop = somebody_else_moves_it
+    proxy.drop_before_commit = 1
+
+    with pytest.raises(CTRLRunError) as refused:
+        store.commit_effect("refund:moved", "act_m2", {"ok": True})
+    assert not isinstance(refused.value, NotExecuted)
+
+    assert proxy.commits_dropped == 1, "our COMMIT was not swallowed; the window never opened"
+    assert branches(resolutions) == ["a2.row3.refuse"], (
+        f"the store reported {branches(resolutions)}; a record in a state we were not writing is "
+        "Table A2's third row"
+    )
+
+    checker = store_on(URL, schema)
+    record = checker.get_effect("refund:moved")
+    assert record is not None
+    assert record.state is EffectState.FAILED, (
+        f"the refusal left the record {record.state}; it must not have re-issued over somebody "
+        "else's write"
+    )
+    checker.close()
+    mover.close()
+    store.close()
+
+
+@postgres
+def test_T156b_a_failed_re_read_on_a_TRANSITION_refuses_too(proxy, schema, resolutions):
+    """§4.3.2's last paragraph, on the A2 path -- the half T156 does not cover.
+
+    A verification pass found that `_fresh_read_effect` failing **open** is caught only on the
+    reservation path: on a transition, `found is None` raises `InvalidArgument` and reports no
+    branch, which is indistinguishable from the re-read having refused. So the discriminator here
+    is the exception **type**: refusing surfaces the connection error, while failing open
+    surfaces `InvalidArgument("no reservation for effect ...")` about a record that plainly
+    exists.
+    """
+    import psycopg
+
+    from ctrlrun.errors import InvalidArgument
+
+    store = store_on(proxy.url(URL), schema)
+    store.reserve_effect("refund:noread2", "act_n2", timedelta(minutes=5))
+    store.begin_execution("refund:noread2", "act_n2")
+    resolutions.clear()
+    proxy.reset_counters()
+
+    proxy.drop_before_commit = 1
+    proxy.refuse_connections = True
+    with pytest.raises(Exception) as raised:
+        store.commit_effect("refund:noread2", "act_n2", {"ok": True})
+    proxy.drop_before_commit = 0
+    proxy.refuse_connections = False
+
+    assert proxy.commits_dropped == 1, "the window never opened"
+    assert not isinstance(raised.value, InvalidArgument), (
+        "the re-read failed OPEN: it swallowed its connection error, returned None, and the "
+        "store concluded there was no reservation for a key it had just reserved"
+    )
+    assert isinstance(raised.value, psycopg.OperationalError)
+    assert branches(resolutions) == [], (
+        f"the store reported {branches(resolutions)}; no row of Table A is chosen when the "
+        "re-read itself fails"
+    )
+
+    checker = store_on(URL, schema)
+    record = checker.get_effect("refund:noread2")
+    assert record is not None
+    assert record.state is EffectState.EXECUTING, (
+        f"the refusal left the record {record.state}; §4.3.2 writes no effect state when the "
+        "re-read fails"
+    )
+    checker.close()
+    store.close()
+
+
 # T155c is not here, and is not missing. §4.3.3's identity check -- the double execution this
 # milestone's review found, where "a record carrying our `action_id`" was satisfied by another
 # process's live reservation -- is `test_T155c_the_re_read_identity_check_is_not_an_action_id_match`
@@ -683,6 +925,47 @@ def test_T157_one_winner_across_os_processes(schema):
     store.close()
 
 
+@postgres
+def test_T157_a_committed_action_writes_one_receipt_to_a_postgres_store(schema):
+    """§8's T157 asks for "one committed receipt", and until now nothing wrote one here.
+
+    T157 above is a store-level contention test with no `Control` in it, and the docstring says
+    so rather than claiming the receipt half. But a verification pass pointed out what that
+    leaves: **no receipt is written against a Postgres store anywhere in the suite.** `v0.1 §7`
+    T3 covers receipts against SQLite, so the receipt path had never met this backend at all --
+    and the whole premise of item 3 is that a backend can get right what another gets wrong.
+
+    So: one action, through `Control`, against Postgres. One receipt, and it says the effect
+    committed. Contention is T157's subject and is not repeated here.
+    """
+    from ctrlrun import Control, Policy
+    from ctrlrun.action import Action, Principal
+    from ctrlrun.receipt import ReceiptResult
+
+    store = store_on(URL, schema)
+    policy = Policy.from_yaml(
+        "schema: ctrlrun.policy/v1\nactions:\n  stripe.refund:\n    decision: allow\n"
+    )
+    control = Control(policy, store, clock=lambda: T0)
+    action = Action(
+        name="stripe.refund",
+        arguments={"payment_id": "p1", "amount": 2000},
+        principal=Principal(agent="a"),
+    )
+
+    receipt = control.execute(action, lambda: {"ok": True}, "refund:p1", lease=timedelta(minutes=5))
+    assert receipt.result is ReceiptResult.COMMITTED
+
+    written = store.receipts()
+    assert len(written) == 1, f"{len(written)} receipts for one action"
+    assert written[0].action_id == action.action_id
+    assert written[0].result is ReceiptResult.COMMITTED
+
+    record = store.get_effect("refund:p1")
+    assert record is not None and record.state is EffectState.COMMITTED
+    store.close()
+
+
 # --- T158: kill -9, idle and mid-transaction --------------------------------------------------
 
 
@@ -729,8 +1012,15 @@ HOLD_MID = textwrap.dedent(f"""{CHILD_PREAMBLE}
 """)
 
 
-def _hold(script_source: str, schema: str, key: str, action_id: str):
-    """Start a holder, wait for its marker, `SIGKILL` it. Returns nothing; it is dead."""
+def _hold(script_source: str, schema: str, key: str, action_id: str, while_alive=None):
+    """Start a holder, wait for its marker, run `while_alive`, then `SIGKILL` it.
+
+    `while_alive` is what lets a test observe something the *kill* causes rather than something
+    that was true all along. Without it, the mid-transaction test below asserted only facts that
+    hold while the child is still running: MVCC hides an uncommitted `UPDATE` from every other
+    connection whether or not the writer dies, so both of its assertions passed against a child
+    that opened no transaction at all.
+    """
     with tempfile.TemporaryDirectory() as home:
         script = Path(home) / "hold.py"
         script.write_text(script_source, encoding="utf-8")
@@ -766,6 +1056,9 @@ def _hold(script_source: str, schema: str, key: str, action_id: str):
                     raise AssertionError(f"the holder exited early: {child.stderr.read()[-600:]}")
                 time.sleep(0.05)
             assert ready.exists(), "the holder never took the reservation within its bound"
+
+            if while_alive is not None:
+                while_alive()
 
             os.kill(child.pid, signal.SIGKILL)
             child.wait(timeout=30)
@@ -819,12 +1112,62 @@ def test_T158_a_kill_mid_transaction_discards_the_half_written_transaction(schem
     """§8's T158, the half the idle kill above cannot show.
 
     The child is killed with an **open transaction** holding an uncommitted `UPDATE` and the row
-    lock that goes with it. Postgres discards it: the record is still `reserved`, the write is
-    gone, and the lock is released -- so the store can read and plan against the row rather than
-    blocking on a lock nobody will ever release. That is the whole of what "mid-transaction"
-    adds, and nothing checked it.
+    lock that goes with it. Postgres discards it: the write is gone and the lock is released.
+
+    **The lock is the assertion, because it is the only thing the kill changes.** MVCC hides an
+    uncommitted `UPDATE` from every other connection for as long as the writer lives, so "the
+    record is still `reserved`" and "a contender is refused" are both true *while the child is
+    running* -- a verification pass proved it, and proved that a child opening no transaction at
+    all passed this test. What is only true afterwards is that a statement which actually takes
+    the row lock stops blocking. So this asserts both halves: it blocks before the kill, and it
+    succeeds after.
+
+    `reserve_effect` cannot be that statement. `_read_effect` is a plain `SELECT` with no `FOR
+    UPDATE`, so `plan_reservation` refuses from the snapshot without ever reaching for the lock.
     """
-    _hold(HOLD_MID, schema, "refund:t158mid", "act_half")
+    locked: list[str] = []
+
+    def while_the_child_holds_it() -> None:
+        import psycopg
+
+        held = psycopg.connect(URL, autocommit=True)
+        try:
+            with held.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '750ms'")
+                cursor.execute(f'SET search_path TO "{schema}"')
+                try:
+                    cursor.execute(
+                        "UPDATE effects SET error = 'probe' WHERE effect_key = %s",
+                        ("refund:t158mid",),
+                    )
+                except psycopg.errors.LockNotAvailable:
+                    locked.append("blocked")
+                else:
+                    locked.append("not blocked")
+        finally:
+            held.close()
+
+    _hold(HOLD_MID, schema, "refund:t158mid", "act_half", while_alive=while_the_child_holds_it)
+
+    assert locked == ["blocked"], (
+        "the row was writable while the child was supposedly holding an uncommitted UPDATE on "
+        "it, so there was no open transaction and this test is about nothing"
+    )
+
+    # And now that the backend is gone, the same statement gets the lock straight away.
+    import psycopg
+
+    after = psycopg.connect(URL, autocommit=True)
+    try:
+        with after.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '5s'")
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.execute(
+                "UPDATE effects SET error = NULL WHERE effect_key = %s", ("refund:t158mid",)
+            )
+            assert cursor.rowcount == 1, "the row is gone, not merely unlocked"
+    finally:
+        after.close()
 
     store = store_on(URL, schema)
     record = store.get_effect("refund:t158mid")
@@ -834,7 +1177,6 @@ def test_T158_a_kill_mid_transaction_discards_the_half_written_transaction(schem
         "would mean a half-written transaction became state"
     )
 
-    # The row lock died with the backend: a contender gets an answer rather than blocking.
     with pytest.raises(DuplicateEffect):
         store.reserve_effect("refund:t158mid", "act_next", timedelta(minutes=5))
     store.close()

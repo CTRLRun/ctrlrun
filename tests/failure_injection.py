@@ -29,10 +29,13 @@ from __future__ import annotations
 import contextlib
 import socket
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
-#: How long `stop()` waits for a relay thread to notice `_stop` and exit. The relay's *pumps* are
+#: How long `stop()` waits for the **accept** thread, and how long a relay waits to connect
+#: upstream. Relay threads are not joined at all; they notice `_stop` within one `recv` timeout
+#: and exit on their own. The relay's *pumps* are
 #: not bounded by this and must not be: a timeout that abandons a live pump and closes the socket
 #: under it delivers a reset to the client, which silently changes what a partition test observes.
 #: The first version did exactly that, and its 40-second "partition" was this constant twice over.
@@ -111,17 +114,17 @@ class Proxy:
     - `drop_before_commit` -- an integer: swallow the next N `COMMIT`s and drop the client each
       time, **without** forwarding them. Equally ambiguous from the client's side, and the write
       is *not* there: this is what drives A1's "no record → retry the insert" and A2's "unchanged
-      and still ours → re-issue", the two rows nothing reached before. A count rather than a flag
+      → re-issue", the two rows nothing reached before. A count rather than a flag
       because those rows *re-issue* -- a flag would swallow the retry's `COMMIT` too, and the test
       could never observe the row completing. Set it high to drive the unbounded case instead.
-    - `refuse_connections` -- accept and immediately close, which is a reset rather than an
-      `ECONNREFUSED`. A store's re-read then fails, which §4.3.2 says must refuse to let
-      execution proceed rather than guess.
-    - `partition` -- **hold** traffic in both directions rather than discarding it, and release
-      it when the partition is lifted. The client sees a stall, not a reset, and `partition =
-      False` genuinely restores the connection, which is §4.5's "and restore it". Discarding
-      instead would make the restore unexercisable: the query the server never received cannot
-      arrive late.
+    - `refuse_connections` -- accept and immediately close. The client's first `recv` returns
+      `b""`: an orderly close, not an `ECONNREFUSED` and not a reset either. A store's re-read
+      then fails, which §4.3.2 says must refuse to let execution proceed rather than guess.
+    - `partition` -- **hold** traffic in both directions rather than discarding it, and release it
+      through the same path it would have taken live, so the frame parser stays aligned. The
+      client sees a stall, not a reset, and `partition = False` genuinely restores the connection,
+      which is §4.5's "and restore it". Discarding instead would make the restore unexercisable:
+      the query the server never received cannot arrive late.
     """
 
     upstream_host: str
@@ -135,7 +138,9 @@ class Proxy:
     _server: socket.socket | None = None
     _thread: threading.Thread | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
-    #: `COMMIT` messages the proxy parsed out of the client stream, in every mode. Distinct from
+    #: `COMMIT` messages the proxy parsed out of the client stream -- in every mode **except**
+    #: while a partition is up, where bytes are held and are parsed only when it lifts. Distinct
+    #: from
     #: `clients_killed`, which counts drops -- the two were incremented on adjacent lines under
     #: one condition before, so a PR body claiming to assert one "rather than" the other was
     #: describing a distinction that did not exist.
@@ -144,6 +149,11 @@ class Proxy:
     clients_killed: int = 0
     #: `COMMIT` messages the proxy swallowed rather than forwarded (`drop_before_commit`).
     commits_dropped: int = 0
+    #: Called once, on the proxy's own thread, immediately after a client is dropped and
+    #: **before** the store's re-read can run. It is the only way to reach §4.3.2's *refuse* rows
+    #: deterministically: those need somebody else to have acted in the window between our lost
+    #: `COMMIT` and our re-read, and without a hook that is a race a test can only hope for.
+    on_drop: Callable[[], None] | None = None
     #: Set if the server ever accepted an SSLRequest. Everything after that is ciphertext and no
     #: `COMMIT` would ever be recognised -- a test asserting `commits_seen` would fail loudly, but
     #: this says why. Local connections in CI negotiate no TLS.
@@ -203,6 +213,13 @@ class Proxy:
                 continue
             threading.Thread(target=self._relay, args=(client,), daemon=True).start()
 
+    def _after_drop(self) -> None:
+        """Let a test act in the window the drop opened, before the store re-reads."""
+        hook = self.on_drop
+        if hook is not None:
+            self.on_drop = None  # once; a re-read that reconnects must not re-trigger it
+            hook()
+
     @staticmethod
     def _drop(client: socket.socket, killed: threading.Event) -> None:
         killed.set()
@@ -223,26 +240,18 @@ class Proxy:
             source.settimeout(0.2)
             frontend = _Frontend() if watching else None
             held: list[bytes] = []
-            while not self._stop.is_set() and not killed.is_set():
-                if not self.partition and held:
-                    # The partition lifted: release what it held, in order, before anything new.
-                    try:
-                        for chunk in held:
-                            sink.sendall(chunk)
-                    except OSError:
-                        break
-                    held = []
-                try:
-                    data = source.recv(65536)
-                except TimeoutError:
-                    continue
-                except OSError:
-                    break
-                if not data:
-                    break
-                if self.partition:
-                    held.append(data)  # held, not discarded: a stall the restore can undo
-                    continue
+
+            def deliver(data: bytes) -> bool:
+                """Parse, inject, forward. Returns False when this pump is done.
+
+                **Held bytes come back through here, not straight to the socket.** The first
+                version released a partition by `sendall`-ing the held chunks directly, which
+                bypassed the parser -- so a partition that began mid-frame left `_Frontend`
+                permanently misaligned and every later `COMMIT` invisible. Measured: a mid-frame
+                partition, then a restore, then a `COMMIT` the server executed, with
+                `commits_seen = 0` and `clients_killed = 0`. An injector that silently stops
+                injecting is the exact false green this file exists to eliminate.
+                """
                 commit_at = -1
                 if frontend is not None:
                     for kind, body, offset in frontend.feed(data):
@@ -271,13 +280,30 @@ class Proxy:
                     # genuinely absent -- and the client cannot tell that from the case where it
                     # landed, which is what makes both rows of Table A reachable.
                     with_suppress(sink.sendall, data[:commit_at])
+                    # The server end goes first, and at once. The backend is holding an open
+                    # transaction and its row locks; until it sees the connection die it will not
+                    # roll back, so anything else touching that row blocks. Leaving it to the
+                    # relay's own teardown deadlocked `on_drop`: the hook ran on this thread, the
+                    # relay was waiting for this thread before closing the socket, and the hook was
+                    # waiting for the lock that socket was holding open.
+                    #
+                    # `kill_on_commit` deliberately does NOT do this -- there the COMMIT has been
+                    # forwarded and must be allowed to land, and closing on unread data can send a
+                    # reset instead of a FIN.
+                    with_suppress(sink.shutdown, socket.SHUT_RDWR)
+                    with_suppress(sink.close)
+                    # Then the hook, and only then the client. The client is still blocked waiting
+                    # for a COMMIT reply that will never come, so it cannot race the hook. Dropping
+                    # it first made the window a race the store usually won: it re-read before the
+                    # hook's write landed, found nothing, and took A1 row 2 instead of row 3.
+                    self._after_drop()
                     self._drop(client, killed)
-                    return
+                    return False
 
                 try:
                     sink.sendall(data)
                 except OSError:
-                    break
+                    return False
 
                 if commit_at >= 0 and self.kill_on_commit:
                     # The server has the COMMIT and will apply it. The client's connection goes
@@ -291,7 +317,30 @@ class Proxy:
                     # test asserting that path passed anyway. Closing at once is the mechanism.
                     with self._lock:
                         self.clients_killed += 1
+                    self._after_drop()
                     self._drop(client, killed)
+                    return False
+                return True
+
+            while not self._stop.is_set() and not killed.is_set():
+                if not self.partition and held:
+                    # The partition lifted: release what it held, in order, before anything new.
+                    pending, held = held, []
+                    for chunk in pending:
+                        if not deliver(chunk):
+                            return
+                try:
+                    data = source.recv(65536)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                if not data:
+                    break
+                if self.partition:
+                    held.append(data)  # held, not discarded: a stall the restore can undo
+                    continue
+                if not deliver(data):
                     return
 
         forward = threading.Thread(target=pump, args=(client, server, True), daemon=True)
