@@ -59,6 +59,48 @@ def rendezvous(marker_dir: str, contenders: int, deadline: float) -> None:
         time.sleep(0.002)
 
 
+def contend_on(payload: dict[str, Any]) -> dict[str, Any]:
+    """One contender for a read-then-write other than `reserve_effect` (SPEC-v0.6 §2.4).
+
+    **`reserve_effect` was the only method the suite ever contended for**, and it is the one
+    with a `UNIQUE` constraint behind it. `BEGIN IMMEDIATE` gave SQLite mutual exclusion on
+    *every* read-then-write; a backend that reproduces it for the insert and nothing else passes
+    a suite with one concurrent case. A review found four such paths on the Postgres backend --
+    an approval consumed 8 times out of 8, a continuation taken 8 times, a human's `deny`
+    overwritten -- all green in CI. These are the siblings that case needed.
+    """
+    store = store_from_url(payload["url"])
+    rendezvous(
+        payload["rendezvous_dir"],
+        int(payload["contenders"]),
+        time.monotonic() + float(payload["rendezvous_timeout"]),
+    )
+    kind = payload["kind"]
+    try:
+        if kind == "consume":
+            store.consume_approval_and_reserve(
+                payload["approval_id"],
+                payload["action_hash"],
+                payload["effect_key"],
+                payload["action_id"],
+                timedelta(minutes=5),
+            )
+        elif kind == "take":
+            store.take_continuation(payload["continuation"])
+        elif kind == "answer":
+            if payload["answer"] == "grant":
+                store.grant_approval(payload["approval_id"], payload["who"])
+            else:
+                store.deny_approval(payload["approval_id"], payload["who"])
+        else:  # pragma: no cover - a payload the kit did not write
+            raise ValueError(f"no such contention: {kind!r}")
+    except Exception as refused:
+        return {"won": False, "error": type(refused).__name__, "message": str(refused)}
+    finally:
+        store.close()
+    return {"won": True, "error": None, "message": None}
+
+
 def contend(payload: dict[str, Any]) -> dict[str, Any]:
     """Reserve, call the remote, commit -- or report the refusal that stopped us."""
     store = store_from_url(payload["url"])
@@ -99,7 +141,8 @@ def contend(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     payload = json.loads(sys.stdin.read())
-    sys.stdout.write(json.dumps(contend(payload)))
+    work = contend_on if payload.get("kind") else contend
+    sys.stdout.write(json.dumps(work(payload)))
     return 0
 
 

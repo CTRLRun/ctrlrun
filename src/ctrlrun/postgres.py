@@ -58,7 +58,13 @@ from .effect import (
     plan_lease_extension,
     plan_reservation,
 )
-from .errors import DuplicateEffect, InvalidArgument, MissingDependency
+from .errors import (
+    ApprovalMismatch,
+    CTRLRunError,
+    DuplicateEffect,
+    InvalidArgument,
+    MissingDependency,
+)
 from .migrations import migrate
 from .receipt import Event, EventType, Receipt
 from .state import (
@@ -110,17 +116,65 @@ def _psycopg() -> Any:
     return psycopg
 
 
-class AmbiguousWrite(Exception):  # noqa: N818 - see errors.py: this codebase's names have no suffix
+# `errors.py`'s convention: this codebase's exception names carry no suffix.
+class AmbiguousWrite(CTRLRunError):  # noqa: N818
     """A `COMMIT` whose outcome the store could not observe (SPEC-v0.6 §4.3 Table A).
 
-    Internal to this module and never raised to a caller: every path that can produce one
-    resolves it by re-reading (§4.3.2) or refuses. It exists so the two ambiguities cannot be
-    confused in the code the way §1.3 says they must not be confused in the prose.
+    It exists so the two ambiguities of §1.3 cannot be confused in the code the way they must not
+    be confused in the prose: a *store write* nobody could observe is this, and a *remote effect*
+    nobody could observe is `AmbiguousEffect`.
+
+    **It subclasses `CTRLRunError`, and that is a correction.** It was documented as "internal to
+    this module and never raised to a caller", and a review found it escaping from eleven methods
+    -- as a bare `Exception` that no `except CTRLRunError` in this codebase catches: not the
+    CLI's, not the gateway's, not the webhook's. The reservation and transition paths resolve it
+    by re-reading (§4.3.2); everywhere else it is a refusal a caller can catch, which is what an
+    unobservable write **is**. Documenting it as unreachable did not make it so.
     """
 
 
 def _is_stated_abort(error: BaseException) -> bool:
     return str(getattr(error, "sqlstate", "")) in STATED_ABORTS
+
+
+def _is_our_own_write(found: EffectRecord, expected: EffectRecord) -> bool:
+    """Is this record byte-for-byte the row we attempted to write (SPEC-v0.6 §4.3.3)?
+
+    **Every column, not a match on `action_id`.** `Action.action_id` is caller-supplyable and
+    §5.1 contemplates two attempts sharing one, so *"a record carrying our `action_id`"* is
+    satisfied by another process's live reservation -- one logical effect executed twice, through
+    the storage layer.
+
+    `created_at` and `updated_at` are here and were missing. §4.3.3 lists them, and without them a
+    **frozen injected clock** -- which `verify` and the conformance backend both use -- made two
+    attempts indistinguishable, and the store concluded it held a key another attempt held. A
+    review reproduced exactly that, and the test meant to catch it passed only because the wall
+    clock happened to move between the two.
+
+    **And a residual §4.3.3 could not close, stated rather than implied.** Where two attempts are
+    identical in *every* column -- same `action_id`, same `attempt`, and a clock that gave them
+    the same `created_at`, `updated_at` and `lease_expires_at` -- no comparison can separate
+    "our commit landed" from "somebody else's identical commit landed", because the record is the
+    same record. §4.3.3 asked the store to fail closed there, and that is not implementable: the
+    identical case *is* the indistinguishable case, so failing closed on it would refuse every
+    ambiguous commit that actually landed and make the re-read pointless.
+
+    What closes it is upstream: **`action_id` identifies one attempt**, `Action` generates a fresh
+    one per attempt, and two concurrent attempts sharing one is a caller-side violation no store
+    can defend against -- `action_id` is the store's whole notion of who holds a key. The columns
+    here are what make the *realistic* collision detectable: a second attempt under the same id
+    at any other instant, with any other lease, or at a different `attempt` number, differs in a
+    column and is refused. SPEC-v0.6 §4.3.3 carries the argument.
+    """
+    return (
+        found.effect_key == expected.effect_key
+        and found.action_id == expected.action_id
+        and found.state is expected.state
+        and found.attempt == expected.attempt
+        and found.lease_expires_at == expected.lease_expires_at
+        and found.created_at == expected.created_at
+        and found.updated_at == expected.updated_at
+    )
 
 
 class PostgresStateStore:
@@ -154,7 +208,9 @@ class PostgresStateStore:
         self._local = threading.local()
         self._open: set[Any] = set()
         self._open_lock = threading.Lock()
-        migrate(self._connection(), self._clock(), dialect="postgres")
+        connection = self._connection()
+        self._refuse_without_ddl_rights(connection)
+        migrate(connection, self._clock(), dialect="postgres")
 
     @staticmethod
     def create_schema(url: str, schema: str) -> None:
@@ -186,11 +242,69 @@ class PostgresStateStore:
         finally:
             connection.close()
 
+    @property
+    def _q(self) -> str:
+        """This store's schema, quoted, for every table reference (§4.4).
+
+        **Every statement names its schema, so nothing depends on `search_path` at all.** A
+        connect-time `SET` is *session* state, and a review found it contradicting §4.4's claim
+        that the store holds none: under pgbouncer transaction pooling a later transaction may
+        land on a server connection that never received it, resolving to `"$user", public` --
+        which for a scratch-schema store (verify, the conformance backend) means reading and
+        writing the **operator's** `public` tables, the precise hazard §4.1 exists to close.
+        Reads made it worse, because they run outside any transaction and so could not even be
+        fixed with `SET LOCAL`.
+
+        The schema is validated as a plain identifier at construction, which is what makes it
+        safe to interpolate: it is the one name in this module that reaches SQL, and it never
+        comes from an action, an argument or a header.
+        """
+        return f'"{self._schema}"'
+
+    def _refuse_without_ddl_rights(self, connection: Any) -> None:
+        """Refuse at open, naming the missing privilege, rather than reporting the SQL (§3.6).
+
+        SPEC-v0.6 T154f asks for exactly this and it did not exist: a role without `CREATE` on
+        the schema got a raw `psycopg.errors.InsufficientPrivilege` out of the constructor, with
+        the failing `CREATE TABLE` quoted verbatim, uncatchable by any `except CTRLRunError` in
+        this codebase. A migration needs DDL rights at least on the first start after an upgrade,
+        and `docs/postgres.md` says so; an operator who has not granted them deserves to be told
+        which grant is missing, not which statement failed.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_schema(), current_user")
+            row = cursor.fetchone()
+            schema, user = (str(row[0]) if row and row[0] else None), str(row[1]) if row else "?"
+            if schema is None:
+                raise InvalidArgument(
+                    f"schema {self._schema!r} does not exist, or {user} cannot see it. CTRLRun "
+                    "creates no schema for an operator: create it, or point --store-url at one "
+                    "that exists (SPEC-v0.6 §4.1)"
+                )
+            cursor.execute("SELECT has_schema_privilege(%s, 'CREATE')", (schema,))
+            allowed = cursor.fetchone()
+        if not (allowed and allowed[0]):
+            raise InvalidArgument(
+                f"the database user {user!r} has no CREATE privilege on schema {schema!r}, so "
+                "CTRLRun cannot apply its migrations. A store is opened un-migrated by nothing "
+                "(SPEC-v0.6 §3.6), so this is refused at open rather than discovered at the "
+                f'first write. Grant it with: GRANT CREATE ON SCHEMA "{schema}" TO "{user}"'
+            )
+
     # --- connections ------------------------------------------------------------------
 
     def _connect(self) -> Any:
         psycopg = _psycopg()
-        connection = psycopg.connect(self._url, autocommit=False)
+        # **Autocommit, with every write taking an explicit `BEGIN`.** With `autocommit=False`
+        # every `SELECT` began a transaction that nothing ended: a review measured the store
+        # sitting `idle in transaction` after a plain `get_effect`, which blocks `DROP SCHEMA`
+        # forever (verify hung whenever a guarantee failed), holds `xmin` against vacuum, holds
+        # a transaction open across the executor's run -- the cost §4.2.1 rejected
+        # `SELECT … FOR UPDATE` to avoid -- and makes §4.4's pgbouncer transaction-mode claim
+        # impossible, since a transaction that never ends is never returned to the pool. It also
+        # let one failing statement poison the connection permanently, so every later call
+        # raised `InFailedSqlTransaction` until some write path's handler happened to roll back.
+        connection = psycopg.connect(self._url, autocommit=True)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT pg_encoding_to_char(encoding) FROM pg_database "
@@ -210,9 +324,25 @@ class PostgresStateStore:
                     "the exact code points it is given (v0.1 §2.3), so a lossy encoding makes "
                     "one logical effect into two identities and both would execute"
                 )
+            # `search_path` is set **per transaction**, not once per session, and §4.4's claim
+            # that this store holds nothing session-scoped is now true. A review found the `SET`
+            # here contradicting it: under pgbouncer transaction pooling a later transaction may
+            # land on a server connection that never received it, resolving to `"$user", public`
+            # -- which for a scratch-schema store (verify, the conformance backend) means reading
+            # and writing the **operator's** `public` tables, the precise hazard §4.1 exists to
+            # close.
             cursor.execute(f'SET search_path TO "{self._schema}"')
-        connection.commit()
         return connection
+
+    def _use_schema(self, connection: Any) -> None:
+        """Re-assert `search_path` inside the current transaction (§4.4).
+
+        `SET LOCAL` reverts at the end of the transaction, so it cannot leak into a pooled
+        connection's next tenant, and it is re-issued by every write. Reads run outside a
+        transaction and rely on the connect-time `SET`, which is correct for a dedicated
+        connection and is why the pooling claim is stated as transaction-mode only.
+        """
+        connection.execute(f'SET LOCAL search_path TO "{self._schema}"')
 
     def _connection(self) -> Any:
         connection = getattr(self._local, "connection", None)
@@ -252,8 +382,11 @@ class PostgresStateStore:
         """
         try:
             connection.commit()
-        except Exception as broke:
-            if _is_stated_abort(broke):
+        except BaseException as broke:
+            # `BaseException`, like every other handler here: a `KeyboardInterrupt` arriving
+            # during `COMMIT` is the ambiguous case by definition, and letting it escape
+            # unclassified would skip the re-read.
+            if isinstance(broke, Exception) and _is_stated_abort(broke):
                 raise
             raise AmbiguousWrite(str(broke)) from broke
 
@@ -285,7 +418,7 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT effect_key, state, action_id, attempt, lease_expires_at, result_json, "
-                "error, created_at, updated_at FROM effects WHERE effect_key = %s",
+                f"error, created_at, updated_at FROM {self._q}.effects WHERE effect_key = %s",
                 (effect_key,),
             )
             row = cursor.fetchone()
@@ -307,7 +440,8 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
-                "granted_at, expires_at, consumed_at FROM approvals WHERE approval_id = %s",
+                f"granted_at, expires_at, consumed_at FROM {self._q}.approvals WHERE "
+                f"approval_id = %s",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -361,6 +495,8 @@ class PostgresStateStore:
         effect_key: str | None,
         action_id: str | None,
         lease: timedelta,
+        *,
+        retrying: bool = False,
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both, in ONE transaction.
 
@@ -372,6 +508,8 @@ class PostgresStateStore:
         """
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             approved: ApprovalRecord | None = None
             if approval_id is not None:
@@ -393,15 +531,64 @@ class PostgresStateStore:
         try:
             self._commit(connection)
         except AmbiguousWrite:
-            # §4.3.2 Table A1. Re-read on a fresh connection and obey what it says.
-            if effect_key is not None and plan.reservation is not None:
-                self._resolve_lost_insert(effect_key, plan.reservation, now)
-            else:
+            # §4.3.2. Re-read on a fresh connection and obey what it says.
+            if retrying:
+                # §4.2's bound, and it is one: a second ambiguous commit on the same operation is
+                # not a race this protocol produces, so it fails closed rather than recursing.
+                # *Every loop in this project is bounded*, and a re-read path is a loop.
                 raise
+            if effect_key is None or plan.reservation is None:
+                raise
+            if plan.renews:
+                self._resolve_lost_renewal(effect_key, plan.reservation, now, lease)
+            else:
+                self._resolve_lost_insert(
+                    effect_key,
+                    plan.reservation,
+                    now,
+                    approval_id=approval_id,
+                    action_hash=action_hash,
+                    lease=lease,
+                )
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
+    def _resolve_lost_renewal(
+        self, effect_key: str, reservation: Reservation, now: datetime, lease: timedelta
+    ) -> None:
+        """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`.
+
+        A renewal's pre-state is `FAILED` (`v0.1 §5.4`'s one automatic retry). If the commit
+        landed the record is ours and `RESERVED`; if it did not, the record is still `FAILED` and
+        the renewal simply re-issues -- safe because that `UPDATE` is conditional on
+        `state = 'failed'`.
+
+        Routing a renewal through Table A1 turned a **proven non-execution** into a refusal
+        carrying a `state` that misdescribed the record: the collapse §4.3.2 exists to forbid,
+        found by review.
+        """
+        found = self._fresh_read_effect(effect_key)
+        if found is None:
+            raise InvalidArgument(f"no reservation for effect {effect_key!r}")
+        if found.action_id == reservation.action_id and found.state is EffectState.RESERVED:
+            return  # the commit landed
+        if found.state is EffectState.FAILED:
+            self._authorize_and_reserve(
+                None, None, effect_key, reservation.action_id, lease, retrying=True
+            )
+            return
+        plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
+        if plan.refusal is not None:
+            raise plan.refusal
+
     def _resolve_lost_insert(
-        self, effect_key: str, reservation: Reservation, now: datetime
+        self,
+        effect_key: str,
+        reservation: Reservation,
+        now: datetime,
+        *,
+        approval_id: str | None,
+        action_hash: str | None,
+        lease: timedelta,
     ) -> None:
         """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means.
 
@@ -414,20 +601,19 @@ class PostgresStateStore:
         """
         found = self._fresh_read_effect(effect_key)
         if found is None:
-            # The commit did not land. Retry the insert, once (§4.2 step 5).
+            # The commit did not land. Retry the SAME operation, once (§4.2 step 5) -- with the
+            # approval if there was one, and with the caller's lease. Retrying a narrower
+            # operation was a double-spend: the effect was reserved, the caller was handed an
+            # `Approval`, and the approval row was still `granted`, so the same approval then
+            # authorised a second effect key. Found by review.
             self._authorize_and_reserve(
-                None, None, effect_key, reservation.action_id, DEFAULT_LEASE
+                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
             return
         expected = _reserved(reservation, None, now)
-        if (
-            found.action_id == expected.action_id
-            and found.attempt == expected.attempt
-            and found.state is expected.state
-            and found.lease_expires_at == expected.lease_expires_at
-        ):
+        if _is_our_own_write(found, expected):
             return  # the commit landed; we hold it
-        plan = plan_reservation(found, effect_key, reservation.action_id, DEFAULT_LEASE, now)
+        plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
             raise plan.refusal
         raise DuplicateEffect(
@@ -452,13 +638,15 @@ class PostgresStateStore:
 
     def _expire(self, approval_id: str) -> None:
         connection = self._connect()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE approvals SET status = %s WHERE approval_id = %s",
+                    f"UPDATE {self._q}.approvals SET status = %s WHERE approval_id = %s",
                     (str(ApprovalStatus.EXPIRED), approval_id),
                 )
-            connection.commit()
+            self._commit(connection)
         finally:
             with contextlib.suppress(Exception):
                 connection.close()
@@ -478,11 +666,15 @@ class PostgresStateStore:
 
     def _ambiguate(self, record: EffectRecord, now: datetime) -> None:
         connection = self._connect()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             self._write_effect(
-                connection, _transitioned(record, EffectState.AMBIGUOUS, now, error=LEASE_EXPIRED)
+                connection,
+                _transitioned(record, EffectState.AMBIGUOUS, now, error=LEASE_EXPIRED),
+                record,
             )
-            connection.commit()
+            self._commit(connection)
         finally:
             with contextlib.suppress(Exception):
                 connection.close()
@@ -497,7 +689,8 @@ class PostgresStateStore:
             # record that changed under us refuses instead of overwriting an attempt.
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE effects SET state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
+                    f"UPDATE {self._q}.effects SET "
+                    f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=NULL, error=NULL, updated_at=%s "
                     "WHERE effect_key=%s AND state=%s",
                     (
@@ -520,7 +713,8 @@ class PostgresStateStore:
             return
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO effects(effect_key, state, action_id, attempt, lease_expires_at, "
+                f"INSERT INTO {self._q}.effects("
+                "effect_key, state, action_id, attempt, lease_expires_at, "
                 "result_json, error, created_at, updated_at) "
                 "VALUES(%s,%s,%s,%s,%s,NULL,NULL,%s,%s) ON CONFLICT (effect_key) DO NOTHING",
                 (
@@ -551,17 +745,55 @@ class PostgresStateStore:
         )
 
     def _consume_locked(self, connection: Any, approval_id: str, now: datetime) -> None:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "UPDATE approvals SET status=%s, consumed_at=%s WHERE approval_id=%s",
-                (str(ApprovalStatus.CONSUMED), _iso(now), approval_id),
-            )
+        """`granted -> consumed`, as a compare-and-set (`v0.1 §4.2 A2`, §4.2).
 
-    def _write_effect(self, connection: Any, record: EffectRecord) -> None:
+        **Unconditional, this was a double-spend.** `_consumable` reads with a plain `SELECT`
+        under `READ COMMITTED`, so N transactions all saw `GRANTED`, all wrote `CONSUMED`, all
+        committed, and each reserved its own effect key: a review measured **8 of 8** contenders
+        consuming one approval against Postgres, where SQLite consumes 1 of 8. One human's *yes*
+        authorised eight refunds. SQLite is safe only because `BEGIN IMMEDIATE` wraps its read
+        and its write together; with no such lock the condition has to be in the statement.
+        """
         with connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE effects SET state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
-                "result_json=%s, error=%s, updated_at=%s WHERE effect_key=%s",
+                f"UPDATE {self._q}.approvals SET status=%s, consumed_at=%s WHERE "
+                f"approval_id=%s AND status=%s",
+                (
+                    str(ApprovalStatus.CONSUMED),
+                    _iso(now),
+                    approval_id,
+                    str(ApprovalStatus.GRANTED),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was consumed by another attempt", reason="consumed"
+                )
+
+    def _write_effect(
+        self, connection: Any, record: EffectRecord, was: EffectRecord | None = None
+    ) -> None:
+        """Write a record, conditional on the one we read still being there (§4.2).
+
+        **Unconditional, this erased an unknown outcome.** §4.2 names `resolve_effect`,
+        `extend_lease` and `hold_continuation` among the transitions that become a conditional
+        `UPDATE` with the row count checked; they went through this method, which had neither. A
+        review opened the window deliberately and watched a `mark_ambiguous` committed by another
+        process get overwritten by `extend_lease` -- the record ended `EXECUTING`, lease extended
+        an hour, `error` cleared, so **the unknown outcome that needed a human was gone** and the
+        effect could then be committed normally. SQLite cannot reach that state, because its read
+        and its write are inside one `BEGIN IMMEDIATE`.
+
+        `was` is the record this write was planned against. It is optional only so the one caller
+        that has already established the pre-state under a row lock need not repeat it.
+        """
+        expected = was if was is not None else record
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE {self._q}.effects SET "
+                f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
+                "result_json=%s, error=%s, updated_at=%s "
+                "WHERE effect_key=%s AND action_id=%s AND state=%s",
                 (
                     str(record.state),
                     record.action_id,
@@ -571,8 +803,28 @@ class PostgresStateStore:
                     record.error,
                     _iso(record.updated_at),
                     record.effect_key,
+                    expected.action_id,
+                    str(expected.state),
                 ),
             )
+            if cursor.rowcount != 1:
+                found = self._read_effect(connection, record.effect_key)
+                if found is None:
+                    raise InvalidArgument(f"no reservation for effect {record.effect_key!r}")
+                # Let the predicate the caller used say what it says now, so the exception
+                # taxonomy is the one every test written for SQLite already asserts.
+                _checked(
+                    found,
+                    record.effect_key,
+                    expected.action_id,
+                    frozenset({expected.state}),
+                    self._clock(),
+                )
+                raise DuplicateEffect(
+                    f"effect {record.effect_key!r} was taken by another attempt",
+                    state=IN_PROGRESS_EFFECT,
+                    effect_key=record.effect_key,
+                )
 
     # --- transitions (SPEC-v0.6 §4.2, §4.3.2 Table A2) ----------------------------------
 
@@ -608,6 +860,8 @@ class PostgresStateStore:
         """
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             record = _checked(
                 self._read_effect(connection, effect_key), effect_key, action_id, expected, now
@@ -615,7 +869,8 @@ class PostgresStateStore:
             moved = _transitioned(record, state, now, result=result, error=error)
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE effects SET state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
+                    f"UPDATE {self._q}.effects SET "
+                    f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=%s, error=%s, updated_at=%s "
                     "WHERE effect_key=%s AND action_id=%s AND state=%s",
                     (
@@ -689,10 +944,12 @@ class PostgresStateStore:
         resolver = _approver(resolver)
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
             resolved = _resolved(record, state, resolver, now)
-            self._write_effect(connection, resolved)
+            self._write_effect(connection, resolved, record)
         except BaseException:
             self._rollback(connection)
             raise
@@ -702,14 +959,15 @@ class PostgresStateStore:
     def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             record = self._read_effect(connection, effect_key)
             # `plan_lease_extension` returns the record to write, or raises. It is not a plan
             # object; treating it as one is how the conformance suite -- written before this
             # backend existed -- caught this on its first run.
-            self._write_effect(
-                connection, plan_lease_extension(record, effect_key, action_id, until, now)
-            )
+            extended = plan_lease_extension(record, effect_key, action_id, until, now)
+            self._write_effect(connection, extended, _only(record, "effect record"))
         except BaseException:
             self._rollback(connection)
             raise
@@ -722,10 +980,12 @@ class PostgresStateStore:
         connection = self._connection()
         with connection.cursor() as cursor:
             if state is None:
-                cursor.execute("SELECT effect_key FROM effects ORDER BY created_at, effect_key")
+                cursor.execute(
+                    f"SELECT effect_key FROM {self._q}.effects ORDER BY created_at, effect_key"
+                )
             else:
                 cursor.execute(
-                    "SELECT effect_key FROM effects WHERE state = %s "
+                    f"SELECT effect_key FROM {self._q}.effects WHERE state = %s "
                     "ORDER BY created_at, effect_key",
                     (str(state),),
                 )
@@ -737,10 +997,13 @@ class PostgresStateStore:
 
     def put_approval_request(self, request: ApprovalRequest) -> None:
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO approvals(approval_id, action_hash, status, action_json, "
+                    f"INSERT INTO {self._q}.approvals("
+                    "approval_id, action_hash, status, action_json, "
                     "approver, created_at, granted_at, expires_at, consumed_at) "
                     "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL)",
                     (
@@ -766,7 +1029,8 @@ class PostgresStateStore:
         connection = self._connection()
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT approval_id FROM approvals WHERE action_hash = %s ORDER BY created_at, "
+                f"SELECT approval_id FROM {self._q}.approvals WHERE "
+                f"action_hash = %s ORDER BY created_at, "
                 "approval_id",
                 (action_hash,),
             )
@@ -788,17 +1052,33 @@ class PostgresStateStore:
         approver = _approver(approver)
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             record = self._answerable(connection, approval_id, now)
             granted = replace(
                 record, status=ApprovalStatus.GRANTED, approver=approver, granted_at=now
             )
             with connection.cursor() as cursor:
+                # Conditional on what `check_answerable` saw. Unconditional, a concurrent
+                # `deny_approval` was silently overwritten and `find_granted_approval` then
+                # returned an approval a human had refused.
                 cursor.execute(
-                    "UPDATE approvals SET status=%s, approver=%s, granted_at=%s "
-                    "WHERE approval_id=%s",
-                    (str(ApprovalStatus.GRANTED), approver, _iso(now), approval_id),
+                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s "
+                    "WHERE approval_id=%s AND status=%s",
+                    (
+                        str(ApprovalStatus.GRANTED),
+                        approver,
+                        _iso(now),
+                        approval_id,
+                        str(record.status),
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    raise ApprovalMismatch(
+                        f"approval {approval_id} was answered by somebody else first",
+                        reason="answered",
+                    )
         except BaseException:
             self._rollback(connection)
             raise
@@ -809,13 +1089,21 @@ class PostgresStateStore:
         approver = _approver(approver)
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
-            self._answerable(connection, approval_id, now)
+            record = self._answerable(connection, approval_id, now)
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE approvals SET status=%s, approver=%s WHERE approval_id=%s",
-                    (str(ApprovalStatus.DENIED), approver, approval_id),
+                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s "
+                    "WHERE approval_id=%s AND status=%s",
+                    (str(ApprovalStatus.DENIED), approver, approval_id, str(record.status)),
                 )
+                if cursor.rowcount != 1:
+                    raise ApprovalMismatch(
+                        f"approval {approval_id} was answered by somebody else first",
+                        reason="answered",
+                    )
         except BaseException:
             self._rollback(connection)
             raise
@@ -836,20 +1124,21 @@ class PostgresStateStore:
     ) -> int:
         connection = self._connection()
         now = self._clock()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             record = self._read_effect(connection, effect_key)
-            self._write_effect(
-                connection,
-                plan_lease_extension(record, effect_key, action.action_id, until, now),
-            )
+            extended = plan_lease_extension(record, effect_key, action.action_id, until, now)
+            self._write_effect(connection, extended, _only(record, "effect record"))
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT rounds FROM continuations WHERE effect_key=%s", (effect_key,)
+                    f"SELECT rounds FROM {self._q}.continuations WHERE effect_key=%s", (effect_key,)
                 )
                 row = cursor.fetchone()
                 rounds = (int(row[0]) if row else 0) + 1
                 cursor.execute(
-                    "INSERT INTO continuations(effect_key, action_id, action_json, continuation, "
+                    f"INSERT INTO {self._q}.continuations("
+                    "effect_key, action_id, action_json, continuation, "
                     "rounds, updated_at) VALUES(%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (effect_key) DO UPDATE SET action_id=EXCLUDED.action_id, "
                     "action_json=EXCLUDED.action_json, continuation=EXCLUDED.continuation, "
@@ -875,10 +1164,13 @@ class PostgresStateStore:
         from .state import _NO_SUCH_CONTINUATION, _continuable
 
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT effect_key, action_json, continuation, rounds FROM continuations "
+                    f"SELECT effect_key, action_json, continuation, rounds FROM "
+                    f"{self._q}.continuations "
                     "WHERE continuation <> ''"
                 )
                 rows = cursor.fetchall()
@@ -892,9 +1184,19 @@ class PostgresStateStore:
                 self._read_effect(connection, effect_key), effect_key, self._clock()
             )
             with connection.cursor() as cursor:
+                # Consumed in the transaction that admits it, and **conditionally**. Without the
+                # `continuation` guard and the row count this was a plain double execution: a
+                # review measured 8 of 8 concurrent callers taking one continuation against
+                # Postgres (1 of 8 on SQLite), and four concurrent `Control.resume()` calls
+                # running the executor four times. SQLite's identical statement is safe only
+                # because `BEGIN IMMEDIATE` holds the write lock around it.
                 cursor.execute(
-                    "UPDATE continuations SET continuation='' WHERE effect_key=%s", (effect_key,)
+                    f"UPDATE {self._q}.continuations SET continuation='' "
+                    "WHERE effect_key=%s AND continuation=%s",
+                    (effect_key, continuation),
                 )
+                if cursor.rowcount != 1:
+                    raise InvalidArgument(_NO_SUCH_CONTINUATION)
             held = HeldContinuation(
                 _action_from_json(str(found[1])), effect_key, record, int(found[3])
             )
@@ -906,7 +1208,9 @@ class PostgresStateStore:
 
     def continuation_rounds(self, effect_key: str) -> int:
         with self._connection().cursor() as cursor:
-            cursor.execute("SELECT rounds FROM continuations WHERE effect_key=%s", (effect_key,))
+            cursor.execute(
+                f"SELECT rounds FROM {self._q}.continuations WHERE effect_key=%s", (effect_key,)
+            )
             row = cursor.fetchone()
         return 0 if row is None else int(row[0])
 
@@ -917,10 +1221,13 @@ class PostgresStateStore:
         an existing id would clear `revoked_at`, which is `unrevoke` by another door in a release
         that says there is no such thing (`v0.3 §5.7`)."""
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO delegations(delegation_id, parent_id, depth, grant_json, "
+                    f"INSERT INTO {self._q}.delegations("
+                    "delegation_id, parent_id, depth, grant_json, "
                     "created_by_agent, created_by_user, created_via, created_at, revoked_at, "
                     "revoked_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
@@ -948,7 +1255,7 @@ class PostgresStateStore:
             cursor.execute(
                 "SELECT delegation_id, parent_id, depth, grant_json, created_by_agent, "
                 "created_by_user, created_via, created_at, revoked_at, revoked_by "
-                f"FROM delegations {where}",
+                f"FROM {self._q}.delegations {where}",
                 args,
             )
             rows = cursor.fetchall()
@@ -992,6 +1299,8 @@ class PostgresStateStore:
         indistinguishable from the idempotent case.
         """
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             existing = self.get_delegation(delegation_id)
             if existing is None:
@@ -1001,7 +1310,7 @@ class PostgresStateStore:
                 return False
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE delegations SET revoked_at=%s, revoked_by=%s "
+                    f"UPDATE {self._q}.delegations SET revoked_at=%s, revoked_by=%s "
                     "WHERE delegation_id=%s AND revoked_at IS NULL",
                     (_iso(at), by, delegation_id),
                 )
@@ -1016,10 +1325,13 @@ class PostgresStateStore:
 
     def append_event(self, event: Event) -> Event:
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO events(ts, type, action_id, effect_key, approval_id, data_json) "
+                    f"INSERT INTO {self._q}.events("
+                    "ts, type, action_id, effect_key, approval_id, data_json) "
                     "VALUES(%s,%s,%s,%s,%s,%s) RETURNING event_id",
                     (
                         _iso(event.ts),
@@ -1042,7 +1354,7 @@ class PostgresStateStore:
         with self._connection().cursor() as cursor:
             cursor.execute(
                 "SELECT event_id, ts, type, action_id, effect_key, approval_id, data_json "
-                "FROM events ORDER BY event_id"
+                f"FROM {self._q}.events ORDER BY event_id"
             )
             rows = cursor.fetchall()
         return tuple(
@@ -1060,10 +1372,13 @@ class PostgresStateStore:
 
     def put_receipt(self, receipt: Receipt) -> None:
         connection = self._connection()
+        connection.execute("BEGIN")
+        self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO receipts(receipt_id, action_id, effect_key, result, json, ts) "
+                    f"INSERT INTO {self._q}.receipts("
+                    "receipt_id, action_id, effect_key, result, json, ts) "
                     "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT (receipt_id) DO NOTHING",
                     (
                         receipt.receipt_id,
@@ -1081,6 +1396,6 @@ class PostgresStateStore:
 
     def receipts(self) -> tuple[Receipt, ...]:
         with self._connection().cursor() as cursor:
-            cursor.execute("SELECT json FROM receipts ORDER BY ts, receipt_id")
+            cursor.execute(f"SELECT json FROM {self._q}.receipts ORDER BY ts, receipt_id")
             rows = cursor.fetchall()
         return tuple(Receipt.from_dict(json.loads(str(row[0]))) for row in rows)

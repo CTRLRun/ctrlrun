@@ -333,6 +333,11 @@ _COLUMN_QUERY: Final = {
 }
 _PLACEHOLDER: Final = {"sqlite": "?", "postgres": "%s"}
 
+#: The advisory-lock key every CTRLRun migration serialises on. Constant, so two processes
+#: migrating one database wait for each other; an advisory lock is scoped to the database it is
+#: taken in, so processes migrating different databases do not.
+_MIGRATION_LOCK: Final = 0x43545252554E
+
 
 class Classification(StrEnum):
     """What shape a database's recorded history is in (SPEC-v0.6 §3.2, §3.3).
@@ -386,9 +391,7 @@ def _refuse_unless_ours(connection: Any, tables: set[str], dialect: str) -> None
     cleanly, and failed at first use with `no such column: effect_key` -- which is after
     `Control` was constructed, and §3.3 says every refusal is at open. A review built one.
     """
-    columns = {
-        str(row[1]) for row in connection.execute(f"PRAGMA table_info({_MARKER_TABLE})").fetchall()
-    }
+    columns = {str(row[1]) for row in connection.execute(_COLUMN_QUERY[dialect]).fetchall()}
     missing = _EFFECTS_COLUMNS - columns
     if missing:
         raise _refuse(
@@ -475,7 +478,8 @@ def _apply(connection: Any, migration: Migration, now: datetime, dialect: str) -
         if migration.id in _read_applied(connection):
             # Applied by somebody else while we waited for the lock. Nothing to do, and
             # nothing to record.
-            connection.rollback()
+            if dialect == "sqlite":
+                connection.rollback()
             return
         for statement in migration.sql(dialect):
             connection.execute(statement)
@@ -489,9 +493,14 @@ def _apply(connection: Any, migration: Migration, now: datetime, dialect: str) -
         # Load-bearing and, until a review measured it, exercised by nothing: an abandoned
         # connection holds an *uncommitted* transaction, WAL lets later reads through, and the
         # next writer meets `database is locked`. T149c opens that window on purpose.
-        connection.rollback()
+        #
+        # On Postgres the advisory-locked transaction in `migrate` owns the commit and the
+        # rollback: ending it here would drop the lock between migrations.
+        if dialect == "sqlite":
+            connection.rollback()
         raise
-    connection.commit()
+    if dialect == "sqlite":
+        connection.commit()
 
 
 def migrate(
@@ -507,6 +516,33 @@ def migrate(
     with a storage shape (§3.6).
     """
     stamp = now or datetime.now(UTC)
+    if dialect == "postgres":
+        # SPEC-v0.6 §3.6: *"a second process either finds the work done or waits for it."*
+        # `BEGIN IMMEDIATE` is what makes that true on SQLite. Postgres has no equivalent, so
+        # concurrent opens all ran `CREATE TABLE IF NOT EXISTS` at once and collided in the
+        # catalogue: a review measured **one of six** processes surviving the first open, the
+        # rest dying on `UniqueViolation` and `DuplicateTable`. That is the fleet-restart moment,
+        # on the backend whose whole purpose is more than one host.
+        #
+        # A **transaction-scoped** advisory lock, taken before anything is read and released at
+        # commit. This is not §4.2.1's rejected session lock: it cannot outlive its transaction,
+        # nothing on the reservation path takes it, and it holds nothing a pooler must keep
+        # alive. It covers the *whole* of migrate, because the collisions were in the classify
+        # step and not only in `_apply`.
+        connection.execute("BEGIN")
+        connection.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,))
+        try:
+            found = _migrate_locked(connection, stamp, dialect)
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()
+        return found
+    return _migrate_locked(connection, stamp, dialect)
+
+
+def _migrate_locked(connection: Any, stamp: datetime, dialect: str) -> Classification:
+    """The classification and the migrations themselves (SPEC-v0.6 §3.2, §3.3)."""
     tables = _table_names(connection, dialect)
 
     if "schema_version" not in tables:
@@ -523,7 +559,8 @@ def migrate(
         else:
             found = Classification.EMPTY
         connection.execute(_SCHEMA_VERSION_TABLE)
-        connection.commit()
+        if dialect == "sqlite":
+            connection.commit()
     else:
         found = classify(_read_applied(connection))
 

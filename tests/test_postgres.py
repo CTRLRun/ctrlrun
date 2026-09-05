@@ -368,8 +368,16 @@ def test_T154f_the_store_holds_nothing_session_scoped(backend):
     advisory locks, and a property worth keeping deliberately rather than by luck.
     """
     source = Path(__import__("ctrlrun.postgres", fromlist=["x"]).__file__).read_text()
-    for smell in ("pg_advisory_lock", "pg_advisory_xact_lock", "CREATE TEMP", "PREPARE "):
+    for smell in ("pg_advisory_lock(", "CREATE TEMP", "PREPARE "):
         assert smell not in source, f"postgres.py uses {smell!r}, which pins it to a session"
+    # A grep cannot see a `SET`, and a review found one contradicting this test's own claim.
+    # `SET LOCAL` reverts at the end of its transaction, so it is not session state; a bare `SET`
+    # outside `_connect` would be.
+    assert "SET LOCAL search_path" in source, "the store no longer scopes search_path per txn"
+    assert source.count("SET search_path") == 1, (
+        "a second bare `SET search_path` appeared; only the connect-time one is allowed, and "
+        "every transaction re-asserts it with SET LOCAL (§4.4)"
+    )
 
 
 # --- §4.3: the two ambiguities, and the checks that make them different ----------------------
@@ -388,30 +396,45 @@ def test_T155c_the_re_read_identity_check_is_not_an_action_id_match(backend):
     second attempt holds the key -- which is one logical effect executed twice, through the
     storage layer.
     """
-    from datetime import timedelta
+    from datetime import UTC, datetime, timedelta
 
     from ctrlrun.effect import Reservation
     from ctrlrun.errors import DuplicateEffect
 
-    store = backend.open()
+    # A **frozen** clock, which is the whole point. With the wall clock the two attempts'
+    # `lease_expires_at` differ by microseconds and the refusal is an accident of timing rather
+    # than of the check -- a review found this test passing for exactly that reason, while the
+    # store concluded it held a key another attempt held. `verify` and the conformance backend
+    # both inject clocks, so the frozen case is the deployed one.
+    frozen = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store = backend.open_with_clock(lambda: frozen)
     shared = "act_shared"
     store.reserve_effect("refund:shared", shared, timedelta(minutes=5))
 
-    # What a second attempt with the same action_id would have tried to write.
+    # A second attempt under the SAME action_id but a different lease -- the realistic collision,
+    # and the one an `action_id` match alone cannot see. §4.3.3 records why the fully-identical
+    # case is a caller-side violation rather than something a store can separate.
     attempted = Reservation(
         effect_key="refund:shared",
         action_id=shared,
         attempt=1,
-        lease_expires_at=store._clock() + timedelta(minutes=5),
+        lease_expires_at=frozen + timedelta(minutes=9),
     )
     try:
-        store._resolve_lost_insert("refund:shared", attempted, store._clock())
+        store._resolve_lost_insert(
+            "refund:shared",
+            attempted,
+            frozen,
+            approval_id=None,
+            action_hash=None,
+            lease=timedelta(minutes=5),
+        )
     except DuplicateEffect:
         pass
     else:
         raise AssertionError(
-            "the re-read concluded we hold a key another attempt holds; §4.3.3 compares the "
-            "whole row written, not the action_id"
+            "the re-read concluded we hold a key another attempt holds; §4.3.3 compares every "
+            "column written, and fails closed where the rows are indistinguishable"
         )
     store.close()
 
@@ -420,11 +443,12 @@ def test_T155c_the_re_read_identity_check_is_not_an_action_id_match(backend):
 def test_T155c_the_re_read_accepts_only_our_own_row(backend):
     """The other half: a lost `COMMIT` that DID land must be recognised, or every ambiguous
     write would refuse and the re-read would buy nothing."""
-    from datetime import timedelta
+    from datetime import UTC, datetime, timedelta
 
     from ctrlrun.effect import Reservation
 
-    store = backend.open()
+    frozen = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store = backend.open_with_clock(lambda: frozen)
     reservation = store.reserve_effect("refund:mine", "act_mine", timedelta(minutes=5))
     record = store.get_effect("refund:mine")
     assert record is not None
@@ -435,7 +459,14 @@ def test_T155c_the_re_read_accepts_only_our_own_row(backend):
         lease_expires_at=record.lease_expires_at,
     )
     # No exception: this is our own write, so we hold the key and execution proceeds.
-    store._resolve_lost_insert("refund:mine", landed, store._clock())
+    store._resolve_lost_insert(
+        "refund:mine",
+        landed,
+        frozen,
+        approval_id=None,
+        action_hash=None,
+        lease=timedelta(minutes=5),
+    )
     assert reservation.action_id == "act_mine"
     store.close()
 
@@ -572,3 +603,86 @@ def test_T153_the_module_imports_without_the_driver(monkeypatch):
         f"importing ctrlrun.postgres without the driver did not work: {done.stdout}{done.stderr}"
     )
     assert "ctrlrun[postgres]" in done.stdout
+
+
+@postgres
+def test_T154f_a_user_without_ddl_rights_is_refused_naming_the_privilege():
+    """SPEC-v0.6 §3.6 and T154f's first assertion, which had neither test nor code.
+
+    A role without `CREATE` got a raw `psycopg.errors.InsufficientPrivilege` out of the
+    constructor, quoting the failing `CREATE TABLE` verbatim -- uncatchable by any
+    `except CTRLRunError` in this codebase. A migration needs DDL rights at least on the first
+    start after an upgrade, and an operator who has not granted them deserves to be told which
+    grant is missing rather than which statement failed.
+    """
+    import psycopg
+
+    from ctrlrun.postgres import PostgresStateStore
+
+    role = f"ctrlrun_nodll_{uuid.uuid4().hex[:8]}"
+    schema = f"locked_{uuid.uuid4().hex[:8]}"
+    admin = psycopg.connect(URL, autocommit=True)
+    try:
+        try:
+            admin.execute(f"CREATE ROLE \"{role}\" LOGIN PASSWORD 'probe'")
+            admin.execute(f'CREATE SCHEMA "{schema}"')
+            admin.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
+            admin.execute(f'REVOKE CREATE ON SCHEMA "{schema}" FROM "{role}", PUBLIC')
+        except psycopg.Error as refused:
+            pytest.skip(f"cannot create a locked-down role here: {refused}")
+
+        host = URL.split("@", 1)[1]
+        locked = f"postgresql://{role}:probe@{host}"
+        with pytest.raises(InvalidArgument) as raised:
+            PostgresStateStore(locked, schema=schema)
+        message = str(raised.value)
+        assert "CREATE" in message, "the refusal does not name the missing privilege"
+        assert schema in message, "the refusal does not name the schema"
+        assert "GRANT CREATE ON SCHEMA" in message, "the refusal does not name the grant"
+    finally:
+        admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.execute(f'DROP ROLE IF EXISTS "{role}"')
+        admin.close()
+
+
+@postgres
+def test_T154f_search_path_is_set_per_transaction(backend):
+    """§4.4's pgbouncer transaction-mode claim, made true.
+
+    A connect-time `SET search_path` is **session** state, and §4.4 claimed the store holds none.
+    Under transaction pooling a later transaction may land on a server connection that never
+    received it, resolving to `"$user", public` -- which for a scratch-schema store means reading
+    and writing the *operator's* `public` tables, the hazard §4.1 exists to close.
+
+    Modelled by resetting the session's `search_path` behind the store's back and then writing:
+    a store that depended on the session would land in `public`.
+    """
+    from datetime import timedelta
+
+    store = backend.open()
+    connection = store._connection()
+    connection.execute("SET search_path TO public")
+
+    store.reserve_effect("refund:pooled", "act_pooled", timedelta(minutes=5))
+
+    # The record must be in the store's own schema, not in `public`.
+    assert store.get_effect("refund:pooled") is not None
+    bare, schema = __import__(
+        "ctrlrun.conformance.store.backends", fromlist=["_split_schema"]
+    )._split_schema(backend.url())
+    import psycopg
+
+    checker = psycopg.connect(bare, autocommit=True)
+    try:
+        rows = checker.execute(
+            f'SELECT effect_key FROM "{schema}".effects WHERE effect_key = %s', ("refund:pooled",)
+        ).fetchall()
+        assert rows, "the write did not land in the store's own schema"
+        stray = checker.execute("SELECT to_regclass('public.effects')").fetchone()
+        assert stray is None or stray[0] is None, (
+            "the store created tables in `public`; §4.1's whole point is that it never touches "
+            "a schema it was not pointed at"
+        )
+    finally:
+        checker.close()
+        store.close()

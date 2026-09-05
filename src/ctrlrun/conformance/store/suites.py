@@ -62,6 +62,11 @@ CONTENDERS = 8
 #: and the case still runs in well under a second.
 ROUNDS = 12
 
+#: How many times a **cross-process** contention case repeats. Fewer than `ROUNDS`, because each
+#: round starts `processes` interpreters; enough that a defect the scheduler sometimes hides is
+#: not a flaky grade. §2.4 has the measurement that made this necessary.
+RACE_ROUNDS = 4
+
 
 # --- case plumbing --------------------------------------------------------------------------
 
@@ -517,6 +522,137 @@ def reservation_lease_expiry(backend: StoreBackend, processes: int = CONTENDERS)
     return passed("lease-expiry", title)
 
 
+def store_now(store: StateStore) -> datetime:
+    """The instant this store believes it is. A cross-process case cannot inject a clock -- the
+    children open the storage themselves -- so it uses the store's own wall clock."""
+    clock = getattr(store, "_clock", None)
+    return clock() if callable(clock) else datetime.now(UTC)
+
+
+def race(
+    backend: StoreBackend, processes: int, jobs: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]] | str:
+    """Run `jobs` as OS processes released together. Returns the results, or a failure reason.
+
+    The rendezvous is the worker's, so every contender is inside its operation when the others
+    are -- the same barrier `e1-cross-process` uses, for the same reason.
+    """
+    url = backend.url()
+    if url is None:
+        return "this backend's storage cannot be opened from another process"
+    with tempfile.TemporaryDirectory() as gate:
+        payloads = [
+            json.dumps(
+                {
+                    **job,
+                    "url": url,
+                    "rendezvous_dir": gate,
+                    "contenders": len(jobs),
+                    "rendezvous_timeout": 30,
+                }
+            )
+            for job in jobs
+        ]
+        children = [
+            subprocess.Popen(
+                [sys.executable, "-m", "ctrlrun.conformance.store.worker"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in payloads
+        ]
+        for child, payload in zip(children, payloads, strict=True):
+            assert child.stdin is not None
+            child.stdin.write(payload)
+            child.stdin.close()
+        results = []
+        for child in children:
+            try:
+                child.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                return "a contender did not finish in 90s"
+            assert child.stdout is not None and child.stderr is not None
+            out, err = child.stdout.read(), child.stderr.read()
+            child.stdout.close()
+            child.stderr.close()
+            if child.returncode != 0:
+                return f"a contender exited {child.returncode}: {err}"
+            results.append(json.loads(out))
+        arrived = len(os.listdir(gate))
+    if arrived != len(jobs):
+        return f"only {arrived} of {len(jobs)} contenders reached the barrier"
+    return results
+
+
+@case("consume-cross-process", "one approval is consumed by exactly one contender")
+def approval_consume_cross_process(
+    backend: StoreBackend, processes: int = CONTENDERS
+) -> CaseResult:
+    """`v0.1 §4.2 A2` and `A4`, contended -- which nothing in this suite used to do.
+
+    **`reserve_effect` was the only method the suite ever raced for.** A review found this one
+    consuming a single approval **8 times out of 8** on a backend that passed every case: one
+    human's *yes* authorising eight refunds, invisible to CI. `BEGIN IMMEDIATE` gives SQLite
+    mutual exclusion on every read-then-write; a backend must reproduce that for each of them,
+    not only for the insert with a `UNIQUE` constraint behind it.
+
+    Each contender reserves a **different** effect key, so the reservation cannot be what
+    refuses -- the approval has to be.
+    """
+    title = approval_consume_cross_process.title
+    url = backend.url()
+    if url is None:
+        if not storage_is_confined(backend):
+            return dishonest("consume-cross-process", title, "url()")
+        return na(
+            "consume-cross-process",
+            title,
+            "this backend's storage cannot be opened from another process",
+        )
+    store = store_from_url(url)
+    action = an_action(payment_id="txn_race")
+    approval_id = granted_approval(store, action, at=store_now(store))
+    store.close()
+
+    results = race(
+        backend,
+        processes,
+        [
+            {
+                "kind": "consume",
+                "approval_id": approval_id,
+                "action_hash": action.action_hash,
+                "effect_key": f"refund:race-{index}",
+                "action_id": f"act_{index:032x}",
+            }
+            for index in range(processes)
+        ],
+    )
+    if isinstance(results, str):
+        return failed("consume-cross-process", title, results)
+    winners = [result for result in results if result["won"]]
+    if len(winners) != 1:
+        return failed(
+            "consume-cross-process",
+            title,
+            f"{len(winners)} of {processes} contenders consumed one approval; exactly one may "
+            "(v0.1 §4.2 A2). A human said yes once",
+            results=results,
+        )
+    holder = store_from_url(url)
+    try:
+        record = holder.get_approval(approval_id)
+    finally:
+        holder.close()
+    if record is None or str(record.status) != "consumed":
+        got = record.status if record else "gone"
+        return failed("consume-cross-process", title, f"the approval is {got}, expected consumed")
+    return passed("consume-cross-process", title)
+
+
 # --- approval (v0.1 §7 T2, T4, T5, T12; §4.2 A1-A4) -----------------------------------------
 
 
@@ -666,6 +802,116 @@ def approval_checked_first(backend: StoreBackend, processes: int = CONTENDERS) -
         reason="consumed",
     )
     return problem or passed("approval-checked-first", title)
+
+
+@case("answered-once", "a grant and a deny cannot both win")
+def approval_answered_once(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """`v0.1 §4.3`: a request is answered once, by one human.
+
+    Half the contenders grant and half deny. Exactly one may succeed, and whichever it is must be
+    what the record says -- a review found a `deny` silently overwritten by a concurrent `grant`,
+    after which `find_granted_approval` returned an approval a human had refused.
+    """
+    title = approval_answered_once.title
+    url = backend.url()
+    if url is None:
+        if not storage_is_confined(backend):
+            return dishonest("answered-once", title, "url()")
+        return na(
+            "answered-once",
+            title,
+            "this backend's storage cannot be opened from another process",
+        )
+    # Repeated, for `e1-in-process`'s reason. A contender that happens to *read* after another
+    # has committed is refused by `check_answerable` before it ever reaches the write, so a
+    # single round exposes an unconditional write only when the scheduler cooperates: measured at
+    # 3 winners traced directly and 1 through the suite on the same broken store. One round would
+    # have made this a flaky detector for the defect it exists to catch.
+    for round_number in range(RACE_ROUNDS):
+        store = store_from_url(url)
+        action = an_action(payment_id=f"txn_answer-{round_number}")
+        request = build_request(action, timedelta(minutes=15), store_now(store))
+        store.put_approval_request(request)
+        store.close()
+
+        results = race(
+            backend,
+            processes,
+            [
+                {
+                    "kind": "answer",
+                    "answer": "grant" if index % 2 else "deny",
+                    "approval_id": request.request_id,
+                    "who": f"human-{index}",
+                }
+                for index in range(processes)
+            ],
+        )
+        if isinstance(results, str):
+            return failed("answered-once", title, results)
+        winners = [result for result in results if result["won"]]
+        if len(winners) != 1:
+            return failed(
+                "answered-once",
+                title,
+                f"{len(winners)} of {processes} answers were accepted; a request is answered "
+                f"once (round {round_number + 1} of {RACE_ROUNDS})",
+                results=results,
+            )
+        holder = store_from_url(url)
+        try:
+            record = holder.get_approval(request.request_id)
+        finally:
+            holder.close()
+        if record is None or str(record.status) not in ("granted", "denied"):
+            got = record.status if record else "gone"
+            return failed("answered-once", title, f"the approval is {got} after being answered")
+    return passed("answered-once", title)
+
+
+@case("taken-once-cross-process", "one suspension admits one resumption, across processes")
+def continuation_taken_once_cross_process(
+    backend: StoreBackend, processes: int = CONTENDERS
+) -> CaseResult:
+    """`v0.2 §6.9.2`, contended.
+
+    A review measured 8 of 8 concurrent callers taking one continuation on a backend that passed
+    every case, and four concurrent `Control.resume()` calls running the executor **four times**.
+    That is a plain double execution, and the in-process case could not see it.
+    """
+    title = continuation_taken_once_cross_process.title
+    url = backend.url()
+    if url is None:
+        if not storage_is_confined(backend):
+            return dishonest("taken-once-cross-process", title, "url()")
+        return na(
+            "taken-once-cross-process",
+            title,
+            "this backend's storage cannot be opened from another process",
+        )
+    store = store_from_url(url)
+    action = an_action(payment_id="txn_take")
+    now = store_now(store)
+    store.reserve_effect("refund:take", action.action_id, LEASE)
+    store.begin_execution("refund:take", action.action_id)
+    store.hold_continuation(action, "refund:take", "tok-race", now + timedelta(hours=1))
+    store.close()
+
+    results = race(
+        backend, processes, [{"kind": "take", "continuation": "tok-race"} for _ in range(processes)]
+    )
+    if isinstance(results, str):
+        return failed("taken-once-cross-process", title, results)
+    winners = [result for result in results if result["won"]]
+    if len(winners) != 1:
+        return failed(
+            "taken-once-cross-process",
+            title,
+            f"{len(winners)} of {processes} callers took one continuation; one suspension admits "
+            "exactly one resumption, and more than one is a double execution",
+            results=results,
+        )
+    return passed("taken-once-cross-process", title)
 
 
 # --- resolution (v0.1 §7 T10; §5.2) ---------------------------------------------------------
@@ -1336,6 +1582,8 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         reservation_lease_expiry,
     ),
     "approval": (
+        approval_consume_cross_process,
+        approval_answered_once,
         approval_binding,
         approval_single_use,
         approval_expiry,
@@ -1346,7 +1594,11 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
     "outcome": (outcome_no_failed_on_refusal, outcome_no_not_executed),
     "durability": (durability_ambiguous, durability_terminal),
     "evidence": (evidence_action_round_trip, evidence_event_ids, evidence_receipt),
-    "continuation": (continuation_one_resumption, continuation_extend_lease),
+    "continuation": (
+        continuation_taken_once_cross_process,
+        continuation_one_resumption,
+        continuation_extend_lease,
+    ),
     "delegation": (delegation_insert, delegation_revoke, delegation_grant_json),
 }
 
