@@ -1703,30 +1703,42 @@ one name meaning two things in two files, which is the ambiguity `v0.1 §3.2` re
 address `data_scope`: the derived-subject allow-list is the policy evaluator's, and a grant that
 named one is refused as it always was (§11).
 
-**Redaction, and where it does not apply.** A label may be declared `redact: true`:
+**The shape of a label.**
 
 ```yaml
 data:
-  diagnosis: {label: phi, redact: true}
+  diagnosis: {label: phi}     # `redact:` was described here and cut; see below
 ```
 
-A redacted argument's value is replaced **in the evidence** — the receipt, the events, the JSONL
-export — by `"sha256:<hex>"` of its canonical form. The value is gone; two different values are
-still distinguishable; the `action_hash` is **unchanged**, because it is computed over the real
-arguments as it always was, so a reader can still check the binding.
+The mapping form remains because a label may gain a second key later; today `label:` is its only
+one, and `diagnosis: phi` is the shorthand for it.
 
-**Redaction never applies to the approval payload.** `ApprovalRequest.action`, `PendingApproval`
-(`v0.5 §2.2`) and `ctrlrun approve`'s display carry the real values. A human must see what they
-approve — that is the whole of `v0.1 §4.2` — and a redacted approval screen is an approval of
-something nobody read.
-
-**`redact:` is on probation and item 7 must earn it.** It is the primitive here that exists most
+**`redact:` was on probation and item 7 cut it.** It was the primitive here that existed most
 plausibly because an imagined sector might want it, and `v0.6`'s scope rule is that a field added
-for a pack nobody is writing is a guess that gets frozen. Item 7 writes one throwaway sector
-configuration (§7.5). If that configuration does not need `redact:`, **item 7 cuts it** and
-records the cut in §12. The registry and the labels are not on probation: a receipt that cannot
-say which control governed an action, and a rule that cannot see that an argument is PHI, are the
-two things a pack cannot be written without.
+for a pack nobody is writing is a guess that gets frozen. §7.5's throwaway configuration was to
+earn it, and did not:
+
+- The configuration needed a rule that could **see** an argument was PHI, which `data:` gives it.
+  That primitive is not on probation and is not cut.
+- It did not need the value hidden from the evidence. A deployment that may not hold a diagnosis
+  in its receipt store may not hold it upstream either, so redacting here would be a weaker
+  second copy of a control that has to live elsewhere.
+- The approval payload carries the real value regardless, because a human must see what they
+  approve (`v0.1 §4.2`). Once that is true, redacting the same value in the receipt hides it from
+  the auditor and from nobody else.
+
+So there is no `redact:` key, and **it is refused at load rather than ignored** — with a message
+saying it was cut and why. An operator who writes `redact: true` and gets no error believes the
+value is hidden, which is worse than not having the feature. §12 records the cut.
+
+The registry and the labels stay: a receipt that cannot say which control governed an action, and
+a rule that cannot see that an argument is PHI, are the two things a pack cannot be written
+without.
+
+**`data:` labels an argument and not a return value**, and §7.5's configuration is where that
+became worth stating. A protected function that *returns* PHI declares nothing, and `data_scope`
+sees only what went in. That is the right scope for a decision made **before** the call — a label
+on the result could not inform it — but a pack author will expect otherwise.
 
 ### 7.5 The throwaway configuration
 
