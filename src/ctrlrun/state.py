@@ -50,6 +50,7 @@ from .effect import (
     plan_reservation,
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
+from .migrations import migrate
 from .receipt import Event, EventType, Receipt
 
 _LOG = logging.getLogger(__name__)
@@ -65,71 +66,6 @@ _UNFINISHED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING, Eff
 #: SPEC-v0.1 §5.2 — `AMBIGUOUS` is the only state a human resolves, and these are the two
 #: answers available: what actually happened at the remote was one or the other.
 RESOLUTIONS: Final = frozenset({EffectState.COMMITTED, EffectState.FAILED})
-
-_SCHEMA: Final = """
-CREATE TABLE IF NOT EXISTS effects(
-  effect_key TEXT PRIMARY KEY,
-  state TEXT NOT NULL,
-  action_id TEXT NOT NULL,
-  attempt INTEGER NOT NULL DEFAULT 1,
-  lease_expires_at TEXT,
-  result_json TEXT,
-  error TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS continuations(
-  effect_key TEXT PRIMARY KEY,
-  action_id TEXT NOT NULL,
-  action_json TEXT NOT NULL,
-  continuation TEXT NOT NULL,
-  rounds INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS continuations_by_value
-  ON continuations(continuation) WHERE continuation <> '';
-CREATE TABLE IF NOT EXISTS approvals(
-  approval_id TEXT PRIMARY KEY,
-  action_hash TEXT NOT NULL,
-  status TEXT NOT NULL,
-  action_json TEXT NOT NULL,
-  approver TEXT,
-  created_at TEXT,
-  granted_at TEXT,
-  expires_at TEXT,
-  consumed_at TEXT
-);
-CREATE TABLE IF NOT EXISTS receipts(
-  receipt_id TEXT PRIMARY KEY,
-  action_id TEXT,
-  effect_key TEXT,
-  result TEXT,
-  json TEXT,
-  ts TEXT
-);
-CREATE TABLE IF NOT EXISTS events(
-  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT,
-  type TEXT,
-  action_id TEXT,
-  effect_key TEXT,
-  approval_id TEXT,
-  data_json TEXT
-);
-CREATE TABLE IF NOT EXISTS delegations(
-  delegation_id TEXT PRIMARY KEY,
-  parent_id TEXT NOT NULL,
-  depth INTEGER NOT NULL,
-  grant_json TEXT NOT NULL,
-  created_by_agent TEXT NOT NULL,
-  created_by_user TEXT,
-  created_via TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  revoked_at TEXT,
-  revoked_by TEXT
-);
-CREATE INDEX IF NOT EXISTS delegations_by_parent ON delegations(parent_id);
-"""
 
 
 def _utc_now() -> datetime:
@@ -935,7 +871,10 @@ class SQLiteStateStore:
         self._open: set[sqlite3.Connection] = set()
         self._open_lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection().executescript(_SCHEMA)
+        # SPEC-v0.6 §3. The store's admission check: classify, then migrate or refuse. It runs
+        # before any other table is read, and there is no argument, keyword or environment
+        # variable that suppresses it (§3.6).
+        migrate(self._connection(), self._clock())
 
     @property
     def path(self) -> Path:

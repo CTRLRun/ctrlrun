@@ -38,6 +38,7 @@ from .errors import (
     MissingDependency,
     NotExecuted,
     PolicyError,
+    SchemaMismatch,
     Suspended,
 )
 from .identity import (
@@ -98,6 +99,7 @@ __all__ = [
     "Receipt",
     "ReconcileOutcome",
     "SQLiteStateStore",
+    "SchemaMismatch",
     "ScriptedApprovalProvider",
     "StateStore",
     "StaticIdentityProvider",
