@@ -857,3 +857,31 @@ def test_T138_item_sixs_questions_are_recorded_and_each_is_answered():
     # The four the report called security- or correctness-critical are marked as such.
     severities = {severity.strip().strip("*").lower() for _, _, severity, _ in rows}
     assert "security" in severities, severities
+
+
+def test_the_throwaway_sector_configuration_ships_nowhere():
+    """SPEC-v0.6 §7.5, §8's T177b: *"it lives in the test suite and in no `packs/` directory, no
+    `examples/`, and no distribution."*
+
+    The artefact is disposable and what it found is the deliverable, so the packaging assertion
+    is what keeps it disposable: a configuration that reached a wheel would be a sector pack
+    nobody agreed to ship, and §11 ships none.
+    """
+    root = REPO_ROOT
+    assert not (root / "packs").exists(), "a `packs/` directory appeared; §11 ships no pack"
+
+    manifest = (root / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "packs" not in manifest
+
+    # The configuration lives in exactly one place, and that place is a test file. The marker is
+    # assembled rather than written, so this file does not match its own search.
+    marker = "clinician-of" + "-record"
+    holders = [
+        path
+        for path in root.rglob("*.py")
+        if marker in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert [path.name for path in holders] == ["test_sector_configuration.py"], (
+        f"the throwaway configuration appears in {[str(p) for p in holders]}; §7.5 keeps it in "
+        "the test suite and nowhere else"
+    )

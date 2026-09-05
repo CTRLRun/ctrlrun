@@ -1192,7 +1192,7 @@ class SQLiteStateStore:
         try:
             self._connection().execute(
                 "INSERT INTO approvals(approval_id, action_hash, status, action_json, "
-                "created_at, expires_at) VALUES(?,?,?,?,?,?)",
+                "created_at, expires_at, policy_hash_at_approval) VALUES(?,?,?,?,?,?,?)",
                 (
                     request.request_id,
                     request.action_hash,
@@ -1200,6 +1200,7 @@ class SQLiteStateStore:
                     _action_json(request.action),
                     _iso(request.created_at),
                     _iso(request.expires_at),
+                    request.policy_hash,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -1381,6 +1382,7 @@ class SQLiteStateStore:
                 action=_action_from_json(row["action_json"]),
                 created_at=datetime.fromisoformat(row["created_at"]),
                 expires_at=datetime.fromisoformat(row["expires_at"]),
+                policy_hash=row["policy_hash_at_approval"],
             ),
             status=ApprovalStatus(row["status"]),
             approver=row["approver"],
