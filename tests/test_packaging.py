@@ -824,7 +824,11 @@ def test_T138_item_sixs_questions_are_recorded_and_each_is_answered():
         pytest.skip("no repository checkout")
 
     text = adapters.read_text(encoding="utf-8")
-    rows = re.findall(r"^\| (Q\d+) \| (.+?) \| (.+?) \| (.+?) \|$", text, re.M)
+    # The answer column is `(.*?)` and not `(.+?)` on purpose: an **empty** answer must still
+    # match, so the "every row says where it was answered" check below is what catches it. With
+    # `(.+?)` the row simply stopped being a row and the count assertion caught it instead --
+    # a subsumed guard, found by mutating an answer to empty and watching the wrong test fail.
+    rows = re.findall(r"^\| (Q\d+) \| (.+?) \| (.+?) \|(.*?)\|$", text, re.M)
 
     assert len(rows) >= 14, f"item 6 raised fourteen questions; {len(rows)} are recorded"
     assert [q for q, *_ in rows] == [f"Q{n}" for n in range(1, len(rows) + 1)], [
