@@ -235,6 +235,9 @@ class Proxy:
             with_suppress(client.close)
             return
         killed = threading.Event()
+        #: Set by the forward pump when it has forwarded a `COMMIT` under `kill_on_commit`, and
+        #: read by the backward pump, which drops the client on the server's next byte.
+        commit_landed = threading.Event()
 
         def pump(source: socket.socket, sink: socket.socket, watching: bool) -> None:
             source.settimeout(0.2)
@@ -306,19 +309,23 @@ class Proxy:
                     return False
 
                 if commit_at >= 0 and self.kill_on_commit:
-                    # The server has the COMMIT and will apply it. The client's connection goes
-                    # **immediately**, so the response never gets back: the write very likely
-                    # landed and the client will never be told, which is §4.3's ambiguous store
-                    # write exactly.
+                    # The COMMIT has gone to the server. The client is dropped **when the
+                    # server's reply reaches the proxy** -- by the backward pump, below -- and
+                    # the reply is never relayed. So the write has definitely landed and the
+                    # client has definitely not been told, which is §4.3's ambiguous store write
+                    # with no timing left in it.
                     #
-                    # The first version slept 50ms here "to let the server apply it", which on a
-                    # local socket is long enough for the reply to arrive -- so `commit()`
-                    # returned normally and the store never took the ambiguous path at all. The
-                    # test asserting that path passed anyway. Closing at once is the mechanism.
-                    with self._lock:
-                        self.clients_killed += 1
-                    self._after_drop()
-                    self._drop(client, killed)
+                    # Two earlier versions, and both were wrong in the same place. The first
+                    # slept 50ms here "to let the server apply it", which on a local socket is
+                    # long enough for the reply to arrive: `commit()` returned normally and the
+                    # store never took the ambiguous path at all, while the test asserting that
+                    # path passed. The second closed at once, which fixed that and left a race
+                    # the other way -- the store's re-read could beat the server's apply and
+                    # correctly find the pre-state, taking Table A2's *re-issue* row instead of
+                    # its *landed* row. Both are correct store behaviour, so the test that
+                    # pinned one branch flaked on CI. Waiting for the reply removes the race
+                    # rather than asserting around it.
+                    commit_landed.set()
                     return False
                 return True
 
@@ -340,6 +347,15 @@ class Proxy:
                 if self.partition:
                     held.append(data)  # held, not discarded: a stall the restore can undo
                     continue
+                if not watching and commit_landed.is_set():
+                    # The server has answered the COMMIT it applied. Drop the client now, and
+                    # never relay this reply: that is what makes the write landed *and* the
+                    # outcome unobservable, deterministically.
+                    with self._lock:
+                        self.clients_killed += 1
+                    self._after_drop()
+                    self._drop(client, killed)
+                    return
                 if not deliver(data):
                     return
 
