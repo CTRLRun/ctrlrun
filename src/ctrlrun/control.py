@@ -26,6 +26,7 @@ from .approval import (
     ApprovalProvider,
     ApprovalStatus,
     LocalApprovalProvider,
+    policy_in_force,
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
@@ -1301,7 +1302,53 @@ class Control:
                 effect_key,
                 approval=approval,
             )
+        if approval is None and evaluation.decision is not Decision.APPROVE:
+            approval = self._spend_unneeded_approval(action, effect_key)
         return approval, reservation
+
+    def _spend_unneeded_approval(self, action: Action, effect_key: str | None) -> Approval | None:
+        """SPEC-v0.6 §7.2's `ALLOW` row: close a token the action no longer needs.
+
+        The policy said `APPROVE` when a human was asked and says something permissive now. Left
+        alone, the presented approval stays `granted` for its full TTL, bound to a hash a later
+        policy edit could make `APPROVE`-requiring again -- a live bearer token for an action a
+        human already answered, and `v0.1 §4.1` calls a request id a bearer token in as many
+        words. **This is a change to shipped behaviour and is the reason §7.2 exists.**
+
+        **After the reservation, and in a write of its own** (§7.2.2). An earlier draft said
+        *consumed anyway, in the same transaction*, which would have added a refusal path to the
+        permissive decision: `consume_approval_and_reserve` checks the approval **first**
+        (`v0.1 §4.2 A4`), so an approval that is expired, already consumed or denied raises
+        `ApprovalMismatch` -- and an action the policy allows would be refused because of an
+        approval it did not need. The reachable case is ordinary: an agent retries inside
+        `with_approval(id)` after the operator relaxed the rule, the grant having been spent on
+        the first attempt.
+
+        So nothing here can refuse the action. A failure is logged and the action proceeds,
+        because the policy permits it outright and there is nothing to protect.
+        """
+        approval_id = _PRESENTED_APPROVAL.get(None)
+        if approval_id is None:
+            return None
+        try:
+            spent = self._store.consume_approval(approval_id, action.action_hash)
+        except CTRLRunError as refused:
+            _LOG.info(
+                "%s: the presented approval %s was not consumable (%s); the policy allows this "
+                "action outright, so it proceeds",
+                action.name,
+                approval_id,
+                refused,
+            )
+            return None
+        self._append(
+            EventType.APPROVAL_CONSUMED,
+            action,
+            {"approver": spent.approver, "required": False},
+            effect_key,
+            approval_id=spent.approval_id,
+        )
+        return spent
 
     def _reconciled(
         self,
@@ -1439,7 +1486,11 @@ class Control:
         presented = _PRESENTED_APPROVAL.get(None)
         if presented is not None:
             return presented
-        request = self._approvals.request(action, self._approval_ttl)
+        # SPEC-v0.6 §7.1 — the request records which policy was in force while it was built.
+        # `Control` is the only object holding both a policy and a provider, and the provider
+        # protocol takes neither, so it travels the way a presented approval does.
+        with policy_in_force(self._policy.policy_hash):
+            request = self._approvals.request(action, self._approval_ttl)
         self._append(
             EventType.APPROVAL_REQUESTED,
             action,

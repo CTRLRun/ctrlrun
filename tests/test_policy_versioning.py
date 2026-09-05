@@ -466,3 +466,258 @@ def test_T175_the_source_is_cited_and_never_interpreted() -> None:
     )
     policy = Policy.from_yaml(invented)
     assert policy.controls["card-data-handling"].source == "Entirely Fictional Standard 9000 §1.1"
+
+
+# --- §7.2: the policy changed between the grant and its consumption ----------------------------
+
+
+APPROVE_OVER = """
+schema: ctrlrun.policy/v4
+version: "before"
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: {amount_gt: 1000}
+        decision: approve
+      - decision: allow
+"""
+
+DENY_OVER = APPROVE_OVER.replace('version: "before"', 'version: "after"').replace(
+    "        decision: approve", "        decision: deny"
+)
+ALLOW_ALL = """
+schema: ctrlrun.policy/v4
+version: "after"
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+"""
+
+
+def a_refund(payment_id: str = "p1", amount: int = 90000):
+    from ctrlrun.action import Action, Principal
+
+    return Action(
+        name="stripe.refund",
+        arguments={"payment_id": payment_id, "amount": amount},
+        principal=Principal(agent="refund-agent"),
+    )
+
+
+def granted(store, action, *, at=T0, ttl=timedelta(hours=1)) -> str:
+    """A real granted approval for `action`, as `ctrlrun approve` would leave one.
+
+    Through `build_request`, so it picks up whatever `policy_in_force` is carrying -- which is
+    how every shipped provider builds one (§7.1).
+    """
+    from dataclasses import replace as _replace
+
+    from ctrlrun.approval import build_request
+
+    request = _replace(build_request(action, ttl, at), request_id=f"req_{action.action_id[-8:]}")
+    store.put_approval_request(request)
+    store.grant_approval(request.request_id, "cli:ada")
+    return request.request_id
+
+
+def status_of(store, request_id: str) -> str:
+    record = store.get_approval(request_id)
+    assert record is not None
+    return str(record.status)
+
+
+def test_T173_the_APPROVE_row_is_unchanged(tmp_path) -> None:
+    """SPEC-v0.6 §7.2, first row. The approval is consumed with the reservation
+    (`v0.1 §4.2 A4`), and the receipt records both policy hashes."""
+    from ctrlrun import Control
+    from ctrlrun.control import with_approval
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    policy = Policy.from_yaml(APPROVE_OVER)
+    control = Control(policy, store, clock=lambda: T0)
+    action = a_refund()
+    request_id = granted(store, action)
+
+    with with_approval(request_id):
+        receipt = control.execute(action, lambda: {"ok": True}, "refund:p1", lease=LEASE)
+
+    assert receipt.decision.value == "approve"
+    assert receipt.approval_id == request_id
+    assert receipt.approver == "cli:ada"
+    assert status_of(store, request_id) == "consumed"
+    assert receipt.policy_hash == policy.policy_hash
+    store.close()
+
+
+def test_T173_the_DENY_row_refuses_and_leaves_the_approval_granted(tmp_path) -> None:
+    """§7.2's second row, and §7.2.1's argument for it.
+
+    A human's answer is not spent on an action that did not run. The token authorizes nothing on
+    its own -- `v0.1 §4.2 A1` binds it to one `action_hash`, and the policy is re-evaluated on
+    every presentation -- so while the policy says `DENY` the approval opens nothing, and if the
+    policy is corrected it opens exactly the action it was granted for.
+    """
+    from ctrlrun import Control
+    from ctrlrun.control import with_approval
+    from ctrlrun.errors import ActionDenied
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    action = a_refund()
+    request_id = granted(store, action)
+
+    # Granted under the old policy; presented under one that now denies.
+    control = Control(Policy.from_yaml(DENY_OVER), store, clock=lambda: T0)
+    with pytest.raises(ActionDenied), with_approval(request_id):
+        control.execute(action, lambda: {"ok": True}, "refund:p1", lease=LEASE)
+
+    assert status_of(store, request_id) == "granted", (
+        "a policy edit spent a human's answer on an action that did not run"
+    )
+
+    # And the correction restores exactly what was approved -- the whole of §7.2.1's second
+    # bullet, which would be an assertion about nothing if the grant had been consumed above.
+    fixed = Control(Policy.from_yaml(APPROVE_OVER), store, clock=lambda: T0)
+    with with_approval(request_id):
+        receipt = fixed.execute(action, lambda: {"ok": True}, "refund:p1", lease=LEASE)
+    assert receipt.decision.value == "approve"
+    assert status_of(store, request_id) == "consumed"
+    store.close()
+
+
+def test_T173_the_ALLOW_row_invalidates_the_approval_it_did_not_need(tmp_path) -> None:
+    """§7.2's third row. **This is a change to shipped behaviour and the reason §7.2 exists.**
+
+    Today a re-evaluation that returns `ALLOW` leaves `approval_id` unset, so the presented
+    approval is never consumed: it stays `granted` for its full TTL, for a hash that a later
+    policy edit could make `APPROVE`-requiring again -- a live bearer token for an action a human
+    already answered. `v0.1 §4.1` calls a request id a bearer token in as many words.
+
+    The old behaviour is asserted to be gone, not merely the new one to be present.
+    """
+    from ctrlrun import Control
+    from ctrlrun.control import with_approval
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    action = a_refund()
+    request_id = granted(store, action)
+
+    control = Control(Policy.from_yaml(ALLOW_ALL), store, clock=lambda: T0)
+    with with_approval(request_id):
+        receipt = control.execute(action, lambda: {"ok": True}, "refund:p1", lease=LEASE)
+
+    assert receipt.decision.value == "allow"
+    assert status_of(store, request_id) != "granted", (
+        "an ALLOW re-evaluation left the presented approval live for its full TTL; that is the "
+        "bearer token this row exists to close"
+    )
+    assert status_of(store, request_id) == "consumed"
+    # §7.2.2's third step: the evidence says a human answered and the policy did not require it.
+    assert receipt.approval_id == request_id
+    assert receipt.approver == "cli:ada"
+    store.close()
+
+
+@pytest.mark.parametrize("broken", ["expired", "consumed", "denied"])
+def test_T173c_an_ALLOW_action_is_never_refused_by_the_approval_it_did_not_need(
+    tmp_path, broken
+) -> None:
+    """SPEC-v0.6 §7.2.2, and the failure its inversion exists to prevent.
+
+    An earlier draft said *consumed anyway, in the same transaction*, which would have added a
+    refusal path to the permissive decision: `consume_approval_and_reserve` checks the approval
+    **first** (`v0.1 §4.2 A4`), so an approval that is expired, already consumed or denied raises
+    `ApprovalMismatch` -- and **an action the policy allows is refused because of an approval it
+    did not need.**
+
+    The reachable case is ordinary: an agent retries inside `with_approval(id)` after the
+    operator relaxed the rule, the grant having been spent on the first attempt.
+    """
+    from ctrlrun import Control
+    from ctrlrun.control import with_approval
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    action = a_refund()
+
+    if broken == "expired":
+        request_id = granted(store, action, ttl=timedelta(seconds=1))
+        clock = lambda: T0 + timedelta(hours=2)  # noqa: E731 - the point is the moved clock
+    elif broken == "consumed":
+        request_id = granted(store, action)
+        store.consume_approval(request_id, action.action_hash)
+        clock = lambda: T0  # noqa: E731
+    else:
+        from ctrlrun.approval import ApprovalRequest
+
+        request = ApprovalRequest(
+            request_id="req_denied",
+            action_hash=action.action_hash,
+            action=action,
+            created_at=T0,
+            expires_at=T0 + timedelta(hours=1),
+        )
+        store.put_approval_request(request)
+        store.deny_approval(request.request_id, "cli:ada")
+        request_id = request.request_id
+        clock = lambda: T0  # noqa: E731
+
+    ran: list[str] = []
+    control = Control(Policy.from_yaml(ALLOW_ALL), store, clock=clock)
+    with with_approval(request_id):
+        receipt = control.execute(
+            action, lambda: ran.append("ran") or {"ok": True}, "refund:p1", lease=LEASE
+        )
+
+    assert ran == ["ran"], (
+        f"an ALLOW action was refused because its presented approval was {broken}; the policy "
+        "permits this action outright and the approval is not an input to that"
+    )
+    assert receipt.decision.value == "allow"
+    assert receipt.result.value == "committed"
+    record = store.get_effect("refund:p1")
+    assert record is not None and record.state.value == "committed"
+    store.close()
+
+
+def test_T174_both_policy_hashes_are_recorded_and_differ_when_they_should(tmp_path) -> None:
+    """SPEC-v0.6 §7.1's second half, and §8's T174.
+
+    `policy_hash_at_approval` is the hash that was in force when the approval was **granted**,
+    carried on the approval record. Where it differs from the receipt's `policy_hash`, the policy
+    changed between the grant and its consumption -- which is the thing §7.2's table is about,
+    and which no other field can say.
+    """
+    from ctrlrun import Control
+    from ctrlrun.approval import policy_in_force
+    from ctrlrun.control import with_approval
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    before = Policy.from_yaml(APPROVE_OVER)
+    action = a_refund()
+
+    # Granted while `before` was in force. `Control` stamps the hash on the request it creates,
+    # which is what `policy_in_force` carries -- the store has no policy and §9.4's argument
+    # against giving evidence commands one applies to providers too.
+    with policy_in_force(before.policy_hash):
+        request_id = granted(store, action)
+    recorded = store.get_approval(request_id)
+    assert recorded is not None
+    assert recorded.policy_hash_at_approval == before.policy_hash
+
+    # Consumed under a policy that still approves, and is a different document.
+    after = Policy.from_yaml(APPROVE_OVER.replace("amount_gt: 1000", "amount_gt: 2000"))
+    assert after.policy_hash != before.policy_hash
+    with with_approval(request_id):
+        receipt = Control(after, store, clock=lambda: T0).execute(
+            action, lambda: {"ok": True}, "refund:p1", lease=LEASE
+        )
+
+    assert receipt.policy_hash == after.policy_hash
+    consumed = store.get_approval(request_id)
+    assert consumed is not None
+    assert consumed.policy_hash_at_approval == before.policy_hash
+    assert consumed.policy_hash_at_approval != receipt.policy_hash, (
+        "the policy changed between the grant and its consumption and nothing records it"
+    )
+    store.close()
