@@ -9,6 +9,28 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`docs/SPEC-v0.6.md`** — the v0.6 "Durable runtime" contract, a delta over v0.1–v0.5. No code
+  lands with it. It asks one question: *does it still hold when the process dies, the host goes
+  away, and the database is somewhere else?* Every guarantee shipped so far is a guarantee about
+  one process holding one SQLite file, and `BEGIN IMMEDIATE` is a whole-database write lock on a
+  local file; take the file away and the promise has to be re-earned with a different mechanism.
+  Tests come from §8; public names are frozen in §9.
+
+### Changed
+
+- **`docs/ROADMAP.md`'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the
+  slash was the problem.** A chain detects **alteration**; a signature proves **origin**, and
+  proving origin brings key generation, rotation and revocation with it — which is issuing, and
+  this project verifies what it is handed. Signing is out of scope for v0.6 (`SPEC-v0.6.md` §11).
+  Corrected in the same commit as the specification, on the rule `SPEC-v0.4.md` §9.4 set.
+- **`docs/THREAT_MODEL.md`'s "Receipts are not signed; a database admin can alter history
+  (v0.6)"** promised something v0.6 does not deliver. Rewritten to say which half v0.6 closes —
+  the partial tamper: an `UPDATE` on one row, a `DELETE` from the middle, a reordering, a
+  truncation — and which half it does not: authorship, an adversary who can rewrite every row
+  including the chain head, and the question of whether every action wrote a receipt at all.
+
 ## [0.5.0] - 2026-09-05 — Adapter contract
 
 v0.4 asked *does it hold in my setup?* v0.5 asks a narrower and harder question: **can somebody
