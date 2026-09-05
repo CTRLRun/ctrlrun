@@ -22,14 +22,14 @@ Regenerated for: **v0.5.0**, with rows re-pointed on `main` since. Line numbers 
 | Claim | Code | Proof |
 |---|---|---|
 | "Transaction safety for AI-agent actions" | `Control.execute` — `control.py:528` drives reserve → execute → commit/fail/ambiguous over `EffectState` (`effect.py:67`) | `test_T1_a_lost_response_leaves_the_effect_ambiguous` |
-| "Agents can retry. Your refund shouldn't." | A retry against an `AMBIGUOUS` key is refused — `effect.py:179`, the one place `plan_reservation` decides it for both stores | `test_T1_a_blind_retry_is_refused_and_never_reaches_the_remote` |
+| "Agents can retry. Your refund shouldn't." | A retry against an `AMBIGUOUS` key is refused — `effect.py:156`, the one place `plan_reservation` decides it for every store | `test_T1_a_blind_retry_is_refused_and_never_reaches_the_remote` |
 | "open-source" | Apache-2.0 `LICENSE`; `license = "Apache-2.0"` in `pyproject.toml` | n/a — licence file |
 | "controlling consequential AI-agent actions" | `@protect` — `control.py:1789`; `context()` — `control.py:132` | `test_T6_unknown_action_raises_ActionDenied_with_reason_unknown_action` |
 | "what an agent can do autonomously, what requires human approval, and what is blocked" | `Decision.ALLOW / APPROVE / DENY` — `policy.py:125`. Exactly three members. | `test_T6_unknown_action_is_denied_with_reason_unknown_action` |
 | "binds approvals to the exact action" | `ApprovalRequest.action_hash` — `approval.py:81`; `consume_approval(approval_id, action_hash)` — `approval.py:278` | `test_T2_a_mutated_action_presenting_the_approval_raises_ApprovalMismatch`, `test_T2_any_material_change_invalidates_the_approval` |
-| "blocks duplicate execution attempts for the same logical effect" | `reserve_effect` — `state.py:348`, decided inside the `BEGIN IMMEDIATE` of `_authorize_and_reserve` (`state.py:1323`) against `effect_key TEXT PRIMARY KEY` (`migrations.py:107`; `COLLATE "C"` on Postgres, §4.4) | `test_T3_exactly_one_agent_reserves_and_seven_are_blocked` (8 OS processes), `test_T3_the_fake_remote_is_called_exactly_once` |
+| "blocks duplicate execution attempts for the same logical effect" | `reserve_effect` — `state.py:352`, decided inside the `BEGIN IMMEDIATE` of `_authorize_and_reserve` (`state.py:1327`) against `effect_key TEXT PRIMARY KEY` (`migrations.py:107`; `COLLATE "C"` on Postgres, §4.4) | `test_T3_exactly_one_agent_reserves_and_seven_are_blocked` (8 OS processes), `test_T3_the_fake_remote_is_called_exactly_once` |
 | "stops blind retries when an execution outcome is uncertain" | Only `NotExecuted` maps to `FAILED` — `control.py:959`. Every other exception, timeouts included, yields `AMBIGUOUS`. | `test_T1_a_blind_retry_writes_a_blocked_receipt`, `test_T1_the_ambiguous_record_survives_the_blocked_retry` |
-| "records what actually happened" | `ReceiptResult` — `receipt.py:85`; `Event` — `receipt.py:144`; JSONL `append_event` — `state.py:575` | `test_T11_every_demo_receipt_carries_every_field_in_the_spec`, `test_T11_every_demo_receipt_parses_back_into_a_Receipt` |
+| "records what actually happened" | `ReceiptResult` — `receipt.py:85`; `Event` — `receipt.py:144`; JSONL `append_event` — `state.py:579` | `test_T11_every_demo_receipt_carries_every_field_in_the_spec`, `test_T11_every_demo_receipt_parses_back_into_a_Receipt` |
 | "Autonomy belongs to the action, not the agent." | `Policy.evaluate(action)` — `policy.py:368` — passes only the action's **name and arguments** to `_ActionPolicy.evaluate` (`policy.py:254`), whose signature has no principal in it. A rule cannot read who is acting even by accident. `agent_eq` and `user_eq` are refused at load by `RESERVED_ARGUMENTS` (`policy.py:104`) rather than silently matching nothing. | `test_T6_an_action_name_is_matched_exactly`, `test_a_condition_naming_an_action_field_is_refused_at_load` |
 
 
@@ -68,7 +68,7 @@ way — and the four the README deliberately *does not* say are below.
 | "narrow it at runtime with `ctrlrun delegate`" | `Control.delegate` — `control.py:1468`; `Authority.plan_delegation` — `authority.py:878`; `ctrlrun delegate` — `cli/main.py:660` | `test_t75_the_delegation_authorizes_an_action_within_its_limits` |
 | "provably a subset of its parent on every dimension, at creation and again at every evaluation" | `contained_dimension` — `authority.py:604` — runs from `plan_delegation` (`authority.py:878`) **and** from the chain walk in `Authority.evaluate` (`authority.py:807`) | `test_t76_each_dimension_violated_alone`, `test_t77b_a_narrowed_parent_narrows_its_children` |
 | "Omitting a dimension the parent constrains is rejected, not inherited" | `contained_dimension` treats an absent child dimension as unconstrained and therefore wider — `authority.py:604`; the subject half is `_subject_contained` (`authority.py:635`) | `test_t81_omission_is_not_unlimited`, `test_T73b_a_subject_addressed_to_every_principal_is_refused`, `test_t76_each_dimension_violated_alone` |
-| "`ctrlrun revoke` cuts a chain of any depth with one write" | `Control.revoke` — `control.py:1484` — writes one row (`state.py:1063`) and visits no children; every evaluation walks to the root | `test_t78_a_revoked_parent_denies_its_grandchild`, `test_put_delegation_is_never_an_upsert` |
+| "`ctrlrun revoke` cuts a chain of any depth with one write" | `Control.revoke` — `control.py:1484` — writes one row (`state.py:1067`) and visits no children; every evaluation walks to the root | `test_t78_a_revoked_parent_denies_its_grandchild`, `test_put_delegation_is_never_an_upsert` |
 | "`mode: observe` … records what *would* have been blocked, without blocking anything" | `_parse_mode` — `policy.py:405`; `Control._observed` — `control.py:701`; `_WouldHave` — `receipt.py:180`; `ReceiptResult.OBSERVED` — `receipt.py:101` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_a_duplicate_is_recorded_and_still_runs` |
 | "One top-level line" | `mode:` is refused anywhere but the top level — `reject_nested_mode`, `policy.py:424` | `test_T84_mode_is_refused_anywhere_but_the_top_level` |
 | "`ctrlrun stats` gives you the numbers" | `stats` — `cli/main.py:500`; counted from `would_have.blocked_reason` and nothing else | `test_T86_stats_counts_what_observe_mode_recorded`, `test_T86_stats_reaches_no_network` |
@@ -135,7 +135,7 @@ The README also makes two negative claims. They matter as much as the positive o
 | Claim | Where it holds |
 |---|---|
 | "CTRLRun cannot guarantee exactly-once execution against external systems it doesn't control." | Stated, not implemented — see `THREAT_MODEL.md`, "Out of scope". CTRLRun never asserts what a remote did; only `NotExecuted`, raised by the executor, claims that. |
-| "It will not *knowingly* execute the same logical effect twice, and will never treat an unknown outcome as a failure." | `effect.py:179` (refuse retry on `AMBIGUOUS`) and `control.py:959` (only `NotExecuted` → `FAILED`) |
+| "It will not *knowingly* execute the same logical effect twice, and will never treat an unknown outcome as a failure." | `effect.py:191` (refuse retry on `AMBIGUOUS`) and `control.py:959` (only `NotExecuted` → `FAILED`) |
 
 ## Demo output
 

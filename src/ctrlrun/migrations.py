@@ -277,11 +277,21 @@ _RECEIPT_CHAIN_PG: Final = (
     "ON CONFLICT (id) DO NOTHING",
 )
 
+#: SPEC-v0.6 §3.7, §5.3. `effects.resolved_by`: which authority moved a record out of
+#: `AMBIGUOUS`. Nullable and not backfilled -- a record resolved before this column existed was
+#: resolved by somebody the store did not write down, and inventing a value for it would be
+#: asserting provenance nobody has.
+_RESOLVED_BY: Final = ("ALTER TABLE effects ADD COLUMN resolved_by TEXT",)
+_RESOLVED_BY_PG: Final = (
+    'ALTER TABLE effects ADD COLUMN IF NOT EXISTS resolved_by TEXT COLLATE "C"',
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001_baseline", _BASELINE, postgres=_BASELINE_PG),
     Migration("0002_receipt_chain", _RECEIPT_CHAIN, postgres=_RECEIPT_CHAIN_PG),
+    Migration("0003_resolved_by", _RESOLVED_BY, postgres=_RESOLVED_BY_PG),
 )
 
 HEAD: Final = MIGRATIONS[-1].id

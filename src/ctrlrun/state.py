@@ -276,12 +276,16 @@ def _resolved(
     about what happened, and the evidence should say it was one.
     """
     note = f"resolved {state} by {resolver}"
-    return _transitioned(
-        record,
-        state,
-        now,
-        result=record.result,
-        error=note if record.error is None else f"{note} (was: {record.error})",
+    return replace(
+        _transitioned(
+            record,
+            state,
+            now,
+            result=record.result,
+            error=note if record.error is None else f"{note} (was: {record.error})",
+        ),
+        # SPEC-v0.6 §5.3: queryable, and not buried in the executor's error text.
+        resolved_by=resolver,
     )
 
 
@@ -1548,12 +1552,13 @@ class SQLiteStateStore:
             lease_expires_at=_at(row["lease_expires_at"]),
             result=_result_value(row["result_json"]),
             error=row["error"],
+            resolved_by=row["resolved_by"],
         )
 
     def _write_effect(self, connection: sqlite3.Connection, record: EffectRecord) -> None:
         connection.execute(
             "UPDATE effects SET state=?, action_id=?, attempt=?, lease_expires_at=?, "
-            "result_json=?, error=?, updated_at=? WHERE effect_key=?",
+            "result_json=?, error=?, updated_at=?, resolved_by=? WHERE effect_key=?",
             (
                 str(record.state),
                 record.action_id,
@@ -1562,6 +1567,7 @@ class SQLiteStateStore:
                 _result_json(record.result),
                 record.error,
                 _iso(record.updated_at),
+                record.resolved_by,
                 record.effect_key,
             ),
         )

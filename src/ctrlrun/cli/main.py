@@ -42,6 +42,9 @@ from .demo import run_demo
 #: Who the CLI records as the answer's author. Free text in v0.1 (SPEC-v0.1 §4.1).
 CLI_APPROVER: Final = "cli:local"
 
+#: The two states that hold a lease, and so the two whose lease can lapse (v0.1 §5.3 E3).
+_LEASED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING})
+
 #: SPEC-v0.3 §6.5 — printed to stderr, before anything else, by every command that loads the
 #: operator's policy, on every invocation. To stderr so a `--json` stdout stays
 #: machine-readable and a pipeline cannot silently swallow it; on every invocation because a
@@ -1011,11 +1014,31 @@ def _receipt_line(receipt: Receipt) -> str:
     )
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _effect_line(record: EffectRecord) -> str:
-    return (
+    """One effect, with the two things the state alone does not say (SPEC-v0.6 §5.2, §5.3).
+
+    **An expired lease is shown as expired.** Nothing sweeps, so a lease that lapses and is never
+    contended stays `EXECUTING` in the table indefinitely -- and an operator reading `executing`
+    cannot tell it from live work. `EffectRecord.lease_is_live` already answers the question; the
+    line just stopped hiding it. This is a display change and not a transition: `list_effects` is
+    a read and reads never move anything.
+
+    **And who resolved it**, where somebody did, because a human overriding the kernel and a
+    reconcile hook answering are different authorities (§5.3).
+    """
+    line = (
         f"{record.effect_key}  {record.state}  attempt {record.attempt}  "
         f"{record.action_id}  {iso_timestamp(record.updated_at)}"
     )
+    if record.state in _LEASED and not record.lease_is_live(_utc_now()):
+        line += "  (lease expired)"
+    if record.resolved_by is not None:
+        line += f"  resolved by {record.resolved_by}"
+    return line
 
 
 if __name__ == "__main__":  # pragma: no cover

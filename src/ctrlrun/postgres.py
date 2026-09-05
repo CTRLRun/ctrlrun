@@ -213,9 +213,17 @@ class PostgresStateStore:
     """Approvals, effects and evidence in a Postgres schema (SPEC-v0.6 §4).
 
     One connection per thread, as `SQLiteStateStore` does: `psycopg` connections are not
-    thread-safe. A broken connection is replaced only between transactions and for the re-read --
-    never silently mid-transaction, because a reconnect is a new transaction and pretending
-    otherwise is how a partial write becomes invisible.
+    thread-safe, and the thread-local shape is the one `close()` is already specified against
+    (§2.7).
+
+    **A connection outlives the thread that opened it, and that is a real limit worth stating.**
+    A host running agents on a *bounded, recycled* thread pool is fine -- the same threads keep
+    reusing the same connections. A host that starts a fresh thread per unit of work accumulates
+    one connection per thread that ever touched the store, and Postgres connections are far
+    scarcer than SQLite file handles: `max_connections` defaults to 100. `close()` releases every
+    one, so the mitigation is to close a store you are done with. The conformance suite met this
+    for real -- ninety-six connections across twelve rounds of eight threads -- and the failure
+    surfaced in a case that had nothing to do with it.
 
     No pool ships. An operator may put pgbouncer in front in **transaction** mode, and it works
     because this store holds nothing session-scoped: no advisory lock, no temp table, no prepared
@@ -450,7 +458,8 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT effect_key, state, action_id, attempt, lease_expires_at, result_json, "
-                f"error, created_at, updated_at FROM {self._q}.effects WHERE effect_key = %s",
+                "error, created_at, updated_at, resolved_by "
+                f"FROM {self._q}.effects WHERE effect_key = %s",
                 (effect_key,),
             )
             row = cursor.fetchone()
@@ -466,6 +475,7 @@ class PostgresStateStore:
             error=row[6],
             created_at=datetime.fromisoformat(str(row[7])),
             updated_at=datetime.fromisoformat(str(row[8])),
+            resolved_by=row[9],
         )
 
     def _read_approval(self, connection: Any, approval_id: str) -> ApprovalRecord | None:
@@ -830,7 +840,7 @@ class PostgresStateStore:
             cursor.execute(
                 f"UPDATE {self._q}.effects SET "
                 f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
-                "result_json=%s, error=%s, updated_at=%s "
+                "result_json=%s, error=%s, updated_at=%s, resolved_by=%s "
                 "WHERE effect_key=%s AND action_id=%s AND state=%s",
                 (
                     str(record.state),
@@ -840,6 +850,7 @@ class PostgresStateStore:
                     _result_json(record.result),
                     record.error,
                     _iso(record.updated_at),
+                    record.resolved_by,
                     record.effect_key,
                     expected.action_id,
                     str(expected.state),

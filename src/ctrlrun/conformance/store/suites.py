@@ -218,9 +218,14 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
     §2.7 records the correction.
     """
     title = reservation_e1_in_process.title
-    store = backend.open()
 
     for round_number in range(ROUNDS):
+        # A store per round, closed at the end of it. Each round starts `processes` fresh
+        # threads, and a thread-local connection outlives the thread that opened it -- so one
+        # store across twelve rounds accumulated ninety-six connections and the backend ran out
+        # of slots. The failure surfaced in this case and had nothing to do with it, which is
+        # exactly how a resource leak announces itself.
+        store = backend.open()
         key = f"refund:e1-{round_number}"
         barrier = threading.Barrier(processes)
         won: list[str] = []
@@ -234,6 +239,7 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
             lock: threading.Lock = lock,
             won: list[str] = won,
             refused: list[Exception] = refused,
+            store: StateStore = store,
         ) -> None:
             # Every per-round object is bound as a default. They are rebuilt each round, and a
             # closure over the loop variable would have a thread from round N appending to
@@ -281,6 +287,7 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
         record = store.get_effect(key)
         if record is None or record.action_id != won[0]:
             return failed("e1-in-process", title, "the record does not name the winner")
+        store.close()
     return passed("e1-in-process", title)
 
 

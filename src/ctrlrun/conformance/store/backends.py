@@ -7,6 +7,7 @@ because a seam in shipping code that exists only for a test is what §1.1's last
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -245,7 +246,19 @@ class PostgresBackend:
         return f"{self._url}{joiner}{SCHEMA_PARAM}={self._schema}"
 
     def reset(self) -> None:
+        """Close every store and **drop the schema they used**.
+
+        A review counted 1137 `conf_*` schemas left in one database after a handful of runs: the
+        backend made one per case and dropped none. In CI the service is ephemeral and it does
+        not matter; in a developer's or an operator's database it does, and the catalogue bloat
+        eventually shows up as something else entirely -- here it was `remaining connection slots
+        are reserved`, reported by a case that had nothing to do with it.
+        """
+        from ...postgres import PostgresStateStore
+
         for store in self._open:
             store.close()
         self._open.clear()
+        with contextlib.suppress(Exception):
+            PostgresStateStore.drop_schema(self._url, self._schema)
         self._serial += 1
