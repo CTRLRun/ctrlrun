@@ -743,6 +743,30 @@ def test_T125b_importing_ctrlrun_verify_pulls_in_no_module_from_an_extra():
 # --- the registry itself ------------------------------------------------------------------
 
 
+def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
+    """SPEC-v0.6 §6.6, and the claim `g11`'s docstring makes about itself.
+
+    A receipt is written for every terminal outcome, a denial included, so a policy that denies
+    everything still produces a chain to check. Two earlier versions of `g11` narrowed the
+    selection and made the docstring false -- first by requiring an `effect:` template, then by
+    taking `select()`'s `ALLOW`/`APPROVE` default -- and a review found the second.
+
+    `not applicable is not a pass`, so a guarantee excused for a reason that has nothing to do
+    with the operator's configuration is the shape this asserts against.
+    """
+    path = _write(
+        tmp_path, "schema: ctrlrun.policy/v1\nactions:\n  stripe.refund:\n    decision: deny\n"
+    )
+    report = run(path, only=("G11",))
+    result = _by_id(report)["G11"]
+
+    assert result.status is Status.PASS, (
+        f"G11 reported {result.status} on an all-deny policy (reason={result.reason!r}); a "
+        "denied action still writes a receipt and the chain is about receipts"
+    )
+    assert result.action == "stripe.refund"
+
+
 def test_the_catalogue_is_closed_and_ordered():
     assert reg.CATALOGUE == "ctrlrun.guarantees/v2"
     assert [guarantee.id for guarantee in reg.GUARANTEES] == [f"G{n}" for n in range(1, 12)]

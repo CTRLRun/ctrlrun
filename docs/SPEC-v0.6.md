@@ -1362,10 +1362,29 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   If a sentence anywhere could be read as "signed", it is rewritten.
 - **Not an adversary who can rewrite every row including the head.** A database administrator with
   full write access recomputes the chain and it verifies. `THREAT_MODEL.md` already lists a
-  malicious administrator as out of scope, and v0.6 does not change that — it narrows it. What
-  the chain closes is the *partial* tamper: an `UPDATE` on one row, a `DELETE` from the middle, a
-  reordering, a truncation. What it does not close is a rewrite of the whole log by somebody who
-  can do that.
+  malicious administrator as out of scope, and v0.6 does not change that — it narrows it.
+
+  **What the chain buys is a cost, and the cost is stated exactly**, because an earlier draft of
+  this bullet described the excluded case as *"a rewrite of the whole log"* and that is not where
+  the boundary falls. Tampering with receipt *n* requires rewriting *n*, every receipt after it,
+  and the head. So:
+
+  | Where | What it costs |
+  |---|---|
+  | a receipt in the middle | rewrite it, every later receipt, and the head |
+  | the **last** receipt | **two writes**: the receipt and the head |
+  | the whole log | rewrite everything, which nothing here prevents |
+
+  The tail is protected by the head row alone, so the newest receipt — the one an incident
+  investigation reads first — is the cheapest to forge. A review measured it at two `UPDATE`s.
+  Saying "every row" would have implied a difficulty that is not there.
+
+- **Not evidence that a receipt was written by CTRLRun.** A well-formed row appended at the end,
+  with a correct `prev_hash` and a head updated to match, is indistinguishable from a real one:
+  one `INSERT` and one `UPDATE`. No chain without an external anchor can detect an append, and
+  §6.1's *"altering, deleting or reordering"* did not list insertion because insertion is not in
+  the set it closes. §11 keeps signing and anchoring out of v0.6, so this is a bound on what the
+  chain means and not a defect in it.
 - **Not a signature.** §11 has the argument.
 - **Not that every action wrote a receipt.** The chain proves that the receipts which were
   written were not altered. A receipt whose write failed (§6.3.1) leaves no gap in `seq` — the

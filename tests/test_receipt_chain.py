@@ -13,7 +13,9 @@ the head, and not evidence that every action wrote a receipt.
 from __future__ import annotations
 
 import itertools
+import os
 import unicodedata
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -23,7 +25,27 @@ from ctrlrun import Control, Policy, SQLiteStateStore
 from ctrlrun.action import Action, Principal
 from ctrlrun.approval import ApprovalRequest
 from ctrlrun.errors import InvalidArgument
-from ctrlrun.receipt import GENESIS_HASH
+from ctrlrun.policy import Decision
+from ctrlrun.receipt import GENESIS_HASH, ReceiptResult
+
+POSTGRES_URL = os.environ.get("CTRLRUN_TEST_POSTGRES")
+postgres = pytest.mark.skipif(
+    not POSTGRES_URL, reason="CTRLRUN_TEST_POSTGRES is not set; no server to run against"
+)
+
+
+@pytest.fixture
+def pg_schema():
+    """A private schema per test, created and dropped."""
+    from ctrlrun.postgres import PostgresStateStore
+
+    name = f"chain_{uuid.uuid4().hex[:12]}"
+    PostgresStateStore.create_schema(POSTGRES_URL, name)
+    try:
+        yield name
+    finally:
+        PostgresStateStore.drop_schema(POSTGRES_URL, name)
+
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 LEASE = timedelta(minutes=5)
@@ -257,9 +279,99 @@ def test_T164_an_altered_receipt_is_content_altered_at_its_seq(
     reopened.close()
 
     assert not report.ok
-    assert [(break_.name, break_.seq) for break_ in report.breaks] == [(name, at)], (
-        f"tampering with {label} was reported as {[(b.name, b.seq) for b in report.breaks]}, "
-        f"expected exactly [({name!r}, {at})]"
+    reported = [(break_.name, break_.seq) for break_ in report.breaks]
+    assert reported[0] == (name, at), (
+        f"tampering with {label} was reported as {reported}, expected ({name!r}, {at}) first"
+    )
+    # And the link the **next** receipt asserts is broken too, because receipt `at` no longer
+    # hashes to what receipt `at + 1` says it does. Both statements are true and an operator
+    # wants both: one says the document was edited, the other says the chain no longer joins.
+    #
+    # A first version asserted exactly one break here. That was written against a reader which
+    # carried the *stored* hash forward -- which hid this, and which also let one corrupted hash
+    # column accuse the innocent next receipt. Both went with the same one-line change.
+    assert ("link_broken", at + 1) in reported, (
+        f"altering receipt {at} left receipt {at + 1}'s link unquestioned: {reported}"
+    )
+
+
+@pytest.mark.parametrize("scope", ["every row", "one row"])
+def test_T164_a_missing_stored_hash_is_a_break_and_not_a_skip(tmp_path, scope) -> None:
+    """The seventh tamper, and the one the first version of this file did not have.
+
+    `content_altered` was the only check against the stored hash, and it was **skipped** rather
+    than failed when the column was `NULL`:
+
+        sqlite3 state.db "UPDATE receipts SET hash=NULL"
+        ctrlrun receipts --verify-chain
+        chain: 3 of 3 receipts verified / the chain is intact / exit 0
+
+    One statement, no `WHERE`, and the chain reports itself sound while the only independent copy
+    of every receipt's hash is gone. That is squarely inside what §6.4 says is covered -- *"an
+    `UPDATE` on one row"* -- and it is `v0.4 §3.8`'s false green exactly: a check that cannot be
+    evaluated resolved as a pass. A review found it.
+
+    `unchained` does not cover this. That name is about a receipt with no `seq`, written before
+    the chain existed; a row that has a `seq` and no `hash` was chained and has been stripped.
+    """
+    import sqlite3
+
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    a_chain(store, 3)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    where = "" if scope == "every row" else " WHERE seq = 2"
+    connection.execute(f"UPDATE receipts SET hash = NULL{where}")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert not report.ok, (
+        f"stripping the stored hash from {scope} left the chain reported intact; the check that "
+        "could not be made was resolved as a pass"
+    )
+    stripped = [break_ for break_ in report.breaks if break_.name == "hash_missing"]
+    assert stripped, f"the break was not named `hash_missing`: {report.breaks}"
+    assert stripped[0].seq == (1 if scope == "every row" else 2)
+
+
+def test_T164_a_corrupt_stored_hash_does_not_accuse_the_next_receipt(tmp_path) -> None:
+    """The link is checked against what the **document** hashes to, not against what the column
+    says it hashed to.
+
+    Trusting the column propagated a corrupt value into the next receipt's expected `prev_hash`,
+    so altering one row's hash reported `content_altered` at that row **and** `link_broken` at
+    its innocent successor. An operator reading that would go looking for two tampers.
+    """
+    import sqlite3
+
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    a_chain(store, 4)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipts SET hash = ? WHERE seq = 2", ("sha256:" + "ab" * 32,))
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert not report.ok
+    assert [(break_.name, break_.seq) for break_ in report.breaks] == [("content_altered", 2)], (
+        f"one corrupted hash column was reported as {[(b.name, b.seq) for b in report.breaks]}; "
+        "receipt 3 is untouched and its link is sound"
     )
 
 
@@ -773,4 +885,255 @@ def test_the_verify_chain_flag_never_reports_unchained_as_a_pass(tmp_path, monke
     assert "unchained" in result.output
     assert "0 of 2" in result.output, (
         f"the summary must say how many of how many were verified:\n{result.output}"
+    )
+
+
+# --- §6.2: one canonicalizer, and the chain hash uses it ---------------------------------------
+
+
+def test_the_chain_hash_is_the_canonical_form_and_not_the_stored_json(tmp_path) -> None:
+    """SPEC-v0.6 §6.2, and the one MUST in §6 that had nothing behind it.
+
+    A review replaced `canonical_bytes(self.to_dict())` with `self.to_json().encode()` -- a
+    second, non-canonical encoder, which is what §6.2 forbids **by name** -- and the whole suite
+    passed. It is not an equivalent mutant: `to_json()` has no `sort_keys`, so two receipts whose
+    `arguments` differ only in insertion order hash differently.
+
+    That would also make the two backends disagree about the same receipt, because SQLite stores
+    `to_json()` (insertion order) and Postgres stores `json.dumps(..., sort_keys=True)`. A chain
+    written on one and read on the other would report every row `content_altered`.
+    """
+    from ctrlrun.receipt import Receipt
+
+    def receipt_with(arguments: dict) -> Receipt:
+        return Receipt(
+            receipt_id="ctr_" + "1" * 12,
+            action_id="act_1",
+            action="stripe.refund",
+            action_hash="sha256:" + "0" * 64,
+            principal=Principal(agent="a"),
+            resource=None,
+            arguments=arguments,
+            environment="production",
+            decision=Decision.ALLOW,
+            decision_reason="decision",
+            result=ReceiptResult.COMMITTED,
+            started_at=T0,
+            finished_at=T0,
+            seq=1,
+            prev_hash=GENESIS_HASH,
+        )
+
+    one = receipt_with({"b": 1, "a": 2, "nested": {"z": 1, "a": 2}})
+    two = receipt_with({"a": 2, "nested": {"a": 2, "z": 1}, "b": 1})
+    assert one.to_json() != two.to_json(), (
+        "the control is void: these two receipts already serialise identically, so equal hashes "
+        "would prove nothing about sorting"
+    )
+    assert one.chain_hash() == two.chain_hash(), (
+        "two receipts differing only in key insertion order hash differently, so the chain hash "
+        "is over the stored JSON rather than the canonical form (§6.2)"
+    )
+
+
+@postgres
+def test_a_chain_written_on_one_backend_verifies_when_read_on_the_other(
+    tmp_path, pg_schema
+) -> None:
+    """The consequence of the above, end to end.
+
+    The two backends store the receipt document as different byte strings on purpose -- SQLite
+    `to_json()`, Postgres `json.dumps(..., sort_keys=True)`. The chain must not care, because it
+    recomputes the canonical form from the parsed document rather than hashing whatever was
+    stored. If it ever did care, an operator migrating a database would find every receipt
+    reported as altered.
+    """
+    from ctrlrun.postgres import PostgresStateStore
+    from ctrlrun.receipt import verify_chain
+
+    written = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    receipts = a_chain(written, 3)
+    written.close()
+
+    on_postgres = PostgresStateStore(POSTGRES_URL, schema=pg_schema, clock=lambda: T0)
+    for receipt in receipts:
+        # The same documents, re-chained by the other backend.
+        on_postgres.put_receipt(replace(receipt, seq=None, prev_hash=None, hash=None))
+    report = verify_chain(on_postgres)
+    assert report.ok, f"a chain rewritten on Postgres does not verify: {report.breaks}"
+    assert report.verified == 3
+    for original, moved in zip(receipts, on_postgres.receipts(), strict=True):
+        assert moved.chain_hash() == original.chain_hash(), (
+            "the same document hashes differently on the two backends, so the chain hash is "
+            "over the stored bytes and not the canonical form"
+        )
+    on_postgres.close()
+
+
+# --- §6.3: the head row is a lock, and what that is worth on each backend ----------------------
+
+
+def test_concurrent_receipt_writes_leave_no_gap_and_lose_nothing(tmp_path) -> None:
+    """SPEC-v0.6 §6.3, on SQLite, across threads.
+
+    Eight writers, thirty receipts each: the `seq` values must be exactly 1..240 with no gap, no
+    duplicate, and nothing lost. §6.3's whole argument is that a compare-and-set here would drop
+    receipts under contention, and until now nothing drove `put_receipt` concurrently on any
+    backend at all -- the design decision the item argues hardest for was untested.
+
+    **On SQLite the unconditional `UPDATE` is a subsumed guard, and this test says so rather than
+    implying otherwise.** `BEGIN IMMEDIATE` already holds the database write lock, so replacing
+    the head update with a compare-and-set changes nothing here; a review measured 240/240 either
+    way. It is load-bearing on Postgres, which is the case below. Reporting this row as evidence
+    for the lock would be a subsumed guard reported as a defence -- a check that can only fire
+    where a later one already would, with the same observable result.
+    """
+    import threading
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    writers, each = 8, 30
+    barrier = threading.Barrier(writers)
+    errors: list[BaseException] = []
+
+    def write(index: int) -> None:
+        barrier.wait(timeout=30)
+        for number in range(each):
+            try:
+                store.put_receipt(_a_receipt(f"ctr_{index:02d}{number:04d}"))
+            except BaseException as broke:
+                errors.append(broke)
+
+    threads = [threading.Thread(target=write, args=(index,)) for index in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+
+    assert errors == [], f"{len(errors)} writers raised: {errors[:3]}"
+    seqs = sorted(receipt.seq for receipt in store.receipts())
+    assert seqs == list(range(1, writers * each + 1)), (
+        f"{len(seqs)} receipts with seqs {seqs[:5]}...{seqs[-3:]}; a gap or a duplicate means a "
+        "receipt was dropped or numbered twice under contention"
+    )
+    from ctrlrun.receipt import verify_chain
+
+    assert verify_chain(store).ok
+    store.close()
+
+
+@postgres
+def test_concurrent_receipt_writes_across_processes_lose_nothing(tmp_path, pg_schema) -> None:
+    """§6.3 on Postgres, across **processes**, which is where the lock is load-bearing.
+
+    Replacing the unconditional head `UPDATE` with a compare-and-set here is not equivalent and
+    not subtle: a review measured **82 of 120 receipts lost** to `UniqueViolation`. Postgres has
+    no `BEGIN IMMEDIATE`, so the row lock is the only thing serialising two unrelated actions --
+    which §6.3 names as the first place in the kernel where that happens.
+    """
+    import json
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+    from pathlib import Path
+
+    writers, each = 6, 20
+    child = textwrap.dedent(f"""
+        import json, sys
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+        from datetime import UTC, datetime
+        from ctrlrun.postgres import PostgresStateStore
+        from ctrlrun.receipt import Receipt, ReceiptResult
+        from ctrlrun.action import Principal
+        from ctrlrun.policy import Decision
+
+        job = json.loads(sys.stdin.read())
+        T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        store = PostgresStateStore(job["url"], schema=job["schema"], clock=lambda: T0)
+        wrote, failed = [], []
+        for number in range({each}):
+            try:
+                written = store.put_receipt(Receipt(
+                    receipt_id="ctr_%02d%04d" % (job["index"], number),
+                    action_id="act_1", action="stripe.refund",
+                    action_hash="sha256:" + "0" * 64, principal=Principal(agent="a"),
+                    resource=None, arguments={{}}, environment="production",
+                    decision=Decision.ALLOW, decision_reason="decision",
+                    result=ReceiptResult.COMMITTED, started_at=T0, finished_at=T0,
+                ))
+                wrote.append(written.seq)
+            except BaseException as broke:
+                failed.append(type(broke).__name__)
+        store.close()
+        sys.stdout.write(json.dumps({{"wrote": wrote, "failed": failed}}))
+    """)
+
+    with tempfile.TemporaryDirectory() as home:
+        script = Path(home) / "writer.py"
+        script.write_text(child, encoding="utf-8")
+        payloads = [
+            json.dumps({"url": POSTGRES_URL, "schema": pg_schema, "index": index})
+            for index in range(writers)
+        ]
+        children = [
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in payloads
+        ]
+        try:
+            for process, payload in zip(children, payloads, strict=True):
+                assert process.stdin is not None
+                process.stdin.write(payload)
+                process.stdin.close()
+            results = []
+            for process in children:
+                process.wait(timeout=120)
+                assert process.stdout is not None and process.stderr is not None
+                raw = process.stdout.read()
+                assert raw.strip(), f"a writer said nothing: {process.stderr.read()[-400:]}"
+                results.append(json.loads(raw))
+        finally:
+            for process in children:
+                if process.poll() is None:
+                    process.kill()
+
+    assert all(result["failed"] == [] for result in results), (
+        f"writers raised: {[r['failed'] for r in results if r['failed']]}"
+    )
+    from ctrlrun.postgres import PostgresStateStore
+    from ctrlrun.receipt import verify_chain
+
+    store = PostgresStateStore(POSTGRES_URL, schema=pg_schema, clock=lambda: T0)
+    seqs = sorted(receipt.seq for receipt in store.receipts())
+    assert seqs == list(range(1, writers * each + 1)), (
+        f"{len(seqs)} of {writers * each} receipts survived; a compare-and-set here loses them "
+        "to UniqueViolation, which is what §6.3 takes the row lock to prevent"
+    )
+    assert verify_chain(store).ok
+    store.close()
+
+
+def _a_receipt(receipt_id: str):
+    from ctrlrun.receipt import Receipt
+
+    return Receipt(
+        receipt_id=receipt_id,
+        action_id="act_1",
+        action="stripe.refund",
+        action_hash="sha256:" + "0" * 64,
+        principal=Principal(agent="a"),
+        resource=None,
+        arguments={},
+        environment="production",
+        decision=Decision.ALLOW,
+        decision_reason="decision",
+        result=ReceiptResult.COMMITTED,
+        started_at=T0,
+        finished_at=T0,
     )

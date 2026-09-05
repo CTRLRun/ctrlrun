@@ -392,7 +392,7 @@ def _report_chain(store: StateStore, *, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(report.to_dict(), ensure_ascii=False, separators=(",", ":")))
     else:
-        total = report.verified + report.unchained
+        total = report.chained + report.unchained
         click.echo(f"chain: {report.verified} of {total} receipts verified")
         if report.unchained:
             click.echo(f"       {report.unchained} written before the chain existed (unchained)")

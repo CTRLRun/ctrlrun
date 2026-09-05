@@ -1933,10 +1933,13 @@ class Engine:
     def g11(self) -> GuaranteeResult:
         """SPEC-v0.6 §6.6. The receipt chain, against the scratch store verify created.
 
-        **Applicable to every v0.6 configuration**, because the store it uses is one verify made
-        (`v0.4 §3.5`): there is no operator setting that can make this N/A, which is what §11
-        asks of a guarantee that would otherwise be excused for a reason having nothing to do
-        with the deployment. `ctrlrun receipts --verify-chain` is the one that reads the
+        **Applicable to every configuration that declares an action at all**, because the store
+        it uses is one verify made (`v0.4 §3.5`) and because a receipt is written for every
+        terminal outcome, a denial included. The one N/A left is a policy with no actions in it,
+        which is not a deployment. That is what §11 asks of a guarantee that would otherwise be
+        excused for a reason having nothing to do with the operator's configuration.
+
+        `ctrlrun receipts --verify-chain` is the one that reads the
         operator's own store, and §6.6 keeps the two apart.
 
         Two halves, and the second is `v0.4 §1.3`'s required positive control. **Without it a
@@ -1948,17 +1951,19 @@ class Engine:
         checks is therefore the detector and the chain the store actually wrote -- a store that
         never chained fails the control half, and a detector that never detects fails this one.
         """
-        # No `needs_effect`: a receipt is written for every action that reaches a terminal
-        # state, and the chain is about receipts. Requiring an `effect:` template would have made
-        # this N/A on any policy that declares none -- and the docstring above says it is
-        # applicable to every configuration, which is a claim that has to be true of the code.
-        selection = self.select()
+        # No `needs_effect`, and **`DENY` among the decisions**: a receipt is written for every
+        # action that reaches a terminal state, denials included, and the chain is about
+        # receipts. Two earlier versions narrowed this and made the docstring above false --
+        # first by requiring an `effect:` template, then by taking `select()`'s default, which
+        # is `ALLOW` and `APPROVE` and so went N/A on a policy that denies everything. A review
+        # found the second. A claim that a guarantee is never N/A has to be true of the code.
+        selection = self.select(decisions=(Decision.ALLOW, Decision.APPROVE, Decision.DENY))
         if selection is None:
-            return self.na("G11", reg.EVERY_ACTION_DENIED)
+            return self.na("G11", reg.NO_ACTIONS)
         control, store, recorder, _ = self._control_for("G11", selection)
 
         def body(detail: dict[str, Any]) -> None:
-            written: list[Receipt] = []
+            returned: list[Receipt] = []
             for index in range(3):
                 action = selection.build()
                 key = (
@@ -1966,14 +1971,23 @@ class Engine:
                     if selection.effect_key is None
                     else f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-chain-{index}"
                 )
-                receipt = self.execute(
-                    control,
-                    action,
-                    _Executor(lambda: f"{APPROVER}-result"),
-                    key,
-                    self.approve(control, store, action, selection),
-                )
-                written.append(receipt)
+                # A denied action raises and still writes its receipt, which is the whole reason
+                # `DENY` is an acceptable selection here: the chain does not care what the
+                # decision was, only that a receipt reached the store.
+                with suppress(CTRLRunError):
+                    returned.append(
+                        self.execute(
+                            control,
+                            action,
+                            _Executor(lambda: f"{APPROVER}-result"),
+                            key,
+                            self.approve(control, store, action, selection),
+                        )
+                    )
+            # From the store, because a denied action raises and returns nothing while still
+            # writing its receipt. `returned` is what `put_receipt` handed back, which is a
+            # different claim and is checked separately below.
+            written = list(store.receipts())
 
             # The control, first: the chain the store just wrote must verify. A store that
             # assigned no `seq` at all, or a detector that always says "broken", dies here.
@@ -1985,13 +1999,21 @@ class Engine:
             )
             _expect_control(
                 all(item.seq is not None and item.hash is not None for item in written),
-                "every receipt came back with its place in the chain",
-                "a receipt has no seq or no hash",
+                "every stored receipt has its place in the chain",
+                "a stored receipt has no seq or no hash",
+            )
+            # And what the caller was handed carries it too (§6.3). Without this a store could
+            # chain correctly and return an unchained receipt, and every sink would export a
+            # document with no `seq` -- which §6.4's "verifiable by recomputation" rests on.
+            _expect_control(
+                all(item.seq is not None and item.hash is not None for item in returned),
+                "every receipt `put_receipt` returned carries its place in the chain",
+                "put_receipt returned a receipt with no seq or no hash",
             )
 
             # Now alter one, exactly as §6.5's first row describes, and require the break to be
             # **named** and placed. "Invalid" would be a chain that only catches the easy case.
-            receipts = list(store.receipts())
+            receipts = written
             target = next(item for item in receipts if item.seq == written[1].seq)
             altered = replace(target, decision_reason=f"{target.decision_reason}-altered")
             view = _AlteredChain(

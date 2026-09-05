@@ -441,6 +441,7 @@ class JSONLEventSink:
 #: at a `seq`, never as a bare "invalid".
 CHAIN_BREAKS: Final = (
     "content_altered",
+    "hash_missing",
     "link_broken",
     "missing",
     "head_mismatch",
@@ -471,7 +472,12 @@ class ChainReport:
     """
 
     ok: bool
+    #: Receipts that were chained **and** had nothing reported against them. Not the number of
+    #: rows with a `seq`: a count of "chained" printed beside a detected forgery reads "3 of 3
+    #: receipts verified" about a chain with a forgery in it, which is the false green in prose.
     verified: int
+    #: Every row that carries a `seq`, whether or not it survived the walk.
+    chained: int
     unchained: int
     breaks: list[ChainBreak]
     head_seq: int | None = None
@@ -481,6 +487,7 @@ class ChainReport:
         return {
             "ok": self.ok,
             "verified": self.verified,
+            "chained": self.chained,
             "unchained": self.unchained,
             "head_seq": self.head_seq,
             "head_hash": self.head_hash,
@@ -556,7 +563,24 @@ def verify_chain(store: ChainSource) -> ChainReport:
             expected_seq = seq
         recomputed = receipt.chain_hash()
         stored = receipt.hash
-        if stored is not None and stored != recomputed:
+        if stored is None:
+            # A chained row whose stored hash is gone. **Not a skip.** This was the only check
+            # against the column, and skipping it meant `UPDATE receipts SET hash=NULL` -- one
+            # statement, no `WHERE` -- destroyed every independent copy of every receipt's hash
+            # while the chain reported itself intact and exited 0. `v0.4 §3.8`'s false green
+            # exactly: a check that could not be made, resolved as a pass. Found by review.
+            #
+            # `unchained` does not cover it. That name is for a receipt with no `seq`, written
+            # before the chain existed; this row has a `seq` and has been stripped.
+            breaks.append(
+                ChainBreak(
+                    "hash_missing",
+                    seq,
+                    "the stored hash is gone, so there is nothing to compare the document "
+                    "against; the row was chained and something removed it",
+                )
+            )
+        elif stored != recomputed:
             breaks.append(
                 ChainBreak(
                     "content_altered",
@@ -573,7 +597,10 @@ def verify_chain(store: ChainSource) -> ChainReport:
                     f"{expected_prev}",
                 )
             )
-        expected_prev = stored if stored is not None else recomputed
+        # The **document's** hash, never the column's. Carrying the stored value forward let one
+        # corrupted column accuse the next receipt of `link_broken` as well, so a single tamper
+        # read as two and an operator went looking for the wrong one.
+        expected_prev = recomputed
         expected_seq = seq + 1
 
     head = store.chain_head()
@@ -595,9 +622,11 @@ def verify_chain(store: ChainSource) -> ChainReport:
                 )
             )
 
+    accused = {item.seq for item in breaks if item.seq is not None}
     return ChainReport(
         ok=not breaks,
-        verified=len(chained),
+        verified=sum(1 for item in chained if item.seq not in accused),
+        chained=len(chained),
         unchained=len(unchained),
         breaks=breaks,
         head_seq=head_seq,

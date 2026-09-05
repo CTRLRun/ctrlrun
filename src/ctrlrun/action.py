@@ -237,7 +237,20 @@ def _no_floats(value: object, path: str) -> PlainValue:
             "binary float is not portable between two hosts (v0.1 §2.3)"
         )
     if isinstance(value, Mapping):
-        return {str(key): _no_floats(item, f"{path}.{key}") for key, item in value.items()}
+        for key in value:
+            if not isinstance(key, str):
+                # `str(key)` here was silently lossy and order-dependent: `{"1": "a", 1: "b"}`
+                # and `{1: "b", "1": "a"}` both canonicalized to one key, and *which* value
+                # survived depended on insertion order -- two distinct payloads, one canonical
+                # form. It also admitted a Python `repr` into a canonical form, since a tuple key
+                # rendered as `"(1, 2)"`, which plain `json.dumps` refuses outright. A review
+                # found it, and §7.1's policy hash is what makes it reachable: `yaml.safe_load`
+                # produces non-string keys from `1:` and `true:`.
+                raise InvalidArgument(
+                    f"a canonical form has string keys only, and {path} has a "
+                    f"{type(key).__name__} key {key!r}: quote it in the document"
+                )
+        return {key: _no_floats(item, f"{path}.{key}") for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_no_floats(item, f"{path}[{index}]") for index, item in enumerate(value)]
     if value is None or isinstance(value, str | int):  # bool is a subclass of int
