@@ -901,7 +901,11 @@ def test_T176_the_data_map_needs_v4_and_its_labels_are_checked() -> None:
 
     for broken, fragment in (
         ("      diagnosis: 1\n", "must be"),
-        ("      diagnosis: {label: phi, redact: yes, extra: 1}\n", "extra"),
+        ("      diagnosis: {label: phi, extra: 1}\n", "extra"),
+        # `redact:` was described by §7.4 and cut by item 7 (§7.5), so it is refused with the
+        # reason rather than reading as a typo -- an operator who writes it and gets no error
+        # would believe the value is hidden from the evidence.
+        ("      diagnosis: {label: phi, redact: true}\n", "not in v0.6"),
     ):
         with pytest.raises(PolicyError) as refused:
             Policy.from_yaml(LABELLED.replace("      diagnosis: phi\n", broken))

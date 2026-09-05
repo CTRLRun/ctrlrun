@@ -172,7 +172,25 @@ RESERVED_ARGUMENTS: Final = frozenset(
 DERIVED_SUBJECTS: Final = frozenset({"data_scope"})
 
 #: §7.4 — the closed key set of one `data:` entry in its mapping form.
-_DATA_KEYS: Final = frozenset({"label", "redact"})
+#:
+#: **`redact:` is not in it.** §7.4 put the key on probation and §7.5's throwaway sector
+#: configuration was to earn it; that configuration did not need it, so item 7 cut it and §12
+#: records the cut. A `data:` entry is therefore a label, in either shape.
+_DATA_KEYS: Final = frozenset({"label"})
+
+#: Keys §7.4 described and item 7 removed, so the refusal can say what happened rather than
+#: reading as a typo. **Refused and not ignored**: an operator who writes `redact: true` and gets
+#: no error would believe the value is hidden from the evidence, which is worse than not having
+#: the feature.
+_CUT_DATA_KEYS: Final[Mapping[str, str]] = {
+    "redact": (
+        "redaction is not in v0.6. §7.5's sector configuration did not need it: a deployment "
+        "that may not hold a value in its receipts may not hold it upstream either, so "
+        "redacting here would be a weaker second copy of a control that has to live elsewhere "
+        "-- and the approval payload carries the real value regardless (§7.4), so it would hide "
+        "the value from the auditor and from nobody else"
+    ),
+}
 
 
 class Decision(StrEnum):
@@ -327,10 +345,15 @@ class DataLabel:
 
     `label` is the operator's own word -- `phi`, `internal`, `pci`. CTRLRun does not know what
     any of them mean; it derives the *set* present in an action's arguments so a rule can see it.
+
+    **There is no `redact`.** §7.4 put it on probation and §7.5's throwaway sector configuration
+    was to earn it. That configuration needed a rule that could *see* an argument was PHI and did
+    not need the value hidden, so item 7 cut it -- and `_CUT_DATA_KEYS` refuses the key rather
+    than ignoring it, because an operator who writes `redact: true` and gets no error believes
+    the value is hidden.
     """
 
     label: str
-    redact: bool = False
 
 
 @dataclass(frozen=True)
@@ -813,14 +836,14 @@ def _parse_data(value: object, where: str) -> dict[str, DataLabel]:
             raise PolicyError(
                 f"{at}: must be a label or a mapping with 'label', got {_type_name(entry)}"
             )
+        for cut, why in _CUT_DATA_KEYS.items():
+            if cut in entry:
+                raise PolicyError(f"{at}: {cut!r} is not a data key: {why}")
         _reject_unknown_keys(entry, _DATA_KEYS, at)
         label = entry.get("label")
         if not isinstance(label, str) or not label.strip():
             raise PolicyError(f"{at}: 'label' must be a non-empty string, got {_type_name(label)}")
-        redact = entry.get("redact", False)
-        if not isinstance(redact, bool):
-            raise PolicyError(f"{at}: 'redact' must be true or false, got {_type_name(redact)}")
-        labels[name] = DataLabel(label=label, redact=redact)
+        labels[name] = DataLabel(label=label)
     return labels
 
 
