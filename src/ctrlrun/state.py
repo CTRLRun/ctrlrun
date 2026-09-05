@@ -550,6 +550,30 @@ class StateStore(ApprovalStore, Protocol):
         """Record a receipt for an action that reached a terminal state."""
         ...
 
+    def events(self) -> tuple[Event, ...]:
+        """Every event, oldest first (SPEC-v0.6 §9.2).
+
+        Declared on the protocol in v0.6, having been *called* since v0.2 and *implemented* by
+        both shipped stores since v0.1. The store conformance suite found it: a third backend
+        written against this protocol alone would omit it, and `ctrlrun inspect`,
+        `ctrlrun verify` and the adapter conformance kit would each break on a store that
+        satisfied every declared method.
+
+        It adds no behaviour -- both stores already return exactly this -- and it clears
+        SPEC-v0.6 §9.2's bar in the plainest way available: a second backend genuinely could
+        not be written without it.
+        """
+        ...
+
+    def receipts(self) -> tuple[Receipt, ...]:
+        """Every receipt, oldest first (SPEC-v0.6 §9.2).
+
+        Declared on the protocol in v0.6, for `events()`'s reason and one of its own: the
+        receipt chain reader (SPEC-v0.6 §6.5) enumerates receipts to verify it, and
+        `ctrlrun receipts --verify-chain` runs against whatever backend the operator has.
+        """
+        ...
+
     def close(self) -> None:
         """Release whatever this store holds open."""
         ...
