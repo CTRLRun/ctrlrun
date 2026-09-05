@@ -26,6 +26,7 @@ from .approval import (
     ApprovalProvider,
     ApprovalStatus,
     LocalApprovalProvider,
+    check_consumable,
     policy_in_force,
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
@@ -59,7 +60,15 @@ from .errors import (
     Suspended,
 )
 from .identity import IdentityContext, IdentityProvider
-from .policy import OBSERVE, Decision, Evaluation, Policy, discover_policy_path
+from .policy import (
+    DEFAULT_ENVIRONMENT,
+    OBSERVE,
+    Decision,
+    Evaluation,
+    Policy,
+    discover_policy_path,
+    hash_with_authority,
+)
 from .receipt import (
     BLOCKED_AMBIGUOUS,
     BLOCKED_APPROVAL_MISMATCH,
@@ -83,7 +92,6 @@ _LOG = logging.getLogger(__name__)
 P = ParamSpec("P")
 R = TypeVar("R")
 
-DEFAULT_ENVIRONMENT: Final = "production"
 
 #: SPEC-v0.2 §6.9.2 — how long a reservation is held open across one round trip. A client
 #: that never returns lets this lapse, and the record becomes AMBIGUOUS by v0.1 §5.3 E3.
@@ -284,7 +292,12 @@ class Control:
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
         self._identity = identity
         self._authority = authority
+        #: SPEC-v0.6 §7.1's *"both are folded into the one canonical structure before hashing"*.
+        #: `Policy` cannot see a separately-loaded `Authority` and this can, so the hash every
+        #: receipt and every approval request carries is composed here. Where the authority came
+        #: from the policy document, this equals `policy.policy_hash` exactly.
         self._environment = _resolve_environment(environment, policy)
+        self._policy_hash = hash_with_authority(policy, authority, self._environment)
         #: SPEC-v0.3 §6.1 — one switch, read once, governing the process. Not a parameter:
         #: the mode belongs to the configuration an operator deployed, and a Control that
         #: could be handed a different one would be a per-caller opt-out of enforcement.
@@ -655,9 +668,32 @@ class Control:
                     reconciler,
                     held,
                 )
-            self._append(EventType.ACTION_DENIED, action, {"reason": evaluation.reason}, effect_key)
+            # SPEC-v0.6 §7.2.1's third bullet: *"the refusal is recorded against the approval
+            # so the history shows a grant that met a denial."* It was not. An independent
+            # review found `ACTION_DENIED` appended with `approval_id=None` and the receipt
+            # carrying neither the id nor the approver, so nothing in the store or the log
+            # connected a **live** granted approval to the refusal it met -- and that bullet is
+            # one of the three arguments §7.2.1 offers for the *worse* half of the asymmetry,
+            # a live bearer token for an action the policy currently forbids.
+            #
+            # Recording it changes nothing about the approval, which is the whole point of the
+            # `DENY` row: it stays `granted`, unspent, for the action a human really did answer.
+            presented = _PRESENTED_APPROVAL.get(None)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {"reason": evaluation.reason},
+                effect_key,
+                approval_id=presented,
+            )
             self._record(
-                action, evaluation, ReceiptResult.DENIED, started_at, effect_key=effect_key
+                action,
+                evaluation,
+                ReceiptResult.DENIED,
+                started_at,
+                effect_key=effect_key,
+                approval_id=presented,
+                approver=self._approver_of(presented),
             )
             raise ActionDenied(
                 f"{action.name} denied: {evaluation.reason}",
@@ -785,7 +821,7 @@ class Control:
         if approval_id is None and effect_key is None:
             return None, None
         try:
-            approval, reservation = self._take(action, approval_id, effect_key, lease)
+            approval, reservation = self._observe_take(action, approval_id, effect_key, lease)
         except (DuplicateEffect, AmbiguousEffect) as refused:
             observation.block(_blocked_by(refused))
             self._append(
@@ -822,14 +858,6 @@ class Control:
                 approval_id=approval_id,
             )
             return None, None
-        if approval is not None:
-            self._append(
-                EventType.APPROVAL_CONSUMED,
-                action,
-                {"approver": approval.approver},
-                effect_key,
-                approval_id=approval.approval_id,
-            )
         if reservation is not None:
             self._append(
                 EventType.EFFECT_RESERVED,
@@ -842,6 +870,54 @@ class Control:
                 approval=approval,
             )
         return approval, reservation
+
+    def _observe_take(
+        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
+    ) -> tuple[Approval | None, Reservation | None]:
+        """Observe mode's `_take`: **check the grant, never spend it** (SPEC-v0.6 §7.2.3).
+
+        `_observe_secure` used to call `_take`, which consumes. An independent review found it,
+        and §7.2.3's own sentence is the argument -- *a counterfactual is not a place to spend a
+        real grant*. Observe mode blocks nothing: the action runs whatever the approval says, so
+        consuming it destroyed a single-use answer that authorized nothing, and an operator
+        evaluating a policy in observe mode silently burned their humans' grants.
+
+        The **reservation is still taken**, and that asymmetry is deliberate. In observe mode
+        the action genuinely executes, so the effect record has to exist or `v0.1 §5.4`'s
+        duplicate refusal has nothing to refuse with. What observe mode suppresses is CTRLRun's
+        *decisions*; it does not suppress the record of an effect that really happened.
+
+        The verdict is computed with the same pure `check_consumable` every store applies, so
+        the four refusals observe mode records are the four `_secure` would have raised, from
+        one implementation rather than two.
+        """
+        if approval_id is not None:
+            verdict = check_consumable(
+                self._store.get_approval(approval_id),
+                approval_id,
+                action.action_hash,
+                self._clock(),
+            )
+            if verdict.refusal is not None:
+                raise verdict.refusal
+            # `as_approval()` and not a hand-built `Approval`: one construction, so observe
+            # mode cannot drift from what a store returns.
+            record = verdict.record
+            approval = None if record is None else record.as_approval()
+            # **And no event, which is the change worth naming.** `_observe_secure` used to
+            # append `APPROVAL_CONSUMED` here. Nothing is consumed now, and there is no
+            # `APPROVAL_PRESENTED` type to append instead -- §9 freezes the event vocabulary and
+            # v0.6 adds none, deliberately. An event naming a write that did not happen is worse
+            # than no event: it is the false-green shape, in the evidence log. What observe mode
+            # found is on the observation and on the receipt's `approver`, which is where a
+            # counterfactual belongs. The refusal paths keep their events, because there the
+            # approval really was found unusable and that is a fact about the record.
+            if effect_key is None:
+                return approval, None
+            return approval, self._store.reserve_effect(effect_key, action.action_id, lease)
+        if effect_key is not None:
+            return None, self._store.reserve_effect(effect_key, action.action_id, lease)
+        return None, None
 
     def resume(self, continuation: str, executor: Callable[[], Any]) -> Receipt:
         """Finish an action a `Suspended` executor left open (SPEC-v0.2 §6.9).
@@ -1198,7 +1274,18 @@ class Control:
             self._presented(action, effect_key) if evaluation.decision is Decision.APPROVE else None
         )
         if approval_id is None and effect_key is None:
-            return None, None
+            # SPEC-v0.6 §7.2's `ALLOW` row, which §7.2.2 step 1 quietly assumed a reservation
+            # for. There is nothing to take here -- no grant to check, no key to hold -- but a
+            # presented approval is still a live bearer token this policy says is not needed,
+            # and an independent review found the row silently not firing for exactly the class
+            # of action `v0.1 §5.1` documents as the escape hatch: one with no `effect:`
+            # template. Item 7's own throwaway configuration contains one.
+            #
+            # It is reachable by the ordinary route, because the **`APPROVE`** path consumes
+            # without a reservation too -- `_take(action, approval_id, None, lease)`. So grant,
+            # relax the rule to `allow`, present: the grant outlived the answer for its full
+            # TTL, which is the precise hazard §7.2 exists to close.
+            return self._spend_unneeded_approval(action, None), None
 
         # At most two passes: an `AMBIGUOUS` refusal may be reconciled once (SPEC-v0.2 §2.3),
         # and whatever the second attempt meets is final.
@@ -1332,7 +1419,23 @@ class Control:
             return None
         try:
             spent = self._store.consume_approval(approval_id, action.action_hash)
-        except CTRLRunError as refused:
+        except Exception as refused:
+            # **`Exception`, not `CTRLRunError`, and the width is the point.** An independent
+            # review found this catching only `CTRLRunError`, so a `sqlite3.OperationalError`
+            # ("database is locked"), a dropped `psycopg` connection or any other store failure
+            # propagated out of `_secure` -- **after** the reservation was taken and **before**
+            # `begin_execution`. The action the policy allows was refused, no receipt was
+            # written at all (`execute` raises before `_record`), and the effect key was left
+            # `RESERVED` with nothing holding it until the lease lapsed: an ambiguity
+            # manufactured by the *permissive* decision path, and the case T154d is about
+            # arriving from a new direction.
+            #
+            # Catching everything is safe here for the reason the docstring gives and for no
+            # other: **there is nothing to protect.** The policy permits this action outright,
+            # this call closes a token it does not need, and a token that failed to close stays
+            # bounded by its own `expires_at`. No other handler in this file may widen on that
+            # argument -- it holds because the decision was already permissive, not because a
+            # store error is unimportant.
             _LOG.info(
                 "%s: the presented approval %s was not consumable (%s); the policy allows this "
                 "action outright, so it proceeds",
@@ -1489,7 +1592,7 @@ class Control:
         # SPEC-v0.6 §7.1 — the request records which policy was in force while it was built.
         # `Control` is the only object holding both a policy and a provider, and the provider
         # protocol takes neither, so it travels the way a presented approval does.
-        with policy_in_force(self._policy.policy_hash):
+        with policy_in_force(self._policy_hash):
             request = self._approvals.request(action, self._approval_ttl)
         self._append(
             EventType.APPROVAL_REQUESTED,
@@ -1701,7 +1804,7 @@ class Control:
             # SPEC-v0.6 §7.1 — what decided this action, on every receipt. The hash is the
             # policy's content and the version is the operator's label for it; §7.1 makes the
             # first authoritative and says the second never is.
-            policy_hash=self._policy.policy_hash,
+            policy_hash=self._policy_hash,
             policy_version=self._policy.version,
             controls=evaluation.controls,
         )
@@ -1898,6 +2001,7 @@ def protect(
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
         _reject_variadic(signature, name)
+        _reject_reserved_parameters(signature, name)
         dangling: list[bool] = []
         compared: list[bool] = []
         if control is not None:
@@ -2102,6 +2206,39 @@ def _reject_variadic(signature: inspect.Signature, name: str) -> None:
         raise InvalidArgument(
             f"protect({name!r}): a protected function cannot take *args or **kwargs "
             f"({', '.join(offending)}); every argument must be nameable in policy"
+        )
+
+
+def _reject_reserved_parameters(signature: inspect.Signature, name: str) -> None:
+    """Refuse a protected function whose parameter is a name CTRLRun resolves itself.
+
+    SPEC-v0.6 §7.4's table, first row: *"May an **argument** be called this? No."* An
+    independent review found the set inert for `data_scope` -- `RESERVED_ARGUMENTS` was
+    consulted only by the condition splitter, which exempts derived subjects -- so a
+    `@protect`-ed function could take a parameter called `data_scope` and shadow the thing a
+    rule was written to read.
+
+    **`DERIVED_SUBJECTS`, not `RESERVED_ARGUMENTS`.** The first version of this check used the
+    whole reserved set and broke shipped code on the spot: `user` has been in it since v0.3 and
+    protected functions in this repository take a `user` parameter. Those names are refused as
+    *condition subjects* so a rule cannot read who is acting -- an argument of that name
+    collides with nothing, because policy cannot see the principal at all. A derived subject is
+    different: it is merged into the same mapping the arguments are read from.
+
+    Refused at **decoration** time and not at call time, on `_reject_variadic`'s precedent:
+    the mistake is in the source, so it should fail on import rather than on the first request.
+    """
+    from .policy import DERIVED_SUBJECTS
+
+    offending = sorted(
+        parameter for parameter in signature.parameters if parameter in DERIVED_SUBJECTS
+    )
+    if offending:
+        raise InvalidArgument(
+            f"protect({name!r}): {', '.join(repr(item) for item in offending)} is derived by "
+            "CTRLRun and may not be a parameter of a protected function. SPEC-v0.6 §7.4 "
+            "resolves it at evaluation from the arguments actually supplied, so an argument of "
+            "the same name would mean two things in one rule"
         )
 
 

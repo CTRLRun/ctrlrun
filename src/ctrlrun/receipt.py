@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from .action import Principal, canonical_bytes
+from .errors import InvalidArgument
 from .policy import Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
@@ -221,6 +222,25 @@ class _WouldHave:
         )
 
 
+def _controls_of(value: object) -> tuple[str, ...]:
+    """A receipt's `controls`, parsed rather than coerced (SPEC-v0.6 §7.3).
+
+    `tuple(value or ())` turned the string `"abc"` into `('a', 'b', 'c')` -- three controls that
+    were never cited, in a document a reader would take as evidence. Everything else in
+    `from_dict` parses into a closed set; this did not, and an independent review found it.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        raise InvalidArgument(
+            f"a receipt's 'controls' must be a list of control ids, got {type(value).__name__}"
+        )
+    for item in value:
+        if not isinstance(item, str):
+            raise InvalidArgument(f"a control id must be a string, got {item!r}")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class Receipt:
     """Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1)."""
@@ -377,7 +397,7 @@ class Receipt:
             prev_hash=document.get("prev_hash"),
             policy_hash=document.get("policy_hash"),
             policy_version=document.get("policy_version"),
-            controls=tuple(document.get("controls") or ()),
+            controls=_controls_of(document.get("controls")),
         )
 
     @classmethod

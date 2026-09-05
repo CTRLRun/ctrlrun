@@ -14,6 +14,7 @@ import hashlib
 import logging
 import operator
 import os
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -142,6 +143,10 @@ _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
 #: with two candidate meanings is refused until the author renames. Not gated on the schema
 #: version (§12.1): the splitter runs for every condition in every document, and gating it
 #: would leave the same name meaning two things in two files.
+#: `v0.3 §2.5`'s last rank. Here rather than in `control.py` because `_canonical_policy`
+#: needs it and dependencies point downward: `policy.py` does not import `control.py`.
+DEFAULT_ENVIRONMENT: Final = "production"
+
 RESERVED_ARGUMENTS: Final = frozenset(
     {
         "action_id",
@@ -170,6 +175,39 @@ RESERVED_ARGUMENTS: Final = frozenset(
 #: it, so a grant naming `data_scope` is refused exactly as it always was (§11 puts matching a
 #: grant on a data label out of scope).
 DERIVED_SUBJECTS: Final = frozenset({"data_scope"})
+
+
+def _refuse_reserved(names: Iterable[str], where: str, what: str) -> None:
+    """Refuse a **derived** subject used as an argument name, wherever an argument is named.
+
+    `RESERVED_ARGUMENTS` was consulted in exactly one place -- `_split_condition_key` -- and
+    `data_scope` is exempted there for policy rules by `DERIVED_SUBJECTS`. So for the one name
+    v0.6 added, the set was **inert**: an independent review loaded a `data:` key called
+    `data_scope` and an `effect:` template containing `{data_scope}` without a murmur, while
+    §7.4's table said both were load errors and `_Rule.matches`'s docstring leaned on it.
+
+    **`DERIVED_SUBJECTS`, and not `RESERVED_ARGUMENTS`, and the narrowing is the finding
+    inside the finding.** The first version of this check used the whole reserved set and broke
+    shipped code immediately: `user` has been in it since v0.3 and `@protect`-ed functions take
+    a `user` parameter throughout this repository's own tests. The two halves of that set are
+    not the same rule. `agent`, `user`, `claims`, `issuer` and the rest are refused as
+    **condition subjects**, because a rule must not be able to read who is acting (`v0.3 §4.5`)
+    -- an *argument* of that name collides with nothing, since policy cannot see the principal
+    at all. A derived subject is different in kind: `_ActionPolicy.evaluate` merges
+    `{**arguments, **derived}` in one dictionary, so `data_scope` really would be two things at
+    one evaluation, decided by merge order in another function.
+
+    §7.4's table row is corrected in the same change to say this rather than the wider claim.
+    """
+    offending = sorted(name for name in names if name in DERIVED_SUBJECTS)
+    if offending:
+        raise PolicyError(
+            f"{where}: {', '.join(repr(name) for name in offending)} is derived by CTRLRun and "
+            f"may not be {what}. §7.4 resolves it at evaluation from the arguments actually "
+            "supplied, so an argument of the same name would mean two things in one rule; "
+            "rename the argument"
+        )
+
 
 #: §7.4 — the closed key set of one `data:` entry in its mapping form.
 #:
@@ -285,6 +323,28 @@ class Condition:
             )
             return False
         value = arguments[self.argument]
+        if self.op in {"eq", "neq"} and self.argument in DERIVED_SUBJECTS:
+            # SPEC-v0.6 §7.4: *"`_eq` and `_neq` compare the whole set."* **The whole set, and
+            # a set has no order.** The derived value is a `sorted(...)` list, and `_equal` on
+            # lists is order-sensitive -- so an independent review found `data_scope_eq: [phi,
+            # internal]` never matching, silently, while `[internal, phi]` did. An operator
+            # writing the labels in the order their own `data:` map declares them gets a rule
+            # that never fires, with no warning: the key splits, the subject is present, and
+            # `matches` simply returns `False` and falls through to whatever is below. Where
+            # the rule was the `deny` or `approve`, that is fail-open.
+            #
+            # Narrowed to `DERIVED_SUBJECTS` for exactly the reason `_in` below is: an ordinary
+            # list-valued argument means *this list*, and `value_eq: [1, 2]` against `[2, 1]`
+            # must stay false. This branch is one line away from the one that regressed when it
+            # was written too wide, and it is written narrow for the same reason.
+            if not isinstance(value, list | tuple) or not isinstance(self.operand, list | tuple):
+                return (
+                    _equal(value, self.operand)
+                    if self.op == "eq"
+                    else not _equal(value, self.operand)
+                )
+            same = frozenset(value) == frozenset(self.operand)
+            return same if self.op == "eq" else not same
         if self.op == "eq":
             return _equal(value, self.operand)
         if self.op == "neq":
@@ -357,8 +417,13 @@ class DataLabel:
 
 
 @dataclass(frozen=True)
-class Control:
+class PolicyControl:
     """One entry in the control registry: an identifier and a citation (SPEC-v0.6 §7.3).
+
+    **`PolicyControl` and not `Control`.** It shipped as `ctrlrun.policy.Control` -- a second
+    `Control` in a package whose central object is `Control`, which an independent review flagged
+    as a name nobody should have to disambiguate at a call site, and which §9.1 would have frozen
+    for a long time. Renamed in the same change that adds it to §9.1.1's list.
 
     **CTRLRun does not interpret a control.** `source:` is a string the operator wrote. The
     kernel does not know what PCI DSS is, does not check the clause exists, and makes no
@@ -374,6 +439,21 @@ class Control:
     id: str
     title: str
     source: str | None = None
+
+
+def _in_registry_order(cited: tuple[str, ...], order: tuple[str, ...]) -> tuple[str, ...]:
+    """`cited`, sorted into the registry's declaration order (SPEC-v0.6 §7.3).
+
+    An id not in `order` keeps its relative position at the end rather than being dropped. That
+    cannot happen through the loader -- `_parse_cited` makes a dangling citation a load error --
+    but this function is one line from silently losing a control, and losing one is worse than
+    ordering it oddly.
+    """
+    if not order:
+        return cited
+    rank = {identifier: index for index, identifier in enumerate(order)}
+    known = sorted((item for item in cited if item in rank), key=lambda item: rank[item])
+    return tuple(known) + tuple(item for item in cited if item not in rank)
 
 
 @dataclass(frozen=True)
@@ -412,24 +492,34 @@ class _ActionPolicy:
         """
         return frozenset(self.data[name].label for name in arguments if name in self.data)
 
-    def evaluate(self, action_name: str, arguments: Mapping[str, Any]) -> Evaluation:
+    def evaluate(
+        self, action_name: str, arguments: Mapping[str, Any], order: tuple[str, ...] = ()
+    ) -> Evaluation:
+        """Decide this action. `order` is the registry's declaration order (§7.3)."""
         if self.decision is not None:
-            return Evaluation(self.decision, BARE_DECISION, self.controls)
+            return Evaluation(
+                self.decision, BARE_DECISION, _in_registry_order(self.controls, order)
+            )
         derived = {"data_scope": sorted(self.data_scope(arguments))}
         for index, rule in enumerate(self.rules):
             if rule.matches(action_name, arguments, derived):
                 # The union of the action's and the matched rule's, in registry order (§7.3).
                 # The action's alone would drop what the rule narrowed to; the rule's alone
                 # would drop a control that governs every rule under the action.
-                return Evaluation(
-                    rule.decision,
-                    f"rule[{index}]",
-                    self.controls
-                    + tuple(item for item in rule.controls if item not in self.controls),
+                # **In registry order** (§7.3), which this concatenation did not give: it
+                # produced the action's citation order followed by the rule's, and an
+                # independent review found all three sentences claiming otherwise -- §7.3, the
+                # `Evaluation.controls` docstring, and the comment beside the shipped
+                # assertion. Order matters here because a receipt is read by a human against
+                # the document, and two receipts citing the same set should list it the same
+                # way whichever rule matched.
+                union = self.controls + tuple(
+                    item for item in rule.controls if item not in self.controls
                 )
+                return Evaluation(rule.decision, f"rule[{index}]", _in_registry_order(union, order))
         # No rule matched, so no rule's controls apply -- and the action's do: they govern
         # everything under it, including this refusal.
-        return Evaluation(Decision.DENY, NO_MATCHING_RULE, self.controls)
+        return Evaluation(Decision.DENY, NO_MATCHING_RULE, _in_registry_order(self.controls, order))
 
 
 @dataclass(frozen=True)
@@ -459,7 +549,7 @@ class Policy:
     version: str | None = None
     #: SPEC-v0.6 §7.3 — the control registry, by id, in document order. Empty where the document
     #: declares none, which is every document before `ctrlrun.policy/v4`.
-    controls: Mapping[str, Control] = field(default_factory=dict)
+    controls: Mapping[str, PolicyControl] = field(default_factory=dict)
     #: The canonical form this policy's hash is computed over (§7.1). Held rather than rebuilt so
     #: `policy_hash` is not recomputed on every action, and private because it is an
     #: implementation detail of the hash and not a second way to read the policy.
@@ -558,7 +648,7 @@ class Policy:
             mode=mode,
             version=version if isinstance(version, str) else None,
             controls=MappingProxyType(controls),
-            _canonical=_canonical_policy(document, str(schema), mode, environment),
+            _canonical=_canonical_policy(document, str(schema), mode, environment, source),
         )
 
     def data_scope(self, action: Action) -> frozenset[str]:
@@ -592,7 +682,7 @@ class Policy:
             return Evaluation(Decision.DENY, UNKNOWN_ACTION)
         # Conditions see exactly what the executor will receive (SPEC-v0.1 §2.2), which is
         # also why a list argument compares equal to a list operand.
-        return entry.evaluate(action.name, action.canonical_arguments)
+        return entry.evaluate(action.name, action.canonical_arguments, tuple(self.controls))
 
 
 def discover_policy_path() -> Path:
@@ -610,6 +700,7 @@ def _canonical_policy(
     schema: str,
     mode: str,
     environment: object,
+    source: str,
 ) -> Mapping[str, Any]:
     """The decision inputs of a policy document, in the shape its hash is taken over (§7.1).
 
@@ -623,11 +714,87 @@ def _canonical_policy(
     """
     return {
         "actions": _plain(document.get("actions")),
-        "authority": _plain(document.get("authority")),
-        "environment": environment if isinstance(environment, str) else None,
+        # The **parsed** grants, not the raw section, so that the same authority reaches this
+        # hash identically whether it was written inline or handed to `Control` as a separate
+        # `--authority` document (§7.1). `Control` substitutes its own effective authority here
+        # through `hash_with_authority`, and the two agree only because both go through
+        # `canonical_grants`.
+        "authority": _canonical_authority(document, source),
+        # SPEC-v0.6 §7.3's registry, **in the hash**, and the call is worth stating because it
+        # cuts against "decision inputs only": a control changes no decision, so on a strict
+        # reading it does not belong here. It is in anyway, because `policy_hash` is an
+        # auditor's only handle from a receipt back to a document, and the receipt records
+        # control **ids** whose meaning lives entirely in this registry. Without it, two
+        # receipts with the same hash and the same `controls: [card-data-handling]` could cite
+        # different standards.
+        #
+        # The cost, accepted: editing a control's `title:` changes every later receipt's
+        # provenance. That is the same shape as the argument against hashing comments and comes
+        # out the other way, because a title is not formatting -- it is what the id means.
+        "controls": _plain(document.get("controls")),
+        # **The resolved environment, not the raw key.** A document with no `environment:` runs
+        # in `production` (`v0.3 §2.5`'s last rank), so hashing `None` here made
+        # `Policy.policy_hash` and the receipt's differ for every ordinary document once
+        # `Control` began substituting the effective value. The default is spelled here so the
+        # two agree in the common case and the substitution below is reserved for a real
+        # override -- `Control(environment=...)` or `$CTRLRUN_ENVIRONMENT`.
+        "environment": environment if isinstance(environment, str) else DEFAULT_ENVIRONMENT,
         "mode": mode,
         "schema": schema,
     }
+
+
+def _canonical_authority(document: Mapping[Any, Any], source: str) -> PlainValue:
+    """The document's own `authority:` section, parsed and canonicalized, or `None`.
+
+    **`source` is threaded through and not invented.** A first version passed a synthetic
+    `"<policy …>"` string and two shipped tests went red: `T84` asserts that a `mode:` nested
+    inside a grant is refused with the *file name* in the message, and an error naming a
+    placeholder instead of the file an operator has to edit is a worse error.
+    """
+    from .authority import _from_section, canonical_grants
+
+    section = document.get("authority")
+    if section is None:
+        return None
+    return canonical_grants(_from_section(section, source))
+
+
+def hash_with_authority(policy: Policy, authority: object, environment: str | None = None) -> str:
+    """`policy`'s hash, with `authority` standing in for whatever the document declared (§7.1).
+
+    This exists because `Policy` cannot see a separately-loaded `Authority` and `Control` can.
+    An independent review found the gap: §7.1 promises both are folded into one canonical
+    structure, and the gateway's shape -- policy from one file, `Authority.from_yaml` from
+    another -- folded in nothing, so every receipt in such a deployment carried provenance that
+    was silently missing half of what decided the action.
+
+    Where the authority came from the policy document itself -- which is what
+    `Control.from_file` does, reading the same file again for its section -- the substitution is
+    a no-op and the hash is `policy.policy_hash` exactly, because `_canonical_policy` already
+    put the same `canonical_grants` output there. That identity is asserted rather than assumed.
+
+    **And the substitution is a substitution, not a merge.** A `Control` handed a policy with an
+    inline `authority:` section and no `authority=` argument does not enforce that section at
+    all -- `_authority_result` reads `self._authority` and nothing else -- so the hash records
+    the authority that actually decided, which is `None`. That is the honest answer to *"what
+    decided this action"* and not a gap; a merge would have recorded grants that governed
+    nothing.
+    """
+    from .authority import Authority, canonical_grants
+
+    if not isinstance(authority, Authority) and authority is not None:
+        raise InvalidArgument("hash_with_authority takes an Authority or None")
+    folded = dict(policy._canonical)
+    folded["authority"] = canonical_grants(authority)
+    # SPEC-v0.6 §7.1 lists `environment` among the hashed decision inputs, and `Policy` only
+    # knows the **document's**. `Control(environment=...)` and `$CTRLRUN_ENVIRONMENT` outrank it
+    # (`_resolve_environment`), so a review found the hash naming an environment that did not
+    # decide the action. The receipt carries the effective one in its own field, which made the
+    # mismatch detectable and not attributable; substituting it here makes the hash mean what
+    # §7.1 says it means.
+    folded["environment"] = environment
+    return "sha256:" + hashlib.sha256(canonical_bytes(folded)).hexdigest()
 
 
 def _plain(value: object) -> PlainValue:
@@ -639,7 +806,21 @@ def _plain(value: object) -> PlainValue:
     right answer: a binary float in a decision input is not portable between two hosts.
     """
     if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
+        # **A non-string key is refused, not coerced.** `str(key)` made `{1: 2}` and
+        # `{"1": 2}` hash identically, and an independent review found the collision reachable:
+        # `Policy._from_document` never validates the `authority:` section itself (that is
+        # `_optional_from_yaml`'s job, on a different call path), so both documents load as a
+        # `Policy` and share a hash. Not exploitable today -- every such document is refused
+        # when the section is actually parsed -- but `policy_hash` is supposed to be injective
+        # over its inputs, which is the whole property `canonical_bytes` was promoted to give,
+        # and "safe because some other loader happens to refuse it" is not that property.
+        for key in value:
+            if not isinstance(key, str):
+                raise PolicyError(
+                    f"policy keys must be strings; {key!r} is a {_type_name(key)}. Coercing it "
+                    "would make two different documents hash the same (SPEC-v0.6 §7.1)"
+                )
+        return {key: _plain(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_plain(item) for item in value]
     if value is None or isinstance(value, str | int):  # bool is a subclass of int
@@ -654,7 +835,13 @@ def _plain(value: object) -> PlainValue:
         # document with an unquoted expiry. The conformance kit's own `EXPIRED_GRANT` caught it.
         return value.isoformat()
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
+        # `errors="replace"` mapped two distinct `!!binary` values onto one string and one
+        # hash. Same argument as the key above: a lossy decode inside a hash is a collision,
+        # and `canonical_bytes` refuses `bytes` one layer down for exactly this reason.
+        raise PolicyError(
+            "a policy may not carry binary data; a lossy decode would make two different "
+            "documents hash the same (SPEC-v0.6 §7.1)"
+        )
     # A `float`, or anything else. `canonical_bytes` refuses it too, and naming the policy here
     # is what turns "float is not encodable at payload.actions..." into something an operator can
     # act on. A float in a *condition* was already refused before v0.6, by the numeric-operand
@@ -773,7 +960,38 @@ def _reject_unknown_keys(mapping: Mapping[Any, Any], allowed: Iterable[str], whe
         )
 
 
-def _parse_controls(value: object, source: str) -> dict[str, Control]:
+#: §7.3 — a control id is printed in a per-line CLI table and carried on every receipt that
+#: cites it, so it is bounded and free of control characters for `state.py`'s `_approver`
+#: reasons: a newline forges a whole row in a listing an operator reads to decide what happened.
+#: 200 is generous for an identifier and short enough that a table stays a table.
+MAX_CONTROL_ID = 200
+
+
+def _checked_control_id(identifier: str, source: str) -> None:
+    """Refuse a control id that would corrupt the evidence it is printed in (§7.3).
+
+    An independent review found ids accepting newlines and unbounded length. JSON escapes them,
+    so a receipt is safe -- but `ctrlrun receipts --control` and every per-line CLI table are
+    not, and the id reaches both. A refusal and not an escape, on `_approver`'s reasoning: a
+    stored id that differs from the one the operator wrote is worse than a rejected document.
+    """
+    if len(identifier) > MAX_CONTROL_ID:
+        raise PolicyError(
+            f"{source}: control id is {len(identifier)} characters; the limit is "
+            f"{MAX_CONTROL_ID}. An id is printed in a table and carried on every receipt that "
+            "cites it"
+        )
+    if identifier.splitlines() != [identifier] or any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in identifier
+    ):
+        raise PolicyError(
+            f"{source}: control id {identifier!r} contains a control character. `ctrlrun "
+            "receipts` prints one record per line, so a line break here forges a row in the "
+            "evidence an operator reads"
+        )
+
+
+def _parse_controls(value: object, source: str) -> dict[str, PolicyControl]:
     """The top-level `controls:` registry (SPEC-v0.6 §7.3)."""
     if value is None:
         return {}
@@ -781,12 +999,13 @@ def _parse_controls(value: object, source: str) -> dict[str, Control]:
         raise PolicyError(
             f"{source}: 'controls' must be a mapping of id to entry, got {_type_name(value)}"
         )
-    registry: dict[str, Control] = {}
+    registry: dict[str, PolicyControl] = {}
     for identifier, entry in value.items():
         if not isinstance(identifier, str) or not identifier.strip():
             raise PolicyError(
                 f"{source}: control ids must be non-empty strings, got {identifier!r}"
             )
+        _checked_control_id(identifier, source)
         where = f"{source}: control {identifier!r}"
         if not isinstance(entry, Mapping):
             raise PolicyError(f"{where}: must be a mapping with a 'title', got {_type_name(entry)}")
@@ -801,7 +1020,7 @@ def _parse_controls(value: object, source: str) -> dict[str, Control]:
             raise PolicyError(
                 f"{where}: 'source' must be a non-empty string, got {_type_name(cited)}"
             )
-        registry[identifier] = Control(
+        registry[identifier] = PolicyControl(
             id=identifier, title=title, source=cited if isinstance(cited, str) else None
         )
     return registry
@@ -810,11 +1029,16 @@ def _parse_controls(value: object, source: str) -> dict[str, Control]:
 def _parse_data(value: object, where: str) -> dict[str, DataLabel]:
     """An action's `data:` map (SPEC-v0.6 §7.4).
 
-    Two shapes, because the second exists only for `redact:` and most entries do not need it:
+    Two shapes, and both are just a label:
 
         data:
           patient_id: phi
-          diagnosis: {label: phi, redact: true}
+          diagnosis: {label: phi}
+
+    The mapping form existed for `redact:`, which §7.5's throwaway configuration did not need
+    and item 7 cut (`_CUT_DATA_KEYS`). It is kept because it is the shape a key would grow into
+    if one is ever earned, and because refusing it now would be a second edit for no gain --
+    but a document using it says nothing the short form does not.
     """
     if value is None:
         return {}
@@ -823,6 +1047,9 @@ def _parse_data(value: object, where: str) -> dict[str, DataLabel]:
             f"{where}: 'data' must be a mapping of argument name to label, got {_type_name(value)}"
         )
     labels: dict[str, DataLabel] = {}
+    _refuse_reserved(
+        [name for name in value if isinstance(name, str)], f"{where}: 'data'", "an argument name"
+    )
     for name, entry in value.items():
         if not isinstance(name, str) or not name.strip():
             raise PolicyError(f"{where}: argument names in 'data' must be non-empty strings")
@@ -959,9 +1186,10 @@ def _parse_template(value: object, kwarg: str, where: str) -> str | None:
     if not isinstance(value, str):
         raise PolicyError(f"{where}: {kwarg!r} must be a template string, got {_type_name(value)}")
     try:
-        template_placeholders(value)
+        named = template_placeholders(value)
     except InvalidArgument as exc:
         raise PolicyError(f"{where}: {kwarg!r}: {exc}") from exc
+    _refuse_reserved(named, f"{where}: {kwarg!r}", "a template placeholder")
     return value
 
 

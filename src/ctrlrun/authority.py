@@ -36,7 +36,7 @@ from typing import Any, Final, Literal
 
 import yaml
 
-from .action import Action, Principal
+from .action import Action, PlainValue, Principal
 from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
 from .policy import (
     SUPPORTED_SCHEMAS,
@@ -1126,6 +1126,54 @@ class Authority:
 
 
 # --- loading (SPEC-v0.3 §4.1, §4.2) ----------------------------------------------------
+
+
+def canonical_grants(authority: Authority | None) -> PlainValue:
+    """This authority's grants, in the shape `policy_hash` is taken over (SPEC-v0.6 §7.1).
+
+    §7.1 says *"authority is included, and where it was loaded from a separate `--authority`
+    document both are folded into the one canonical structure before hashing."* An independent
+    review found that half unimplemented: `_canonical_policy` read `document["authority"]` from
+    the **policy document only**, so a `Control` built with `authority=Authority.from_yaml(...)`
+    -- which is the gateway's shape and `verify --authority`'s -- hashed nothing of it. Two
+    deployments whose grants differ produced byte-identical provenance on every receipt, and a
+    deployment with *no* authority hashed the same as one with grants.
+
+    Over the **parsed** grants and not the document's bytes, for the same reason the rest of
+    §7.1 is: the same grants loaded from an inline section and from a `--authority` file are one
+    authority, and a receipt saying otherwise would make the field noise. `max_delegation_depth`
+    is in, because it is a decision input -- it bounds what a chain may reach.
+
+    Returns something `canonical_bytes` accepts: mappings, lists, strings, ints, bools, None.
+    Dates render ISO-8601, as `_plain` does, because `canonical_bytes` refuses a `datetime`.
+    """
+    if authority is None:
+        return None
+    return {
+        "max_delegation_depth": authority.max_delegation_depth,
+        # Sorted by id: a mapping, and `canonical_bytes` sorts keys anyway, but two documents
+        # listing the same grants in different orders are one authority and this says so
+        # locally rather than relying on the layer below.
+        "grants": {
+            grant_id: _canonical_grant(grant) for grant_id, grant in authority.grants.items()
+        },
+    }
+
+
+def _canonical_grant(grant: Grant) -> PlainValue:
+    """One grant's decision inputs. Every field that narrows what it permits, and nothing else."""
+    return {
+        "actions": list(grant.actions),
+        "constraints": {
+            key: {"argument": condition.argument, "op": condition.op, "operand": condition.operand}
+            for key, condition in sorted(grant.constraints.items())
+        },
+        "delegable": grant.delegable,
+        "environments": None if grant.environments is None else list(grant.environments),
+        "expires_at": None if grant.expires_at is None else grant.expires_at.isoformat(),
+        "resources": None if grant.resources is None else list(grant.resources),
+        "subject": {"agent": grant.subject.agent, "user": grant.subject.user},
+    }
 
 
 def _optional_from_yaml(

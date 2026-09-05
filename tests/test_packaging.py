@@ -732,6 +732,14 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
     # attribution dressed as prevention.
     reference = re.compile(r"`((?:[a-z_]+/)*[a-z_]+\.py):(\d+)`")
     identifier = re.compile(r"`@?([A-Za-z_][\w.]*)")
+    # **`not_symbols` is the fix for a hole a review demonstrated**, and it is a subtraction
+    # rather than a cleverer regex because a lookahead does not help: `[\w.]*` is greedy, so
+    # `` `control.py:1036` `` yields the token `control.py` whatever follows it, and the
+    # `.split(".")[-1]` below turns that into `py`. **32 of 40 rows** carried the bare token
+    # `py`, so *any* line containing the substring "py" -- `copy`, `pyyaml`, `python` --
+    # satisfied them. A row was aimed at a line inside a string literal in a comment about
+    # redaction and this test stayed green, which is exactly the failure its docstring claims.
+    not_symbols = frozenset({"py", "md", "yaml", "yml", "json", "sql", "toml"})
 
     stale = []
     checked = 0
@@ -742,7 +750,10 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
         # A cell may name several symbols -- "Only `NotExecuted` maps to `FAILED`" -- and the
         # cited line legitimately contains any one of them. Requiring the *nearest* one is how
         # this test first failed against references that were in fact correct.
-        named = {name.split(".")[-1] for name in identifier.findall(row)}
+        named = {name.split(".")[-1] for name in identifier.findall(row)} - not_symbols
+        if not named:
+            stale.append(f"{row.strip()[:60]!r} cites code and names no symbol")
+            continue
         for filename, number in found_refs:
             source = REPO_ROOT / "src" / "ctrlrun" / filename
             if not source.exists():
@@ -751,7 +762,13 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
             index = int(number)
             line = lines[index - 1] if 0 < index <= len(lines) else ""
             checked += 1
-            if not any(name in line for name in named):
+            # **Whole words, not substrings.** A definition would be the strict rule and it is
+            # too strict: four rows here legitimately cite a statement rather than a `def` --
+            # `effect_key TEXT PRIMARY KEY` inside a DDL string, the branch where only
+            # `NotExecuted` maps to `FAILED`. The residual is stated rather than implied: a
+            # named symbol appearing as a whole word *in prose* still satisfies this, which is
+            # far narrower than a substring and is not nothing.
+            if not any(re.search(rf"\b{re.escape(name)}\b", line) for name in named):
                 stale.append(f"{filename}:{index} is {line.strip()[:60]!r}, names {sorted(named)}")
 
     assert checked, "CLAIMS.md cites no code locations at all"
