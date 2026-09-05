@@ -114,12 +114,20 @@ _V3_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
     ),
     "mode": ("an older reader would enforce a configuration that was deployed to observe"),
 }
+#: §7.4 — the action-entry keys that need `ctrlrun.policy/v4`, and what an older reader would do.
+_V4_ENTRY_KEYS: Final[Mapping[str, str]] = {
+    "data": (
+        "an older reader would ignore the labels and evaluate a `data_scope` condition against "
+        "nothing, so a rule written to catch PHI would match no action at all"
+    ),
+}
+
 _RULE_KEYS: Final = frozenset({"when", "decision", "controls"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
 #: decorator to carry an effect template, so the policy file has to.
 _V2_ENTRY_KEYS: Final = frozenset({"effect", "resource", "mcp"})
-_ENTRY_KEYS: Final = frozenset({"decision", "rules", "controls"}) | _V2_ENTRY_KEYS
+_ENTRY_KEYS: Final = frozenset({"decision", "rules", "controls", "data"}) | _V2_ENTRY_KEYS
 
 #: And the closed key set of the `mcp` mapping, which is one key wide.
 _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
@@ -139,6 +147,7 @@ RESERVED_ARGUMENTS: Final = frozenset(
         "action_id",
         "agent",
         "claims",
+        "data_scope",
         "environment",
         "expires_at",
         "issuer",
@@ -147,6 +156,23 @@ RESERVED_ARGUMENTS: Final = frozenset(
         "user",
     }
 )
+
+#: SPEC-v0.6 §7.4 — names refused as **arguments** and permitted as **condition subjects**,
+#: resolved at evaluation from something other than `action.canonical_arguments`.
+#:
+#: The distinction is what makes `data_scope` implementable at all. Today one check does both
+#: jobs: the splitter refuses a condition whose subject is in `RESERVED_ARGUMENTS`, which is how
+#: `claims_eq:` becomes a load error. Adding `data_scope` to that set unchanged would have made
+#: `data_scope_in:` a load error too -- the very condition §7.4 asks operators to write.
+#:
+#: **A name here is still refused as an argument**, so one name never means two things in one
+#: document. And this list is the *policy evaluator's*: authority `constraints:` do not consult
+#: it, so a grant naming `data_scope` is refused exactly as it always was (§11 puts matching a
+#: grant on a data label out of scope).
+DERIVED_SUBJECTS: Final = frozenset({"data_scope"})
+
+#: §7.4 — the closed key set of one `data:` entry in its mapping form.
+_DATA_KEYS: Final = frozenset({"label", "redact"})
 
 
 class Decision(StrEnum):
@@ -246,6 +272,19 @@ class Condition:
         if self.op == "neq":
             return not _equal(value, self.operand)
         if self.op == "in":
+            if self.argument in DERIVED_SUBJECTS and isinstance(value, list | tuple):
+                # SPEC-v0.6 §7.4 — a **derived, set-valued** subject intersects the list, which
+                # is the membership `_in` already expresses one element at a time. §7.4 adds no
+                # operator for it: `contains` and `not_in` would land in `_OPERATORS`, which
+                # authority `constraints:` share (`v0.3 §4.5` -- one implementation, not two),
+                # and §11 puts matching a grant on a data label out of scope.
+                #
+                # **Narrowed to derived subjects, and the first version was not.** Testing every
+                # list-valued subject changed `_in` for ordinary arguments: `value_in: [[1, 2]]`
+                # against `value = [1, 2]` means *this exact list is one of the operands* and has
+                # since v0.1, and intersecting broke it. A rule about a new subject may not
+                # quietly re-mean an operator for the old ones.
+                return any(_equal(item, candidate) for item in value for candidate in self.operand)
             return any(_equal(value, item) for item in self.operand)
         if not _is_int(value):
             _LOG.warning(
@@ -266,9 +305,32 @@ class _Rule:
     #: §7.3 — the control ids this rule cites. A rule may narrow or add to the action's.
     controls: tuple[str, ...] = ()
 
-    def matches(self, action_name: str, arguments: Mapping[str, Any]) -> bool:
-        # A rule with no `when` has no conditions, so all() holds and it always matches.
-        return all(condition.matches(action_name, arguments) for condition in self.conditions)
+    def matches(
+        self,
+        action_name: str,
+        arguments: Mapping[str, Any],
+        derived: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Whether every condition holds. A rule with no `when` always matches.
+
+        `derived` carries §7.4's subjects, which are resolved from something other than the
+        action's arguments and are **shadowed by nothing**: `data_scope` is a reserved argument
+        name, so no real argument can be called it.
+        """
+        seen = {**arguments, **(derived or {})}
+        return all(condition.matches(action_name, seen) for condition in self.conditions)
+
+
+@dataclass(frozen=True)
+class DataLabel:
+    """What class of data one argument carries (SPEC-v0.6 §7.4).
+
+    `label` is the operator's own word -- `phi`, `internal`, `pci`. CTRLRun does not know what
+    any of them mean; it derives the *set* present in an action's arguments so a rule can see it.
+    """
+
+    label: str
+    redact: bool = False
 
 
 @dataclass(frozen=True)
@@ -316,12 +378,23 @@ class _ActionPolicy:
     mcp: McpOptions = _DEFAULT_MCP_OPTIONS
     #: §7.3 — the control ids this action cites, which govern every rule under it.
     controls: tuple[str, ...] = ()
+    #: §7.4 — which of this action's arguments carry which class of data.
+    data: Mapping[str, DataLabel] = field(default_factory=dict)
+
+    def data_scope(self, arguments: Mapping[str, Any]) -> frozenset[str]:
+        """The labels present in **the arguments actually supplied** (SPEC-v0.6 §7.4).
+
+        Not the whole declared map: an action that carries no PHI is not a PHI action because
+        some other call of it would be.
+        """
+        return frozenset(self.data[name].label for name in arguments if name in self.data)
 
     def evaluate(self, action_name: str, arguments: Mapping[str, Any]) -> Evaluation:
         if self.decision is not None:
             return Evaluation(self.decision, BARE_DECISION, self.controls)
+        derived = {"data_scope": sorted(self.data_scope(arguments))}
         for index, rule in enumerate(self.rules):
-            if rule.matches(action_name, arguments):
+            if rule.matches(action_name, arguments, derived):
                 # The union of the action's and the matched rule's, in registry order (§7.3).
                 # The action's alone would drop what the rule narrowed to; the rule's alone
                 # would drop a control that governs every rule under the action.
@@ -464,6 +537,11 @@ class Policy:
             controls=MappingProxyType(controls),
             _canonical=_canonical_policy(document, str(schema), mode, environment),
         )
+
+    def data_scope(self, action: Action) -> frozenset[str]:
+        """The set of data labels this action's supplied arguments carry (SPEC-v0.6 §7.4)."""
+        entry = self.actions.get(action.name)
+        return frozenset() if entry is None else entry.data_scope(action.canonical_arguments)
 
     def effect_template(self, action_name: str) -> str | None:
         """This action's `effect:` template, or `None` (SPEC-v0.2 §3.1, §11).
@@ -643,16 +721,23 @@ def reject_nested_mode(mapping: Mapping[Any, Any], where: str) -> None:
         )
 
 
-def parse_conditions(mapping: Mapping[Any, Any], *, where: str) -> Mapping[str, Condition]:
+def parse_conditions(
+    mapping: Mapping[Any, Any], *, where: str, allow_derived: bool = False
+) -> Mapping[str, Condition]:
     """Parse a `when:`-shaped mapping into conditions, keyed by the raw condition key.
 
     Public since SPEC-v0.3 §11: a grant's `constraints:` is in exactly this syntax and MUST be
     parsed by this code (§4.5). The key is injective given §3.2's longest-suffix split, which
     is what lets `Grant`'s containment check look a dimension up by name.
+
+    `allow_derived` admits §7.4's derived subjects and **defaults to off**, so `authority.py` --
+    which calls this without it — sees exactly the surface it saw in v0.3. A grant naming
+    `data_scope` is refused as it always was, which is what keeps §11's *"matching a grant on a
+    data label"* out of v0.6 rather than letting it in through a shared parser.
     """
     conditions: dict[str, Condition] = {}
     for key, operand in mapping.items():
-        condition = _parse_condition(key, operand, where)
+        condition = _parse_condition(key, operand, where, allow_derived)
         conditions[condition.key] = condition
     return conditions
 
@@ -697,6 +782,46 @@ def _parse_controls(value: object, source: str) -> dict[str, Control]:
             id=identifier, title=title, source=cited if isinstance(cited, str) else None
         )
     return registry
+
+
+def _parse_data(value: object, where: str) -> dict[str, DataLabel]:
+    """An action's `data:` map (SPEC-v0.6 §7.4).
+
+    Two shapes, because the second exists only for `redact:` and most entries do not need it:
+
+        data:
+          patient_id: phi
+          diagnosis: {label: phi, redact: true}
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise PolicyError(
+            f"{where}: 'data' must be a mapping of argument name to label, got {_type_name(value)}"
+        )
+    labels: dict[str, DataLabel] = {}
+    for name, entry in value.items():
+        if not isinstance(name, str) or not name.strip():
+            raise PolicyError(f"{where}: argument names in 'data' must be non-empty strings")
+        at = f"{where} data {name!r}"
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise PolicyError(f"{at}: a label must be a non-empty string")
+            labels[name] = DataLabel(label=entry)
+            continue
+        if not isinstance(entry, Mapping):
+            raise PolicyError(
+                f"{at}: must be a label or a mapping with 'label', got {_type_name(entry)}"
+            )
+        _reject_unknown_keys(entry, _DATA_KEYS, at)
+        label = entry.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise PolicyError(f"{at}: 'label' must be a non-empty string, got {_type_name(label)}")
+        redact = entry.get("redact", False)
+        if not isinstance(redact, bool):
+            raise PolicyError(f"{at}: 'redact' must be true or false, got {_type_name(redact)}")
+        labels[name] = DataLabel(label=label, redact=redact)
+    return labels
 
 
 def _parse_cited(value: object, where: str, known: frozenset[str]) -> tuple[str, ...]:
@@ -746,6 +871,13 @@ def _parse_entry(
     mcp = _parse_mcp(entry.get("mcp"), where)
 
     cited = _parse_cited(entry.get("controls"), where, known)
+    for key, consequence in _V4_ENTRY_KEYS.items():
+        if key in entry and schema != POLICY_SCHEMA_V4:
+            raise PolicyError(
+                f"{where}: {key!r} needs 'schema: {POLICY_SCHEMA_V4}'; this document declares "
+                f"{schema!r}, and {consequence}"
+            )
+    labels = _parse_data(entry.get("data"), where)
 
     if has_decision:
         return _ActionPolicy(
@@ -755,6 +887,7 @@ def _parse_entry(
             resource=resource,
             mcp=mcp,
             controls=cited,
+            data=MappingProxyType(labels),
         )
 
     rules = entry["rules"]
@@ -769,6 +902,7 @@ def _parse_entry(
         resource=resource,
         mcp=mcp,
         controls=cited,
+        data=MappingProxyType(labels),
     )
 
 
@@ -858,15 +992,17 @@ def _parse_rule(rule: object, where: str, known: frozenset[str] = frozenset()) -
         )
     return _Rule(
         decision=decision,
-        conditions=tuple(parse_conditions(when, where=where).values()),
+        conditions=tuple(parse_conditions(when, where=where, allow_derived=True).values()),
         controls=cited,
     )
 
 
-def _parse_condition(key: object, operand: object, where: str) -> Condition:
+def _parse_condition(
+    key: object, operand: object, where: str, allow_derived: bool = False
+) -> Condition:
     if not isinstance(key, str):
         raise PolicyError(f"{where}: condition keys must be strings, got {key!r}")
-    argument, op = _split_condition_key(key, where)
+    argument, op = _split_condition_key(key, where, allow_derived)
     return Condition(
         key=key,
         argument=argument,
@@ -875,11 +1011,23 @@ def _parse_condition(key: object, operand: object, where: str) -> Condition:
     )
 
 
-def _split_condition_key(key: str, where: str) -> tuple[str, str]:
+def _split_condition_key(key: str, where: str, allow_derived: bool = False) -> tuple[str, str]:
     for op in _OPERATORS_BY_LENGTH:
         suffix = f"_{op}"
         if key.endswith(suffix) and len(key) > len(suffix):
             argument = key[: -len(suffix)]
+            if argument in DERIVED_SUBJECTS and allow_derived:
+                return argument, op
+            if argument in DERIVED_SUBJECTS:
+                # Reached only where derived subjects are not admitted -- an authority
+                # `constraints:` mapping. §11 puts *"matching a grant on a data label"* out of
+                # v0.6, and the message says which surface refused it rather than claiming the
+                # name is an `Action` field, which `data_scope` is not.
+                raise PolicyError(
+                    f"{where}: condition {key!r} addresses {argument!r}, which a policy rule may "
+                    f"see and a grant may not. Matching a grant on {argument!r} is not in v0.6; "
+                    "write the rule in the policy instead."
+                )
             if argument in RESERVED_ARGUMENTS:
                 raise PolicyError(
                     f"{where}: condition {key!r} names the Action field {argument!r}, not an "
