@@ -729,13 +729,23 @@ def test_the_catalogue_is_closed_and_ordered():
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
 
-def test_a_store_url_v0_4_does_not_have_is_refused(tmp_path):
+def test_a_store_url_ctrlrun_does_not_have_is_refused(tmp_path):
+    """SPEC-v0.6 §9.6 amendment 2. `v0.4 §3.1` reserved the flag and exited 2 naming v0.6 for
+    anything but SQLite; v0.6 is now, so the message names the two values that exist.
+
+    This test used a `postgres://` URL and asserted the word "v0.6". That URL is now **accepted**,
+    which the sdist job caught and the `check` job did not: with psycopg installed the run gets
+    as far as connecting, and without it the refusal is `MissingDependency`. Neither is what the
+    test meant to exercise, so it names a backend that really does not exist.
+    """
     path = _write(tmp_path, WITH_EFFECTS)
 
     with pytest.raises(VerifyRefused) as refused:
-        run(path, store_url="postgres://localhost/ctrlrun")
+        run(path, store_url="mysql://localhost/ctrlrun")
 
-    assert "v0.6" in str(refused.value)
+    message = str(refused.value)
+    assert "postgresql://" in message, "the refusal does not name the second accepted value"
+    assert "sqlite" in message
 
 
 def test_authority_declared_twice_is_refused(tmp_path):
