@@ -84,7 +84,7 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
 _TOP_LEVEL_KEYS: Final = frozenset(
-    {"schema", "actions", "environment", "authority", "mode", "version"}
+    {"schema", "actions", "environment", "authority", "mode", "version", "controls"}
 )
 
 #: SPEC-v0.6 §7.1 — the top-level keys that need `ctrlrun.policy/v4`, and what an older reader
@@ -92,7 +92,14 @@ _TOP_LEVEL_KEYS: Final = frozenset(
 #: declared version, which is exactly what a `v3` document has. It is still gated, because
 #: §3.1's key sets are closed and a `version:` an older reader silently dropped would be a typo
 #: that never surfaced.
+#: The closed key set of one registry entry (§7.3, and §3.1's rule).
+_CONTROL_KEYS: Final = frozenset({"title", "source"})
+
 _V4_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
+    "controls": (
+        "an older reader would ignore the registry and load a document whose rules cite ids "
+        "nothing defines"
+    ),
     "version": (
         "an older reader would refuse the document outright, since its top-level key set is closed"
     ),
@@ -107,12 +114,12 @@ _V3_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
     ),
     "mode": ("an older reader would enforce a configuration that was deployed to observe"),
 }
-_RULE_KEYS: Final = frozenset({"when", "decision"})
+_RULE_KEYS: Final = frozenset({"when", "decision", "controls"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
 #: decorator to carry an effect template, so the policy file has to.
 _V2_ENTRY_KEYS: Final = frozenset({"effect", "resource", "mcp"})
-_ENTRY_KEYS: Final = frozenset({"decision", "rules"}) | _V2_ENTRY_KEYS
+_ENTRY_KEYS: Final = frozenset({"decision", "rules", "controls"}) | _V2_ENTRY_KEYS
 
 #: And the closed key set of the `mcp` mapping, which is one key wide.
 _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
@@ -256,10 +263,32 @@ class Condition:
 class _Rule:
     decision: Decision
     conditions: tuple[Condition, ...]
+    #: §7.3 — the control ids this rule cites. A rule may narrow or add to the action's.
+    controls: tuple[str, ...] = ()
 
     def matches(self, action_name: str, arguments: Mapping[str, Any]) -> bool:
         # A rule with no `when` has no conditions, so all() holds and it always matches.
         return all(condition.matches(action_name, arguments) for condition in self.conditions)
+
+
+@dataclass(frozen=True)
+class Control:
+    """One entry in the control registry: an identifier and a citation (SPEC-v0.6 §7.3).
+
+    **CTRLRun does not interpret a control.** `source:` is a string the operator wrote. The
+    kernel does not know what PCI DSS is, does not check the clause exists, and makes no
+    compliance, conformance or alignment claim on the strength of one -- validating a citation
+    would be the beginning of interpreting it.
+
+    And a control is **attribution, not prevention**. Citing one on a rule does not cause an
+    approval; the rule's `decision:` does. It says which written expectation the rule exists to
+    serve, so a receipt can answer "under what" and an operator can go from a control to its
+    evidence. Any sentence that implies otherwise is a false green in prose.
+    """
+
+    id: str
+    title: str
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -285,14 +314,26 @@ class _ActionPolicy:
     effect: str | None = None
     resource: str | None = None
     mcp: McpOptions = _DEFAULT_MCP_OPTIONS
+    #: §7.3 — the control ids this action cites, which govern every rule under it.
+    controls: tuple[str, ...] = ()
 
     def evaluate(self, action_name: str, arguments: Mapping[str, Any]) -> Evaluation:
         if self.decision is not None:
-            return Evaluation(self.decision, BARE_DECISION)
+            return Evaluation(self.decision, BARE_DECISION, self.controls)
         for index, rule in enumerate(self.rules):
             if rule.matches(action_name, arguments):
-                return Evaluation(rule.decision, f"rule[{index}]")
-        return Evaluation(Decision.DENY, NO_MATCHING_RULE)
+                # The union of the action's and the matched rule's, in registry order (§7.3).
+                # The action's alone would drop what the rule narrowed to; the rule's alone
+                # would drop a control that governs every rule under the action.
+                return Evaluation(
+                    rule.decision,
+                    f"rule[{index}]",
+                    self.controls
+                    + tuple(item for item in rule.controls if item not in self.controls),
+                )
+        # No rule matched, so no rule's controls apply -- and the action's do: they govern
+        # everything under it, including this refusal.
+        return Evaluation(Decision.DENY, NO_MATCHING_RULE, self.controls)
 
 
 @dataclass(frozen=True)
@@ -320,6 +361,9 @@ class Policy:
     #: in content are two different policies, and `policy_hash` is what says so. Recorded on
     #: every receipt beside the hash so an operator can read the evidence in their own terms.
     version: str | None = None
+    #: SPEC-v0.6 §7.3 — the control registry, by id, in document order. Empty where the document
+    #: declares none, which is every document before `ctrlrun.policy/v4`.
+    controls: Mapping[str, Control] = field(default_factory=dict)
     #: The canonical form this policy's hash is computed over (§7.1). Held rather than rebuilt so
     #: `policy_hash` is not recomputed on every action, and private because it is an
     #: implementation detail of the hash and not a second way to read the policy.
@@ -402,11 +446,14 @@ class Policy:
             raise PolicyError(
                 f"{source}: 'version' must be a non-empty string, got {_type_name(version)}"
             )
+        controls = _parse_controls(document.get("controls"), source)
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
                 raise PolicyError(f"{source}: action names must be non-empty strings, got {name!r}")
-            actions[name] = _parse_entry(entry, f"{source}: action {name!r}", str(schema))
+            actions[name] = _parse_entry(
+                entry, f"{source}: action {name!r}", str(schema), frozenset(controls)
+            )
         return cls(
             actions=MappingProxyType(actions),
             source=source,
@@ -414,6 +461,7 @@ class Policy:
             environment=environment if isinstance(environment, str) else None,
             mode=mode,
             version=version if isinstance(version, str) else None,
+            controls=MappingProxyType(controls),
             _canonical=_canonical_policy(document, str(schema), mode, environment),
         )
 
@@ -617,7 +665,70 @@ def _reject_unknown_keys(mapping: Mapping[Any, Any], allowed: Iterable[str], whe
         )
 
 
-def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
+def _parse_controls(value: object, source: str) -> dict[str, Control]:
+    """The top-level `controls:` registry (SPEC-v0.6 §7.3)."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise PolicyError(
+            f"{source}: 'controls' must be a mapping of id to entry, got {_type_name(value)}"
+        )
+    registry: dict[str, Control] = {}
+    for identifier, entry in value.items():
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise PolicyError(
+                f"{source}: control ids must be non-empty strings, got {identifier!r}"
+            )
+        where = f"{source}: control {identifier!r}"
+        if not isinstance(entry, Mapping):
+            raise PolicyError(f"{where}: must be a mapping with a 'title', got {_type_name(entry)}")
+        _reject_unknown_keys(entry, _CONTROL_KEYS, where)
+        title = entry.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise PolicyError(
+                f"{where}: 'title' must be a non-empty string, got {_type_name(title)}"
+            )
+        cited = entry.get("source")
+        if "source" in entry and (not isinstance(cited, str) or not cited.strip()):
+            raise PolicyError(
+                f"{where}: 'source' must be a non-empty string, got {_type_name(cited)}"
+            )
+        registry[identifier] = Control(
+            id=identifier, title=title, source=cited if isinstance(cited, str) else None
+        )
+    return registry
+
+
+def _parse_cited(value: object, where: str, known: frozenset[str]) -> tuple[str, ...]:
+    """A `controls:` citation list, checked against the registry (§7.3).
+
+    **An unknown id is a load error naming it.** A registry whose citations can dangle is a
+    registry that quietly stops meaning anything -- an operator reading a receipt would follow a
+    control id to a definition that is not there, and conclude the evidence was wrong rather
+    than the document.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        raise PolicyError(f"{where}: 'controls' must be a list of ids, got {_type_name(value)}")
+    cited: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise PolicyError(f"{where}: control ids must be non-empty strings, got {item!r}")
+        if item not in known:
+            listed = ", ".join(sorted(known)) or "none"
+            raise PolicyError(
+                f"{where}: cites control {item!r}, which the registry does not define. "
+                f"Declared controls: {listed}"
+            )
+        if item not in cited:
+            cited.append(item)
+    return tuple(cited)
+
+
+def _parse_entry(
+    entry: object, where: str, schema: str, known: frozenset[str] = frozenset()
+) -> _ActionPolicy:
     if not isinstance(entry, Mapping):
         raise PolicyError(
             f"{where}: entry must be a mapping with 'decision' or 'rules', got {_type_name(entry)}"
@@ -634,6 +745,8 @@ def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
     resource = _parse_template(entry.get("resource"), "resource", where)
     mcp = _parse_mcp(entry.get("mcp"), where)
 
+    cited = _parse_cited(entry.get("controls"), where, known)
+
     if has_decision:
         return _ActionPolicy(
             decision=_parse_decision(entry["decision"], where),
@@ -641,6 +754,7 @@ def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
             effect=effect,
             resource=resource,
             mcp=mcp,
+            controls=cited,
         )
 
     rules = entry["rules"]
@@ -649,11 +763,12 @@ def _parse_entry(entry: object, where: str, schema: str) -> _ActionPolicy:
     return _ActionPolicy(
         decision=None,
         rules=tuple(
-            _parse_rule(rule, f"{where} rule[{index}]") for index, rule in enumerate(rules)
+            _parse_rule(rule, f"{where} rule[{index}]", known) for index, rule in enumerate(rules)
         ),
         effect=effect,
         resource=resource,
         mcp=mcp,
+        controls=cited,
     )
 
 
@@ -722,7 +837,7 @@ def _parse_decision(value: object, where: str) -> Decision:
         ) from exc
 
 
-def _parse_rule(rule: object, where: str) -> _Rule:
+def _parse_rule(rule: object, where: str, known: frozenset[str] = frozenset()) -> _Rule:
     if not isinstance(rule, Mapping):
         raise PolicyError(f"{where}: a rule must be a mapping, got {_type_name(rule)}")
     reject_nested_mode(rule, where)
@@ -730,8 +845,9 @@ def _parse_rule(rule: object, where: str) -> _Rule:
     if "decision" not in rule:
         raise PolicyError(f"{where}: a rule must have a 'decision'")
     decision = _parse_decision(rule["decision"], where)
+    cited = _parse_cited(rule.get("controls"), where, known)
     if "when" not in rule:
-        return _Rule(decision=decision, conditions=())
+        return _Rule(decision=decision, conditions=(), controls=cited)
 
     when = rule["when"]
     # SPEC: §3.2 — `when` is either absent (always matches) or a non-empty mapping. An
@@ -743,6 +859,7 @@ def _parse_rule(rule: object, where: str) -> _Rule:
     return _Rule(
         decision=decision,
         conditions=tuple(parse_conditions(when, where=where).values()),
+        controls=cited,
     )
 
 

@@ -284,3 +284,185 @@ def test_T172_two_policies_sharing_a_version_string_are_told_apart_by_the_hash(t
         "two policies with the same declared version and different rules produced the same "
         "provenance; the hash is the field that is supposed to tell them apart"
     )
+
+
+# --- T175: the registry loads, cites, and refuses a dangling id --------------------------------
+
+
+REGISTERED = """
+schema: ctrlrun.policy/v4
+controls:
+  maker-checker-refunds:
+    title: "A refund over the desk limit is approved by a second person"
+    source: "House policy FIN-4.2"
+  card-data-handling:
+    title: "Cardholder data is not written to evidence"
+    source: "PCI DSS v4.0 §3.3.1"
+  cited-by-nobody:
+    title: "A control the operator has written down and not yet wired up"
+actions:
+  stripe.refund:
+    controls: [card-data-handling]
+    rules:
+      - when: {amount_gt: 50000}
+        decision: approve
+        controls: [maker-checker-refunds]
+      - decision: allow
+  customer.read:
+    decision: allow
+"""
+
+
+def test_T175_a_control_cited_by_no_rule_still_loads() -> None:
+    """SPEC-v0.6 §7.3. A registry is a list of what the operator has written down; a control
+    nothing cites yet is an ordinary state of a document being filled in, not an error."""
+    policy = Policy.from_yaml(REGISTERED)
+    assert set(policy.controls) == {
+        "maker-checker-refunds",
+        "card-data-handling",
+        "cited-by-nobody",
+    }
+    assert policy.controls["cited-by-nobody"].title.startswith("A control the operator")
+    assert policy.controls["cited-by-nobody"].source is None
+
+
+def test_T175_a_dangling_id_is_a_load_error_naming_it() -> None:
+    """§7.3's third rule: *"an unknown control id is a load error, naming it. A registry whose
+    citations can dangle is a registry that quietly stops meaning anything."*"""
+    for where, edited in (
+        (
+            "an action",
+            REGISTERED.replace("controls: [card-data-handling]", "controls: [typo-here]"),
+        ),
+        (
+            "a rule",
+            REGISTERED.replace("controls: [maker-checker-refunds]", "controls: [typo-here]"),
+        ),
+    ):
+        with pytest.raises(PolicyError) as refused:
+            Policy.from_yaml(edited)
+        assert "typo-here" in str(refused.value), (
+            f"a dangling id cited by {where} was refused without naming it: {refused.value}"
+        )
+
+
+def test_T175_the_receipt_carries_the_union_of_the_action_and_the_matched_rule(tmp_path) -> None:
+    """§7.3: *"the ids the **matched rule** cited, unioned with the action's."*
+
+    The union, and not the rule's alone: an action-level control governs every rule under it, and
+    a receipt that dropped it would answer "under what" with only half of what the operator wrote.
+    """
+    from ctrlrun import Control
+    from ctrlrun.action import Action, Principal
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=lambda: T0)
+    control = Control(
+        Policy.from_yaml(REGISTERED),
+        store,
+        clock=lambda: T0,
+    )
+
+    # The second rule matches: the action's control only.
+    small = control.execute(
+        Action(
+            name="stripe.refund",
+            arguments={"payment_id": "p1", "amount": 100},
+            principal=Principal(agent="a"),
+        ),
+        lambda: {"ok": True},
+        "refund:p1",
+        lease=LEASE,
+    )
+    assert small.controls == ("card-data-handling",)
+
+    # The first rule matches: the union, in registry order. Asserted on the evaluation, because
+    # an `approve` decision needs a human and the union is a property of the decision, not of
+    # what happens after it.
+    over = Policy.from_yaml(REGISTERED).evaluate(
+        Action(
+            name="stripe.refund",
+            arguments={"payment_id": "p2", "amount": 90000},
+            principal=Principal(agent="a"),
+        )
+    )
+    assert over.decision.value == "approve"
+    assert over.controls == ("card-data-handling", "maker-checker-refunds")
+
+    # An action citing none carries none. Without this, a control list that was simply always
+    # the whole registry would pass every assertion above.
+    none = control.execute(
+        Action(
+            name="customer.read",
+            arguments={"customer_id": "c1"},
+            principal=Principal(agent="a"),
+        ),
+        lambda: {"ok": True},
+        "read:c1",
+        lease=LEASE,
+    )
+    assert none.controls == ()
+    store.close()
+
+
+def test_T175_a_control_is_attribution_and_changes_no_decision() -> None:
+    """§7.3's second rule, and this project's sharpest: **a control is attribution, not
+    prevention.**
+
+    Citing `maker-checker-refunds` on a rule does not cause an approval; the rule's `decision:
+    approve` does. So the same document with every `controls:` line removed reaches the *same
+    decision for every action* -- and if it did not, a control would be enforcing something, and
+    every sentence in §7.3 would be a false green in prose.
+    """
+    from ctrlrun.action import Action, Principal
+
+    stripped = "\n".join(
+        line
+        for line in REGISTERED.splitlines()
+        if "controls:" not in line
+        and not line.strip().startswith(
+            ("maker-checker", "card-data", "cited-by", "title:", "source:")
+        )
+    )
+    with_controls = Policy.from_yaml(REGISTERED)
+    without = Policy.from_yaml(stripped)
+
+    for name, arguments in (
+        ("stripe.refund", {"payment_id": "p1", "amount": 100}),
+        ("stripe.refund", {"payment_id": "p2", "amount": 90000}),
+        ("customer.read", {"customer_id": "c1"}),
+        ("unknown.action", {}),
+    ):
+        action = Action(name=name, arguments=arguments, principal=Principal(agent="a"))
+        one, two = with_controls.evaluate(action), without.evaluate(action)
+        assert one.decision is two.decision, (
+            f"{name} with {arguments} decided {one.decision} with controls and {two.decision} "
+            "without them; a control that changes a decision is enforcing something"
+        )
+        assert one.reason == two.reason
+
+
+def test_T175_controls_need_v4_and_the_registry_key_set_is_closed() -> None:
+    """§7.1's gate, and §3.1's closed key sets applied to the new mapping."""
+    with pytest.raises(PolicyError) as refused:
+        Policy.from_yaml(REGISTERED.replace("ctrlrun.policy/v4", "ctrlrun.policy/v3"))
+    assert "controls" in str(refused.value)
+    assert "v4" in str(refused.value)
+
+    with pytest.raises(PolicyError) as typo:
+        Policy.from_yaml(REGISTERED.replace('    source: "House policy FIN-4.2"', '    sauce: "x"'))
+    assert "sauce" in str(typo.value)
+
+
+def test_T175_the_source_is_cited_and_never_interpreted() -> None:
+    """§7.3's first rule. `source:` is a string the operator wrote: the kernel does not know what
+    PCI DSS is, does not check the clause exists, and makes **no compliance, conformance or
+    alignment claim** on the strength of one.
+
+    Asserted as a property of the loader: any string loads, including one naming a standard that
+    does not exist, because validating it would be the beginning of interpreting it.
+    """
+    invented = REGISTERED.replace(
+        '"PCI DSS v4.0 §3.3.1"', '"Entirely Fictional Standard 9000 §1.1"'
+    )
+    policy = Policy.from_yaml(invented)
+    assert policy.controls["card-data-handling"].source == "Entirely Fictional Standard 9000 §1.1"
