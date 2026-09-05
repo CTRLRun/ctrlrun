@@ -2142,6 +2142,30 @@ sentences this rule exists to produce. It would then be removed as a false posit
 would be gone. An allow-list fails on a **new** occurrence — which is exactly the event worth
 failing on — and forces whoever adds one to say, in the test, that they meant it.
 
+**Amended in item 9, because writing it found the sentence above to be two-thirds true.** Ten of
+the twenty-one allow-listed lines disclaim one of the words, as this paragraph assumed. The other
+eleven are about something else entirely and the word-boundary pattern cannot tell them apart: a
+changelog entry about JWT **signature** verification, the HMAC on a webhook POST, `Signing keys
+fetched from somewhere else` in the threat model's identity table, and the Python word for a
+function's parameters — *"`Control.evaluate`'s **signature** is amended"*. Describing the list as
+sentences that disclaim would have made the next person delete those eleven as mistakes, which is
+the false positive this design exists to prevent, arriving through the specification instead of
+through the pattern.
+
+So the list is **two named groups** — the ones that disclaim, and the ones about another subject —
+merged into one allow-list. The mechanism and its guarantee are unchanged: a **new** occurrence
+fails, and whoever adds it comes to the test and says which kind it is. Two further checks make
+the list itself load-bearing rather than decorative: every entry must still resolve to a line in
+its file and must still contain a forbidden word (an entry that stopped matching is an entry doing
+nothing), and a positive control asserts the pattern would fire on *"receipts are signed, which
+proves authorship"*, *"the chain is tamper-proof"* and *"CTRLRun gives you non-repudiation"* while
+not firing on `design`, `assign` or `designated`.
+
+**What the check does not cover**, stated rather than assumed: a claim made in words the pattern
+does not contain. *"CTRLRun proves who wrote each receipt"* passes it. The scan is a guard against
+the vocabulary drifting back in, not a reader of prose, and §6.4 remains the thing that has to be
+true.
+
 The third rule of §1.2, made a test rather than an intention.
 
 #### T181 — Core still installs nothing new

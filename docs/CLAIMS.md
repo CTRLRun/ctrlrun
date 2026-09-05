@@ -8,7 +8,7 @@ removed from the README in the same commit — the README is not allowed to desc
 that no longer ships. If you find a row here that does not hold against the version you
 installed, that is a bug: please open an issue.
 
-Regenerated for: **v0.5.0**, with rows re-pointed on `main` since. Line numbers refer to the current `main`, not to the tag, and item 9 of v0.6 regenerates the file wholesale. `test_the_claims_table_line_numbers_point_at_what_they_name` resolves every one of them against the line it cites, which is why they are re-pointed rather than left to rot.
+Regenerated for: **v0.6.0**. Line numbers refer to the commit this file was regenerated on, and `scripts/repoint-claims.py` re-derives them for the commits in between — it **refuses** rather than guessing when a symbol has no definition, because a row pointing at a docstring that happens to contain the right word makes the guard green and the claim false. `test_the_claims_table_line_numbers_point_at_what_they_name` resolves every one against the line it cites.
 
 ## The opening paragraph
 
@@ -181,3 +181,24 @@ The adapter section. Every sentence, mapped the same way.
 | "An adapter never constructs one, and never supplies a principal" | `needs_approval` — `adapter.py:408` — resolves the principal from the `Control` so no adapter builds an `Action` | `test_T129_no_public_callable_takes_a_principal`, `test_T129_the_module_exposes_no_way_to_construct_a_control` |
 | "prevention" / "attribution" | `carries_approved_arguments` gates §3.4's rebuild in `_check_answer` — `adapter.py:320` | `test_T137b_the_readme_says_the_binding_is_attribution_and_why` |
 | "Adapters ship on their own version line" | `adapters/*/pyproject.toml`, never in the `ctrlrun` wheel or sdist | `test_T136_the_ctrlrun_distributions_contain_no_adapter` |
+
+## What v0.6 adds to the README
+
+The durable-runtime section. Every sentence, mapped the same way.
+
+| Claim | Code | Proof |
+|---|---|---|
+| "Same `StateStore` protocol, extended by nothing" | `PostgresStateStore.reserve_effect` — `postgres.py:528` — and every other method implement `v0.1 §5.3`'s frozen protocol; the decisions stay in `plan_reservation` (`effect.py:156`) | `test_T154_postgres_passes_the_store_conformance_suite` |
+| "a unique index on the effect key and compare-and-set updates whose row counts are checked" | `reserve_effect` — `postgres.py:528` — `INSERT … ON CONFLICT DO NOTHING` against `effect_key TEXT PRIMARY KEY COLLATE "C"` (`migrations.py:107`) | `test_T3_exactly_one_agent_reserves_and_seven_are_blocked` (8 OS processes, both backends) |
+| "every case … runs against both backends, from the same file" | `ctrlrun.conformance.store.run` — `conformance/store/__init__.py:52` | `test_T140_every_fixture_fails_the_suite_named_for_it` |
+| "A lost connection during `COMMIT` … is `AMBIGUOUS`, never `FAILED`" | `_resolve_lost_insert` — `postgres.py:648`; `_resolve_lost_update` — `postgres.py:995`; only `NotExecuted` maps to `FAILED` — `control.py:1036` | `test_T155_a_connection_killed_during_commit_is_resolved_by_the_re_read`, `test_T155_no_effect_is_ever_recorded_failed_by_a_lost_commit` |
+| "the store re-reads the row to find out which" | The six branches, named and logged — `A2_LANDED` — `postgres.py:127` | `test_T155b_a_landed_commit_on_a_transition_is_seen_as_landed`, `test_T155d_a_commit_the_server_never_received_retries_the_insert` |
+| "migrations are automatic at open, forward-only" | `migrate` — `migrations.py:525`, called from both stores' constructors; `HEAD` — `migrations.py:306` | `test_T147_a_v05_database_migrates_and_keeps_every_row`, `test_T150_reopening_does_not_rerun` |
+| "an older binary against a newer schema refuses immediately" | `_refuse` — `migrations.py:451`; `SchemaMismatch` — `errors.py` | `test_T148_an_older_binary_refuses_a_newer_database`, `test_T148_no_other_table_is_read_before_the_refusal` |
+| "Each receipt carries the hash of the one before it" | `Receipt.chain_hash` — `receipt.py:284`; `prev_hash` — `receipt.py:41`; `GENESIS_HASH` — `receipt.py:41`; `put_receipt` takes the head row's lock first — `postgres.py:1464` | `test_T164_an_altered_receipt_is_content_altered_at_its_seq`, `test_T164_reordering_two_receipts_is_detected_either_way` |
+| "`ctrlrun receipts --verify-chain` reports it by `seq`" | `verify_chain` — `receipt.py:479`; the six names — `CHAIN_BREAKS` — `receipt.py:479` | `test_the_verify_chain_flag_reports_a_break_by_seq_and_by_name`, `test_verify_chain_reads_a_postgres_store_through_store_url` |
+| "erasing the end of the log costs two statements" | No code — this is what the chain does **not** cover, and it is asserted rather than argued | `test_erasing_a_suffix_and_rewinding_the_head_is_two_statements_and_undetected` |
+| "This detects alteration … not authorship" | n/a — a disclaimer, and the scan that keeps it one | `test_T180_the_release_documents_do_not_blur_alteration_and_authorship` |
+| "Every receipt records which policy decided it" | `Policy.policy_hash` — `policy.py:559`, over `_canonical_policy` — `policy.py:698`; carried into the receipt by `policy_in_force` — `control.py:1595` | `test_T172_every_receipt_carries_the_hash_and_the_declared_version`, `test_T172_two_policies_sharing_a_version_string_are_told_apart_by_the_hash` |
+| "the policy's declared `version:` … rather than what they are now" | `version:` is recorded and never authoritative; `policy_hash` is what tells two documents apart — `policy.py:559` | `test_T171_the_declared_version_alone_does_not_change_the_hash`, `test_T171_comments_key_order_and_whitespace_do_not_change_the_hash` |
+| "the approval is re-checked against the policy in force at execution" | `policy_in_force` — `control.py:1595` | `test_T173_the_DENY_row_refuses_and_leaves_the_approval_granted`, `test_T173_the_ALLOW_row_invalidates_the_approval_it_did_not_need` |

@@ -114,7 +114,7 @@ Versioned as `adapters-<framework>-MAJOR.MINOR` — `adapters-crewai-1.0`, `adap
 
 Standards: none of its own.
 
-## v0.6 — Durable runtime (Current)
+## v0.6 — Durable runtime (Code complete 2026-09-06; **not tagged** — see Exit)
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity — a hash chain, which detects **alteration** and not authorship.
@@ -123,6 +123,12 @@ Standards: none of its own.
 - Control registry and data-scope primitives: the kernel-side objects a sector pack configures, shipped here so that a pack is configuration rather than code.
 
 Exit: the v0.1 concurrency and mutation standard met against a real Postgres on two hosts under failure injection; a soak of at least one week with no unexplained AMBIGUOUS; a receipt chain tamper test.
+
+**Two of the three were met, and the third is reconciled here rather than quietly rephrased.**
+
+- *The concurrency and mutation standard against a real Postgres* — met, with one narrowing stated in item 4's PR and repeated here: it was run as **separate OS processes against one Postgres, with the connection broken by a proxy the tests own**, not as two hosts, because this build environment has no container runtime. Separate processes give separate connections, no shared memory and no shared file locks, which is what `BEGIN IMMEDIATE` was silently relying on and what a second host removes, so the reservation guarantee is exercised. A **network partition between hosts** is not, and stays unclaimed.
+- *The receipt chain tamper test* — met. Six cases, each asserting **which** break was reported and **where**; `SPEC-v0.6.md` §6.5 names all six, and §6.4 says what the chain does not cover before saying what it does.
+- *A soak of at least one week with no unexplained AMBIGUOUS* — **not met as written.** The harness landed, its definition of *unexplained* is fixed before any run starts, and its positive control fires; what has not happened is a week of calendar time. `research/soak/README.md` publishes the duration actually measured and the count actually found, and the harness asserts nothing about the clock — a table that reported "criterion met" after thirty minutes would be making the one claim this project said would be exactly as false as it looks. The criterion is left standing, unmet, rather than rewritten to fit the run: **v0.6 ships its code and its evidence, and the week is still owed.**
 
 Standards: `docs/CONTROL-MAPPING.md` — clause-level mapping of receipt integrity/retention to EU AI Act Art. 12 and SOC 2 CC6/CC7, and of exact-action approval to Art. 14. Each row points at a test. Written only when a design partner asks.
 
