@@ -1648,9 +1648,15 @@ class Control:
             finished_at=self._clock(),
             error=error,
         )
-        self._store.put_receipt(receipt)
-        self._fan_out("on_receipt", receipt, receipt.receipt_id)
-        return receipt
+        # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
+        # to the sinks and back to the caller is the **chained** receipt. Handing the unchained
+        # one to a sink would put a document with no `seq` in the JSONL export, and §6.4's claim
+        # that the export is verifiable by recomputation rests on every document carrying its
+        # own place in the chain. `append_event` has returned its stored record since v0.2 for
+        # the same reason.
+        chained = self._store.put_receipt(receipt)
+        self._fan_out("on_receipt", chained, chained.receipt_id)
+        return chained
 
     def _fan_out(self, method: str, record: Event | Receipt, described: str) -> None:
         """Hand one record to every sink, in registration order (SPEC-v0.2 §4.1, §4.2).

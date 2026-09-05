@@ -53,7 +53,7 @@ from .effect import (
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
 from .migrations import migrate
-from .receipt import Event, EventType, Receipt
+from .receipt import GENESIS_HASH, Event, EventType, Receipt
 
 _LOG = logging.getLogger(__name__)
 
@@ -519,8 +519,32 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
-    def put_receipt(self, receipt: Receipt) -> None:
-        """Record a receipt for an action that reached a terminal state."""
+    def put_receipt(self, receipt: Receipt) -> Receipt:
+        """Record a receipt, and return it with its place in the chain (SPEC-v0.6 §6.2, §6.3).
+
+        The returned receipt carries `seq`, `prev_hash` and `hash`, which the store assigns in
+        the transaction that writes the row. **The return value is the signature change v0.6
+        makes here**, and it is `append_event`'s exactly: that has returned its stored record
+        with the `event_id` the store assigned since v0.2, for the same reason. Without it the
+        caller hands sinks a document with no `seq`, and §6.4's claim that the JSONL export is
+        verifiable by recomputation rests on every document carrying its own place.
+        """
+        ...
+
+    def chain_head(self) -> tuple[int, str] | None:
+        """The receipt chain's head: `(seq, hash)`, or `None` where there is no head row.
+
+        SPEC-v0.6 §6.3, and **the one store method this milestone adds**. §9.1's earlier
+        "no new store method" did not survive §6.3: the head exists precisely to detect a
+        truncation at the *end*, where deleting the last N receipts leaves a chain that is
+        internally consistent, and only a head that still names a `seq` and a `hash` no row
+        carries catches it. A reader that cannot see the head cannot report `head_mismatch`,
+        so §6.5's fourth name would be unimplementable and the guarantee would be one the
+        document claims and the code cannot make. §9.2 records the amendment.
+
+        It adds no capability: the head is a row this same store already writes in
+        `put_receipt`, and nothing else may change it.
+        """
         ...
 
     def events(self) -> tuple[Event, ...]:
@@ -567,6 +591,11 @@ class InMemoryStateStore:
         self._clock = clock
         self._events: list[Event] = []
         self._receipts: list[Receipt] = []
+        #: The chain head (§6.3), starting where `0002_receipt_chain` starts it: seq 0
+        #: carrying the genesis hash, so an empty store is a chain of length zero rather
+        #: than a truncated one.
+        self._chain_seq = 0
+        self._chain_hash = GENESIS_HASH
         self._approvals: dict[str, ApprovalRecord] = {}
         self._effects: dict[str, EffectRecord] = {}
         self._continuations: dict[str, tuple[str, Action, int]] = {}
@@ -583,9 +612,24 @@ class InMemoryStateStore:
             self._events.append(stored)
         return stored
 
-    def put_receipt(self, receipt: Receipt) -> None:
+    def put_receipt(self, receipt: Receipt) -> Receipt:
         with self._lock:
-            self._receipts.append(receipt)
+            # The same protocol as SQLite's (§6.3): take the head, number the receipt, link it,
+            # write the head back. The lock here is the object's, which is all a store confined
+            # to one process can offer -- and `reopen()` returning `None` is how this backend
+            # declares that (§2.4).
+            seq = self._chain_seq + 1
+            chained = replace(receipt, seq=seq, prev_hash=self._chain_hash)
+            digest = chained.chain_hash()
+            stored = replace(chained, hash=digest)
+            self._receipts.append(stored)
+            self._chain_seq = seq
+            self._chain_hash = digest
+            return stored
+
+    def chain_head(self) -> tuple[int, str] | None:
+        with self._lock:
+            return (self._chain_seq, self._chain_hash)
 
     def events(self) -> tuple[Event, ...]:
         """An immutable snapshot of the event log, in append order."""
@@ -981,19 +1025,64 @@ class SQLiteStateStore:
         )
         return replace(event, event_id=cursor.lastrowid)
 
-    def put_receipt(self, receipt: Receipt) -> None:
-        self._connection().execute(
-            "INSERT INTO receipts(receipt_id, action_id, effect_key, result, json, ts) "
-            "VALUES(?,?,?,?,?,?)",
-            (
-                receipt.receipt_id,
-                receipt.action_id,
-                receipt.effect_key,
-                str(receipt.result),
-                receipt.to_json(),
-                _iso(receipt.finished_at),
-            ),
+    def put_receipt(self, receipt: Receipt) -> Receipt:
+        """Insert the receipt and advance the chain head, in one transaction (SPEC-v0.6 §6.3).
+
+        **The head row is taken as a lock, not compare-and-set**, and the difference is dropped
+        receipts. The `UPDATE` is unconditional, so a concurrent writer *blocks* on the row rather
+        than losing a race. A draft used `WHERE seq = ?` retried once on zero -- a bound imported
+        from §4.2, where its justification is that a second zero would mean a record vanished,
+        *"which nothing in this protocol can do"*. That argument does not transfer to a row
+        **every** writer updates: a second zero there means a third concurrent writer, which is
+        ordinary. Combined with `put_receipt` raising rather than swallowing, three concurrent
+        actions would have silently dropped a receipt in the one place §6.3 identifies as the
+        first in the kernel where two unrelated actions contend.
+
+        The cost is stated rather than hidden: **every receipt write now serializes on one row**,
+        and the lock is held across the insert.
+        """
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "UPDATE receipt_chain SET seq = seq + 1 WHERE id = 1 RETURNING seq, hash"
+            ).fetchone()
+            if row is None:
+                raise InvalidArgument(
+                    "the receipt chain has no head row; this database predates "
+                    "0002_receipt_chain and was not migrated"
+                )
+            chained = replace(receipt, seq=int(row["seq"]), prev_hash=str(row["hash"]))
+            digest = chained.chain_hash()
+            connection.execute(
+                "INSERT INTO receipts(receipt_id, action_id, effect_key, result, json, ts, "
+                "seq, prev_hash, hash) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    chained.receipt_id,
+                    chained.action_id,
+                    chained.effect_key,
+                    str(chained.result),
+                    chained.to_json(),
+                    _iso(chained.finished_at),
+                    chained.seq,
+                    chained.prev_hash,
+                    digest,
+                ),
+            )
+            connection.execute("UPDATE receipt_chain SET hash = ? WHERE id = 1", (digest,))
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()
+        return replace(chained, hash=digest)
+
+    def chain_head(self) -> tuple[int, str] | None:
+        row = (
+            self._connection()
+            .execute("SELECT seq, hash FROM receipt_chain WHERE id = 1")
+            .fetchone()
         )
+        return None if row is None else (int(row["seq"]), str(row["hash"]))
 
     def events(self) -> tuple[Event, ...]:
         rows = self._connection().execute("SELECT * FROM events ORDER BY event_id").fetchall()
@@ -1011,8 +1100,17 @@ class SQLiteStateStore:
         )
 
     def receipts(self) -> tuple[Receipt, ...]:
-        rows = self._connection().execute("SELECT json FROM receipts ORDER BY rowid").fetchall()
-        return tuple(Receipt.from_json(row["json"]) for row in rows)
+        # By `seq`, not by `rowid`: §6.5's reader takes a receipt's *position* from this column
+        # and its *content* from the document, and a reader ordering by physical row order would
+        # report a gap, or fail to, according to how the rows happen to sit on disk. SQLite sorts
+        # NULLs first, which puts pre-chain rows before the chain rather than inside it.
+        rows = (
+            self._connection()
+            .execute("SELECT json, hash FROM receipts ORDER BY seq, rowid")
+            .fetchall()
+        )
+        # `hash` comes off the column, because a document cannot contain its own hash (§6.2).
+        return tuple(replace(Receipt.from_json(row["json"]), hash=row["hash"]) for row in rows)
 
     # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
 

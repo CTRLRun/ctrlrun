@@ -198,26 +198,73 @@ class Action:
         return arguments
 
 
-def canonicalize(action: Action) -> bytes:
-    """Return the canonical form of an Action: UTF-8 JSON, sorted keys, no whitespace.
+def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+    """The canonical form of an arbitrary mapping: UTF-8 JSON, sorted keys, no whitespace.
 
-    `action_id` and timestamps are excluded; the schema tag is included (SPEC-v0.1 §2.2).
+    **This is the encoding half of `v0.1 §2.3`, promoted rather than written** (SPEC-v0.6 §6.2,
+    §9.1). `canonicalize(action)` builds a fixed six-key payload and calls this, so there is
+    provably one implementation rather than two that agree today: the receipt chain (§6.2) and
+    the policy hash (§7.1) both need the canonical form of a *document*, and the alternative was
+    a private second canonicalizer, which §6.2 forbids by name.
+
+    Sorted keys recursively, `separators=(",", ":")`, `ensure_ascii=False`, UTF-8, and **`float`
+    rejected at any depth**. The rejection is not `json.dumps`'s doing -- `allow_nan=False` only
+    catches `NaN` and the infinities -- so it is checked here, because a canonicalizer that
+    silently encoded `0.1` would make two hosts with different libm disagree about a hash.
+
+    `ctrlrun.action/v1` is unchanged by this promotion and T164b is the corpus that proves it.
     """
-    payload = {
-        "arguments": _plain_mapping(action.arguments),
-        "environment": action.environment,
-        "name": action.name,
-        "principal": {"agent": action.principal.agent, "user": action.principal.user},
-        "resource": action.resource,
-        "schema": ACTION_SCHEMA,
-    }
     return json.dumps(
-        payload,
+        _no_floats(payload, "payload"),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def _no_floats(value: object, path: str) -> PlainValue:
+    """Reject `float` at any depth, and return the value otherwise unchanged.
+
+    Separate from `_frozen_value` because that one is about what an `Action` may *hold* and this
+    is about what may be *encoded*. They agree about floats and about nothing else: this accepts
+    a document whose keys and shapes an `Action` would never allow, which is the point of a
+    canonicalizer that works on documents.
+    """
+    if isinstance(value, float):
+        raise InvalidArgument(
+            f"float is not encodable at {path}: canonicalization is security-critical and a "
+            "binary float is not portable between two hosts (v0.1 §2.3)"
+        )
+    if isinstance(value, Mapping):
+        return {str(key): _no_floats(item, f"{path}.{key}") for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_no_floats(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if value is None or isinstance(value, str | int):  # bool is a subclass of int
+        return value
+    raise InvalidArgument(
+        f"{type(value).__name__} is not encodable at {path}: the canonical form is JSON with "
+        "no extensions (v0.1 §2.3)"
+    )
+
+
+def canonicalize(action: Action) -> bytes:
+    """Return the canonical form of an Action: UTF-8 JSON, sorted keys, no whitespace.
+
+    `action_id` and timestamps are excluded; the schema tag is included (SPEC-v0.1 §2.2). The
+    encoding is `canonical_bytes`'s, and calling through is what makes that one implementation
+    rather than two (SPEC-v0.6 §6.2).
+    """
+    return canonical_bytes(
+        {
+            "arguments": _plain_mapping(action.arguments),
+            "environment": action.environment,
+            "name": action.name,
+            "principal": {"agent": action.principal.agent, "user": action.principal.user},
+            "resource": action.resource,
+            "schema": ACTION_SCHEMA,
+        }
+    )
 
 
 def action_hash(action: Action) -> str:

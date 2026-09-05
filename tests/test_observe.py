@@ -205,7 +205,7 @@ def test_T82_the_observed_receipt_round_trips_through_json(store, clock):
     )
     document = json.loads(receipt.to_json())
 
-    assert document["schema"] == "ctrlrun.receipt/v2"
+    assert document["schema"] == "ctrlrun.receipt/v3"
     assert document["result"] == "observed"
     assert document["execution"] == "committed"
     assert document["would_have"]["decision"] == "deny"
