@@ -461,7 +461,7 @@ def test_T149b_the_recording_is_inside_the_migration_transaction(tmp_path, monke
     connection = sqlite3.connect(database, isolation_level=None)
     try:
         with pytest.raises(RuntimeError):
-            migrations._apply(connection, good, T0)
+            migrations._apply(connection, good, T0, "sqlite")
     finally:
         connection.close()
 
@@ -493,7 +493,7 @@ def test_T149c_a_failed_migration_leaves_no_transaction_open():
             id="9996_broken", statements=("CREATE TABLE ok(x TEXT)", "THIS IS NOT SQL")
         )
         try:
-            migrations._apply(connection, broken, T0)
+            migrations._apply(connection, broken, T0, "sqlite")
         except sqlite3.Error:
             pass
         else:

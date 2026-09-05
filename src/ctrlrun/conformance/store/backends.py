@@ -21,6 +21,13 @@ from ...state import InMemoryStateStore, SQLiteStateStore, StateStore
 #: whose database they may touch).
 SQLITE_SCHEME = "sqlite://"
 
+#: Item 3's second value. The worker parses these; `--store-url` is verify's and has its own
+#: rules about whose database it may touch (§4.1).
+POSTGRES_SCHEMES = ("postgresql://", "postgres://")
+
+#: How a conformance URL carries the schema its store must live in. CTRLRun's, not libpq's.
+SCHEMA_PARAM = "ctrlrun_schema"
+
 
 @runtime_checkable
 class StoreBackend(Protocol):
@@ -161,4 +168,84 @@ def store_from_url(url: str) -> StateStore:
     """Open the storage a `url()` names. Used by the worker subprocess and by nothing else."""
     if url.startswith(SQLITE_SCHEME):
         return SQLiteStateStore(Path(url[len(SQLITE_SCHEME) :]))
+    if url.startswith(POSTGRES_SCHEMES):
+        from ...postgres import PostgresStateStore
+
+        bare, schema = _split_schema(url)
+        if schema != "public":
+            # A conformance URL names a schema CTRLRun owns, so the worker may create it. This
+            # path is never reached by an operator's store: `PostgresStateStore` itself creates
+            # nothing, and verify's scratch schema is made and dropped by the caller (§4.1).
+            PostgresStateStore.create_schema(bare, schema)
+        return PostgresStateStore(bare, schema=schema)
     raise ValueError(f"no backend for {url!r}")
+
+
+def _split_schema(url: str) -> tuple[str, str]:
+    """Peel CTRLRun's own schema parameter off a conformance URL."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parts.query) if key != SCHEMA_PARAM]
+    schema = dict(parse_qsl(parts.query)).get(SCHEMA_PARAM, "public")
+    return urlunsplit(parts._replace(query=urlencode(query))), schema
+
+
+class PostgresBackend:
+    """`PostgresStateStore` against a live server. Durable, shareable, no N/A.
+
+    Each instance takes a **private schema**, so two backends handed one URL cannot see each
+    other's rows -- the isolation rule §2.7 states for every backend, which SQLite learned by
+    producing a failure attributed to the wrong fixture.
+    """
+
+    name = "postgres"
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self._serial = 0
+        self._prefix = f"conf_{uuid4().hex[:12]}"
+        self._open: list[StateStore] = []
+
+    @property
+    def _schema(self) -> str:
+        return f"{self._prefix}_{self._serial}"
+
+    def _ensure(self) -> None:
+        from ...postgres import PostgresStateStore
+
+        PostgresStateStore.create_schema(self._url, self._schema)
+
+    def open(self) -> StateStore:
+        from ...postgres import PostgresStateStore
+
+        self._ensure()
+        store = PostgresStateStore(self._url, schema=self._schema)
+        self._open.append(store)
+        return store
+
+    def reopen(self) -> StateStore | None:
+        return self.open()
+
+    def open_with_clock(self, clock: Callable[[], datetime]) -> StateStore:
+        from ...postgres import PostgresStateStore
+
+        self._ensure()
+        store = PostgresStateStore(self._url, schema=self._schema, clock=clock)
+        self._open.append(store)
+        return store
+
+    def url(self) -> str | None:
+        # The schema travels as CTRLRun's own parameter, stripped by `store_from_url` before the
+        # URL reaches the driver. Encoding it as libpq `options=-csearch_path=` would not work:
+        # `PostgresStateStore` sets `search_path` itself on every connection, so a schema smuggled
+        # through the driver would be silently overridden and eight contenders would race in
+        # `public` instead. That is a bug the cross-process case found on its first Postgres run.
+        joiner = "&" if "?" in self._url else "?"
+        return f"{self._url}{joiner}{SCHEMA_PARAM}={self._schema}"
+
+    def reset(self) -> None:
+        for store in self._open:
+            store.close()
+        self._open.clear()
+        self._serial += 1

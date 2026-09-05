@@ -38,9 +38,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
-from .errors import SchemaMismatch
+from .errors import CTRLRunError, SchemaMismatch
 
 
 def ctrlrun_version() -> str:
@@ -74,10 +74,24 @@ class Migration:
     afternoon -- and MUST NOT do anything outside the transaction: no file writes, no network, no
     `VACUUM`, no `CREATE INDEX CONCURRENTLY`. A step that cannot be rolled back is not a migration
     step; it is a second migration, applied and recorded separately.
+
+    **Each dialect's SQL is written out, not translated.** `postgres` falls back to `statements`
+    where the two agree and is given explicitly where they do not -- `INTEGER PRIMARY KEY
+    AUTOINCREMENT` against `BIGSERIAL`, `INSERT OR IGNORE` against `ON CONFLICT DO NOTHING`. A
+    translation layer would be a second place a schema is defined, and two schemas drifting with
+    no marker to tell you is the thing this module exists to prevent.
     """
 
     id: str
     statements: tuple[str, ...]
+    postgres: tuple[str, ...] | None = None
+
+    def sql(self, dialect: str) -> tuple[str, ...]:
+        return (
+            self.postgres
+            if dialect == "postgres" and self.postgres is not None
+            else self.statements
+        )
 
 
 #: SPEC-v0.6 §3.2. Exactly the schema v0.5 shipped, `CREATE TABLE IF NOT EXISTS` throughout.
@@ -176,11 +190,98 @@ _RECEIPT_CHAIN: Final = (
     f"INSERT OR IGNORE INTO receipt_chain(id, seq, hash) VALUES(1, 0, '{GENESIS_HASH}')",
 )
 
+#: SPEC-v0.6 §4.4. The same schema for Postgres, written out rather than translated.
+#:
+#: Two differences carry weight and neither is cosmetic. `event_id` is `BIGSERIAL` rather than
+#: `INTEGER PRIMARY KEY AUTOINCREMENT`, because `append_event` must hand back the id the store
+#: assigned (`v0.2 §4.1`). And every identity column is `COLLATE "C"` -- byte comparison, no
+#: locale. A non-deterministic collation would merge two distinct effect keys into one, which is
+#: a refusal and therefore the safe direction; the store should not depend on which way a
+#: deployment's `lc_collate` happens to fail.
+_BASELINE_PG: Final = (
+    """CREATE TABLE IF NOT EXISTS effects(
+  effect_key TEXT COLLATE "C" PRIMARY KEY,
+  state TEXT NOT NULL,
+  action_id TEXT COLLATE "C" NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  lease_expires_at TEXT,
+  result_json TEXT,
+  error TEXT,
+  created_at TEXT,
+  updated_at TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS continuations(
+  effect_key TEXT COLLATE "C" PRIMARY KEY,
+  action_id TEXT COLLATE "C" NOT NULL,
+  action_json TEXT NOT NULL,
+  continuation TEXT COLLATE "C" NOT NULL,
+  rounds INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS continuations_by_value
+  ON continuations(continuation) WHERE continuation <> ''""",
+    """CREATE TABLE IF NOT EXISTS approvals(
+  approval_id TEXT COLLATE "C" PRIMARY KEY,
+  action_hash TEXT COLLATE "C" NOT NULL,
+  status TEXT NOT NULL,
+  action_json TEXT NOT NULL,
+  approver TEXT,
+  created_at TEXT,
+  granted_at TEXT,
+  expires_at TEXT,
+  consumed_at TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS receipts(
+  receipt_id TEXT COLLATE "C" PRIMARY KEY,
+  action_id TEXT COLLATE "C",
+  effect_key TEXT COLLATE "C",
+  result TEXT,
+  json TEXT,
+  ts TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS events(
+  event_id BIGSERIAL PRIMARY KEY,
+  ts TEXT,
+  type TEXT,
+  action_id TEXT COLLATE "C",
+  effect_key TEXT COLLATE "C",
+  approval_id TEXT COLLATE "C",
+  data_json TEXT
+)""",
+    """CREATE TABLE IF NOT EXISTS delegations(
+  delegation_id TEXT COLLATE "C" PRIMARY KEY,
+  parent_id TEXT COLLATE "C" NOT NULL,
+  depth INTEGER NOT NULL,
+  grant_json TEXT NOT NULL,
+  created_by_agent TEXT NOT NULL,
+  created_by_user TEXT,
+  created_via TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  revoked_by TEXT
+)""",
+    "CREATE INDEX IF NOT EXISTS delegations_by_parent ON delegations(parent_id)",
+)
+
+_RECEIPT_CHAIN_PG: Final = (
+    "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS seq BIGINT",
+    'ALTER TABLE receipts ADD COLUMN IF NOT EXISTS prev_hash TEXT COLLATE "C"',
+    'ALTER TABLE receipts ADD COLUMN IF NOT EXISTS hash TEXT COLLATE "C"',
+    "CREATE UNIQUE INDEX IF NOT EXISTS receipts_by_seq ON receipts(seq) WHERE seq IS NOT NULL",
+    """CREATE TABLE IF NOT EXISTS receipt_chain(
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  seq BIGINT NOT NULL,
+  hash TEXT COLLATE "C" NOT NULL
+)""",
+    f"INSERT INTO receipt_chain(id, seq, hash) VALUES(1, 0, '{GENESIS_HASH}') "
+    "ON CONFLICT (id) DO NOTHING",
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
-    Migration("0001_baseline", _BASELINE),
-    Migration("0002_receipt_chain", _RECEIPT_CHAIN),
+    Migration("0001_baseline", _BASELINE, postgres=_BASELINE_PG),
+    Migration("0002_receipt_chain", _RECEIPT_CHAIN, postgres=_RECEIPT_CHAIN_PG),
 )
 
 HEAD: Final = MIGRATIONS[-1].id
@@ -216,6 +317,21 @@ _SCHEMA_VERSION_TABLE: Final = """CREATE TABLE IF NOT EXISTS schema_version(
 #: A table that means "this is a CTRLRun database from before v0.6". `effects` is the one table
 #: every release since v0.1 has had.
 _MARKER_TABLE: Final = "effects"
+
+#: How each backend lists its tables and its columns, and what a parameter looks like. Both
+#: speak DB-API 2.0; none of these three is part of it.
+_TABLE_QUERY: Final = {
+    "sqlite": "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    "postgres": "SELECT tablename FROM pg_tables WHERE schemaname = ANY(current_schemas(false))",
+}
+_COLUMN_QUERY: Final = {
+    "sqlite": f"PRAGMA table_info({_MARKER_TABLE})",
+    "postgres": (
+        "SELECT 0, column_name FROM information_schema.columns "
+        f"WHERE table_name = '{_MARKER_TABLE}' AND table_schema = ANY(current_schemas(false))"
+    ),
+}
+_PLACEHOLDER: Final = {"sqlite": "?", "postgres": "%s"}
 
 
 class Classification(StrEnum):
@@ -260,7 +376,7 @@ def classify(applied: tuple[str, ...]) -> Classification:
 _EFFECTS_COLUMNS: Final = frozenset({"effect_key", "state", "action_id", "attempt"})
 
 
-def _refuse_unless_ours(connection: sqlite3.Connection, tables: set[str]) -> None:
+def _refuse_unless_ours(connection: Any, tables: set[str], dialect: str) -> None:
     """Adopt a pre-v0.6 database only if its `effects` table is actually CTRLRun's (§3.2).
 
     `effects` is a plausible name in somebody else's schema, and a `$CTRLRUN_STATE` typo is a
@@ -283,14 +399,11 @@ def _refuse_unless_ours(connection: sqlite3.Connection, tables: set[str]) -> Non
         )
 
 
-def _table_names(connection: sqlite3.Connection) -> set[str]:
-    rows = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
-    return {str(row[0]) for row in rows}
+def _table_names(connection: Any, dialect: str) -> set[str]:
+    return {str(row[0]) for row in connection.execute(_TABLE_QUERY[dialect]).fetchall()}
 
 
-def _read_applied(connection: sqlite3.Connection) -> tuple[str, ...]:
+def _read_applied(connection: Any) -> tuple[str, ...]:
     rows = connection.execute(
         "SELECT migration_id FROM schema_version ORDER BY migration_id"
     ).fetchall()
@@ -301,14 +414,14 @@ def applied_migrations(path: str) -> tuple[str, ...]:
     """The migration ids recorded in the database at `path`, in order. A read, for tests."""
     connection = sqlite3.connect(path)
     try:
-        if "schema_version" not in _table_names(connection):
+        if "schema_version" not in _table_names(connection, "sqlite"):
             return ()
         return _read_applied(connection)
     finally:
         connection.close()
 
 
-def _recorded_versions(connection: sqlite3.Connection) -> dict[str, str]:
+def _recorded_versions(connection: Any) -> dict[str, str]:
     rows = connection.execute("SELECT migration_id, ctrlrun_version FROM schema_version").fetchall()
     return {str(row[0]): str(row[1]) for row in rows}
 
@@ -337,7 +450,7 @@ def _refuse(
     )
 
 
-def _apply(connection: sqlite3.Connection, migration: Migration, now: datetime) -> None:
+def _apply(connection: Any, migration: Migration, now: datetime, dialect: str) -> None:
     """Apply one migration and record it, in one transaction (§3.4).
 
     SQLite has transactional DDL, so a migration that raises part way **rolls back to the old
@@ -356,17 +469,20 @@ def _apply(connection: sqlite3.Connection, migration: Migration, now: datetime) 
     start, which is not what "a second process either finds the work done or waits for it"
     means.
     """
-    connection.execute("BEGIN IMMEDIATE")
+    if dialect == "sqlite":
+        connection.execute("BEGIN IMMEDIATE")
     try:
         if migration.id in _read_applied(connection):
             # Applied by somebody else while we waited for the lock. Nothing to do, and
             # nothing to record.
             connection.rollback()
             return
-        for statement in migration.statements:
+        for statement in migration.sql(dialect):
             connection.execute(statement)
+        mark = _PLACEHOLDER[dialect]
         connection.execute(
-            "INSERT INTO schema_version(migration_id, applied_at, ctrlrun_version) VALUES(?,?,?)",
+            "INSERT INTO schema_version(migration_id, applied_at, ctrlrun_version) "
+            f"VALUES({mark},{mark},{mark})",
             (migration.id, now.astimezone(UTC).isoformat(), ctrlrun_version()),
         )
     except BaseException:
@@ -378,7 +494,9 @@ def _apply(connection: sqlite3.Connection, migration: Migration, now: datetime) 
     connection.commit()
 
 
-def migrate(connection: sqlite3.Connection, now: datetime | None = None) -> Classification:
+def migrate(
+    connection: Any, now: datetime | None = None, dialect: str = "sqlite"
+) -> Classification:
     """Bring a database to `HEAD`, or refuse. Returns what it found (SPEC-v0.6 §3).
 
     Every refusal is at **open**. A store that classified a database and then served reads while
@@ -389,11 +507,11 @@ def migrate(connection: sqlite3.Connection, now: datetime | None = None) -> Clas
     with a storage shape (§3.6).
     """
     stamp = now or datetime.now(UTC)
-    tables = _table_names(connection)
+    tables = _table_names(connection, dialect)
 
     if "schema_version" not in tables:
         if _MARKER_TABLE in tables:
-            _refuse_unless_ours(connection, tables)
+            _refuse_unless_ours(connection, tables, dialect)
             found = Classification.BASELINE
         elif tables:
             raise _refuse(
@@ -436,12 +554,19 @@ def migrate(connection: sqlite3.Connection, now: datetime | None = None) -> Clas
     for migration in MIGRATIONS:
         if migration.id not in applied:
             try:
-                _apply(connection, migration, stamp)
-            except sqlite3.Error as broke:
+                _apply(connection, migration, stamp, dialect)
+            except Exception as broke:
                 # §9.3: an operator's process refusing to start needs a distinguishable
-                # exception. A raw `sqlite3.OperationalError` out of a constructor is a bare
-                # traceback that no `except CTRLRunError` in this codebase catches -- not the
-                # CLI's, not the gateway's, not the webhook's.
+                # exception. A raw `sqlite3.OperationalError` -- or a `psycopg.Error` -- out of
+                # a constructor is a bare traceback that no `except CTRLRunError` in this
+                # codebase catches: not the CLI's, not the gateway's, not the webhook's.
+                #
+                # Caught as `Exception` rather than by driver type, because the driver is
+                # behind a lazy import and naming `psycopg.Error` here would drag an extra into
+                # `import ctrlrun`. A `CTRLRunError` is already the right shape and passes
+                # through untouched.
+                if isinstance(broke, CTRLRunError):
+                    raise
                 raise SchemaMismatch(
                     f"migration {migration.id!r} could not be applied: {broke}. The database is "
                     f"unchanged -- the migration ran in one transaction and rolled back. It is "

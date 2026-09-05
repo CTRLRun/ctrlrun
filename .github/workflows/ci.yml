@@ -17,6 +17,29 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+
+    # SPEC-v0.6 §4. The Postgres tests skip when CTRLRUN_TEST_POSTGRES is unset, and a
+    # skipping test proves nothing -- so CI supplies a real server rather than letting the
+    # backend's whole suite pass by not running. `ctrlrun_test` is superuser here because
+    # T154c has to CREATE DATABASE with a deliberately lossy encoding.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ctrlrun
+          POSTGRES_PASSWORD: ctrlrun
+          POSTGRES_DB: ctrlrun_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      CTRLRUN_TEST_POSTGRES: postgresql://ctrlrun:ctrlrun@127.0.0.1:5432/ctrlrun_test
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +52,20 @@ jobs:
           python -m pip install --upgrade pip
           # The gateway's tests need its extra; T30 still proves `import ctrlrun` does not
           # touch it, in a subprocess, whether or not it happens to be installed here.
-          pip install -e ".[dev,gateway,otel,identity]"
+          pip install -e ".[dev,gateway,otel,identity,postgres]"
+
+      # A claim about the environment is worth nothing until something checks it: if the
+      # service failed to start, the Postgres tests would silently skip and the backend
+      # would ship ungraded.
+      - name: The Postgres tests will actually run
+        run: |
+          python - <<'PY'
+          import os, sys
+          url = os.environ["CTRLRUN_TEST_POSTGRES"]
+          import psycopg
+          with psycopg.connect(url, connect_timeout=15) as connection:
+              print("postgres:", connection.execute("select version()").fetchone()[0])
+          PY
 
       # One script, called here and by a developer before pushing, so the two cannot
       # diverge. `test_ci_runs_the_check_script` fails if this step stops calling it.

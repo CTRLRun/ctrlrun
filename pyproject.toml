@@ -79,6 +79,16 @@ otel = [
 # rather than at install time. An extra that installs cleanly and then cannot verify an RS256
 # token is worse than one that names its dependency.
 identity = ["pyjwt[crypto]>=2.8"]
+# SPEC-v0.6 §4. The Postgres backend is the one thing in v0.6 that needs a third-party
+# driver; the migration runner, the chain, the policy hash and the store conformance suite
+# are all core and stdlib, for `v0.4 §1`'s reason -- a check somebody has to remember to
+# install is a check that does not run, and a *migration* somebody has to remember to
+# install is worse than a check.
+#
+# psycopg 3 rather than psycopg2: `ON CONFLICT ... RETURNING`, a `sqlstate` on every error
+# (which §4.3.1's stated-abort set reads), and context-managed cursors. The binary wheel is
+# not required here -- an operator who wants the C implementation installs `psycopg[c]`.
+postgres = ["psycopg>=3.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -143,6 +153,13 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # SPEC-v0.1 §5.3 freezes `commit_effect(effect_key, action_id, result: Any)`. An executor's
 # return value has no narrower type, and the store only serializes it.
 "src/ctrlrun/state.py" = ["ANN401"]
+# SPEC-v0.6 §3, §4. Both take a DB-API 2.0 connection, and there is no shared type for one:
+# `sqlite3.Connection` and `psycopg.Connection` have no common ancestor, and psycopg is behind
+# a lazy import so its type is not even importable here. Narrowing to either would be a lie
+# about the other, and a `Protocol` for "has execute, commit and rollback" would be a fourth
+# description of DB-API that nothing checks.
+"src/ctrlrun/migrations.py" = ["ANN401"]
+"src/ctrlrun/postgres.py" = ["ANN401"]
 # The gateway's subject matter is untyped JSON off a socket: a JSON-RPC `params`, a tool's
 # result, an HTTP client's response object behind a lazy import. Narrowing those to a lie
 # would be worse than saying `Any` and validating at the boundary, which is what mcp.py
