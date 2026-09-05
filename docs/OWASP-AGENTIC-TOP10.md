@@ -69,6 +69,7 @@ mechanism, not the entry.
 | **G8** expired authority refused | A grant is authority only until its `expires_at`; after that the action it covered is denied, by name. | `ASI03:2026`, `ASI10:2026` | Authority is evaluated on every action against the clock, not at the start of a session, so an agent still running after its grant lapsed is denied on its next proposal. |
 | **G9** delegation cannot escalate | A delegated grant is valid only if it is provably a subset of its parent on every dimension — and a child that **drops** a dimension its parent constrains is rejected rather than treated as unconstrained. | `ASI03:2026`, `ASI10:2026` | Containment is checked at creation and again on every evaluation by walking the chain to its root, and omission is never inheritance — so an agent handed authority cannot mint itself more of it, and a revocation anywhere in the chain cuts everything beneath it. |
 | **G10** unknown exception is ambiguous | `NotExecuted` is the only outcome that means "the remote did nothing". Everything else, timeouts included, is `AMBIGUOUS`. | `ASI08:2026` | The mapping from an executor's exception to an outcome is asymmetric on purpose: a timeout is not a failure, so a framework's retry-on-error cannot be the thing that decides whether money moved twice. |
+| **G11** an altered receipt is detected | Each receipt carries the hash of the one before it. Altering, deleting or reordering one breaks the chain, and the break is reported by name — `content_altered`, `link_broken`, `missing`, `head_mismatch` — and by `seq`. | `ASI06:2026`, `ASI09:2026` (partly) | The evidence an operator reads after an incident is the thing an attacker who got that far has the most reason to edit. This does not stop them: it makes **changing what a receipt says, while keeping the receipts after it**, cost a rewrite of all of them plus the head, rather than one statement. What it does not close is the end of the log — erasing a suffix, or appending to it, each cost two statements and are undetected, because the head is a row in the same database and not an external anchor. v0.6 has no anchor and claims none. It is **not** a signature and says nothing about who wrote the log; somebody who can rewrite every row including the head recomputes the chain and it verifies, and `THREAT_MODEL.md` still lists a malicious administrator as out of scope. |
 
 ---
 
@@ -108,5 +109,5 @@ every report as `descends_from`.
 ---
 
 This document is regenerated when the guarantee catalogue changes, and when OWASP publishes a
-new edition. It was written against `ctrlrun.guarantees/v1` and the **2026** edition of the
+new edition. It was written against `ctrlrun.guarantees/v2` and the **2026** edition of the
 OWASP Top 10 for Agentic Applications.

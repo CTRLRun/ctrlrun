@@ -1468,10 +1468,30 @@ def evidence_receipt(backend: StoreBackend, processes: int = CONTENDERS) -> Case
         started_at=T0,
         finished_at=T0 + timedelta(seconds=1),
     )
-    store.put_receipt(receipt)
+    # `put_receipt` returns the receipt with the store's chain fields on it (SPEC-v0.6 §6.3),
+    # and those are what must round-trip: comparing against the *unchained* receipt would
+    # require a store to throw its own `seq` away.
+    written = store.put_receipt(receipt)
+    if written.seq is None or written.prev_hash is None or written.hash is None:
+        return failed(
+            "receipt-round-trip",
+            title,
+            f"put_receipt returned seq={written.seq!r} prev_hash={written.prev_hash!r} "
+            f"hash={written.hash!r}; §6.3 assigns all three in the transaction that writes "
+            "the row, and a caller that does not get them hands sinks a document with no place "
+            "in the chain",
+        )
+    if written.chain_hash() != written.hash:
+        return failed(
+            "receipt-round-trip",
+            title,
+            f"the stored hash {written.hash} is not the receipt's own {written.chain_hash()}; "
+            "a hash nobody can recompute is not evidence",
+        )
     back = [held for held in store.receipts() if held.receipt_id == receipt.receipt_id]
     if not back:
         return failed("receipt-round-trip", title, "the receipt did not come back")
+    receipt = written
     # Every field, not two of seventeen. A store that mangled `decision`, `approver`,
     # `arguments`, `attempt` or the timestamps passed this case while the two it compared
     # survived -- and receipt fidelity is what §6's chain rests on.

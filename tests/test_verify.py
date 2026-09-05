@@ -113,7 +113,7 @@ def test_T100_the_authority_example_passes_every_non_authority_guarantee():
     report = run(AUTHORITY_PAYMENTS)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
     for gid in ("G1", "G2", "G3", "G4", "G5", "G10"):
         assert results[gid].action == "stripe.refund", gid
@@ -126,7 +126,7 @@ def test_T100_a_v1_document_with_no_templates_and_no_grants():
     report = run(EXAMPLE_POLICY)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G6", "G10"):
+    for gid in ("G1", "G2", "G6", "G10", "G11"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
     assert results["G1"].action == "k8s.delete_namespace"
     assert results["G10"].action == "customer.read"
@@ -152,7 +152,7 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     assert report.applicable == report.passed + report.failed
     # Ten in the catalogue; G1 and G2 for the missing approve band, G8 and G9 for the
     # missing authority section. Six applicable, and the count is over those six.
-    assert report.applicable == 6
+    assert report.applicable == 7
     assert report.not_applicable == 4
     text = report.to_text()
     assert "8/8" not in text
@@ -202,7 +202,7 @@ def test_T102_a_policy_with_no_effect_templates_makes_G3_G4_and_G5_not_applicabl
         assert results[gid].detail["note"] == reg.EFFECT_TEMPLATE_NOTE
         assert "@protect" in results[gid].detail["note"]
     # A blanket "nothing applies" cannot pass this test.
-    for gid in ("G1", "G2", "G6", "G7", "G10"):
+    for gid in ("G1", "G2", "G6", "G7", "G10", "G11"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
 
 
@@ -586,7 +586,7 @@ def test_T107_a_full_run_completes_with_no_network(tmp_path):
 
 
 #: The guarantees item 1 ships. G7-G9 are asserted in `test_verify_authority.py`.
-ITEM_ONE = ("G1", "G2", "G3", "G4", "G5", "G6", "G10")
+ITEM_ONE = ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11")
 
 
 def _break_the_executor(monkeypatch):
@@ -639,6 +639,26 @@ def _break_the_asymmetry(monkeypatch):
     monkeypatch.setattr(scenarios, "_raises", swapped)
 
 
+def _break_the_chain(monkeypatch):
+    """A kernel whose store writes no chain: G11's control is that the chain it wrote verifies.
+
+    Not a broken *detector* -- that is G11's other half, and breaking it would make the refusal
+    fail rather than the control. This breaks the writer, so `verify_chain` on the store verify
+    just wrote reports a chain of zero and the control says so.
+    """
+    from dataclasses import replace
+
+    from ctrlrun.state import SQLiteStateStore
+
+    original = SQLiteStateStore.put_receipt
+
+    def unchained(self, receipt):
+        written = original(self, receipt)
+        return replace(written, seq=None, prev_hash=None, hash=None)
+
+    monkeypatch.setattr(SQLiteStateStore, "put_receipt", unchained)
+
+
 #: One breakage per guarantee, because a control is a per-guarantee claim (§8, T125). Each
 #: leaves the guarantee's *refusal* half working, so what goes red is the control and nothing
 #: else — which is the whole distinction §1.3 draws.
@@ -650,6 +670,7 @@ BROKEN_CONTROLS = {
     "G5": _break_the_executor,
     "G6": _break_the_evaluation,
     "G10": _break_the_asymmetry,
+    "G11": _break_the_chain,
 }
 
 
@@ -722,9 +743,33 @@ def test_T125b_importing_ctrlrun_verify_pulls_in_no_module_from_an_extra():
 # --- the registry itself ------------------------------------------------------------------
 
 
+def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
+    """SPEC-v0.6 §6.6, and the claim `g11`'s docstring makes about itself.
+
+    A receipt is written for every terminal outcome, a denial included, so a policy that denies
+    everything still produces a chain to check. Two earlier versions of `g11` narrowed the
+    selection and made the docstring false -- first by requiring an `effect:` template, then by
+    taking `select()`'s `ALLOW`/`APPROVE` default -- and a review found the second.
+
+    `not applicable is not a pass`, so a guarantee excused for a reason that has nothing to do
+    with the operator's configuration is the shape this asserts against.
+    """
+    path = _write(
+        tmp_path, "schema: ctrlrun.policy/v1\nactions:\n  stripe.refund:\n    decision: deny\n"
+    )
+    report = run(path, only=("G11",))
+    result = _by_id(report)["G11"]
+
+    assert result.status is Status.PASS, (
+        f"G11 reported {result.status} on an all-deny policy (reason={result.reason!r}); a "
+        "denied action still writes a receipt and the chain is about receipts"
+    )
+    assert result.action == "stripe.refund"
+
+
 def test_the_catalogue_is_closed_and_ordered():
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v1"
-    assert [guarantee.id for guarantee in reg.GUARANTEES] == [f"G{n}" for n in range(1, 11)]
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v2"
+    assert [guarantee.id for guarantee in reg.GUARANTEES] == [f"G{n}" for n in range(1, 12)]
     for guarantee in reg.GUARANTEES:
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
@@ -797,8 +842,8 @@ def test_the_v1_payments_template_reports_five_over_five_with_five_not_applicabl
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (5, 5, 5)
+    assert (report.passed, report.applicable, report.not_applicable) == (6, 6, 5)
     text = report.to_text()
-    assert "5/5 declared guarantees pass." in text
+    assert "6/6 declared guarantees pass." in text
     assert "5 not applicable: G3, G4, G5, G8, G9." in text
     assert "10/10" not in text

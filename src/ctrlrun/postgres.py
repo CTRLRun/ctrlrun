@@ -1458,32 +1458,86 @@ class PostgresStateStore:
             for row in rows
         )
 
-    def put_receipt(self, receipt: Receipt) -> None:
+    def put_receipt(self, receipt: Receipt) -> Receipt:
+        """Insert the receipt and advance the chain head, in one transaction (SPEC-v0.6 §6.3).
+
+        The head row is taken as a **lock**: the `UPDATE` is unconditional, so a concurrent
+        writer blocks on it rather than losing a compare-and-set and dropping a receipt. This is
+        the first place in the kernel where two unrelated actions contend, and §6.3 says so.
+
+        `ON CONFLICT DO NOTHING` still means what it meant -- writing the same `receipt_id` twice
+        is a no-op -- but the head must not advance when the row was not written, or the chain
+        would gain a gap `missing` would report forever. A conflict rolls the whole transaction
+        back, head included.
+        """
         connection = self._connection()
         connection.execute("BEGIN")
         self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
+                    f"UPDATE {self._q}.receipt_chain SET seq = seq + 1 "
+                    "WHERE id = 1 RETURNING seq, hash"
+                )
+                head = cursor.fetchone()
+                if head is None:
+                    raise InvalidArgument(
+                        "the receipt chain has no head row; this database predates "
+                        "0002_receipt_chain and was not migrated"
+                    )
+                chained = replace(receipt, seq=int(head[0]), prev_hash=str(head[1]))
+                digest = chained.chain_hash()
+                cursor.execute(
                     f"INSERT INTO {self._q}.receipts("
-                    "receipt_id, action_id, effect_key, result, json, ts) "
-                    "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT (receipt_id) DO NOTHING",
+                    "receipt_id, action_id, effect_key, result, json, ts, seq, prev_hash, hash) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (receipt_id) DO NOTHING",
                     (
-                        receipt.receipt_id,
-                        receipt.action_id,
-                        receipt.effect_key,
-                        str(receipt.result),
-                        json.dumps(receipt.to_dict(), sort_keys=True),
-                        _iso(receipt.finished_at),
+                        chained.receipt_id,
+                        chained.action_id,
+                        chained.effect_key,
+                        str(chained.result),
+                        json.dumps(chained.to_dict(), sort_keys=True),
+                        _iso(chained.finished_at),
+                        chained.seq,
+                        chained.prev_hash,
+                        digest,
                     ),
+                )
+                if cursor.rowcount != 1:
+                    # The receipt is already there. Undo the head, which is the only reason this
+                    # branch exists: an advanced head with no row behind it is a permanent gap.
+                    # The caller gets the row as it stands, not the one it tried to write.
+                    self._rollback(connection)
+                    existing = next(
+                        (r for r in self.receipts() if r.receipt_id == receipt.receipt_id), None
+                    )
+                    return existing if existing is not None else receipt
+                cursor.execute(
+                    f"UPDATE {self._q}.receipt_chain SET hash = %s WHERE id = 1", (digest,)
                 )
         except BaseException:
             self._rollback(connection)
             raise
         self._commit(connection)
+        return replace(chained, hash=digest)
 
     def receipts(self) -> tuple[Receipt, ...]:
         with self._connection().cursor() as cursor:
-            cursor.execute(f"SELECT json FROM {self._q}.receipts ORDER BY ts, receipt_id")
+            cursor.execute(
+                f"SELECT json, hash FROM {self._q}.receipts "
+                "ORDER BY seq NULLS FIRST, ts, receipt_id"
+            )
             rows = cursor.fetchall()
-        return tuple(Receipt.from_dict(json.loads(str(row[0]))) for row in rows)
+        # `hash` comes off the column: a document cannot contain its own hash (§6.2). The stored
+        # `json` here is `json.dumps(..., sort_keys=True)` and SQLite's is `to_json()`, which are
+        # different byte strings -- and the chain does not care, because `chain_hash` recomputes
+        # the canonical form from the parsed document rather than hashing whatever was stored.
+        return tuple(
+            replace(Receipt.from_dict(json.loads(str(row[0]))), hash=row[1]) for row in rows
+        )
+
+    def chain_head(self) -> tuple[int, str] | None:
+        with self._connection().cursor() as cursor:
+            cursor.execute(f"SELECT seq, hash FROM {self._q}.receipt_chain WHERE id = 1")
+            row = cursor.fetchone()
+        return None if row is None else (int(row[0]), str(row[1]))

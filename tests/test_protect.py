@@ -674,6 +674,11 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         "error",
         "started_at",
         "finished_at",
+        # SPEC-v0.6 §6.2 — `ctrlrun.receipt/v3`. `seq` is **inside** the hashed content, which
+        # is what makes deletion and reordering detectable rather than only edits. `hash` is
+        # deliberately absent: a document cannot contain its own hash, so it is a column.
+        "seq",
+        "prev_hash",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")

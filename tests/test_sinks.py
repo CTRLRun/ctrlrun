@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -284,7 +285,12 @@ def test_the_jsonl_sink_round_trips_the_receipt_the_store_holds(store, tmp_path)
         refund(payment_id="txn_1", amount=200)
 
     (line,) = sink.receipts_path.read_text(encoding="utf-8").strip().splitlines()
-    assert Receipt.from_json(line) == store.receipts()[0]
+    exported, stored = Receipt.from_json(line), store.receipts()[0]
+    # Everything but `hash`, which §6.2 keeps out of the document because a document cannot
+    # contain its own hash -- and the recomputation is the stronger assertion anyway.
+    assert exported == replace(stored, hash=None)
+    assert exported.chain_hash() == stored.hash
+    assert exported.seq == stored.seq == 1
 
 
 def test_control_from_file_installs_the_jsonl_sink_where_v0_1_put_it(tmp_path, monkeypatch):

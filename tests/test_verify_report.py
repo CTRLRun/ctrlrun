@@ -131,9 +131,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
-        (ALL_APPLICABLE, "8/8 declared guarantees pass. 2 not applicable"),
-        (WITH_NOT_APPLICABLE, "5/5 declared guarantees pass. 5 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 10 not applicable"),
+        (ALL_APPLICABLE, "9/9 declared guarantees pass. 2 not applicable"),
+        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 5 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 11 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )
@@ -183,7 +183,7 @@ def test_T114_the_document_matches_the_schema_field_for_field(tmp_path):
 
     assert set(document) == TOP_LEVEL
     assert document["schema"] == REPORT_SCHEMA == "ctrlrun.verify/v1"
-    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v1"
+    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v2"
     assert set(document["policy"]) == {"path", "sha256", "schema", "mode", "actions"}
     assert document["authority"] is None
     assert document["store"] == {"backend": "sqlite", "scratch": True}

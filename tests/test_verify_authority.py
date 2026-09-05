@@ -92,8 +92,8 @@ def test_T108_the_authority_example_exercises_G7_G8_and_G9():
     assert results["G9"].detail["dimensions_exercised"] == list(DIMENSIONS)
     assert results["G9"].detail["dimensions_unconstrained"] == []
     assert report.exit_code == 0
-    assert report.passed == 10
-    assert report.applicable == 10
+    assert report.passed == 11
+    assert report.applicable == 11
 
 
 def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypatch):

@@ -10,6 +10,7 @@ is plain JSON with enums rendered by value, readable by anything that can read a
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -20,15 +21,24 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol
 
-from .action import Principal
+from .action import Principal, canonical_bytes
 from .policy import Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
 #: field appeared — the principal's claims, issuer and expiry. `execution` and `would_have`
 #: joined them in item 4, under the same version string, so a reader parses one shape.
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v2"
+#: SPEC-v0.6 §9.5. `v3` adds `seq` and `prev_hash` (§6.2) and, in item 7, `policy_hash`,
+#: `policy_version` and `controls`. Every `v2` field keeps its meaning, and `Receipt.from_dict`
+#: reads all five with `.get`, so a `v2` receipt on disk still parses -- which is the rule every
+#: reader upgrades before any writer switches.
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v3"
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
+#: SPEC-v0.6 §6.2. The `prev_hash` of receipt 1, and the hash the head row starts at (§3.7), so
+#: that a database which was empty and one which already held a thousand *unchained* receipts
+#: begin their chain identically.
+GENESIS_HASH: Final = "sha256:" + "00" * 32
+
 RECEIPTS_FILENAME: Final = "receipts.jsonl"
 EVENTS_FILENAME: Final = "events.jsonl"
 
@@ -242,6 +252,35 @@ class Receipt:
     #: (§6.3). That is what keeps "never infer from the absence of a field" true in both
     #: directions.
     would_have: _WouldHave | None = None
+    #: This receipt's place in the store's one chain (SPEC-v0.6 §6.2). Assigned by
+    #: `put_receipt` in the transaction that writes the row, `None` on a receipt that has not
+    #: been written yet and on one written before the chain existed (§3.7, §6.5's `unchained`).
+    #:
+    #: **It is inside the hashed content**, and that is what makes deletion and reordering
+    #: detectable rather than only edits: two adjacent rows swapped *with* their `seq` change
+    #: both documents, and swapped *without* them break the links. There is no swap that is
+    #: invisible.
+    seq: int | None = None
+    #: The `hash` of receipt `seq - 1`, or `GENESIS_HASH` for `seq == 1` (§6.2).
+    prev_hash: str | None = None
+    #: The hash **as the store recorded it**, filled in on read and `None` on a receipt that has
+    #: not been written. Not in `to_dict()`: a document cannot contain its own hash, which is why
+    #: §6.2 makes this a column. Keeping it here rather than behind a store method is what lets
+    #: `verify_chain` compare stored against recomputed without the protocol growing a second
+    #: reader (§9.1).
+    hash: str | None = None
+
+    def chain_hash(self) -> str:
+        """This receipt's own hash: `sha256:` + SHA-256 of its canonical form (§6.2).
+
+        **Derived, and deliberately not a field.** A document cannot contain its own hash, so
+        `hash` is a column and this recomputes it -- which is what makes the chain checkable by
+        any reader rather than only by the writer.
+
+        The canonical form is `v0.1 §2.3`'s, through `canonical_bytes`. A second canonicalizer
+        is the drift this codebase must not have (§6.2).
+        """
+        return "sha256:" + hashlib.sha256(canonical_bytes(self.to_dict())).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         """The receipt as plain JSON-serializable data, in the field order of SPEC §6.1."""
@@ -267,6 +306,8 @@ class Receipt:
             "error": self.error,
             "started_at": iso_timestamp(self.started_at),
             "finished_at": iso_timestamp(self.finished_at),
+            "seq": self.seq,
+            "prev_hash": self.prev_hash,
         }
 
     def to_json(self) -> str:
@@ -315,6 +356,11 @@ class Receipt:
             error=document["error"],
             started_at=datetime.fromisoformat(document["started_at"]),
             finished_at=datetime.fromisoformat(document["finished_at"]),
+            # `.get` for the same reason as the two above: a receipt written before v0.6 carries
+            # neither key and must parse back rather than raise. §6.5 reports those as
+            # `unchained`, which is never a pass.
+            seq=document.get("seq"),
+            prev_hash=document.get("prev_hash"),
         )
 
     @classmethod
@@ -385,3 +431,204 @@ class JSONLEventSink:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
+
+
+# --- the chain (SPEC-v0.6 §6) ------------------------------------------------------------------
+
+
+#: §6.5's closed set of break names. A chain that only catches the easy case is worse than none,
+#: because it gets quoted as though it caught all of them -- so a break is reported *by name* and
+#: at a `seq`, never as a bare "invalid".
+CHAIN_BREAKS: Final = (
+    "content_altered",
+    "hash_missing",
+    "link_broken",
+    "missing",
+    "head_mismatch",
+    "unchained",
+)
+
+
+@dataclass(frozen=True)
+class ChainBreak:
+    """One thing wrong with the chain, named (§6.5)."""
+
+    name: str
+    seq: int | None
+    detail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "seq": self.seq, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class ChainReport:
+    """What `verify_chain` found. `ok` is false if anything at all was wrong (§6.5).
+
+    **`unchained` is never a pass.** A receipt written before the chain existed is reported with
+    its count and `ok` is `False`, because folding pre-chain rows into a green count is
+    `v0.4 §3.8`'s false green in a new costume: the summary would say "verified" about rows
+    nothing verified.
+    """
+
+    ok: bool
+    #: Receipts that were chained **and** had nothing reported against them. Not the number of
+    #: rows with a `seq`: a count of "chained" printed beside a detected forgery reads "3 of 3
+    #: receipts verified" about a chain with a forgery in it, which is the false green in prose.
+    verified: int
+    #: Every row that carries a `seq`, whether or not it survived the walk.
+    chained: int
+    unchained: int
+    breaks: list[ChainBreak]
+    head_seq: int | None = None
+    head_hash: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "verified": self.verified,
+            "chained": self.chained,
+            "unchained": self.unchained,
+            "head_seq": self.head_seq,
+            "head_hash": self.head_hash,
+            "breaks": [item.to_dict() for item in self.breaks],
+        }
+
+
+class ChainSource(Protocol):
+    """What `verify_chain` needs from a store: the receipts, and the head (§6.3, §6.5).
+
+    A `Protocol` rather than an import of `StateStore`, because `state.py` imports *this* module
+    and `ARCHITECTURE.md` §6 says dependencies point downward.
+    """
+
+    def receipts(self) -> tuple[Receipt, ...]: ...
+
+    def chain_head(self) -> tuple[int, str] | None: ...
+
+
+def verify_chain(store: ChainSource) -> ChainReport:
+    """Walk the store's receipt chain and name every break (SPEC-v0.6 §6.5).
+
+    **Position comes from the store's `seq` column; content comes from the document.** The store
+    returns receipts ordered by that column, and this walks them in that order without re-sorting
+    -- which is what makes the column load-bearing rather than decorative, and what makes §6.5's
+    table true. A reader that re-sorted by the *document's* `seq` would be checking the document
+    against itself: swapping two rows' `seq` columns would then reorder nothing it could see, and
+    the one tamper that leaves both documents byte-for-byte intact would be invisible. Physical
+    row order is what no store promises, which is why nothing here depends on it.
+
+    Rows with `seq IS NULL` have **no position**. They are counted separately and never
+    interleaved: a `NULL` sorted to either end would manufacture a gap at one end or a head
+    mismatch at the other.
+
+    What this does not do is in §6.4, and the most important line of it is that a chain says the
+    log was not altered and says nothing about who wrote it. Somebody who can rewrite every row
+    *including the head* recomputes it and it verifies; `THREAT_MODEL.md` has always listed a
+    malicious administrator as out of scope. What this closes is the partial tamper.
+    """
+    receipts = list(store.receipts())
+    # In the store's order, which is by the `seq` **column**, and not re-sorted here. A reader
+    # that re-sorted by the *document's* `seq` would be checking the document against itself.
+    chained = [receipt for receipt in receipts if receipt.seq is not None]
+    unchained = [receipt for receipt in receipts if receipt.seq is None]
+    breaks: list[ChainBreak] = []
+
+    if unchained:
+        breaks.append(
+            ChainBreak(
+                "unchained",
+                None,
+                f"{len(unchained)} receipt(s) were written before the chain existed and carry no "
+                "seq; nothing about them is verified",
+            )
+        )
+
+    expected_prev = GENESIS_HASH
+    expected_seq = 1
+    for receipt in chained:
+        seq = receipt.seq
+        assert seq is not None  # filtered above; this narrows the type
+        if seq != expected_seq:
+            breaks.append(
+                ChainBreak(
+                    "missing",
+                    expected_seq,
+                    f"seq {expected_seq} is not here; the next receipt says it is seq {seq}. A "
+                    "row was deleted, or two were exchanged",
+                )
+            )
+            # Resync on what is actually there, so one hole reports one gap rather than
+            # renumbering every receipt after it.
+            expected_seq = seq
+        recomputed = receipt.chain_hash()
+        stored = receipt.hash
+        if stored is None:
+            # A chained row whose stored hash is gone. **Not a skip.** This was the only check
+            # against the column, and skipping it meant `UPDATE receipts SET hash=NULL` -- one
+            # statement, no `WHERE` -- destroyed every independent copy of every receipt's hash
+            # while the chain reported itself intact and exited 0. `v0.4 §3.8`'s false green
+            # exactly: a check that could not be made, resolved as a pass. Found by review.
+            #
+            # `unchained` does not cover it. That name is for a receipt with no `seq`, written
+            # before the chain existed; this row has a `seq` and has been stripped.
+            breaks.append(
+                ChainBreak(
+                    "hash_missing",
+                    seq,
+                    "the stored hash is gone, so there is nothing to compare the document "
+                    "against; the row was chained and something removed it",
+                )
+            )
+        elif stored != recomputed:
+            breaks.append(
+                ChainBreak(
+                    "content_altered",
+                    seq,
+                    f"the recomputed hash {recomputed} is not the stored {stored}",
+                )
+            )
+        if receipt.prev_hash != expected_prev:
+            breaks.append(
+                ChainBreak(
+                    "link_broken",
+                    seq,
+                    f"prev_hash is {receipt.prev_hash}, and the receipt before it hashes to "
+                    f"{expected_prev}",
+                )
+            )
+        # The **document's** hash, never the column's. Carrying the stored value forward let one
+        # corrupted column accuse the next receipt of `link_broken` as well, so a single tamper
+        # read as two and an operator went looking for the wrong one.
+        expected_prev = recomputed
+        expected_seq = seq + 1
+
+    head = store.chain_head()
+    head_seq, head_hash = (None, None) if head is None else head
+    if head is None:
+        breaks.append(
+            ChainBreak("head_mismatch", None, "the store has no chain head row to compare against")
+        )
+    else:
+        last_seq = chained[-1].seq if chained else 0
+        last_hash = expected_prev
+        if head_seq != last_seq or head_hash != last_hash:
+            breaks.append(
+                ChainBreak(
+                    "head_mismatch",
+                    head_seq,
+                    f"the head names seq {head_seq} / {head_hash}, and the last receipt is "
+                    f"seq {last_seq} / {last_hash}",
+                )
+            )
+
+    accused = {item.seq for item in breaks if item.seq is not None}
+    return ChainReport(
+        ok=not breaks,
+        verified=sum(1 for item in chained if item.seq not in accused),
+        chained=len(chained),
+        unchained=len(unchained),
+        breaks=breaks,
+        head_seq=head_seq,
+        head_hash=head_hash,
+    )

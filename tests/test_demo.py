@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from ctrlrun.cli.demo import (
 from ctrlrun.cli.main import EXAMPLE_POLICY, main
 from ctrlrun.receipt import (
     EVENTS_FILENAME,
+    GENESIS_HASH,
     RECEIPT_SCHEMA,
     RECEIPTS_FILENAME,
     EventType,
@@ -86,6 +88,11 @@ SPEC_RECEIPT_FIELDS = (
     "error",
     "started_at",
     "finished_at",
+    # SPEC-v0.6 §6.2 — `ctrlrun.receipt/v3`. `seq` is **inside** the hashed content, which is
+    # what makes deletion and reordering detectable rather than only edits. `hash` is
+    # deliberately absent: a document cannot contain its own hash, so it is a column.
+    "seq",
+    "prev_hash",
 )
 
 
@@ -195,7 +202,16 @@ def test_the_jsonl_receipt_parses_back_into_the_receipt_the_store_holds(control,
         refund(payment_id="txn_1", amount=200)
 
     (line,) = _lines(journal.receipts_path)
-    assert Receipt.from_json(line) == store.receipts()[0]
+    exported = Receipt.from_json(line)
+    stored = store.receipts()[0]
+    # `hash` is the one field the export cannot carry -- a document cannot contain its own hash
+    # (SPEC-v0.6 §6.2) -- so the assertion is that everything else round-trips **and** that the
+    # export recomputes to what the store recorded. That is §6.4's "fully verifiable by
+    # recomputation", and it is a stronger statement than equality would have been.
+    assert exported == replace(stored, hash=None)
+    assert exported.chain_hash() == stored.hash
+    assert exported.seq == 1
+    assert exported.prev_hash == GENESIS_HASH
 
 
 def test_every_event_is_appended_to_events_jsonl_in_order(control, store, journal):
@@ -1064,7 +1080,11 @@ def test_the_decision_a_receipt_records_survives_the_round_trip(control, store, 
     (receipt,) = store.receipts()
     assert receipt.decision is Decision.ALLOW
     assert receipt.result is ReceiptResult.AMBIGUOUS
-    assert Receipt.from_json(receipt.to_json()) == receipt
+    # `hash` is a column, not a document field (SPEC-v0.6 §6.2), so the round trip drops it and
+    # recomputes it instead -- which is the property that matters: any reader can check the
+    # exported document against the chain without the store's help.
+    assert Receipt.from_json(receipt.to_json()) == replace(receipt, hash=None)
+    assert Receipt.from_json(receipt.to_json()).chain_hash() == receipt.hash
 
 
 def test_a_jsonl_sink_writes_to_the_directory_it_was_given(tmp_path):

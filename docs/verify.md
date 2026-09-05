@@ -11,7 +11,7 @@ what could not be tested at all.
 
 ```console
 $ ctrlrun verify
-CTRLRun verify — ctrlrun 0.4.0, catalogue ctrlrun.guarantees/v1
+CTRLRun verify — ctrlrun 0.5.0, catalogue ctrlrun.guarantees/v2
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -26,8 +26,9 @@ G7   no principal refused             PASS  stripe.refund
 G8   expired authority refused        PASS  head-of-support
 G9   delegation cannot escalate       PASS  head-of-support (6 of 6 dimensions)
 G10  unknown exception is ambiguous   PASS  stripe.refund
+G11  an altered receipt is detected   PASS  stripe.refund
 
-10/10 declared guarantees pass. 0 not applicable.
+11/11 declared guarantees pass. 0 not applicable.
 ```
 
 It reads the policy document — `$CTRLRUN_CONFIG`, else `./ctrlrun.yaml` — and the authority
@@ -90,10 +91,10 @@ G5   ambiguous blocks a blind retry   N/A   no action declares an `effect:` temp
 G8   expired authority refused        N/A   no authority section
 G9   delegation cannot escalate       N/A   no authority section
 
-5/5 declared guarantees pass. 5 not applicable: G3, G4, G5, G8, G9.
+6/6 declared guarantees pass. 5 not applicable: G3, G4, G5, G8, G9.
 ```
 
-That run is `5/5`, never `10/10`. There is no flag that folds an N/A into the count, and there
+That run is `6/6`, never `11/11`. There is no flag that folds an N/A into the count, and there
 will not be one: a number that counts guarantees nobody exercised is a number that means
 nothing.
 
@@ -105,7 +106,7 @@ failure attributed to your kernel.
 
 ## The guarantees
 
-Ten, in `ctrlrun.guarantees/v1`. Every one is the deployed form of an acceptance test that
+Eleven, in `ctrlrun.guarantees/v2`. Every one is the deployed form of an acceptance test that
 already exists and passes in this repository; verify adds no guarantee of its own and weakens
 none.
 
@@ -121,6 +122,7 @@ none.
 | **G8** | A grant is authority only until its `expires_at`; after that the action it covered is denied, by name. | No `authority:` section, no grant with an `expires_at`, or no grant matching any action the policy lists. |
 | **G9** | A delegated grant is valid only if it is provably a subset of its parent on every dimension — and a child that **drops** a dimension its parent constrains is rejected rather than treated as unconstrained. | No `authority:` section, or no grant is delegable. |
 | **G10** | `NotExecuted` is the only outcome that means "the remote did nothing". Everything else, timeouts included, is `AMBIGUOUS`. | Every action in the policy is denied. |
+| **G11** | Each receipt carries the hash of the one before it, so altering one is detected and **named** — `content_altered`, `hash_missing`, `link_broken`, `missing`, `head_mismatch`, `unchained`. Its positive control is that the unaltered chain verifies. | The policy declares no actions at all. A denied action still writes a receipt, so a policy that denies everything is still checked. |
 
 G9 reports **which dimensions it exercised**. A parent that constrains one dimension does not
 score as though it had covered six, because that would be the N/A rule violated one level down.

@@ -120,9 +120,9 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 10/10"
+          test "$AUTHORITY" = "verified 11/11"
           test "$AUTHORITY_NA" = "0"
-          test "$TEMPLATES" = "verified 5/5"
+          test "$TEMPLATES" = "verified 6/6"
           test "$TEMPLATES_NA" = "5"
           test -s verify-badge.json
           test -s verify-report.json

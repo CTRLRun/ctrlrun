@@ -138,8 +138,8 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 10/10"' in script
-    assert 'test "$TEMPLATES" = "verified 5/5"' in script
+    assert 'test "$AUTHORITY" = "verified 11/11"' in script
+    assert 'test "$TEMPLATES" = "verified 6/6"' in script
     assert 'test "$TEMPLATES_NA" = "5"' in script
 
 
@@ -152,10 +152,10 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    assert authority.badge["message"] == "verified 10/10"
+    assert authority.badge["message"] == "verified 11/11"
     assert authority.not_applicable == 0
     assert templates.badge is not None
-    assert templates.badge["message"] == "verified 5/5"
+    assert templates.badge["message"] == "verified 6/6"
     assert templates.not_applicable == 5
 
 
@@ -198,8 +198,8 @@ def test_T119_the_denominator_is_applicable_and_never_the_catalogue_size():
 
     assert badge is not None
     assert badge["message"] == f"verified {report.passed}/{report.applicable}"
-    assert report.applicable == 5
-    assert len(reg.GUARANTEES) == 10
+    assert report.applicable == 6
+    assert len(reg.GUARANTEES) == 11
     assert "/10" not in badge["message"]
 
 
@@ -300,7 +300,7 @@ def test_T120_a_configuration_with_not_applicable_guarantees_still_writes_a_badg
 
     assert report.exit_code == 0
     assert report.badge is not None
-    assert report.badge["message"] == "verified 5/5"
+    assert report.badge["message"] == "verified 6/6"
 
 
 def test_T120_a_failing_run_writes_a_red_badge_and_a_non_zero_exit(tmp_path, monkeypatch):
@@ -454,7 +454,7 @@ def test_the_readme_says_what_not_applicable_means():
     section = " ".join(_readme_verify_section().split())
 
     assert "Not applicable is not a pass" in section
-    assert "never `10/10`" in section
+    assert "never `11/11`" in section
     assert "There is no flag that folds one into the count" in section
     assert "declared guarantees pass" in section
 
