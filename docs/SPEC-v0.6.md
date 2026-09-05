@@ -2228,10 +2228,28 @@ speak to it has not added the backend. A review found it.
 It reads `CTRLRUN_STORE_URL` as well, because the alternative is every command in a runbook
 carrying the same flag.
 
-**It creates nothing.** `PostgresStateStore` creates no schema and neither does this: a command an
-operator runs to *read* evidence must not have a side effect on the database it reads. A schema
-that is not there is an error. That is `v0.4 §3.5`'s argument for verify's scratch store, pointed
-the other way — verify may create because it owns what it creates, and these commands own nothing.
+**It creates nothing, and it migrates nothing.** A command an operator runs to *read* evidence
+must not have a side effect on the database it reads. That is `v0.4 §3.5`'s argument for verify's
+scratch store, pointed the other way — verify may create because it owns what it creates, and
+these commands own nothing.
+
+**Saying so was not enough, and a review found it doing both.** `PostgresStateStore.__init__`
+migrates, so `ctrlrun effects` against an empty schema printed *"no effects yet"*, exited 0, and
+left eight tables behind. Worse: against a database stopped one migration short, a `ctrlrun
+receipts` **applied** it — on the milestone that introduces Postgres, which is the first one where
+a store is shared across hosts, so one operator reading evidence `ALTER TABLE`s a database every
+other process is still running against.
+
+§3.6 forbids a store that can open without migrating — *"a second configuration nobody tested"* —
+and that rule is not the one to bend. So the refusal belongs to the **reader**: it looks first,
+and opens only a database already at HEAD. Three refusals, each naming its own remedy, because
+*"that schema is empty"* and *"your fleet is mid-upgrade"* have nothing in common as instructions:
+
+| What it finds | What it says |
+|---|---|
+| the schema does not exist | a read command does not create one |
+| no `schema_version` in it | that schema holds no CTRLRun database |
+| anything but `UP_TO_DATE` | which migration is missing, and that a **writer** applies it at open |
 
 **Still no new command.** `--verify-chain`, `--control` and `--store-url` are flags on commands that already open the
 store and already reads receipts. A `ctrlrun chain` command would be a second entry point into

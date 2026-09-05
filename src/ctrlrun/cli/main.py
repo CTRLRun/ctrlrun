@@ -125,22 +125,94 @@ def _store(store_url: str | None = None) -> StateStore:
     §5.3's human authority had no route -- `ctrlrun effects` could not show a lapsed lease, and
     `resolved_by` had no read surface outside a Python session. A review found it.
 
-    **It creates nothing.** `PostgresStateStore` creates no schema and this does not either: a
-    command an operator runs to *read* evidence must not have a side effect on the database it
-    reads, which is `v0.4 §3.5`'s argument for verify's scratch store pointed the other way. A
-    schema that is not there is an error, not an invitation.
+    **It creates nothing, and it migrates nothing** -- a command an operator runs to *read*
+    evidence must not have a side effect on the database it reads, which is `v0.4 §3.5`'s
+    argument for verify's scratch store pointed the other way.
+
+    Saying so was not enough. A review found this doing both: `PostgresStateStore.__init__`
+    migrates, so `ctrlrun effects` against an empty schema printed "no effects yet", exited 0,
+    and left eight tables behind -- and against a database stopped one migration short, a
+    `ctrlrun receipts` applied it. On the milestone that introduces Postgres, which is the first
+    one where a store is shared across hosts, that is a single reader altering a table every
+    other process is still running against.
+
+    §3.6 forbids a store that can open without migrating -- *"a second configuration nobody
+    tested"* -- and that rule is right, so the refusal is **this function's**: look first, and
+    open only what is already at HEAD. A database that is not there, or is behind, is an error
+    with an instruction rather than an invitation.
     """
     if store_url is None:
         return SQLiteStateStore(state_path())
     if store_url.startswith(SQLITE_SCHEME):
-        return SQLiteStateStore(Path(store_url[len(SQLITE_SCHEME) :]))
+        path = Path(store_url[len(SQLITE_SCHEME) :])
+        if not path.exists():
+            raise click.ClickException(
+                f"no database at {str(path)!r}. A read command does not create one; the store "
+                "is created by the process that runs your agents."
+            )
+        return SQLiteStateStore(path)
     if store_url.startswith(POSTGRES_SCHEMES):
         from ..postgres import PostgresStateStore
 
         bare, schema = _peel_schema(store_url)
+        _require_head(bare, schema)
         return PostgresStateStore(bare, schema=schema)
     raise click.ClickException(
         f"no store backend for {store_url!r}; expected a 'sqlite://' path or a 'postgresql://' URL"
+    )
+
+
+def _require_head(url: str, schema: str) -> None:
+    """Refuse unless `schema` already holds a CTRLRun database at HEAD. Reads only.
+
+    Three refusals, each naming what the operator should do instead, because "that schema is
+    empty" and "your fleet is mid-upgrade" have nothing in common as remedies.
+    """
+    from ..migrations import MIGRATIONS, Classification, classify
+    from ..postgres import _psycopg
+
+    connection = _psycopg().connect(url, autocommit=True)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (schema,)
+            )
+            if cursor.fetchone() is None:
+                raise click.ClickException(
+                    f"schema {schema!r} does not exist. A read command does not create one."
+                )
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = 'schema_version'",
+                (schema,),
+            )
+            if cursor.fetchone() is None:
+                raise click.ClickException(
+                    f"schema {schema!r} holds no CTRLRun database. A read command does not "
+                    "create one; the store is created by the process that runs your agents."
+                )
+            cursor.execute(
+                f'SELECT migration_id FROM "{schema}".schema_version '
+                "ORDER BY applied_at, migration_id"
+            )
+            applied = tuple(str(row[0]) for row in cursor.fetchall())
+    finally:
+        connection.close()
+
+    found = classify(applied)
+    if found is Classification.UP_TO_DATE:
+        return
+    if found in (Classification.FORWARD, Classification.EMPTY, Classification.BASELINE):
+        missing = [item.id for item in MIGRATIONS if item.id not in applied]
+        raise click.ClickException(
+            f"the database in schema {schema!r} is behind this CTRLRun: "
+            f"{', '.join(missing)} has not been applied. A read command will not apply it -- "
+            "every other process on that database is still running the version that has not "
+            "got it. Upgrade a writer and let it migrate at open (SPEC-v0.6 §3.6)."
+        )
+    raise click.ClickException(
+        f"the database in schema {schema!r} classifies as {found.value} against this CTRLRun "
+        f"({len(applied)} migrations recorded). It is not safe to read as though it were HEAD."
     )
 
 

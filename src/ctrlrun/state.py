@@ -22,6 +22,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -1610,6 +1611,12 @@ def _only(value: _T | None, what: str) -> _T:
     return value
 
 
+#: Unicode general categories that have no place in a name printed to a terminal: control
+#: (`Cc`), format (`Cf` -- the bidi overrides), and the two separators (`Zl`, `Zp`) that
+#: `str.splitlines()` treats as line breaks.
+_UNPRINTABLE: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
 def _approver(approver: str) -> str:
     """The one place a resolver's or approver's name is checked before it becomes evidence.
 
@@ -1628,14 +1635,25 @@ def _approver(approver: str) -> str:
     caller passed, and a record of who decided that is not what anybody typed is worse than a
     rejected write. §5.3's "a reader must be able to tell them apart" needs the strings to be
     what they say they are.
+
+    **The property is checked directly, because a proxy for it missed three characters.** The
+    first version refused anything below `U+0020` plus `U+007F`, which is C0 and DEL -- and
+    `str.splitlines()`, which every Python reader of this output uses, also splits on `U+0085`,
+    `U+2028` and `U+2029`. A review drove `cli:eve\u2028refund:fake  committed` through the
+    shipped listing and got two lines out, the second an effect that does not exist. So the check
+    is now the sentence itself: this string occupies exactly one line.
     """
     if not approver:
         raise InvalidArgument("approver must be a non-empty string")
-    if any(character < " " or character == "\x7f" for character in approver):
+    if approver.splitlines() != [approver]:
         raise InvalidArgument(
-            f"approver must not contain control characters, got {approver!r}: this string is "
-            "printed one per line by `ctrlrun effects` and `ctrlrun approvals`, and a newline in "
-            "it forges a row in the evidence"
+            f"approver must occupy exactly one line, got {approver!r}: `ctrlrun effects` prints "
+            "one record per line, and a string that splits forges a row in the evidence"
+        )
+    if any(unicodedata.category(character) in _UNPRINTABLE for character in approver):
+        raise InvalidArgument(
+            f"approver must not contain control or formatting characters, got {approver!r}: "
+            "U+202E and its neighbours rewrite the rest of a terminal line without adding one"
         )
     return approver
 

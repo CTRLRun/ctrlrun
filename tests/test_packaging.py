@@ -725,7 +725,12 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
         pytest.skip("no repository checkout")
 
     text = claims.read_text(encoding="utf-8")
-    reference = re.compile(r"`([a-z_]+\.py):(\d+)`")
+    # `cli/main.py:400` as well as `state.py:400`. The first version's `[a-z_]+\.py` matched no
+    # path with a directory in it, so **every** `cli/main.py` reference was invisible to this
+    # guard -- and a review found two of them stale, one broken by the commit that added this
+    # very check to the rows beside it. A guard that cannot see a whole class of reference is
+    # attribution dressed as prevention.
+    reference = re.compile(r"`((?:[a-z_]+/)*[a-z_]+\.py):(\d+)`")
     identifier = re.compile(r"`@?([A-Za-z_][\w.]*)")
 
     stale = []

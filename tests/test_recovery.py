@@ -722,6 +722,134 @@ def test_T161_the_operator_commands_reach_a_postgres_store(tmp_path, monkeypatch
     )
 
 
+@pytest.mark.skipif(not POSTGRES_URL, reason="CTRLRUN_TEST_POSTGRES is not set")
+def test_T161_an_operator_command_creates_nothing_and_migrates_nothing(tmp_path):
+    """SPEC-v0.6 §9.4's *"It creates nothing"*, which was a claim and not a fact.
+
+    A verification pass found `--store-url` doing two things a read command must not:
+
+    1. **It created eight tables** in an empty schema, because `PostgresStateStore.__init__`
+       migrates. `ctrlrun effects` against a schema with nothing in it printed "no effects yet",
+       exited 0, and left `approvals`, `continuations`, `delegations`, `effects`, `events`,
+       `receipt_chain`, `receipts` and `schema_version` behind.
+    2. **It migrated a database nobody asked it to migrate.** Against a schema stopped at
+       `0002`, a `ctrlrun receipts` applied `0003_resolved_by` -- on the milestone that
+       introduces Postgres, which is the first one where the store is shared across hosts, so a
+       single v0.6 operator running a read command `ALTER TABLE`s a still-v0.5 fleet's database
+       out from under the processes running against it.
+
+    §3.6 forbids a store that can open without migrating -- *"a second configuration nobody
+    tested"* -- and that rule is right, so the refusal is the reader's: it checks first and
+    opens only what is already at HEAD.
+    """
+    import psycopg
+    from click.testing import CliRunner
+
+    from ctrlrun.cli import main as cli
+    from ctrlrun.migrations import MIGRATIONS
+
+    admin = psycopg.connect(POSTGRES_URL, autocommit=True)
+    empty = f"rec_{uuid.uuid4().hex[:12]}"
+    stale = f"rec_{uuid.uuid4().hex[:12]}"
+    admin.execute(f'CREATE SCHEMA "{empty}"')
+    _SCHEMAS.extend([empty, stale])
+
+    def tables(schema: str) -> list[str]:
+        return sorted(
+            row[0]
+            for row in admin.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+                (schema,),
+            ).fetchall()
+        )
+
+    runner = CliRunner()
+    for command in (["effects"], ["receipts"], ["stats"]):
+        result = runner.invoke(
+            cli.main, [*command, "--store-url", f"{POSTGRES_URL}?ctrlrun_schema={empty}"]
+        )
+        assert result.exit_code != 0, (
+            f"`ctrlrun {command[0]}` accepted a schema holding no CTRLRun database:\n"
+            f"{result.output}"
+        )
+        assert tables(empty) == [], (
+            f"`ctrlrun {command[0]}` created {tables(empty)} in the operator's database; a "
+            "command that reads evidence must not have a side effect on what it reads"
+        )
+
+    # A store one migration behind, as a fleet mid-upgrade has.
+    from ctrlrun.postgres import PostgresStateStore
+
+    PostgresStateStore.create_schema(POSTGRES_URL, stale)
+    PostgresStateStore(POSTGRES_URL, schema=stale, clock=lambda: T0).close()
+    last = MIGRATIONS[-1].id
+    admin.execute(f'DELETE FROM "{stale}".schema_version WHERE migration_id = %s', (last,))
+    admin.execute(f'ALTER TABLE "{stale}".effects DROP COLUMN IF EXISTS resolved_by')
+
+    behind = runner.invoke(
+        cli.main, ["effects", "--store-url", f"{POSTGRES_URL}?ctrlrun_schema={stale}"]
+    )
+    assert behind.exit_code != 0, f"a read command opened a database behind HEAD:\n{behind.output}"
+    applied = [
+        row[0]
+        for row in admin.execute(
+            f'SELECT migration_id FROM "{stale}".schema_version ORDER BY migration_id'
+        ).fetchall()
+    ]
+    assert last not in applied, (
+        f"a read command applied {last} to a database it was only asked to read; every other "
+        "process on that database is still running the version that has not got it"
+    )
+    admin.close()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_T161_a_resolver_occupies_exactly_one_line(tmp_path, backend):
+    """The forged row again, with the characters the first guard missed.
+
+    `any(character < " ")` covers C0 and DEL and stops at `U+007F` -- but `str.splitlines()`,
+    which is what every Python reader of this output uses, also splits on `U+0085` (NEL),
+    `U+2028` (LINE SEPARATOR) and `U+2029` (PARAGRAPH SEPARATOR). A verification pass drove one
+    through the shipped listing: `cli:eve\u2028refund:fake  committed  ...` was accepted, and
+    `ctrlrun effects` output split into two lines, the second of them an effect that does not
+    exist. The guard named the property and then checked a proxy for it.
+
+    So the property is checked directly -- the string occupies exactly one line -- and format
+    characters go too: `U+202E` (RIGHT-TO-LEFT OVERRIDE) rewrites the rest of a terminal line
+    without adding one.
+    """
+    store = _store(tmp_path, backend)
+    _ambiguate(store, "refund:oneline")
+    for forged in (
+        "cli:eve\u2028refund:fake  committed",
+        "cli:eve\u2029refund:fake  committed",
+        "cli:eve\u0085refund:fake  committed",
+        "cli:\u202eeve",
+        "cli:eve\x0brefund:fake",
+        "cli:eve\x1crefund:fake",
+    ):
+        try:
+            store.resolve_effect("refund:oneline", EffectState.COMMITTED, forged)
+        except InvalidArgument:
+            pass
+        else:
+            raise AssertionError(f"a resolver containing {forged!r} was accepted")
+        assert len(forged.splitlines()) > 1 or forged != forged.strip() or "\u202e" in forged, (
+            f"the control is void: {forged!r} occupies one line and needs no refusing"
+        )
+
+    # Ordinary resolvers, including non-ASCII, still work: this is a refusal and not a wall.
+    for index, good in enumerate(
+        ("cli:local", "reconcile:stripe.refund", "cli:ada@example.com", "cli:адá")
+    ):
+        key = f"refund:ok-{index}"
+        _ambiguate(store, key)
+        store.resolve_effect(key, EffectState.COMMITTED, good)
+        record = store.get_effect(key)
+        assert record is not None and record.resolved_by == good
+    store.close()
+
+
 # --- helpers ----------------------------------------------------------------------------------
 
 
