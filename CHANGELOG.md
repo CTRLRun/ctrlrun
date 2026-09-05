@@ -9,6 +9,29 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Added
+
+- **`ctrlrun.conformance.store`** — the store conformance suite (v0.6 item 1). This repository's
+  own acceptance tests, runnable against any `StateStore`, with fourteen deliberately-broken
+  stores proving the suite can fail. It found that **`events()` and `receipts()` were never
+  declared on the `StateStore` protocol** while both shipped stores implement them and four
+  callers depend on them; both are now declared.
+- **Schema version and forward-only migrations** (v0.6 item 2). A `schema_version` table records
+  applied migration ids — recorded, never inferred — and a store refuses a database it does not
+  recognise in **both** directions. Six places across v0.2–v0.5 said *"there is still no
+  migration story — that is v0.6."*
+- **`SchemaMismatch`**, exported from `ctrlrun`. Raised at open when a store meets a database it
+  does not recognise. Its own type because *"your database is from the future"* and *"your lease
+  is negative"* have entirely different remedies.
+
+### Fixed
+
+- **Concurrent store opens no longer fail.** Switching a database to WAL takes a brief exclusive
+  lock that SQLite's busy handler does not cover, and `busy_timeout` was being set *after* the
+  switch — so simultaneous opens raced and lost. It was survivable while opening a store was a
+  read; v0.6 makes every open a potential write, which is the fleet restarting after an upgrade.
+  Measured at 38 of 60 concurrent opens succeeding before, 120 of 120 after.
+
 ### Documentation
 
 - **`docs/SPEC-v0.6.md`** — the v0.6 "Durable runtime" contract, a delta over v0.1–v0.5. No code

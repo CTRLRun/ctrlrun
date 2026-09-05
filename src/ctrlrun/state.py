@@ -21,6 +21,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -66,6 +67,37 @@ _UNFINISHED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING, Eff
 #: SPEC-v0.1 §5.2 — `AMBIGUOUS` is the only state a human resolves, and these are the two
 #: answers available: what actually happened at the remote was one or the other.
 RESOLUTIONS: Final = frozenset({EffectState.COMMITTED, EffectState.FAILED})
+
+
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    """Put the database in WAL, tolerating a concurrent starter who is doing the same.
+
+    Switching journal mode takes a **brief exclusive lock**, and SQLite's busy handler does not
+    cover it: under contention the pragma returns `database is locked` immediately rather than
+    waiting. That was survivable while opening a store was a read. SPEC-v0.6 §3 makes every open
+    a potential write, so a fleet restarting after an upgrade meets it -- T149d measured two of
+    six opens failing.
+
+    **Another process winning this race is a success, not a failure.** If the mode is already
+    WAL there is nothing to do; if the switch is refused we wait and look again, because whoever
+    holds the lock is setting the same value we wanted. The loop is bounded by the same
+    `busy_timeout` budget every other contended write gets, so a database that genuinely cannot
+    be put in WAL still reports it rather than spinning.
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    while True:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()
+        if mode is not None and str(mode[0]).lower() == "wal":
+            return
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            # Somebody else is setting the same value. Wait a little and look again -- the loop
+            # exits the moment the mode is WAL, whoever put it there.
+            time.sleep(0.01)
 
 
 def _utc_now() -> datetime:
@@ -913,8 +945,14 @@ class SQLiteStateStore:
             check_same_thread=False,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        # `busy_timeout` before the WAL switch, and this ordering is **subsumed** by
+        # `_enable_wal`'s own bounded retry: a mutation that swaps the two lines stays green,
+        # because the retry covers what the ordering was for. It is kept because it is free and
+        # because the *first* pragma read wants a timeout too, and it is recorded as subsumed
+        # rather than reported as a load-bearing guard -- a check nothing exercises is
+        # documentation, and a mutation table that called this one closed would be lying.
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        _enable_wal(connection)
         connection.execute("PRAGMA synchronous=NORMAL")
         self._local.connection = connection
         with self._open_lock:

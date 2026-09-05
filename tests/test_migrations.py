@@ -11,9 +11,12 @@ believed the old schema was; a database built by v0.5's own code asserts what it
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
+import sys
+import tempfile
 import textwrap
 import venv
 from datetime import UTC, datetime, timedelta
@@ -37,6 +40,25 @@ T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 # --- building a database with a previous release's own code ---------------------------------
 
 
+#: Set by CI. A release fixture that cannot be installed makes its test **skip**, and a skipped
+#: test proves nothing -- these five are precisely the ones §3.5 item 2 exists for. CI sets this
+#: so a network failure is a red build rather than a quiet one.
+REQUIRE_RELEASES = os.environ.get("CTRLRUN_REQUIRE_RELEASE_FIXTURES") == "1"
+
+
+def _clean_env() -> dict[str, str]:
+    """The parent environment with `PYTHONPATH` removed.
+
+    Without this the release venv's interpreter imports the **current** source tree and the
+    "v0.5 fixture" is a v0.6 database -- the test then proves the opposite of what it says. It
+    was caught by `assert "schema_version" not in _tables(database)`, which is a good guard and
+    not a substitute for not doing it.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
 def _release_venv(tmp_path_factory, version: str) -> Path | None:
     """A venv with `ctrlrun==<version>` in it, or `None` if it cannot be installed offline.
 
@@ -52,6 +74,7 @@ def _release_venv(tmp_path_factory, version: str) -> Path | None:
         [str(python), "-m", "pip", "install", "-q", f"ctrlrun=={version}"],
         capture_output=True,
         text=True,
+        env=_clean_env(),
     )
     if done.returncode != 0:
         return None
@@ -95,10 +118,71 @@ BUILD_SCRIPT = textwrap.dedent("""
     store.put_approval_request(request)
     store.grant_approval(request.request_id, "cli:legacy")
 
+    from ctrlrun.receipt import Event, EventType, Receipt, ReceiptResult
+    from ctrlrun.state import DelegationRecord
+
+    receipt_ids = []
+    for index in range(3):
+        receipt = Receipt(
+            receipt_id=f"ctr_{index:012d}",
+            action_id=action.action_id,
+            action=action.name,
+            action_hash=action.action_hash,
+            principal=action.principal,
+            resource=action.resource,
+            arguments=action.canonical_arguments,
+            environment=action.environment,
+            decision="allow",
+            decision_reason=f"rule[{index}]",
+            effect_key="refund:committed",
+            attempt=1,
+            result=ReceiptResult.COMMITTED,
+            started_at=T0,
+            finished_at=T0 + timedelta(seconds=index),
+        )
+        store.put_receipt(receipt)
+        receipt_ids.append(receipt.receipt_id)
+
+    event_ids = [
+        store.append_event(
+            Event(
+                event_id=0,
+                ts=T0,
+                type=EventType.ACTION_PROPOSED,
+                action_id=f"act_e{index}",
+                effect_key="refund:committed",
+                data={"reason": "rule[1]", "amount": 2000},
+            )
+        ).event_id
+        for index in range(3)
+    ]
+
+    grant_json = (
+        '{"actions":["stripe.*"],"delegable":false,'
+        '"expires_at":"2026-06-01T12:00:00+05:30","resources":null}'
+    )
+    delegation_id = "dlg_" + "a" * 32
+    store.put_delegation(
+        DelegationRecord(
+            delegation_id=delegation_id,
+            parent_id="head-of-finance",
+            depth=1,
+            grant_json=grant_json,
+            created_by_agent="legacy-agent",
+            created_by_user="ada",
+            created_via="api",
+            created_at=T0,
+        )
+    )
+
     out = {
         "action_hash": action.action_hash,
         "approval_id": request.request_id,
         "arguments": dict(action.canonical_arguments),
+        "receipt_ids": receipt_ids,
+        "event_ids": event_ids,
+        "delegation_id": delegation_id,
+        "grant_json": grant_json,
     }
     store.close()
     print(json.dumps(out))
@@ -110,12 +194,23 @@ def v05_database(tmp_path_factory):
     """A real v0.5 database, built by `ctrlrun==0.5.0` in its own interpreter."""
     python = _release_venv(tmp_path_factory, "0.5.0")
     if python is None:
+        if REQUIRE_RELEASES:
+            raise AssertionError(
+                "ctrlrun==0.5.0 could not be installed, and CTRLRUN_REQUIRE_RELEASE_FIXTURES=1. "
+                "§3.5 item 2 asks a migration to be proved against the previous release's own "
+                "code; skipping is not that"
+            )
         pytest.skip("ctrlrun==0.5.0 could not be installed; no network")
     work = tmp_path_factory.mktemp("v05db")
     script = work / "build.py"
     script.write_text(BUILD_SCRIPT, encoding="utf-8")
     database = work / "state.db"
-    done = subprocess.run([str(python), str(script), str(database)], capture_output=True, text=True)
+    done = subprocess.run(
+        [str(python), str(script), str(database)],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+    )
     assert done.returncode == 0, done.stderr
     return database, json.loads(done.stdout)
 
@@ -167,6 +262,47 @@ def test_T147_a_v05_database_migrates_and_keeps_every_row(v05_database, tmp_path
         "longer authorize the action a human approved"
     )
     assert dict(approval.request.action.canonical_arguments) == expected["arguments"]
+
+    # The three tables the fixture used to skip. `0002_receipt_chain` is the only migration in
+    # this milestone that ALTERs an existing table, and without receipts in it the migration
+    # only ever ran against an empty one -- §3.5 item 3 asks for every row, by content.
+    kept = {receipt.receipt_id: receipt for receipt in store.receipts()}
+    assert set(expected["receipt_ids"]) <= set(kept), (
+        f"receipts lost across the migration: {sorted(set(expected['receipt_ids']) - set(kept))}"
+    )
+    for receipt_id in expected["receipt_ids"]:
+        assert kept[receipt_id].action_hash == expected["action_hash"]
+        assert str(kept[receipt_id].result) == "committed"
+
+    # The chain columns exist and are NULL. Asserted through SQL rather than through `Receipt`,
+    # which does not carry them until item 6 -- and §3.7 says `0002` must NOT backfill them: a
+    # chain computed over rows written before the chain existed would assert an integrity
+    # property nobody can have.
+    raw = sqlite3.connect(database)
+    try:
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(receipts)").fetchall()}
+        assert {"seq", "prev_hash", "hash"} <= columns, columns
+        unchained = raw.execute(
+            "SELECT COUNT(*) FROM receipts WHERE seq IS NULL AND prev_hash IS NULL AND hash IS NULL"
+        ).fetchone()[0]
+        total = raw.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
+        assert unchained == total == len(expected["receipt_ids"]), (
+            f"{total - unchained} of {total} pre-chain receipts were backfilled by 0002"
+        )
+        head = raw.execute("SELECT seq, hash FROM receipt_chain WHERE id = 1").fetchone()
+        assert head is not None and head[0] == 0, "the chain head is not at seq = 0"
+    finally:
+        raw.close()
+
+    held = {event.event_id for event in store.events()}
+    assert set(expected["event_ids"]) <= held, "events lost across the migration"
+
+    delegation = store.get_delegation(expected["delegation_id"])
+    assert delegation is not None, "the delegation did not survive the migration"
+    assert delegation.grant_json == expected["grant_json"], (
+        "grant_json changed across the migration; its UTC offset must round-trip (v0.3 §5.2)"
+    )
+    assert delegation.created_by_user == "ada" and delegation.created_via == "api"
     store.close()
 
 
@@ -273,9 +409,12 @@ def test_T149_a_half_applied_migration_rolls_back(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS, broken))
 
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(SchemaMismatch) as raised:
         SQLiteStateStore(database, clock=lambda: T0)
-    assert not isinstance(raised.value, SchemaMismatch)
+    # Named, not a bare `sqlite3.OperationalError`: nothing in this codebase catches one of
+    # those, so an operator would get a traceback out of a constructor (finding 7).
+    assert "9998_deliberately_broken" in str(raised.value)
+    assert "unchanged" in str(raised.value)
 
     assert applied_migrations(database) == before, "the broken migration was recorded"
     assert "half_applied" not in _tables(database), (
@@ -286,6 +425,154 @@ def test_T149_a_half_applied_migration_rolls_back(tmp_path, monkeypatch):
     store = SQLiteStateStore(database, clock=lambda: T0)
     assert store.get_effect("refund:before") is not None
     store.close()
+
+
+def test_T149b_the_recording_is_inside_the_migration_transaction(tmp_path, monkeypatch):
+    """SPEC-v0.6 §3.4's other half, which T149 cannot see.
+
+    T149's broken migration raises **before** the recording, so it proves the DDL rolls back and
+    says nothing about whether `schema_version` is written inside the same transaction. A review
+    mutated the `INSERT` to sit *after* `commit()` -- outside the transaction entirely -- and all
+    sixteen tests still passed. That is the exact claim §3.4 says it refuses to rely on argument
+    for.
+
+    So this makes the **recording** fail while every DDL statement succeeds, by making the value
+    the `INSERT` needs unobtainable, and requires the DDL to be gone too. It drives the real
+    `_apply`: a first attempt at this test built its own copy of the logic and therefore proved
+    nothing about the code -- the mutation stayed green.
+    """
+    import sqlite3
+
+    import ctrlrun.migrations as migrations
+
+    database = tmp_path / "state.db"
+    SQLiteStateStore(database, clock=lambda: T0).close()
+    before = applied_migrations(str(database))
+
+    good = migrations.Migration(
+        id="9997_records_badly", statements=("CREATE TABLE recorded_badly(x TEXT)",)
+    )
+
+    def unobtainable() -> str:
+        raise RuntimeError("the recording cannot be built")
+
+    monkeypatch.setattr(migrations, "ctrlrun_version", unobtainable)
+
+    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        with pytest.raises(RuntimeError):
+            migrations._apply(connection, good, T0)
+    finally:
+        connection.close()
+
+    assert applied_migrations(str(database)) == before, "the migration was recorded anyway"
+    assert "recorded_badly" not in _tables(database), (
+        "a migration's DDL survived a failure in its own recording, so the two are not in one "
+        "transaction (SPEC-v0.6 §3.4)"
+    )
+
+
+def test_T149c_a_failed_migration_leaves_no_transaction_open():
+    """The `rollback()` in `_apply`'s handler, which a review found exercised by nothing.
+
+    With it removed, T149 still passed: the abandoned connection holds an **uncommitted**
+    transaction, WAL lets later reads through, and the test never needs a second writer. The
+    residual is real -- the next writer meets `database is locked` -- so this opens that window
+    on purpose rather than reading past it.
+    """
+    import sqlite3
+
+    import ctrlrun.migrations as migrations
+
+    with tempfile.TemporaryDirectory() as work:
+        database = Path(work) / "state.db"
+        SQLiteStateStore(database, clock=lambda: T0).close()
+
+        connection = sqlite3.connect(database, isolation_level=None)
+        broken = migrations.Migration(
+            id="9996_broken", statements=("CREATE TABLE ok(x TEXT)", "THIS IS NOT SQL")
+        )
+        try:
+            migrations._apply(connection, broken, T0)
+        except sqlite3.Error:
+            pass
+        else:
+            raise AssertionError("the broken migration did not raise")
+
+        assert not connection.in_transaction, (
+            "a failed migration left its transaction open; the next writer would meet "
+            "'database is locked' and the store would look wedged"
+        )
+
+        # And a second writer really can write.
+        other = sqlite3.connect(database, isolation_level=None, timeout=2)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("CREATE TABLE second_writer(x TEXT)")
+            other.commit()
+        finally:
+            other.close()
+            connection.close()
+
+
+@pytest.mark.parametrize("shape", ["fresh.db", "existing.db"])
+def test_T149d_concurrent_opens_all_succeed(tmp_path, shape):
+    """SPEC-v0.6 §3.6: *"a second process either finds the work done or waits for it. There is
+    no advisory lock, no leader election, and no retry loop."*
+
+    This is the fleet restarting after an upgrade, and it is the shape a review measured at
+    **20 failures in 60** before the applied set was re-read inside the write lock. Both the
+    **Both shapes run, because they failed differently and were fixed differently.** An existing
+    database collided on `schema_version`'s primary key and on a re-run `ALTER TABLE`, which the
+    applied-set re-check inside the write lock fixes. A *fresh* one failed on `PRAGMA
+    journal_mode=WAL` -- switching journal mode takes a brief exclusive lock that SQLite's busy
+    handler does not cover -- which `_enable_wal` fixes by treating another process winning that
+    race as the success it is. Measured before: 38 of 60 and 5-of-6-per-trial. After: 120 of 120.
+    """
+    import sqlite3
+
+    import ctrlrun.migrations as migrations
+
+    database = tmp_path / shape
+    if shape == "existing.db":
+        # A pre-v0.6 CTRLRun database: the baseline tables, in WAL, and no `schema_version`.
+        seed = sqlite3.connect(database)
+        seed.execute("PRAGMA journal_mode=WAL")
+        for statement in migrations.MIGRATIONS[0].statements:
+            seed.execute(statement)
+        seed.commit()
+        seed.close()
+
+    script = textwrap.dedent("""
+        import sys
+        from datetime import UTC, datetime
+        from ctrlrun.state import SQLiteStateStore
+        store = SQLiteStateStore(sys.argv[1], clock=lambda: datetime(2026,1,1,12,0,tzinfo=UTC))
+        store.close()
+        print("ok")
+    """)
+    runner = tmp_path / "open.py"
+    runner.write_text(script, encoding="utf-8")
+
+    children = [
+        subprocess.Popen(
+            [sys.executable, str(runner), str(database)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(6)
+    ]
+    failures = []
+    for child in children:
+        _out, err = child.communicate(timeout=120)
+        if child.returncode != 0:
+            failures.append(err.strip().splitlines()[-1] if err.strip() else "(no output)")
+    assert not failures, (
+        f"{len(failures)} of 6 concurrent opens failed; §3.6 says a second process finds the "
+        f"work done or waits for it.\n  " + "\n  ".join(failures)
+    )
+    assert applied_migrations(str(database)) == tuple(m.id for m in MIGRATIONS)
 
 
 # --- T150: re-opening does not re-run a migration --------------------------------------------
@@ -374,6 +661,32 @@ def test_T152_a_database_at_head_applies_nothing(tmp_path):
     assert classify(applied_migrations(database)) is Classification.UP_TO_DATE
 
 
+def test_T152_a_foreign_database_with_an_effects_table_is_refused(tmp_path):
+    """§3.2, and the hole a review opened in it.
+
+    The refusal was keyed on the table *name*, and `effects` is a plausible name in somebody
+    else's schema -- a `$CTRLRUN_STATE` typo is a plausible way to arrive at one. CTRLRun
+    adopted it, created seven of its own tables **inside the operator's database**, recorded
+    both migrations, opened cleanly, and failed at first use with `no such column: effect_key`
+    -- which is after `Control` was constructed, and §3.3 says every refusal is at open.
+    """
+    database = tmp_path / "someone-elses.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE effects(id TEXT, magnitude REAL)")
+    connection.execute("CREATE TABLE reverb(id TEXT)")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(SchemaMismatch) as raised:
+        SQLiteStateStore(database, clock=lambda: T0)
+    message = str(raised.value)
+    assert "effects" in message and "effect_key" in message, message
+
+    # And nothing of CTRLRun's was created on the way to the refusal.
+    after = _tables(database)
+    assert after == {"effects", "reverb"}, f"CTRLRun wrote into somebody else's database: {after}"
+
+
 def test_T152_a_foreign_database_is_refused_naming_what_it_found(tmp_path):
     """§3.2: neither `schema_version` nor `effects`, but other tables present.
 
@@ -405,6 +718,11 @@ def test_T152_the_baseline_path_from_every_release_that_has_one(tmp_path_factory
     """
     python = _release_venv(tmp_path_factory, version)
     if python is None:
+        if REQUIRE_RELEASES:
+            raise AssertionError(
+                f"ctrlrun=={version} could not be installed, and "
+                "CTRLRUN_REQUIRE_RELEASE_FIXTURES=1 (§3.5 item 2)"
+            )
         pytest.skip(f"ctrlrun=={version} could not be installed; no network")
     work = tmp_path_factory.mktemp(f"db-{version}")
     script = work / "build.py"
@@ -420,7 +738,12 @@ def test_T152_the_baseline_path_from_every_release_that_has_one(tmp_path_factory
         encoding="utf-8",
     )
     database = work / "state.db"
-    done = subprocess.run([str(python), str(script), str(database)], capture_output=True, text=True)
+    done = subprocess.run(
+        [str(python), str(script), str(database)],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+    )
     assert done.returncode == 0, done.stderr
     assert "schema_version" not in _tables(database)
 

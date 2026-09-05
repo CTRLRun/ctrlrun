@@ -10,6 +10,13 @@ not understand. The second direction is the one that gets forgotten and the one 
 a binary that reads a table it half understands does not fail, it succeeds, silently dropping the
 columns it does not know.
 
+**The backward guard begins with v0.6, and that qualifier is not a detail.** A released v0.5
+binary has no version check at all: it will open a v0.6 database and `SELECT json FROM receipts`
+straight past `seq`, `prev_hash` and `hash`. So the rule protects a v0.6-or-later reader from a
+future schema; it cannot protect a reader that shipped before it existed. `SPEC-v0.6 §9.5` states
+the operational consequence -- **upgrade every reader before upgrading any writer** -- and this
+paragraph exists so the module does not imply a protection it cannot give retroactively.
+
 **The version is recorded, never inferred.** A store MUST NOT decide what version a database is by
 looking for a column: `PRAGMA table_info` answers *what is there*, which is not the same question
 as *what has been applied*, and the two diverge the moment a migration does anything a column list
@@ -26,6 +33,7 @@ doors.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -177,6 +185,28 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
 
 HEAD: Final = MIGRATIONS[-1].id
 
+
+def _check_migration_ids() -> None:
+    """`MIGRATIONS` must be unique, `NNNN_snake_name`-shaped and in lexicographic order.
+
+    `classify` compares a set read `ORDER BY migration_id` against `known[:n]` in *declaration*
+    order, so the two agree only while those hold. An out-of-order id would classify a healthy
+    database as `gapped` and refuse it; a duplicate would collide at apply time. §3.1 states the
+    rule and, until a review asked, nothing enforced it -- and §3.7 already schedules two more
+    migrations for later items.
+    """
+    ids = [migration.id for migration in MIGRATIONS]
+    if len(set(ids)) != len(ids):
+        raise AssertionError(f"duplicate migration id in MIGRATIONS: {ids}")
+    if ids != sorted(ids):
+        raise AssertionError(f"MIGRATIONS is not in lexicographic order: {ids}")
+    for item in ids:
+        if not re.fullmatch(r"\d{4}_[a-z][a-z0-9_]*", item):
+            raise AssertionError(f"migration id {item!r} is not NNNN_snake_name")
+
+
+_check_migration_ids()
+
 _SCHEMA_VERSION_TABLE: Final = """CREATE TABLE IF NOT EXISTS schema_version(
   migration_id TEXT PRIMARY KEY,
   applied_at TEXT NOT NULL,
@@ -222,6 +252,35 @@ def classify(applied: tuple[str, ...]) -> Classification:
     if applied == known[: len(applied)]:
         return Classification.FORWARD
     return Classification.GAPPED
+
+
+#: What an `effects` table must have for a database to be CTRLRun's. Not the whole schema: a
+#: v0.1 database has fewer tables than a v0.5 one, and the point is to tell *ours* from
+#: *somebody else's*, not to re-derive the version from the columns (§3.1).
+_EFFECTS_COLUMNS: Final = frozenset({"effect_key", "state", "action_id", "attempt"})
+
+
+def _refuse_unless_ours(connection: sqlite3.Connection, tables: set[str]) -> None:
+    """Adopt a pre-v0.6 database only if its `effects` table is actually CTRLRun's (§3.2).
+
+    `effects` is a plausible name in somebody else's schema, and a `$CTRLRUN_STATE` typo is a
+    plausible way to arrive at one. Keying adoption on the name alone meant CTRLRun created
+    `schema_version`, `approvals`, `receipts`, `events`, `delegations`, `continuations` and
+    `receipt_chain` **inside the operator's other database**, recorded both migrations, opened
+    cleanly, and failed at first use with `no such column: effect_key` -- which is after
+    `Control` was constructed, and §3.3 says every refusal is at open. A review built one.
+    """
+    columns = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({_MARKER_TABLE})").fetchall()
+    }
+    missing = _EFFECTS_COLUMNS - columns
+    if missing:
+        raise _refuse(
+            f"this database has a table named {_MARKER_TABLE!r} that is not CTRLRun's: it is "
+            f"missing {', '.join(sorted(missing))}. It holds {', '.join(sorted(tables))}. "
+            "Creating CTRLRun's tables in somebody else's database is not a recovery.",
+            (),
+        )
 
 
 def _table_names(connection: sqlite3.Connection) -> set[str]:
@@ -283,11 +342,27 @@ def _apply(connection: sqlite3.Connection, migration: Migration, now: datetime) 
 
     SQLite has transactional DDL, so a migration that raises part way **rolls back to the old
     version by construction** -- including the `INSERT` into `schema_version`, which is inside
-    the same transaction as the DDL it records. T149 proves that by execution rather than by
-    argument: a deliberately broken migration ships in the test suite.
+    the same transaction as the DDL it records. T149 proves the DDL half by execution, and
+    T149b proves the recording half by making the recording itself fail.
+
+    **The applied set is re-read after the write lock is taken, and that is the whole of
+    §3.6's concurrency claim.** `migrate()` reads it before the lock, so between that read and
+    this transaction another process may have applied the very migration this one is about to.
+    Without the re-check the second process runs the DDL again -- `ALTER TABLE … ADD COLUMN` is
+    not idempotent -- and then collides on `schema_version`'s primary key. An independent review
+    measured it: six concurrent opens of an existing v0.5 database, ten trials, **20 of 60
+    failed** with `UNIQUE constraint failed` or `duplicate column name`, and five of six failed
+    on every trial against a fresh one. It failed closed, and every worker but one refused to
+    start, which is not what "a second process either finds the work done or waits for it"
+    means.
     """
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if migration.id in _read_applied(connection):
+            # Applied by somebody else while we waited for the lock. Nothing to do, and
+            # nothing to record.
+            connection.rollback()
+            return
         for statement in migration.statements:
             connection.execute(statement)
         connection.execute(
@@ -295,6 +370,9 @@ def _apply(connection: sqlite3.Connection, migration: Migration, now: datetime) 
             (migration.id, now.astimezone(UTC).isoformat(), ctrlrun_version()),
         )
     except BaseException:
+        # Load-bearing and, until a review measured it, exercised by nothing: an abandoned
+        # connection holds an *uncommitted* transaction, WAL lets later reads through, and the
+        # next writer meets `database is locked`. T149c opens that window on purpose.
         connection.rollback()
         raise
     connection.commit()
@@ -315,6 +393,7 @@ def migrate(connection: sqlite3.Connection, now: datetime | None = None) -> Clas
 
     if "schema_version" not in tables:
         if _MARKER_TABLE in tables:
+            _refuse_unless_ours(connection, tables)
             found = Classification.BASELINE
         elif tables:
             raise _refuse(
@@ -356,5 +435,19 @@ def migrate(connection: sqlite3.Connection, now: datetime | None = None) -> Clas
 
     for migration in MIGRATIONS:
         if migration.id not in applied:
-            _apply(connection, migration, stamp)
+            try:
+                _apply(connection, migration, stamp)
+            except sqlite3.Error as broke:
+                # §9.3: an operator's process refusing to start needs a distinguishable
+                # exception. A raw `sqlite3.OperationalError` out of a constructor is a bare
+                # traceback that no `except CTRLRunError` in this codebase catches -- not the
+                # CLI's, not the gateway's, not the webhook's.
+                raise SchemaMismatch(
+                    f"migration {migration.id!r} could not be applied: {broke}. The database is "
+                    f"unchanged -- the migration ran in one transaction and rolled back. It is "
+                    f"still at {', '.join(applied) or '(nothing)'}.",
+                    applied=applied,
+                    known=tuple(item.id for item in MIGRATIONS),
+                    running=ctrlrun_version(),
+                ) from broke
     return found
