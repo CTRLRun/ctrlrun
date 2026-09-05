@@ -32,9 +32,21 @@ postgres = pytest.mark.skipif(
 
 
 @pytest.fixture
-def backend() -> PostgresBackend:
+def backend():
+    """A backend, and its schemas dropped when the test is done.
+
+    Without the teardown every test that called `open()` left its `_serial = 0` schema behind:
+    measured at **+8 per run**, monotonic, in a database CI shares with every other Postgres test
+    here. `reset()` drops the schema it is *finished* with and advances the serial, so the last
+    one a test used is always still there when the test ends -- which is the half of item 5's
+    leak fix that nothing asserted.
+    """
     assert URL
-    return PostgresBackend(URL)
+    made = PostgresBackend(URL)
+    try:
+        yield made
+    finally:
+        made.reset()
 
 
 # --- T153: the extra says so when it is missing, and core does not import it -----------------

@@ -218,9 +218,14 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
     §2.7 records the correction.
     """
     title = reservation_e1_in_process.title
-    store = backend.open()
 
     for round_number in range(ROUNDS):
+        # A store per round, closed at the end of it. Each round starts `processes` fresh
+        # threads, and a thread-local connection outlives the thread that opened it -- so one
+        # store across twelve rounds accumulated ninety-six connections and the backend ran out
+        # of slots. The failure surfaced in this case and had nothing to do with it, which is
+        # exactly how a resource leak announces itself.
+        store = backend.open()
         key = f"refund:e1-{round_number}"
         barrier = threading.Barrier(processes)
         won: list[str] = []
@@ -234,6 +239,7 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
             lock: threading.Lock = lock,
             won: list[str] = won,
             refused: list[Exception] = refused,
+            store: StateStore = store,
         ) -> None:
             # Every per-round object is bound as a default. They are rebuilt each round, and a
             # closure over the loop variable would have a thread from round N appending to
@@ -281,6 +287,7 @@ def reservation_e1_in_process(backend: StoreBackend, processes: int = CONTENDERS
         record = store.get_effect(key)
         if record is None or record.action_id != won[0]:
             return failed("e1-in-process", title, "the record does not name the winner")
+        store.close()
     return passed("e1-in-process", title)
 
 
@@ -338,22 +345,38 @@ def reservation_e1_cross_process(backend: StoreBackend, processes: int = CONTEND
             child.stdin.write(payload)
             child.stdin.close()
 
+        def reap() -> None:
+            """Kill every contender still running, on every exit from the block below.
+
+            An early return used to leave the other seven alive. They hold open transactions on
+            the backend's schema, and the very next thing that happens is `reset()` dropping it
+            -- which waits on their locks. A review found the pair: a *broken* backend, which is
+            the case this suite exists to catch, produced a hung run rather than a red report.
+            """
+            for other in children:
+                if other.poll() is None:
+                    other.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        other.wait(timeout=30)
+
         results = []
-        for child in children:
-            try:
-                child.wait(timeout=90)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                return failed("e1-cross-process", title, "a contender did not finish in 90s")
-            assert child.stdout is not None and child.stderr is not None
-            out, err = child.stdout.read(), child.stderr.read()
-            child.stdout.close()
-            child.stderr.close()
-            if child.returncode != 0:
-                return failed(
-                    "e1-cross-process", title, f"a contender exited {child.returncode}: {err}"
-                )
-            results.append(json.loads(out))
+        try:
+            for child in children:
+                try:
+                    child.wait(timeout=90)
+                except subprocess.TimeoutExpired:
+                    return failed("e1-cross-process", title, "a contender did not finish in 90s")
+                assert child.stdout is not None and child.stderr is not None
+                out, err = child.stdout.read(), child.stderr.read()
+                child.stdout.close()
+                child.stderr.close()
+                if child.returncode != 0:
+                    return failed(
+                        "e1-cross-process", title, f"a contender exited {child.returncode}: {err}"
+                    )
+                results.append(json.loads(out))
+        finally:
+            reap()
         called = os.listdir(marker_dir)
         arrived = len(os.listdir(gate))
 
@@ -970,6 +993,75 @@ def resolution_only_ambiguous(backend: StoreBackend, processes: int = CONTENDERS
     return passed("only-ambiguous", title)
 
 
+@case("resolution-attribution", "a store records WHO resolved a record, and drops it on a retry")
+def resolution_attribution(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """SPEC-v0.6 §5.3, and the one field this milestone adds to every backend.
+
+    Two halves, and the second is the one shipped code got wrong. A store must record the
+    resolver, and it must **clear** it when `v0.1 §5.4`'s one automatic retry renews the record.
+    A human resolving to `FAILED` is saying *"this may be retried"*; they did not commit the
+    retry, and a record still naming them says a person decided something they did not.
+
+    Written because a review mutated one backend's read and write of the column to `None` and the
+    entire test suite -- 2262 tests -- stayed green, twice. `resolved_by` is a column on both
+    shipped backends, and this is the suite whose whole purpose is that two backends agree.
+    Durability across a reopen is `resolver-survives`, in the suite that can say N/A about it.
+    """
+    title = resolution_attribution.title
+    store = backend.open()
+
+    store.reserve_effect("refund:who", "act_w", LEASE)
+    store.begin_execution("refund:who", "act_w")
+    store.mark_ambiguous("refund:who", "act_w", "the response was lost")
+
+    returned = store.resolve_effect("refund:who", EffectState.FAILED, "cli:ada")
+    if returned.resolved_by != "cli:ada":
+        return failed(
+            "resolution-attribution",
+            title,
+            f"resolve_effect returned resolved_by={returned.resolved_by!r}, expected 'cli:ada'",
+        )
+    read_back = store.get_effect("refund:who")
+    if read_back is None or read_back.resolved_by != "cli:ada":
+        got = read_back.resolved_by if read_back else "gone"
+        return failed(
+            "resolution-attribution",
+            title,
+            f"the record reads back resolved_by={got!r}; the resolver must be on the record and "
+            "not only on the object resolve_effect returned",
+        )
+
+    # The control for the half above: an untouched record names nobody. Without it a store that
+    # stamped every record it read would pass everything so far.
+    store.reserve_effect("refund:nobody", "act_n", LEASE)
+    untouched = store.get_effect("refund:nobody")
+    if untouched is None or untouched.resolved_by is not None:
+        got = untouched.resolved_by if untouched else "gone"
+        return failed(
+            "resolution-attribution",
+            title,
+            f"an unresolved record says resolved_by={got!r}; nothing resolved it",
+        )
+
+    store.reserve_effect("refund:who", "act_x", LEASE)
+    retried = store.get_effect("refund:who")
+    if retried is None or retried.attempt != 2:
+        return failed(
+            "resolution-attribution",
+            title,
+            "the retry after a resolution to FAILED did not renew the record",
+        )
+    if retried.resolved_by is not None:
+        return failed(
+            "resolution-attribution",
+            title,
+            f"the retry carries resolved_by={retried.resolved_by!r}. A human permitted the retry; "
+            "they did not make its outcome, and an operator reading the table would see their "
+            "name beside whatever the agent goes on to do",
+        )
+    return passed("resolution-attribution", title)
+
+
 @case("two-resolutions", "an AMBIGUOUS record resolves to COMMITTED or FAILED, and nothing else")
 def resolution_two_targets(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
     title = resolution_two_targets.title
@@ -1149,6 +1241,43 @@ def durability_ambiguous(backend: StoreBackend, processes: int = CONTENDERS) -> 
         AmbiguousEffect,
     )
     return problem or passed("ambiguous-survives", title)
+
+
+@case("resolver-survives", "who resolved a record survives a reopen")
+def durability_resolver(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """§5.3's field is evidence, and evidence a process loses on restart is not evidence.
+
+    `resolution-attribution` covers the semantics on one handle; this covers the storage. Split
+    because only this half can be N/A, and folding them would have made the whole of §5.3
+    unexercised on any backend that cannot reopen.
+    """
+    title = durability_resolver.title
+    store = backend.open()
+    store.reserve_effect("refund:dur9", "act_r9", LEASE)
+    store.begin_execution("refund:dur9", "act_r9")
+    store.mark_ambiguous("refund:dur9", "act_r9", "the response was lost")
+    store.resolve_effect("refund:dur9", EffectState.COMMITTED, "cli:ada")
+
+    other = backend.reopen()
+    if other is None:
+        if not storage_is_confined(backend):
+            return dishonest("resolver-survives", title, "reopen()")
+        return na(
+            "resolver-survives",
+            title,
+            "this backend's storage does not outlive the object that holds it",
+        )
+    record = other.get_effect("refund:dur9")
+    if record is None:
+        return failed("resolver-survives", title, "the record did not survive the reopen")
+    if record.resolved_by != "cli:ada":
+        return failed(
+            "resolver-survives",
+            title,
+            f"the reopened record says resolved_by={record.resolved_by!r}; a resolver held only "
+            "in memory is not a record of who decided",
+        )
+    return passed("resolver-survives", title)
 
 
 @case("terminal-states-survive", "every terminal record survives a reopen")
@@ -1590,9 +1719,9 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         approval_atomic,
         approval_checked_first,
     ),
-    "resolution": (resolution_only_ambiguous, resolution_two_targets),
+    "resolution": (resolution_only_ambiguous, resolution_two_targets, resolution_attribution),
     "outcome": (outcome_no_failed_on_refusal, outcome_no_not_executed),
-    "durability": (durability_ambiguous, durability_terminal),
+    "durability": (durability_ambiguous, durability_terminal, durability_resolver),
     "evidence": (evidence_action_round_trip, evidence_event_ids, evidence_receipt),
     "continuation": (
         continuation_taken_once_cross_process,

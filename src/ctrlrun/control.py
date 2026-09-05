@@ -1338,8 +1338,12 @@ class Control:
         state = RECONCILED_STATES.get(outcome)
         if state is None:
             return False
+        # §5.3's table: `reconcile:<action name>`. The bare kind would make two hooks
+        # reconciling two different actions one indistinguishable string, which is the finer
+        # distinction the section promises and item 8's soak is told it has.
+        resolver = f"{RESOLVED_BY_RECONCILE}:{action.name}"
         try:
-            self._store.resolve_effect(effect_key, state, RESOLVED_BY_RECONCILE)
+            self._store.resolve_effect(effect_key, state, resolver)
         except CTRLRunError as refused:
             # The record moved out of `AMBIGUOUS` between the refusal and the answer — a
             # human, or another process, got there first. Their resolution stands; this one
@@ -1349,7 +1353,15 @@ class Control:
         self._append(
             EventType.EFFECT_RESOLVED,
             action,
-            {"state": str(state), "resolved_by": RESOLVED_BY_RECONCILE},
+            # Two keys, each meaning one thing on **both** paths (§5.3): `resolver` is the
+            # string on the record, and `resolved_by` is the authority's kind. They used to be
+            # the same value here and different values in the CLI, which coincided for the hook
+            # and so hid that a reader could not join events to records on either one.
+            {
+                "state": str(state),
+                "resolver": resolver,
+                "resolved_by": RESOLVED_BY_RECONCILE,
+            },
             effect_key,
         )
         return True

@@ -241,6 +241,55 @@ class _ForgetsTheUnknown(_Wrapped):
         return None
 
 
+class _ForgetsTheResolver(_Wrapped):
+    """Resolves correctly and forgets **who** did it (SPEC-v0.6 §5.3).
+
+    Written because a review mutated `PostgresStateStore`'s read and write of `resolved_by` to
+    `None` and the whole suite -- 2262 tests -- stayed green, twice. `resolved_by` is a column on
+    both shipped backends, and the suite that exists to make two backends agree had no case for
+    the one field the milestone added to them.
+    """
+
+    def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
+        return replace(self._inner.resolve_effect(effect_key, state, resolver), resolved_by=None)
+
+    def get_effect(self, effect_key: str) -> EffectRecord | None:
+        record = self._inner.get_effect(effect_key)
+        return None if record is None else replace(record, resolved_by=None)
+
+
+class _KeepsTheResolverAcrossARetry(_Wrapped):
+    """Never clears `resolved_by`, so `v0.1 §5.4`'s retry is attributed to whoever permitted it.
+
+    The direction that matters: a human resolving to `FAILED` says *"this may be retried"*, and
+    the agent's next outcome is the agent's. This is the shape the shipped stores had -- the
+    resolver moved from free text into a column, and the renewal `UPDATE` cleared the text and
+    not the column.
+    """
+
+    _resolvers: dict[str, str]
+
+    def __init__(self, inner: StateStore) -> None:
+        _Wrapped.__init__(self, inner)
+        self._resolvers = {}
+
+    def reserve_effect(
+        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+    ) -> Reservation:
+        before = self._inner.get_effect(effect_key)
+        reservation = self._inner.reserve_effect(effect_key, action_id, lease)
+        if before is not None and before.resolved_by is not None:
+            self._resolvers[effect_key] = before.resolved_by
+        return reservation
+
+    def get_effect(self, effect_key: str) -> EffectRecord | None:
+        record = self._inner.get_effect(effect_key)
+        if record is None:
+            return None
+        kept = self._resolvers.get(effect_key)
+        return record if kept is None else replace(record, resolved_by=kept)
+
+
 # --- evidence --------------------------------------------------------------------------------
 
 
@@ -429,6 +478,18 @@ FIXTURES: Sequence[Fixture] = (
         {"reservation": "lease-expiry"},
         _wrapping("releases-an-expired-lease", _ReleasesAnExpiredLease),
         because="did not raise AmbiguousEffect",
+    ),
+    Fixture(
+        "forgets-the-resolver",
+        {"durability": "resolver-survives"},
+        _wrapping("forgets-the-resolver", _ForgetsTheResolver),
+        because="resolved_by=None",
+    ),
+    Fixture(
+        "keeps-the-resolver-across-a-retry",
+        {"resolution": "resolution-attribution"},
+        _wrapping("keeps-the-resolver-across-a-retry", _KeepsTheResolverAcrossARetry),
+        because="the retry carries resolved_by",
     ),
     Fixture(
         "grants-twice",

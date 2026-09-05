@@ -7,6 +7,7 @@ because a seam in shipping code that exists only for a test is what §1.1's last
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +77,9 @@ class StoreBackend(Protocol):
     def reset(self) -> None:
         """Discard everything. Called between cases; the suite never reuses state."""
         ...
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class SQLiteBackend:
@@ -245,7 +249,30 @@ class PostgresBackend:
         return f"{self._url}{joiner}{SCHEMA_PARAM}={self._schema}"
 
     def reset(self) -> None:
+        """Close every store and **drop the schema they used**.
+
+        A review counted 1137 `conf_*` schemas left in one database after a handful of runs: the
+        backend made one per case and dropped none. In CI the service is ephemeral and it does
+        not matter; in a developer's or an operator's database it does, and the catalogue bloat
+        eventually shows up as something else entirely -- here it was `remaining connection slots
+        are reserved`, reported by a case that had nothing to do with it.
+        """
+        from ...postgres import PostgresStateStore
+
         for store in self._open:
             store.close()
         self._open.clear()
+        try:
+            PostgresStateStore.drop_schema(self._url, self._schema)
+        except Exception as refused:
+            # Not suppressed. `contextlib.suppress` cannot catch a *block*, and this used to
+            # wait forever behind one connection the suite had not closed -- a child process
+            # left alive by an early return. Now `drop_schema` gives up, and a cleanup that
+            # could not run says so instead of leaving a schema nobody will look for.
+            _LOG.warning(
+                "could not drop conformance schema %r: %s. It is left behind; drop it by hand "
+                "if this database is not disposable",
+                self._schema,
+                refused,
+            )
         self._serial += 1

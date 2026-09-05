@@ -102,6 +102,18 @@ class EffectRecord:
     lease_expires_at: datetime | None = None
     result: Any = None
     error: str | None = None
+    #: Which authority moved this record out of `AMBIGUOUS` (SPEC-v0.6 §5.3), or `None`.
+    #:
+    #: `"cli:<user>"` for a human running `ctrlrun resolve`, `"reconcile"` for a hook answering
+    #: where its answer points. The two are different authorities and §5's whole argument is that
+    #: a reader must be able to tell them apart -- item 8's soak cannot say anything about
+    #: unexplained ambiguity if "a human decided" and "a hook decided" are the same free-text
+    #: string. Until v0.6 the resolver's identity lived inside `error`, unqueryable and
+    #: indistinguishable from an executor's message.
+    #:
+    #: `error` keeps what it already kept, because a receipt already written must not change
+    #: meaning. This is additive.
+    resolved_by: str | None = None
 
     def lease_is_live(self, now: datetime) -> bool:
         """Whether an attempt is still holding this effect (SPEC-v0.1 §5.3 E3).

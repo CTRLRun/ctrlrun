@@ -1145,8 +1145,36 @@ two authorities, both of which already exist:
 
 | Authority | Route | Recorded as |
 |---|---|---|
-| A human | `ctrlrun resolve <effect_key> --committed \| --failed` | `resolved_by = "cli:<user>"` |
+| A human | `ctrlrun resolve <effect_key> --committed \| --failed` | `resolved_by = "cli:local"` |
 | A reconcile hook | `v0.2 §2`, and **only where its answer points** — `"unknown"` changes nothing | `resolved_by = "reconcile:<action name>"` |
+
+**`cli:local`, not `cli:<user>`, and the difference is a promise this milestone cannot keep.**
+An earlier draft of this table wrote `"cli:<user>"`. CTRLRun does not authenticate the person at
+the terminal — §11 puts *authenticating the approver* out of scope by name, and it is the same
+sentence for the same reason here — so a `<user>` in that column would be whatever the shell says
+`$USER` is, which is a claim about a person made from a value that person controls. `cli:local`
+says exactly what is known: **somebody with the operator's terminal**. The constant is the one
+`ctrlrun approve` has always written into `approver`, and one string for "a human at this
+installation" is better than two that mean the same thing. A review found the draft's wording;
+the code was right and the document was not.
+
+**The hook's half of the column is the code's fault, and the code changed.** It wrote the bare
+`reconcile`, which made two hooks reconciling two different actions one indistinguishable string
+— the finer distinction this section promises and §8.1's soak is told it has.
+
+Two names, each meaning one thing on both paths, because they did not:
+
+| Where | Human | Reconcile hook |
+|---|---|---|
+| `EffectRecord.resolved_by` | `cli:local` | `reconcile:<action name>` |
+| `EFFECT_RESOLVED` event, `resolver` | `cli:local` | `reconcile:<action name>` |
+| `EFFECT_RESOLVED` event, `resolved_by` | `human` | `reconcile` |
+
+The record's field and the event's `resolver` are **the same string**, which is what lets a
+reader — §8.1's soak first — join the two. They were not: the CLI stamped `cli:local` on the
+record and put `human` in the event's `resolved_by`, while the hook put its record value in that
+same key. The two coincided for the hook, and that is precisely what hid that they did not
+coincide for the human.
 
 **`EffectRecord.resolved_by` is a new field and `effects.resolved_by` a new column**, migrated by
 `0003_resolved_by` (§3.7). Today the resolver's identity is written into the record's free-text
@@ -2178,12 +2206,52 @@ different remedies. It carries `applied`, `known` and the recorded `ctrlrun_vers
 ### 9.4 The CLI
 
 ```
-ctrlrun receipts [--last N] [--json] [--verify-chain] [--control ID]
+ctrlrun receipts [--last N] [--json] [--verify-chain] [--control ID] [--store-url …]
 ctrlrun verify   [… unchanged …] [--store-url postgresql://…]
-ctrlrun effects  [--state ambiguous]        # now shows an expired lease as expired (§5.2)
+ctrlrun effects  [--state ambiguous] [--store-url …]   # an expired lease shows as expired (§5.2)
+ctrlrun resolve  [--committed | --failed] [--store-url …]
+ctrlrun inspect  [--json] [--store-url …]              # now carries `resolved_by` (§5.3)
+ctrlrun approve  [--store-url …]
+ctrlrun deny     [--store-url …]
+ctrlrun stats    [--since …] [--json] [--store-url …]
 ```
 
-**No new command.** `--verify-chain` and `--control` are flags on a command that already opens the
+**`--store-url` is on every command that opens the operator's store, and an earlier draft of this
+block put it only on `verify`.** That draft did not survive being read against §5.3. `_store()`
+returned `SQLiteStateStore(state_path())` unconditionally, so on the backend this entire milestone
+exists for: `ctrlrun resolve` — §5.3's *human authority*, one of exactly two ways an `AMBIGUOUS`
+record ever moves — could not reach the record; `ctrlrun effects` could not show §5.2's lapsed
+lease; `resolved_by` had no read surface outside a Python session; and `ctrlrun approve` could not
+answer a request. A milestone that adds a backend and leaves the operator's commands unable to
+speak to it has not added the backend. A review found it.
+
+It reads `CTRLRUN_STORE_URL` as well, because the alternative is every command in a runbook
+carrying the same flag.
+
+**It creates nothing, and it migrates nothing.** A command an operator runs to *read* evidence
+must not have a side effect on the database it reads. That is `v0.4 §3.5`'s argument for verify's
+scratch store, pointed the other way — verify may create because it owns what it creates, and
+these commands own nothing.
+
+**Saying so was not enough, and a review found it doing both.** `PostgresStateStore.__init__`
+migrates, so `ctrlrun effects` against an empty schema printed *"no effects yet"*, exited 0, and
+left eight tables behind. Worse: against a database stopped one migration short, a `ctrlrun
+receipts` **applied** it — on the milestone that introduces Postgres, which is the first one where
+a store is shared across hosts, so one operator reading evidence `ALTER TABLE`s a database every
+other process is still running against.
+
+§3.6 forbids a store that can open without migrating — *"a second configuration nobody tested"* —
+and that rule is not the one to bend. So the refusal belongs to the **reader**: it looks first,
+and opens only a database already at HEAD. Three refusals, each naming its own remedy, because
+*"that schema is empty"* and *"your fleet is mid-upgrade"* have nothing in common as instructions:
+
+| What it finds | What it says |
+|---|---|
+| the schema does not exist | a read command does not create one |
+| no `schema_version` in it | that schema holds no CTRLRun database |
+| anything but `UP_TO_DATE` | which migration is missing, and that a **writer** applies it at open |
+
+**Still no new command.** `--verify-chain`, `--control` and `--store-url` are flags on commands that already open the
 store and already reads receipts. A `ctrlrun chain` command would be a second entry point into
 the evidence and would need `v0.3 §4.3.1`'s treatment for no benefit; a flag on the reader is the
 same code path with a different report.
@@ -2197,7 +2265,8 @@ same code path with a different report.
 | `ctrlrun.receipt/v3` | new fields: `seq`, `prev_hash`, `policy_hash`, `policy_version`, `controls`. Every `v2` field keeps its meaning |
 | `ctrlrun.guarantees/v2` | G11 added (§6.6) |
 | `ctrlrun.store-conformance/v1` | new: the store suite's report document (§2.2) |
-| `ctrlrun.verify/v1`, `ctrlrun.inspection/v2`, `ctrlrun.framework-probe/v1` | unchanged |
+| `ctrlrun.verify/v1`, `ctrlrun.framework-probe/v1` | unchanged |
+| `ctrlrun.inspection/v2` | **version unchanged, one additive field**: `effect.resolved_by` (§5.3). A draft of this row said "unchanged" outright, which was wrong the moment §5.3 named `ctrlrun inspect` as a place a reader finds the resolver — the command had to carry it, and a document that gains a key has changed. The version does not move because `v2` readers are unaffected: nothing is removed, nothing is renamed, no value changes meaning, and a reader that does not know the key ignores it. That is the same additive rule `ctrlrun.receipt/v3`'s row states, applied to a document whose readers are scripts rather than stores |
 
 **A `ctrlrun.receipt/v3` writer and a ≤ 0.5 reader do not mix**, for `v0.3 §12.2`'s reason and
 with the same instruction: `Receipt.from_dict` parses into closed sets, so **upgrade every reader

@@ -139,6 +139,12 @@ def _took(branch: str, effect_key: str) -> None:
     )
 
 
+#: How long `drop_schema` waits for the locks it needs before giving up. Long enough that an
+#: ordinary short read does not fail a cleanup, short enough that a forgotten open transaction
+#: produces an error rather than a hung run.
+DROP_LOCK_TIMEOUT: Final = "10s"
+
+
 def _psycopg() -> Any:
     """The driver, imported lazily so `import ctrlrun` never reaches it (T153)."""
     try:
@@ -213,9 +219,17 @@ class PostgresStateStore:
     """Approvals, effects and evidence in a Postgres schema (SPEC-v0.6 §4).
 
     One connection per thread, as `SQLiteStateStore` does: `psycopg` connections are not
-    thread-safe. A broken connection is replaced only between transactions and for the re-read --
-    never silently mid-transaction, because a reconnect is a new transaction and pretending
-    otherwise is how a partial write becomes invisible.
+    thread-safe, and the thread-local shape is the one `close()` is already specified against
+    (§2.7).
+
+    **A connection outlives the thread that opened it, and that is a real limit worth stating.**
+    A host running agents on a *bounded, recycled* thread pool is fine -- the same threads keep
+    reusing the same connections. A host that starts a fresh thread per unit of work accumulates
+    one connection per thread that ever touched the store, and Postgres connections are far
+    scarcer than SQLite file handles: `max_connections` defaults to 100. `close()` releases every
+    one, so the mitigation is to close a store you are done with. The conformance suite met this
+    for real -- ninety-six connections across twelve rounds of eight threads -- and the failure
+    surfaced in a case that had nothing to do with it.
 
     No pool ships. An operator may put pgbouncer in front in **transaction** mode, and it works
     because this store holds nothing session-scoped: no advisory lock, no temp table, no prepared
@@ -262,14 +276,27 @@ class PostgresStateStore:
             connection.close()
 
     @staticmethod
-    def drop_schema(url: str, schema: str) -> None:
+    def drop_schema(url: str, schema: str, *, timeout: str = DROP_LOCK_TIMEOUT) -> None:
         """Remove a schema and everything in it. Verify's scratch store is dropped when the run
-        ends, including when it ends by exception (§4.1)."""
+        ends, including when it ends by exception (§4.1).
+
+        **Bounded.** `DROP SCHEMA … CASCADE` takes an `ACCESS EXCLUSIVE` lock on every table in
+        it, so a single connection left idle inside a transaction -- a child process the caller
+        forgot to kill, a `psql` somebody left open -- blocks this forever. A review measured it:
+        `reset()` had not returned after 25 seconds, with the dropping backend sitting in
+        `wait_event_type=Lock` behind one `idle in transaction` reader. A cleanup that hangs turns
+        a broken backend into a hung CI run instead of a red report, which is this project's rule
+        about timeouts inverted.
+
+        `lock_timeout` makes it raise instead, and the caller decides. It is set on the session
+        rather than passed to the driver so it covers the `DROP` and nothing else.
+        """
         if not schema or not schema.replace("_", "").isalnum():
             raise InvalidArgument(f"schema must be a plain identifier, got {schema!r}")
         psycopg = _psycopg()
         connection = psycopg.connect(url, autocommit=True)
         try:
+            connection.execute(f"SET lock_timeout = '{timeout}'")
             connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         finally:
             connection.close()
@@ -450,7 +477,8 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT effect_key, state, action_id, attempt, lease_expires_at, result_json, "
-                f"error, created_at, updated_at FROM {self._q}.effects WHERE effect_key = %s",
+                "error, created_at, updated_at, resolved_by "
+                f"FROM {self._q}.effects WHERE effect_key = %s",
                 (effect_key,),
             )
             row = cursor.fetchone()
@@ -466,6 +494,7 @@ class PostgresStateStore:
             error=row[6],
             created_at=datetime.fromisoformat(str(row[7])),
             updated_at=datetime.fromisoformat(str(row[8])),
+            resolved_by=row[9],
         )
 
     def _read_approval(self, connection: Any, approval_id: str) -> ApprovalRecord | None:
@@ -727,9 +756,14 @@ class PostgresStateStore:
             # record that changed under us refuses instead of overwriting an attempt.
             with connection.cursor() as cursor:
                 cursor.execute(
+                    # `resolved_by` is cleared with them, and its own line says why: a human
+                    # resolving to FAILED is saying *"this may be retried"*, not committing the
+                    # retry. Leaving the column set attributes the agent's next outcome to the
+                    # person who merely permitted it -- and v0.5 got this right only by accident,
+                    # because the resolver used to live inside the `error` this UPDATE clears.
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
-                    "result_json=NULL, error=NULL, updated_at=%s "
+                    "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=%s "
                     "WHERE effect_key=%s AND state=%s",
                     (
                         str(record.state),
@@ -830,7 +864,7 @@ class PostgresStateStore:
             cursor.execute(
                 f"UPDATE {self._q}.effects SET "
                 f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
-                "result_json=%s, error=%s, updated_at=%s "
+                "result_json=%s, error=%s, updated_at=%s, resolved_by=%s "
                 "WHERE effect_key=%s AND action_id=%s AND state=%s",
                 (
                     str(record.state),
@@ -840,6 +874,7 @@ class PostgresStateStore:
                     _result_json(record.result),
                     record.error,
                     _iso(record.updated_at),
+                    record.resolved_by,
                     record.effect_key,
                     expected.action_id,
                     str(expected.state),
