@@ -90,11 +90,35 @@ Three things bite here, and all three were found the hard way:
 ## What the contract could not answer
 
 Item 6 of v0.5 wrote a third adapter against `SPEC-v0.5.md` alone, in a session that could not
-read the kernel or either reference adapter. It produced fourteen questions the document could
-not answer, four of which would have produced an insecure or unimplementable adapter. **Every one
-of them became an edit to the contract** — `SPEC-v0.5.md` §12.10 lists them and what they
-changed, and §12.9 is the observe-mode defect it found in a *shipping* adapter without reading
-a line of it.
+read the kernel or either reference adapter. **The adapter was disposable; this list is what it
+was for.** A contract only its author can implement is not a contract, so the list had to be
+emptied before v0.5 could ship — every row below is answered by an edit to `SPEC-v0.5.md`.
+
+It chose the **decided-before-invocation** shape deliberately, because that shape must touch
+`needs_approval`, `banner`, `refuses_before_invoking` and `Control.policy` and so loads more of
+the contract. Six of the fourteen exist only because of that choice, and that is the finding
+rather than an artefact of it: **this document was written from one shape and read from the
+other, and that is where it broke.**
+
+| # | The question | Severity | Answered by |
+|---|---|---|---|
+| Q1 | Is `ctrlrun.context()` on the never-list? It supplies a principal without naming the type, and passes T129 because that test runs against a `Control` **with** an identity provider | **security** | §2.3 never-list row |
+| Q2 | May an adapter construct an `InterruptApprovalProvider`? §9 rested a security argument on "it does not", and nothing forbade it — a `build_provider()` helper could inject a frozen clock and defeat §2.4 | **security** | §2.3 never-list row |
+| Q3 | §3.6's "never interrupts in observe mode" is false for this shape: the primitive is reached from the *predicate*, and a human's *no* then **stops** an action observe mode promises to run | **correctness** | §3.6 now requires it; §12.9 |
+| Q4 | §3.4 rebuilds the request's `Action` "with those arguments" — replace or overlay? Under replace, a tool with a defaulted parameter can never match, so the honest adapter with the honest declaration is the one that breaks | **correctness** | §3.5, with a README requirement |
+| Q5 | Nothing in five specifications addresses `async` — may `interrupt()` be called inside a running loop? Does `@protect` wrap a coroutine? | **correctness** | §3.5.1 |
+| Q6 | What does `invoke` do when the framework refuses *before* invoking? Returning a value is `never-executes`; returning `None` is undefined | correctness | §5.2 code block |
+| Q7 | `needs_approval` cannot see the effect key, so an unresolvable template asks a human and *then* fails — the waste `v0.1 §5.1` exists to prevent | correctness | §3.5, stated as a cost |
+| Q8 | Is `resource` a template core resolves, or a literal? The whole contract answered this once, in a parenthesis of `ARCHITECTURE.md` | correctness | §3.5 |
+| Q9 | The kit's executor signature is an unstated contract — must arguments be spread as keywords? | correctness | §5.2 |
+| Q10 | `@protect(wait=True)` is mandatory and §2.3's *must call* paragraph did not say so | correctness | §2.3 |
+| Q11 | Six names the may-call list is written in are frozen nowhere, including `ApprovalStore` in a §9 signature | correctness | §2.3 |
+| Q12 | `Case` is public in `SUITES`' type and defined nowhere | style | §5.2 |
+| Q13 | A Protocol class-attribute default cannot reach a non-inheriting adapter, so `refuses_before_invoking`'s default must mean `getattr(..., False)` | style | §5.2 |
+| Q14 | "May raise its own type" — of its own choosing, or one it defined? It decides whether `except CTRLRunError` catches it | style | §10 |
+
+`SPEC-v0.5.md` §12.10 records what the exercise says about the document as a whole, and §12.9 is
+the observe-mode defect it found in a **shipping** adapter without reading a line of it.
 
 If you write an adapter and the contract cannot answer something, that is a defect in the
 contract. Please open an issue saying what you were writing when you got stuck.

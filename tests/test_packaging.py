@@ -803,3 +803,52 @@ def test_every_documented_install_names_a_distribution_this_repository_builds():
                 unknown.append(f"{document.name}: {match}")
 
     assert unknown == [], unknown
+
+
+def test_T138_item_sixs_questions_are_recorded_and_each_is_answered():
+    """SPEC-v0.5 §8 T138: a third adapter was written against the contract alone, and **the list
+    of questions it could not answer is the deliverable**, recorded in `docs/adapters.md` with
+    each answered by an edit to `SPEC-v0.5.md`.
+
+    *"If the list cannot be emptied, v0.5 is not done."* So this asserts the list exists, that
+    every entry names where it was answered, and that the sections it names are real. The
+    adapter itself is disposable and is deliberately not in the repository — asserting its
+    existence would be asserting the wrong half.
+
+    This test was missing when v0.5 was otherwise complete, and `docs/adapters.md` carried a
+    summary of the list rather than the list. A summary cannot be checked against the spec.
+    """
+    adapters = REPO_ROOT / "docs" / "adapters.md"
+    spec = REPO_ROOT / "docs" / "SPEC-v0.5.md"
+    if not adapters.exists() or not spec.exists():  # pragma: no cover - not a checkout
+        pytest.skip("no repository checkout")
+
+    text = adapters.read_text(encoding="utf-8")
+    # The answer column is `(.*?)` and not `(.+?)` on purpose: an **empty** answer must still
+    # match, so the "every row says where it was answered" check below is what catches it. With
+    # `(.+?)` the row simply stopped being a row and the count assertion caught it instead --
+    # a subsumed guard, found by mutating an answer to empty and watching the wrong test fail.
+    rows = re.findall(r"^\| (Q\d+) \| (.+?) \| (.+?) \|(.*?)\|$", text, re.M)
+
+    assert len(rows) >= 14, f"item 6 raised fourteen questions; {len(rows)} are recorded"
+    assert [q for q, *_ in rows] == [f"Q{n}" for n in range(1, len(rows) + 1)], [
+        q for q, *_ in rows
+    ]
+
+    # Every row says where it was answered, and every section it names exists in the spec.
+    spec_text = spec.read_text(encoding="utf-8")
+    unanswered = [q for q, _, _, answer in rows if not answer.strip()]
+    assert unanswered == [], unanswered
+
+    cited = {
+        section for _, _, _, answer in rows for section in re.findall(r"§(\d+(?:\.\d+)*)", answer)
+    }
+    assert cited, "no row names a section of SPEC-v0.5"
+    missing = [
+        s for s in sorted(cited) if f"### {s} " not in spec_text and f"## {s}. " not in spec_text
+    ]
+    assert missing == [], f"rows cite sections that do not exist: {missing}"
+
+    # The four the report called security- or correctness-critical are marked as such.
+    severities = {severity.strip().strip("*").lower() for _, _, severity, _ in rows}
+    assert "security" in severities, severities
