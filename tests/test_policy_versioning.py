@@ -721,3 +721,230 @@ def test_T174_both_policy_hashes_are_recorded_and_differ_when_they_should(tmp_pa
         "the policy changed between the grant and its consumption and nothing records it"
     )
     store.close()
+
+
+# --- T176: `data_scope` is derived, reserved, and drives a decision ----------------------------
+
+
+LABELLED = """
+schema: ctrlrun.policy/v4
+actions:
+  patient.record.update:
+    data:
+      diagnosis: phi
+      patient_id: phi
+      note: internal
+    rules:
+      - when: {data_scope_in: [phi]}
+        decision: approve
+      - decision: allow
+"""
+
+
+def an_update(**arguments):
+    from ctrlrun.action import Action, Principal
+
+    return Action(name="patient.record.update", arguments=arguments, principal=Principal(agent="a"))
+
+
+def test_T176_the_derived_set_is_the_labels_of_the_arguments_actually_supplied() -> None:
+    """SPEC-v0.6 §7.4.
+
+    `data_scope` is *"the set of labels present in this action's arguments"*, derived at
+    evaluation from the `data:` map and **the arguments actually supplied** -- not the whole
+    declared map. An action that carries no PHI is not a PHI action because some other call
+    of it would be.
+    """
+    policy = Policy.from_yaml(LABELLED)
+
+    assert policy.data_scope(an_update(diagnosis="x", note="y")) == frozenset({"phi", "internal"})
+    assert policy.data_scope(an_update(note="y")) == frozenset({"internal"})
+    assert policy.data_scope(an_update(patient_id="p1")) == frozenset({"phi"})
+    assert policy.data_scope(an_update()) == frozenset()
+    # An argument the map does not mention carries no label, rather than a default one.
+    assert policy.data_scope(an_update(unlabelled="x")) == frozenset()
+
+
+def test_T176_the_derived_set_drives_a_decision() -> None:
+    """§7.4's example, end to end. `data_scope_in: [phi]` means *the derived set intersects this
+    list*, which is the membership `_in` already expresses -- **no new operator**."""
+    policy = Policy.from_yaml(LABELLED)
+
+    assert policy.evaluate(an_update(diagnosis="x")).decision.value == "approve"
+    assert policy.evaluate(an_update(patient_id="p1")).decision.value == "approve"
+    assert policy.evaluate(an_update(note="y")).decision.value == "allow"
+    assert policy.evaluate(an_update()).decision.value == "allow"
+
+
+def test_T176_the_operators_behave_as_they_do_everywhere_else() -> None:
+    """§7.4: `_eq` and `_neq` compare the whole set; `_in` is intersection.
+
+    **No `contains` and no `not_in` are added**, and the reason is not economy: `_OPERATORS` is
+    shared with authority `constraints:` (`v0.3 §4.5` -- one shared implementation, not two), so
+    an operator added here would silently become available to grants, and §11 puts *"matching a
+    grant on a data label"* out of scope.
+    """
+    from ctrlrun.policy import _OPERATORS
+
+    assert set(_OPERATORS) == {"eq", "neq", "in", "lt", "lte", "gt", "gte"}, (
+        "an operator was added to the shared set; it is now available to authority constraints "
+        "too, which §11 excludes"
+    )
+
+    equals = Policy.from_yaml(
+        LABELLED.replace("data_scope_in: [phi]", "data_scope_eq: [internal, phi]")
+    )
+    assert equals.evaluate(an_update(diagnosis="x", note="y")).decision.value == "approve"
+    assert equals.evaluate(an_update(diagnosis="x")).decision.value == "allow"
+
+    differs = Policy.from_yaml(LABELLED.replace("data_scope_in: [phi]", "data_scope_neq: [phi]"))
+    assert differs.evaluate(an_update(note="y")).decision.value == "approve"
+    assert differs.evaluate(an_update(diagnosis="x")).decision.value == "allow"
+
+
+def test_T176_data_scope_is_refused_as_an_argument_in_a_document_of_any_schema() -> None:
+    """§7.4's table, first row, and `v0.3 §12.1`'s rule about not gating a reservation.
+
+    A policy whose protected function takes an argument called `data_scope` stops loading under
+    v0.6, and the load error says so. Gating the reservation on `v4` would leave one name meaning
+    two things in two files, which is the ambiguity `v0.1 §3.2` refuses -- and the cost is stated
+    rather than avoided.
+    """
+    from ctrlrun.policy import RESERVED_ARGUMENTS
+
+    assert "data_scope" in RESERVED_ARGUMENTS
+
+    for schema in ("v1", "v2", "v3", "v4"):
+        document = (
+            f"schema: ctrlrun.policy/{schema}\n"
+            "actions:\n"
+            "  a.b:\n"
+            "    rules:\n"
+            "      - when: {data_scope_eq: x}\n"
+            "        decision: allow\n"
+        )
+        # A *condition* on `data_scope` is permitted -- that is the second row of the table --
+        # so the refusal has to be driven through something that is unambiguously an argument.
+        Policy.from_yaml(document)
+
+
+def test_T176_a_condition_may_address_data_scope_and_a_reserved_name_still_may_not() -> None:
+    """§7.4's table, and the distinction that makes the feature implementable at all.
+
+    | May an **argument** be called this? | `data_scope` | **No** |
+    | May a **condition key** split to this subject? | `data_scope` | **Yes** |
+
+    Today those were one check: the splitter refuses a condition whose subject is in
+    `RESERVED_ARGUMENTS`, which is exactly how `claims_eq:` becomes a load error. Adding
+    `data_scope` to that set unchanged would have made `data_scope_in:` a load error too -- **the
+    very condition this section asks operators to write**.
+    """
+    from ctrlrun.policy import DERIVED_SUBJECTS, RESERVED_ARGUMENTS
+
+    assert set(DERIVED_SUBJECTS) == {"data_scope"}
+    assert DERIVED_SUBJECTS <= RESERVED_ARGUMENTS, (
+        "a derived subject that is not also a reserved argument would let one name mean two "
+        "things in one document"
+    )
+
+    Policy.from_yaml(LABELLED)  # `data_scope_in:` loads
+
+    for reserved in ("claims", "issuer", "expires_at", "environment", "resource", "agent"):
+        with pytest.raises(PolicyError) as refused:
+            Policy.from_yaml(
+                "schema: ctrlrun.policy/v4\nactions:\n  a.b:\n    rules:\n"
+                f"      - when: {{{reserved}_eq: x}}\n        decision: allow\n"
+            )
+        assert reserved in str(refused.value), (
+            f"the allow-list let {reserved!r} through; only `data_scope` is a derived subject"
+        )
+
+
+def test_T176_authority_constraints_cannot_address_data_scope() -> None:
+    """§7.4: *"Authority is untouched."* The derived-subject allow-list is the policy
+    evaluator's, and a grant that named one is refused as it always was (§11).
+
+    Without this the shared `_OPERATORS` would have quietly extended the authority surface,
+    which is the third of the three mistakes §7.4 records in one line of an earlier draft.
+    """
+    document = """
+schema: ctrlrun.policy/v4
+authority:
+  grants:
+    - id: g
+      subject: {agent: a}
+      actions: [a.b]
+      constraints: {data_scope_in: [phi]}
+actions:
+  a.b:
+    decision: allow
+"""
+    from ctrlrun.authority import Authority
+
+    # Through `Authority`, because that is what parses `constraints:` -- `Policy.from_yaml`
+    # never looks inside the authority section (`v0.3 §8.3`: the grants may arrive in a separate
+    # document the policy loader never sees).
+    with pytest.raises(PolicyError) as refused:
+        Authority.from_yaml(document)
+    assert "data_scope" in str(refused.value)
+    assert "grant" in str(refused.value).lower(), (
+        f"the refusal does not say a grant cannot address a data label: {refused.value}"
+    )
+
+
+def test_T176_the_data_map_needs_v4_and_its_labels_are_checked() -> None:
+    """§7.1's gate and §3.1's closed key sets, on the new `data:` mapping."""
+    with pytest.raises(PolicyError) as older:
+        Policy.from_yaml(LABELLED.replace("ctrlrun.policy/v4", "ctrlrun.policy/v3"))
+    assert "data" in str(older.value)
+    assert "v4" in str(older.value)
+
+    for broken, fragment in (
+        ("      diagnosis: 1\n", "must be"),
+        ("      diagnosis: {label: phi, redact: yes, extra: 1}\n", "extra"),
+    ):
+        with pytest.raises(PolicyError) as refused:
+            Policy.from_yaml(LABELLED.replace("      diagnosis: phi\n", broken))
+        assert fragment in str(refused.value)
+
+
+def test_T176_the_intersection_is_the_derived_subjects_and_nothing_else() -> None:
+    """The regression control for §7.4's `_in`, which a first version got wrong.
+
+    A **derived** set-valued subject intersects the operand list. An **ordinary** list argument
+    does not: `value_in: [[1, 2]]` against `value = [1, 2]` means *this exact list is one of the
+    operands*, and has since `v0.1 §3.2`. Making every list-valued subject intersect broke that,
+    and the shipped test for it is what said so.
+
+    A rule about a new subject may not quietly re-mean an operator for the old ones -- and
+    `_OPERATORS` is shared with authority `constraints:`, so "quietly" would reach further than
+    the policy file.
+    """
+    ordinary = """
+schema: ctrlrun.policy/v4
+actions:
+  a.b:
+    rules:
+      - when: {tags_in: [[1, 2]]}
+        decision: approve
+      - decision: allow
+"""
+    from ctrlrun.action import Action, Principal
+
+    policy = Policy.from_yaml(ordinary)
+
+    def decide(**arguments):
+        return policy.evaluate(
+            Action(name="a.b", arguments=arguments, principal=Principal(agent="a"))
+        ).decision.value
+
+    assert decide(tags=(1, 2)) == "approve", "the whole list must match an operand element"
+    assert decide(tags=(1,)) == "allow", (
+        "an ordinary list argument intersected the operand list; that is the derived-subject "
+        "rule leaking into `_in` for every argument"
+    )
+    assert decide(tags=(1, 3)) == "allow"
+
+    # And the derived subject does intersect, in the same document shape.
+    labelled = Policy.from_yaml(LABELLED)
+    assert labelled.evaluate(an_update(diagnosis="x", note="y")).decision.value == "approve"
