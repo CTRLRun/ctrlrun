@@ -167,7 +167,7 @@ extends the assertion to the store subpackage).
 ### 2.2 What a backend hands the suite
 
 ```python
-# ctrlrun/conformance/store.py — core, stdlib
+# ctrlrun/conformance/store/backends.py — core, stdlib
 
 class StoreBackend(Protocol):
     """A live backend the suite may open, reopen and describe to a subprocess."""
@@ -199,9 +199,23 @@ class StoreBackend(Protocol):
         reason, and §2.6's `falsely-declares-no-url` is what keeps the declaration honest.
         """
 
+    def open_with_clock(self, clock: Callable[[], datetime]) -> StateStore:
+        """A store on this backend's storage, reading time from `clock`.
+
+        The suite's **only** seam, and one every shipped store already takes. `v0.1 §5.3 E3`
+        is about a lease expiring and `v0.4 §3.6`'s rule -- no sleeps, anywhere -- applies
+        here in full. It is not a relaxation under §1.1: nothing about what the store
+        *refuses* changes, only what time it thinks it is.
+        """
+
     def reset(self) -> None:
         """Discard everything. Called between cases; the suite never reuses state."""
 ```
+
+**`open_with_clock` is five methods, not four**, and an earlier draft of this block listed only
+four while the code required all five — so a backend written to this section verbatim failed ten
+cases. It is declared here because the paragraph below already argued for it; what was missing
+was the line.
 
 The suite is driven by `run(backend, *, only=(), processes=8) -> StoreReport`. It takes **no
 fault-injection hook, no clock override that the backend does not already accept, and no flag
@@ -247,10 +261,22 @@ them.** This was found by review, and it is `v0.5 §5.4`'s finding one layer dow
 fixture can fail reports `pass` for every backend ever written.
 
 - **`reservation/e1-in-process`** — the deterministic one. N threads contend for one key against
-  one store object, with the window held open on purpose rather than raced for: each contender
-  blocks on a barrier released after every one of them has read the record and before any has
-  written. Exactly one reservation is granted and N−1 are refused with `v0.1 §5.4`'s errors.
+  one store object, released together from a barrier so every contender is running when it calls.
+  Exactly one reservation is granted and N−1 are refused with `v0.1 §5.4`'s errors.
   **Applicable to every backend, and never N/A.**
+
+  **It is not a race test, and §2.7 says why the stronger wording was withdrawn.** The barrier
+  cannot be released *between* the store's read and its write — that is inside `reserve_effect`,
+  and getting there needs a hook §2.5 refuses to add. What this case establishes is that **the
+  store serializes at all**.
+
+  **It repeats the contention `ROUNDS` times, and the number is not decoration.** A store with
+  *no* check is caught in one round every time. The realistic bug — a **check-then-act**
+  `reserve_effect` that reads the record and then inserts without a lock — was measured at
+  **8 catches in 20 runs** with a single round: `reservation` would have been a flaky grade for
+  the store shape it most needs to catch, and CI would eventually have shown a red that was not a
+  regression. Twelve rounds puts the miss below one in a hundred thousand and still finishes in
+  well under a second; the same store is now caught 20 times in 20.
 - **`reservation/e1-cross-process`** — `v0.1 §7` T3's standard unchanged: **N contenders, one
   winner**, the fake remote called exactly once, one committed record and N−1 refused. It runs in
   `processes` OS processes started as `python -m ctrlrun.conformance.store.worker` with the
@@ -281,8 +307,26 @@ backend that has storage and simply did not implement the hook: `url()` and `reo
 `None` is a **declaration**, and §2.6's fixtures include one that declares falsely.
 
 `v0.4 §3.8`'s rule holds in full: **not applicable is not a pass**, the denominator counts
-applicable cases only, and there is no flag that folds one into the count. A backend reporting
-any *third* N/A has failed.
+applicable **cases** — not suites — and there is no flag that folds one into the count. A backend
+reporting any *third* N/A has failed.
+
+**Cases and not suites, and the difference is not cosmetic.** An N/A case inside a suite that
+otherwise passes is invisible to a suite-level fraction: the in-memory backend reported
+`7/7 (1 not applicable)` while `e1-cross-process` sat N/A inside a `PASS` suite, which is
+`v0.4 §3.8`'s *"6/6 with two uncounted"* wearing the other costume. It now reports `20/20 (3 not
+applicable)`. `StoreReport.ok` is case-level for the same reason.
+
+**What the honesty check can and cannot establish, stated rather than implied.** It opens two
+independent handles, writes through one and reads through the other. That catches a backend whose
+storage is plainly shared — which is what `falsely-declares-no-url` is. It does **not** catch a
+backend whose `open()` returns a *fresh, isolated, durable* store each call: to the probe that is
+indistinguishable from storage confined to the object, and a Postgres backend that made a private
+schema per `open()` would have exactly that shape. No in-process test can separate the two, because
+the only means the protocol offers are `open()` and `reopen()` and both come back empty either way.
+The residual is recorded here rather than left for a reader to assume the declaration is proved.
+The check that *is* airtight is the one on the other side: where `url()` is **not** `None`,
+`e1-cross-process` opens the storage from eight real subprocesses and the declaration is tested by
+use rather than by assertion.
 
 ### 2.5 `outcome`, and why it needs no fault injection
 
@@ -333,11 +377,12 @@ name** (T140).
 | `guesses-failed` | Writes `FAILED` when a write refuses, rather than leaving the record alone | `outcome` |
 | `raises-not-executed` | Raises `NotExecuted` from `commit_effect` when the write refuses | `outcome` |
 | `forgets-the-unknown` | Holds `AMBIGUOUS` in memory and loses it across a `reopen()` | `durability` |
-| `coerces-an-argument` | Round-trips `arguments` through a lossy encoding — an `int` returns as a `float`, a long string is truncated — so the stored `Action` no longer hashes to what was approved | `evidence` |
+| `coerces-an-argument` | Truncates a string argument on the way back out, so the stored `Action` no longer hashes to what was approved | `evidence` |
 | `renumbers-events` | `append_event` returns an event carrying an id other than the one it stored | `evidence` |
 | `admits-two-resumptions` | `take_continuation` does not consume the token in the transaction that admits it | `continuation` |
 | `upserts-a-delegation` | `put_delegation` upserts on a duplicate id, clearing `revoked_at` — unrevoking by another door | `delegation` |
-| `falsely-declares-no-url` | Has durable, shareable storage and returns `None` from `url()` and `reopen()`, so `e1-cross-process` and `durability` report `not_applicable` and it scores full marks | `reservation` and `durability` — **the declarations**, caught by opening the storage the fixture says cannot be opened |
+| `refuses-with-the-wrong-error` | Refuses a duplicate reservation with a plain `RuntimeError` | `reservation` — the **taxonomy**, which an agent loop's `except DuplicateEffect` depends on |
+| `falsely-declares-no-url` | Has durable, shareable storage and returns `None` from `url()` and `reopen()`, so `e1-cross-process` and `durability` report `not_applicable` and it scores full marks | `reservation` and `durability` — **the declarations**, caught by two handles seeing each other's writes |
 
 **Every suite is named by at least one fixture, and every fixture names a suite that exists.**
 Both directions are asserted (T140), on `v0.5 §5.4`'s finding: a fixture pointed at a renamed
@@ -360,10 +405,19 @@ where `reopen()` is `None` it asks for a second `open()` and checks whether the 
 other's writes. A backend whose storage genuinely does not outlive its object fails both attempts,
 which is what makes the N/A honest; one that quietly has a file or a socket is caught.
 
-**The thirteen fixtures are the floor and not the ceiling.** T140 requires every suite to be
+**The fourteen fixtures are the floor and not the ceiling.** T140 requires every suite to be
 named by at least one fixture and every fixture to name a suite that exists, in both directions —
 because a fixture pointed at a renamed suite passes its own test by never being checked against
-anything.
+anything. Each fixture also carries the **reason** its case must fail with, and T140 asserts it:
+a fixture pinned only to the case is a subsumed guard the moment that case grows a second check.
+
+**Two of `e1-cross-process`'s checks have no fixture and cannot have one**, and saying so is the
+alternative to a mutation table that reads green for nothing. The fake-remote count and the
+winner's error are asserted about **subprocesses**, and a fixture is an in-process wrapper: a
+child opening the backend's `url()` gets the real store, never the broken one. That asymmetry is
+the same one §2.4 relies on to make the two E1 cases non-redundant, and it cuts both ways. The
+in-process case is where a fixture bites, which is why `two-winners` and
+`refuses-with-the-wrong-error` are aimed there.
 
 Each fixture fails **the suite named in its row**. Several also fail others incidentally, and the
 assertion is on the named suite rather than on an exclusive one. What T140 forbids is a fixture
@@ -393,8 +447,85 @@ may reconnect lazily; none may raise. The alternative — `close()` as a fence �
 `close()` the fault-injection hook §2.5 refuses to add, and would have made the shipped stores
 wrong rather than the suite.
 
-Where item 1 finds others, each is added to this section with the same shape: the divergence, the
-decision, and the case number that pins it.
+**Three more were found by writing the suite, and each is specified here with the case that pins
+it:**
+
+**§2.4's barrier could not open the window it described.** An earlier draft said the in-process
+contenders are *"released after every one of them has read the record and before any has
+written"*. There is no way to do that: reading and writing happen **inside** `reserve_effect`,
+and getting between them would need a hook in shipping code, which §2.5 refuses to add. What the
+suite actually controls is that every contender is *running and released simultaneously* when it
+calls, which is the strongest deterministic statement available from outside the store. The
+weaker claim is the true one and is what T143 asserts.
+
+**`extend_lease`'s refusal taxonomy was never written down.** §2.3's row said it *"refuses an
+expired lease, another action's record, and a non-`EXECUTING` one"* without saying with what, and
+three different exceptions would each have satisfied that sentence. The suite pins the shipped
+behaviour, which is now the specification:
+
+| What `extend_lease` meets | Raises |
+|---|---|
+| A `RESERVED` record, held by this very action | `DuplicateEffect` |
+| An `EXECUTING` record held by another action | `DuplicateEffect` |
+| An `EXECUTING` record whose lease has already lapsed | **`AmbiguousEffect`** |
+
+The third is the one worth stating: an expired lease is extendable by nothing and an expired
+reservation is released by nobody, so the refusal names the **unknown** rather than a live holder
+(`v0.2 §6.9.4`). A backend that raised `DuplicateEffect` there would be asserting somebody else
+holds the key, when what is true is that nobody knows.
+
+**A backend must isolate its own storage.** Two `SQLiteBackend`s handed the same root directory
+shared one database file, so a test comparing two fixtures saw the first fixture's rows through
+the second's store — and reported a failure attributed to the wrong fixture, which is the worst
+kind because it reads as a finding. Each backend now takes a private subdirectory. The general
+rule for a backend author: **`open()` must not be able to observe another backend instance's
+writes**, whatever root it was handed.
+
+### 2.7.1 What the suite did *not* find, and why that is the result
+
+**`SQLiteStateStore` and `InMemoryStateStore` do not diverge.** Thirty-seven differential probes
+— refusal taxonomy on every method, `list_effects` and `events()` and `receipts()` and
+`delegations()` ordering, the ids `append_event` assigns, result round-tripping including `None`
+and an unencodable object, `created_at` preserved across a `FAILED` retry, and eight threads on
+one key — produce byte-identical outcomes from both.
+
+§2.7 says a suite that passes on both backends on its first run is a suite that is not asking
+anything, and that if item 1 finds nothing the finding is about the suite. **That reading is
+wrong here, and the reason is worth recording rather than explaining away.** The two stores agree
+because they were built to: `plan_reservation`, `plan_lease_extension`, `check_consumable` and
+`check_answerable` are pure functions in `effect.py` and `approval.py`, and *both stores decide
+with them and then only write*. There is no second copy of `v0.1 §5.4`'s retry table to drift.
+
+Which relocates what this suite is for. It is **not** primarily a difference-detector between the
+two backends that exist; against those it is a regression guard on a property the architecture
+already provides. It is the thing that will grade **Postgres**, which reuses those same pure
+functions but replaces every *write* path — `BEGIN IMMEDIATE` for compare-and-set, one
+transaction for another — and where §4.3's two re-read tables have no shared implementation to
+inherit correctness from.
+
+**The zero is only worth reporting because the probe has a positive control.** Run against a
+store that quietly reverses `events()`, `list_effects()` and `receipts()`, it reports three
+divergences; without that, "no divergences" would be indistinguishable from a probe that compares
+nothing. `v0.4 §1.3`'s rule applies to a measurement as much as to a guarantee.
+
+### 2.7.2 The protocol was short by two methods
+
+The largest finding of item 1 is not a divergence between the backends but a gap in what they
+were being graded against: **`events()` and `receipts()` are not on the `StateStore` protocol**,
+and have never been, while both shipped stores implement them and four callers depend on them.
+
+It surfaced the way such things do — the suite's `evidence` cases are written against
+`StateStore`, so type-checking them asked the protocol for a method it does not declare. A
+backend author reading `v0.1 §5.3` and implementing exactly what it lists would produce a store
+that satisfies every declared method and breaks `ctrlrun receipts`, `ctrlrun inspect`,
+`ctrlrun verify` and the v0.5 adapter kit.
+
+§9.2 carries the amendment and its argument. It is the clearest possible vindication of item 1
+coming before item 3: had Postgres been written first, this would have been found by an operator
+running `ctrlrun inspect` against it.
+
+Where a later item finds others, each is added to this section with the same shape: the
+divergence, the decision, and the case number that pins it.
 
 ---
 
@@ -1504,7 +1635,7 @@ test of `v0.1 §7`, `v0.2 §10`, `v0.3 §10`, `v0.4 §8` and `v0.5 §8` MUST sti
 ### Item 1 — The store conformance suite (§2)
 
 #### T140 — Every fixture fails its named suite, and every suite has a fixture
-Each of §2.6's thirteen broken stores is run through `ctrlrun.conformance.store.run`. Each MUST
+Each of §2.6's fourteen broken stores is run through `ctrlrun.conformance.store.run`. Each MUST
 fail the suite named in its row, and the assertion is on the **case** that failed and its
 **reason**, not only on the suite's status. Both directions of the coverage rule are asserted:
 every suite in §2.3 is named by at least one fixture, and every fixture names a suite that exists.
@@ -1905,6 +2036,13 @@ def run(backend: StoreBackend, *, only: Sequence[str] = (),
         processes: int = 8) -> StoreReport: ...          # §2.2
 ```
 
+`ctrlrun.conformance.store` also exports **`SUITES`**, **`all_case_ids`**, **`SQLiteBackend`** and
+**`InMemoryBackend`**. The first two are what a backend author passes to `only=` and what T140
+checks its fixture table against; the last two are the reference implementations of
+`StoreBackend`, and a backend author with no worked example would be writing against prose. An
+earlier draft's *"and no other public name"* did not survive contact with the package's `__all__`,
+and the honest resolution is to list them rather than to have a sentence nobody could obey.
+
 ```python
 def canonical_bytes(payload: Mapping[str, Any]) -> bytes: ...
 ```
@@ -1922,8 +2060,43 @@ new CLI command, no new approval provider, no new sink.
 ### 9.2 The two bars, stated separately
 
 A **new `StateStore` method** faces the bar §1.1 sets: *a second backend could not be written
-without it.* The expected number in v0.6 is **zero**, and if item 3 disagrees it stops and amends
-this section before writing code.
+without it.* The expected number was **zero**. It is **two**, and both were found by item 1
+rather than by item 3 — which is the ordering working, not failing.
+
+#### `events()` and `receipts()`
+
+```python
+class StateStore(ApprovalStore, Protocol):
+    def events(self) -> tuple[Event, ...]: ...      # every event, oldest first
+    def receipts(self) -> tuple[Receipt, ...]: ...  # every receipt, oldest first
+```
+
+**These are not new methods. They are methods the protocol never declared and every store has
+always had.** `SQLiteStateStore` and `InMemoryStateStore` have both implemented them since v0.1,
+and they are called by `ctrlrun receipts`, `ctrlrun inspect`, `ctrlrun stats`,
+`ctrlrun.verify.scenarios` — for the counterexample of `v0.4 §4.5` and for the assertion that the
+operator's store was not touched — and by the v0.5 adapter conformance kit.
+
+The bar is cleared in the plainest way it can be: **a second backend written against the declared
+protocol alone would omit both**, satisfy every declared method, and break four callers. That is
+not a hypothetical — it is what the store suite's `evidence` cases surfaced the moment they were
+type-checked against `StateStore` rather than against a concrete store.
+
+v0.6 also *adds* a caller with a stronger need than any of those: §6.5's chain reader enumerates
+receipts ordered by `seq` to verify the chain, and `ctrlrun receipts --verify-chain` (§9.4) runs
+it against whichever backend the operator has. A chain the protocol gives no way to read would be
+an integrity guarantee that only the SQLite backend could check.
+
+**Nothing changes behaviourally.** No store gains a method, no caller changes, no test changes;
+the declaration is written down and the type checker can see it. It is recorded here rather than
+made silently because §1.1 says a backend needing more of the protocol is a specification
+amendment first, and the rule reads the same in the direction where the protocol was short.
+
+#### The bar Postgres still faces
+
+Unchanged: **zero**. Item 1's amendment is about what the *existing* stores already do; if item 3
+finds Postgres needs something neither SQLite nor the in-memory store provides, **it stops** and
+the disagreement becomes an amendment before any code.
 
 A **new field on an existing record** faces a lower and different bar: additive, migrated, named,
 and answering a question the existing fields cannot. Conflating the two would let a field in
@@ -2044,15 +2217,24 @@ with `Control` the only module that composes the others:
 | Module | Owns | Must not know about |
 |---|---|---|
 | `postgres.py` | `PostgresStateStore`: the same protocol, a different mechanism | policy, decorator, sinks — `state.py`'s row, unchanged |
-| `conformance/store.py` | the store suites, the broken-store fixtures, the report | the gateway, `otel`, `jwt_identity`; anything from an extra but the backend it was handed |
+| `conformance/store/` | the store suites, the broken-store fixtures, the report, the worker | the gateway, `otel`, `jwt_identity`; anything from an extra but the backend it was handed |
 
 `postgres.py` sits **beside** `state.py`, at the same level, and imports from it the pure planning
 functions and the record types. It does **not** subclass `SQLiteStateStore`: a shared base class
 would make one backend's behaviour the other's default, which is the drift §2's suite exists to
 catch and would be the one thing it could not see.
 
-`conformance/store.py` sits above `control.py` beside `verify/` and `cli/`, as `v0.5` put
-`conformance/`. Nothing in the kernel imports it.
+`conformance/store/` sits above `control.py` beside `verify/` and `cli/`, as `v0.5` put
+`conformance/`. Nothing in the kernel imports it. It is a **package** rather than a module
+because §2.4's cross-process case is reached as `python -m ctrlrun.conformance.store.worker`, and
+a module cannot carry a submodule.
+
+**It reuses `conformance/report.py`'s `CaseResult`, `SuiteResult` and `SuiteStatus` rather than
+declaring its own.** A second set of result types that agreed with the first today is the drift
+this document refuses elsewhere for canonicalization (§6.2), and the N/A accounting — a
+denominator of applicable cases, `ok` false for `0/0` — is the rule `v0.4 §3.8` fixes once. Only
+`StoreReport` is new, and it differs from `ConformanceReport` in one field: the subject is a
+backend rather than a framework.
 
 The migration runner lives **in `state.py`**, not in a module of its own: it is the thing that
 decides whether a store may open, and a store whose admission check lived somewhere else would be
