@@ -11,7 +11,7 @@ what could not be tested at all.
 
 ```console
 $ ctrlrun verify
-CTRLRun verify — ctrlrun 0.4.0, catalogue ctrlrun.guarantees/v1
+CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -27,7 +27,7 @@ G8   expired authority refused        PASS  head-of-support
 G9   delegation cannot escalate       PASS  head-of-support (6 of 6 dimensions)
 G10  unknown exception is ambiguous   PASS  stripe.refund
 
-10/10 declared guarantees pass. 0 not applicable.
+11/11 declared guarantees pass. 0 not applicable.
 ```
 
 It reads the policy document — `$CTRLRUN_CONFIG`, else `./ctrlrun.yaml` — and the authority

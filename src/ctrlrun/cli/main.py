@@ -35,6 +35,7 @@ from ..receipt import (
     Receipt,
     ReceiptResult,
     iso_timestamp,
+    verify_chain,
 )
 from ..state import RESOLUTIONS, SQLiteStateStore, StateStore
 from .demo import run_demo
@@ -347,13 +348,25 @@ def deny(request_id: str, store_url: str | None) -> None:
 @main.command()
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show only the last N.")
 @click.option("--json", "as_json", is_flag=True, help="Print the portable receipt JSON.")
+@click.option(
+    "--verify-chain",
+    "verify_chain_flag",
+    is_flag=True,
+    help="Check the receipt chain and report every break by seq and by name.",
+)
 @STORE_URL_OPTION
-def receipts(last: int | None, as_json: bool, store_url: str | None) -> None:
+def receipts(
+    last: int | None, as_json: bool, verify_chain_flag: bool, store_url: str | None
+) -> None:
     """Show the receipts this store holds."""
+    store = _store(store_url)
     try:
-        found = _store(store_url).receipts()
+        found = store.receipts()
     except CTRLRunError as exc:
         raise _fail(exc) from exc
+    if verify_chain_flag:
+        _report_chain(store, as_json=as_json)
+        return
     if last is not None:
         found = found[-last:]
     if not found:
@@ -361,6 +374,35 @@ def receipts(last: int | None, as_json: bool, store_url: str | None) -> None:
         return
     for receipt in found:
         click.echo(receipt.to_json() if as_json else _receipt_line(receipt))
+
+
+def _report_chain(store: StateStore, *, as_json: bool) -> None:
+    """`--verify-chain` against the operator's own store (SPEC-v0.6 §6.6).
+
+    A **flag on the reader**, not a `ctrlrun chain` command: the same code path that already
+    opens this store and already reads its receipts, reporting something else. `ctrlrun verify`
+    checks the same guarantee against a scratch store it created and never opens this one, and
+    §6.6 keeps the two apart on purpose.
+
+    A break exits non-zero, because an operator scripting this needs the exit code to mean
+    something. So does `unchained`: a summary that said "ok" while naming rows nothing verified
+    is `v0.4 §3.8`'s false green with the evidence removed rather than faked.
+    """
+    report = verify_chain(store)
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), ensure_ascii=False, separators=(",", ":")))
+    else:
+        total = report.verified + report.unchained
+        click.echo(f"chain: {report.verified} of {total} receipts verified")
+        if report.unchained:
+            click.echo(f"       {report.unchained} written before the chain existed (unchained)")
+        for problem in report.breaks:
+            where = "" if problem.seq is None else f" at seq {problem.seq}"
+            click.echo(f"  {problem.name}{where}: {problem.detail}")
+        if report.ok:
+            click.echo("the chain is intact")
+    if not report.ok:
+        raise SystemExit(1)
 
 
 @main.command()

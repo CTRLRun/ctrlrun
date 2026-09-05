@@ -66,7 +66,7 @@ from ..errors import (
     PolicyError,
 )
 from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
-from ..receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp
+from ..receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp, verify_chain
 from ..state import InMemoryStateStore, SQLiteStateStore, StateStore
 from . import guarantees as reg
 from .report import Counterexample, GuaranteeResult, Status
@@ -1927,6 +1927,121 @@ class Engine:
             return self.graded("G10", selection, store, recorder, body)
         finally:
             store.close()
+
+    # --- G11: an altered receipt is detected, and named -----------------------------------
+
+    def g11(self) -> GuaranteeResult:
+        """SPEC-v0.6 §6.6. The receipt chain, against the scratch store verify created.
+
+        **Applicable to every v0.6 configuration**, because the store it uses is one verify made
+        (`v0.4 §3.5`): there is no operator setting that can make this N/A, which is what §11
+        asks of a guarantee that would otherwise be excused for a reason having nothing to do
+        with the deployment. `ctrlrun receipts --verify-chain` is the one that reads the
+        operator's own store, and §6.6 keeps the two apart.
+
+        Two halves, and the second is `v0.4 §1.3`'s required positive control. **Without it a
+        kernel whose detector returned "broken" unconditionally would pass**, which is this
+        project's oldest false green.
+
+        The alteration is applied to the receipts as read back, not by an `UPDATE`: verify does
+        not know what backend it is on and may not assume one it can write SQL against. What it
+        checks is therefore the detector and the chain the store actually wrote -- a store that
+        never chained fails the control half, and a detector that never detects fails this one.
+        """
+        # No `needs_effect`: a receipt is written for every action that reaches a terminal
+        # state, and the chain is about receipts. Requiring an `effect:` template would have made
+        # this N/A on any policy that declares none -- and the docstring above says it is
+        # applicable to every configuration, which is a claim that has to be true of the code.
+        selection = self.select()
+        if selection is None:
+            return self.na("G11", reg.EVERY_ACTION_DENIED)
+        control, store, recorder, _ = self._control_for("G11", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            written: list[Receipt] = []
+            for index in range(3):
+                action = selection.build()
+                key = (
+                    None
+                    if selection.effect_key is None
+                    else f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-chain-{index}"
+                )
+                receipt = self.execute(
+                    control,
+                    action,
+                    _Executor(lambda: f"{APPROVER}-result"),
+                    key,
+                    self.approve(control, store, action, selection),
+                )
+                written.append(receipt)
+
+            # The control, first: the chain the store just wrote must verify. A store that
+            # assigned no `seq` at all, or a detector that always says "broken", dies here.
+            intact = verify_chain(store)
+            _expect_control(
+                intact.ok and intact.verified >= 3,
+                "the chain verify just wrote verifies",
+                f"it reported {intact.verified} verified and {[b.name for b in intact.breaks]}",
+            )
+            _expect_control(
+                all(item.seq is not None and item.hash is not None for item in written),
+                "every receipt came back with its place in the chain",
+                "a receipt has no seq or no hash",
+            )
+
+            # Now alter one, exactly as §6.5's first row describes, and require the break to be
+            # **named** and placed. "Invalid" would be a chain that only catches the easy case.
+            receipts = list(store.receipts())
+            target = next(item for item in receipts if item.seq == written[1].seq)
+            altered = replace(target, decision_reason=f"{target.decision_reason}-altered")
+            view = _AlteredChain(
+                tuple(altered if item.seq == target.seq else item for item in receipts),
+                store.chain_head(),
+            )
+            report = verify_chain(view)
+            # The name and the position, not the `detail` string: that carries the two hashes,
+            # which contain a receipt id that is random per run -- and `v0.4 §3.7`'s rule is that
+            # two runs of verify against one configuration produce byte-identical JSON. A report
+            # that changed every run would be one nobody could diff.
+            detail["break"] = [{"name": item.name, "seq": item.seq} for item in report.breaks]
+            _expect(
+                not report.ok,
+                "an altered receipt is not reported as a valid chain",
+                "the altered chain verified",
+            )
+            _expect(
+                any(
+                    item.name == "content_altered" and item.seq == target.seq
+                    for item in report.breaks
+                ),
+                f"the alteration is named `content_altered` at seq {target.seq}",
+                f"it was reported as {[(b.name, b.seq) for b in report.breaks]}",
+            )
+
+        try:
+            return self.graded("G11", selection, store, recorder, body)
+        finally:
+            store.close()
+
+
+@dataclass(frozen=True)
+class _AlteredChain:
+    """A read-only view of a store's chain with one receipt changed (G11).
+
+    Verify does not know which backend it is on, so it cannot tamper with an `UPDATE`. This
+    presents the same receipts the store returned, one of them altered, to the same reader an
+    operator runs -- which checks the detector against real chained receipts rather than against
+    a chain this scenario built for itself.
+    """
+
+    _receipts: tuple[Receipt, ...]
+    _head: tuple[int, str] | None
+
+    def receipts(self) -> tuple[Receipt, ...]:
+        return self._receipts
+
+    def chain_head(self) -> tuple[int, str] | None:
+        return self._head
 
 
 def run_attempts(payloads: Sequence[str]) -> None:

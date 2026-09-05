@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from typing import Final
 
 #: SPEC-v0.4 §2.3 — the catalogue identifier. It appears in every report and on nothing else.
-CATALOGUE: Final = "ctrlrun.guarantees/v1"
+#: SPEC-v0.6 §9.5 — `v2` adds G11 (§6.6). The version moves because the catalogue is a closed
+#: set a report is read against, and a reader that met an id it did not know would have no way
+#: to tell a new guarantee from a corrupted line.
+CATALOGUE: Final = "ctrlrun.guarantees/v2"
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ GUARANTEES: Final = (
     Guarantee("G8", "expired authority refused", ("v0.3 §10 T71",)),
     Guarantee("G9", "delegation cannot escalate", ("v0.3 §10 T76", "v0.3 §10 T81", "v0.3 §10 T75")),
     Guarantee("G10", "unknown exception is ambiguous", ("v0.1 §5.5", "v0.1 §7 T1", "v0.1 §7 T8")),
+    Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
