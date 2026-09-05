@@ -751,3 +751,48 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
 
     assert checked, "CLAIMS.md cites no code locations at all"
     assert stale == [], stale
+
+
+def test_every_documented_install_names_a_distribution_this_repository_builds():
+    """`pip install ctrlrun-langgraph` shipped in the README of a release where no such
+    distribution existed, so the line 404s for anyone who follows it.
+
+    The publication state is not knowable offline, so this asserts the half that is: every
+    `pip install <name>` in the documentation names something this repository actually builds —
+    `ctrlrun` itself, one of its extras, or a distribution under `adapters/`. A typo, a rename,
+    or a doc written ahead of the code fails here.
+
+    What it deliberately does **not** claim is that the name is on PyPI. That is a release-time
+    fact and `.github/workflows/release.yml` is what makes it true; saying otherwise would be
+    the kind of loosely-true assertion this suite keeps refusing.
+    """
+    import tomllib
+
+    root = REPO_ROOT
+    with (root / "pyproject.toml").open("rb") as handle:
+        kernel = tomllib.load(handle)["project"]
+    known = {kernel["name"]}
+    known |= {f"{kernel['name']}[{extra}]" for extra in kernel.get("optional-dependencies", {})}
+
+    adapters = root / "adapters"
+    if adapters.is_dir():
+        for path in sorted(adapters.iterdir()):
+            manifest = path / "pyproject.toml"
+            if manifest.is_file():
+                with manifest.open("rb") as handle:
+                    known.add(tomllib.load(handle)["project"]["name"])
+
+    documents = [root / "README.md", root / "docs" / "adapters.md"]
+    documents += sorted((root / "adapters").glob("*/README.md")) if adapters.is_dir() else []
+
+    unknown = []
+    for document in documents:
+        if not document.exists():  # pragma: no cover - not a checkout
+            continue
+        for match in re.findall(r"pip install \"?([A-Za-z0-9_.\[\]-]+)\"?", document.read_text()):
+            if match.startswith(".") or match.startswith("-"):
+                continue
+            if match.split("==")[0] not in known:
+                unknown.append(f"{document.name}: {match}")
+
+    assert unknown == [], unknown

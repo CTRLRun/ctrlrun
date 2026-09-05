@@ -1,0 +1,162 @@
+name: Release
+
+# Publishing runs from a tag and from nothing else, and it stores no token.
+#
+# **Trusted publishing (OIDC), not an API token.** PyPI mints a short-lived credential for this
+# exact workflow file in this exact repository, so there is no long-lived secret in the
+# repository, in an environment, or on a maintainer's laptop. The laptop is the reason: v0.5.0
+# was published by hand, and the `~/.pypirc` beside it had never held anything but
+# `<your-api-token-here>` — a credential path nobody could see the state of until it failed.
+#
+# `id-token: write` is granted **per job**, so the only jobs that can mint a PyPI credential are
+# the three that publish. Everything else in this workflow is read-only, which is `ci.yml`'s
+# discipline for `contents: write` applied to the one other privilege this repository uses.
+#
+# One-time setup on PyPI, per project (ctrlrun, ctrlrun-langgraph, ctrlrun-openai-agents):
+#   Publishing → Add a new pending publisher
+#     Owner: CTRLRun   Repository: ctrlrun   Workflow: release.yml   Environment: pypi
+# Until that exists the publish step fails closed with an authentication error, which is the
+# correct behaviour: nothing is uploaded on a half-configured release.
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "adapters-langgraph-*"
+      - "adapters-openai-agents-*"
+  workflow_dispatch:
+    inputs:
+      distribution:
+        description: Which distribution to publish
+        required: true
+        type: choice
+        options: [ctrlrun, ctrlrun-langgraph, ctrlrun-openai-agents]
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag is the input, and the tag has to agree with what it claims to be. A tag whose
+  # `pyproject.toml` says a different version is a release nobody can reproduce from the
+  # repository, which is the whole reason release verification runs from a fresh clone.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.pick.outputs.target }}
+      path: ${{ steps.pick.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Which distribution does this tag name
+        id: pick
+        env:
+          REF: ${{ github.ref_name }}
+          CHOICE: ${{ inputs.distribution }}
+        run: |
+          set -eu
+          case "${CHOICE:-$REF}" in
+            ctrlrun|v*)                             target=ctrlrun;               path=.                        ;;
+            ctrlrun-langgraph|adapters-langgraph-*) target=ctrlrun-langgraph;     path=adapters/langgraph       ;;
+            ctrlrun-openai-agents|adapters-openai-agents-*)
+                                                    target=ctrlrun-openai-agents; path=adapters/openai-agents   ;;
+            *) echo "::error::$REF names no distribution"; exit 1 ;;
+          esac
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "publishing $target from $path"
+
+      - name: The tag and the metadata agree
+        # Only for a version-bearing tag; `workflow_dispatch` has no version to check against.
+        if: github.event_name == 'push'
+        env:
+          REF: ${{ github.ref_name }}
+          PATH_: ${{ steps.pick.outputs.path }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, sys
+
+          ref = os.environ["REF"]
+          declared = re.search(
+              r'^version = "([^"]+)"',
+              (pathlib.Path(os.environ["PATH_"]) / "pyproject.toml").read_text(encoding="utf-8"),
+              re.M,
+          ).group(1)
+          # v0.5.0 -> 0.5.0   |   adapters-langgraph-1.0 -> 1.0, which 1.0.0 must start with
+          wanted = ref[1:] if ref.startswith("v") else ref.rsplit("-", 1)[-1]
+          ok = declared == wanted or declared.startswith(wanted + ".")
+          print(f"tag {ref} -> wants {wanted}; pyproject declares {declared}: {'ok' if ok else 'MISMATCH'}")
+          sys.exit(0 if ok else 1)
+          PY
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build and check
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build --outdir dist "${{ needs.verify.outputs.path }}"
+          twine check --strict dist/*
+
+      # SPEC-v0.5 §6.1, and T136's assertion carried onto the release path: the kernel's
+      # artifacts never carry an adapter, and an adapter's never carry the kernel.
+      - name: Neither distribution carries the other
+        env:
+          TARGET: ${{ needs.verify.outputs.target }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, tarfile, zipfile
+
+          names = []
+          for path in pathlib.Path("dist").iterdir():
+              if path.suffix == ".whl":
+                  names += zipfile.ZipFile(path).namelist()
+              elif path.name.endswith(".tar.gz"):
+                  with tarfile.open(path) as archive:
+                      names += archive.getnames()
+          assert names, "nothing was built"
+
+          if os.environ["TARGET"] == "ctrlrun":
+              bad = [n for n in names if "adapters/" in n or "ctrlrun_langgraph" in n
+                     or "ctrlrun_openai_agents" in n]
+              assert not bad, bad
+              assert any(n.endswith("ctrlrun/adapter.py") for n in names), "the surface is missing"
+          else:
+              bad = [n for n in names if "/src/ctrlrun/" in n]
+              assert not bad, bad
+          print("ok:", len(names), "entries")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    # The environment is half of what PyPI's pending publisher is configured against, and it is
+    # where a required reviewer goes if this repository ever wants one on the publish step.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.verify.outputs.target }}/
+    permissions:
+      # The only privilege in this workflow, on the only job that needs it.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
