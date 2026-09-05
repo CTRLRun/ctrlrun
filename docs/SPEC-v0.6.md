@@ -186,11 +186,17 @@ class StoreBackend(Protocol):
         """
 
     def url(self) -> str | None:
-        """A `--store-url` value a *subprocess* can open, or `None`.
+        """An address the conformance *worker subprocess* can open this storage by, or `None`.
+
+        Deliberately **not** described as a `--store-url` value: that flag is verify's, it
+        names a database an operator owns, and §4.1 has the rules about what may be done to
+        one. This string is addressed to `python -m ctrlrun.conformance.store.worker` and to
+        nothing else.
 
         `None` means the storage cannot be reached from another OS process, which is a
         property of the backend and not of the harness — `InMemoryStateStore` says so in its
-        own docstring. The cross-process cases are then `not_applicable` with that reason.
+        own docstring. `reservation/e1-cross-process` is then `not_applicable` with that
+        reason, and §2.6's `falsely-declares-no-url` is what keeps the declaration honest.
         """
 
     def reset(self) -> None:
@@ -210,11 +216,11 @@ behaviour; it stays where it is when its subject is `Control`'s composition of t
 
 | Suite | Sourced from | What it drives |
 |---|---|---|
-| `reservation` | `v0.1 §7` T1, T3, T8, T9 | E1 across processes · the §5.4 retry table, every row · a `FAILED` record renews with `attempt + 1` · an expired lease becomes `AMBIGUOUS` and is never released |
+| `reservation` | `v0.1 §7` T1, T3, T8, T9 | E1 **in one process** and E1 **across processes** (§2.4) · the §5.4 retry table, every row · a `FAILED` record renews with `attempt + 1` · an expired lease becomes `AMBIGUOUS` and is never released |
 | `approval` | `v0.1 §7` T2, T4, T5, T12 | `consume_approval` refuses a different `action_hash`, a consumed one, an expired one · a refused reservation leaves the approval `granted` · the approval is checked first when both would refuse |
 | `resolution` | `v0.1 §7` T10 | only an `AMBIGUOUS` record resolves, and only to `COMMITTED` or `FAILED` |
-| `outcome` | `v0.1 §7` T1, and §5.5 | **no store method writes `FAILED` except `fail_effect`, and no store method raises `NotExecuted`** (§2.5) |
-| `durability` | new; the statement `v0.1 §5.2` makes and no test drives | every terminal record — `AMBIGUOUS` above all — survives a `reopen()`, and a blind retry is still refused after one |
+| `outcome` | `v0.1 §7` T1, and `v0.1 §5.5` | **no store method writes `FAILED` on a refusal path, and no store method raises `NotExecuted`** (§2.5) |
+| `durability` | new; the statement `v0.1 §5.2` makes and no test drives | every terminal record — `AMBIGUOUS` above all — survives a `reopen()`, and a blind retry is still refused after one. `not_applicable` where `reopen()` returns `None` (§2.4) |
 | `evidence` | `v0.1 §7` T7 · `v0.3 §10` T60c | an `Action` round-trips through the store byte-identically: same `action_hash`, same argument **types**, principal claims, issuer and expiry intact · `append_event` returns the event with the id it stored · receipts round-trip |
 | `continuation` | `v0.2 §10` T26, T26b | a reservation held across a round trip · one suspension admits exactly one resumption · `extend_lease` refuses an expired lease, another action's record, and a non-`EXECUTING` one |
 | `delegation` | `v0.3 §10` T75b, T78 · `v0.3 §5.2` | `put_delegation` inserts and never upserts · `revoke_delegation` is atomic, returns `False` when already revoked, and raises `InvalidArgument` on an unknown id · `grant_json` round-trips with its UTC offset retained |
@@ -234,22 +240,49 @@ behaviour; it stays where it is when its subject is `Control`'s composition of t
   across a round trip the kernel does not control — which is precisely where a second host
   changes the picture (§5.4). The addition is recorded here rather than made silently.
 
-### 2.4 The cross-process case, and the one honest N/A
+### 2.4 E1 twice, and the two honest N/As
 
-`reservation`'s E1 case is `v0.1 §7` T3 unchanged in its standard: **N contenders, one winner**,
-the fake remote called exactly once, one committed record and N−1 refused. It runs in `processes`
-OS processes started as `python -m ctrlrun.conformance.store.worker` with the backend's `url()`
-and the payload on stdin — subprocesses rather than `multiprocessing`, for `v0.4 §12.5`'s reason:
-`spawn` re-imports the caller's `__main__`, and requiring an `if __name__ == "__main__"` guard in
-a backend author's test file is not a trade a conformance suite gets to make.
+**E1 is driven as two cases, and the reason is that a broken-store fixture can only fail one of
+them.** This was found by review, and it is `v0.5 §5.4`'s finding one layer down: a suite no
+fixture can fail reports `pass` for every backend ever written.
 
-Where `url()` is `None` the case is `not_applicable` with the reason **`this backend's storage
-cannot be opened from another process`**. That is a legitimate N/A — a property of the backend,
-which `InMemoryStateStore` states in its own docstring — and it is the **only** N/A any suite in
-§2.3 may report on the two backends that already exist. Every other case is applicable to every
-backend, and a backend reporting one N/A has failed it. `v0.4 §3.8`'s rule holds here in full:
-**not applicable is not a pass**, the denominator counts applicable cases only, and there is no
-flag that folds one into the count.
+- **`reservation/e1-in-process`** — the deterministic one. N threads contend for one key against
+  one store object, with the window held open on purpose rather than raced for: each contender
+  blocks on a barrier released after every one of them has read the record and before any has
+  written. Exactly one reservation is granted and N−1 are refused with `v0.1 §5.4`'s errors.
+  **Applicable to every backend, and never N/A.**
+- **`reservation/e1-cross-process`** — `v0.1 §7` T3's standard unchanged: **N contenders, one
+  winner**, the fake remote called exactly once, one committed record and N−1 refused. It runs in
+  `processes` OS processes started as `python -m ctrlrun.conformance.store.worker` with the
+  backend's `url()` and the payload on stdin — subprocesses rather than `multiprocessing`, for
+  `v0.4 §12.5`'s reason: `spawn` re-imports the caller's `__main__`, and requiring an
+  `if __name__ == "__main__"` guard in a backend author's test file is not a trade a conformance
+  suite gets to make.
+
+**Why both.** A broken-store fixture is an in-process wrapper around a real backend. A subprocess
+opening that backend's `url()` gets the *correct* store, not the fixture — so `two-winners` and
+`releases-an-expired-lease` could never fail the cross-process case, and T140, the only check
+that `reservation` can fail at all, could not pass. The in-process case is what a fixture can
+fail; the cross-process case is what a *backend* can fail, and only it distinguishes a store whose
+atomicity is a Python lock from one whose atomicity is the database's. Neither alone is the
+guarantee.
+
+**Two N/As are legitimate, and they are the only two**, each a property of the backend rather
+than of the harness — which is the whole test of an honest N/A:
+
+| Case | N/A when | Reason reported |
+|---|---|---|
+| `reservation/e1-cross-process` | `url()` is `None` | `this backend's storage cannot be opened from another process` |
+| `durability` (every case) | `reopen()` is `None` | `this backend's storage does not outlive the object that holds it` |
+
+Both describe `InMemoryStateStore`, which says so in its own docstring — *"Nothing here survives
+the process, and nothing here is shared between processes"* — and neither is available to a
+backend that has storage and simply did not implement the hook: `url()` and `reopen()` returning
+`None` is a **declaration**, and §2.6's fixtures include one that declares falsely.
+
+`v0.4 §3.8`'s rule holds in full: **not applicable is not a pass**, the denominator counts
+applicable cases only, and there is no flag that folds one into the count. A backend reporting
+any *third* N/A has failed.
 
 ### 2.5 `outcome`, and why it needs no fault injection
 
@@ -259,10 +292,20 @@ suite whose subject is a *negative*: what a store must never do.
 - **No `StateStore` method raises `ctrlrun.NotExecuted`.** `NotExecuted` is the executor's opt-in
   to `FAILED` and the one exception an agent may read as permission to retry. A store that raised
   it would be asserting something about a remote it has never spoken to.
-- **No `StateStore` method writes `FAILED` to an effect record except `fail_effect`.** Every
-  other method's refusal path is driven — a duplicate reservation, a consumed approval, a
-  transition from the wrong state, a lease that lapsed, a broken continuation, an unknown
-  delegation id — and after each the record is read back and MUST NOT be `FAILED`.
+- **No `StateStore` method writes `FAILED` to an effect record on a refusal path.** Two methods
+  write `FAILED` and both do it as their *purpose*: `fail_effect`, which records that the
+  executor proved nothing happened (`v0.1 §5.5`), and `resolve_effect`, which is
+  `ctrlrun resolve --failed` — a human answering what the executor could not, and the only route
+  out of `AMBIGUOUS` (`v0.1 §5.2`, §7 T10). **Neither is a refusal path.** What the suite drives
+  is every *refusal*: a duplicate reservation, a consumed approval, a transition from the wrong
+  state, a lease that lapsed, a broken continuation, an unknown delegation id — and after each
+  the record is read back and MUST NOT be `FAILED`.
+
+  The earlier wording of this bullet said "except `fail_effect`", which was false of both shipped
+  backends: it would have failed `resolve_effect` and, worse, invited an implementer to "fix" the
+  one transition that lets a human release an ambiguous effect. It is recorded rather than
+  quietly corrected, because a suite that fails a correct backend and a suite that passes a
+  broken one are the same defect facing opposite ways.
 - **`Control` never maps a store exception through `v0.1 §5.5`'s table.** That table is about the
   *executor*. Applying it to the store would let a storage failure look like a proven
   non-execution, which is the shape of a double refund. This is asserted at the `Control` layer
@@ -282,7 +325,7 @@ name** (T140).
 
 | Fixture | What it does wrong | Fails |
 |---|---|---|
-| `two-winners` | Drops the uniqueness check: both contenders reserve one key | `reservation` |
+| `two-winners` | Drops the uniqueness check: both contenders reserve one key | `reservation` — the **in-process** case (§2.4) |
 | `releases-an-expired-lease` | Treats a lease-expired `RESERVED` record as free and re-reserves it instead of moving it to `AMBIGUOUS` | `reservation` |
 | `grants-twice` | `consume_approval` returns the `Approval` and leaves the record `granted` | `approval` |
 | `consumes-before-reserving` | Sequences `consume_approval` then `reserve_effect` in two transactions, so a refused reservation has already spent the approval | `approval` — T12's case |
@@ -294,6 +337,7 @@ name** (T140).
 | `renumbers-events` | `append_event` returns an event carrying an id other than the one it stored | `evidence` |
 | `admits-two-resumptions` | `take_continuation` does not consume the token in the transaction that admits it | `continuation` |
 | `upserts-a-delegation` | `put_delegation` upserts on a duplicate id, clearing `revoked_at` — unrevoking by another door | `delegation` |
+| `falsely-declares-no-url` | Has durable, shareable storage and returns `None` from `url()` and `reopen()`, so `e1-cross-process` and `durability` report `not_applicable` and it scores full marks | `reservation` and `durability` — **the declarations**, caught by opening the storage the fixture says cannot be opened |
 
 **Every suite is named by at least one fixture, and every fixture names a suite that exists.**
 Both directions are asserted (T140), on `v0.5 §5.4`'s finding: a fixture pointed at a renamed
@@ -305,6 +349,21 @@ two checks and a single fixture would leave one subsumed — `v0.5 §5.4`'s `den
 layer down. `releases-an-expired-lease` exists because `two-winners` fails `reservation`
 incidentally on the lease case too, and a check whose only fixture reaches it by accident is a
 check nothing is aimed at.
+
+**`falsely-declares-no-url` exists because §2.4's two N/As are the only declarations on this
+surface, and a declaration that turns a suite off is a setting that relaxes a check** — which
+§1.1's last bullet forbids by name. It is `v0.5 §5.4`'s `falsely-refuses-before-invoking` one
+layer down, and the discriminator is the same shape: the kit does not take the declaration on
+trust, it **tries the thing the declaration says is impossible**. Where `url()` is `None` the kit
+attempts to open the backend from a subprocess by every other means the `StoreBackend` exposes;
+where `reopen()` is `None` it asks for a second `open()` and checks whether the two see each
+other's writes. A backend whose storage genuinely does not outlive its object fails both attempts,
+which is what makes the N/A honest; one that quietly has a file or a socket is caught.
+
+**The thirteen fixtures are the floor and not the ceiling.** T140 requires every suite to be
+named by at least one fixture and every fixture to name a suite that exists, in both directions —
+because a fixture pointed at a renamed suite passes its own test by never being checked against
+anything.
 
 Each fixture fails **the suite named in its row**. Several also fail others incidentally, and the
 assertion is on the named suite rather than on an exclusive one. What T140 forbids is a fixture
@@ -373,13 +432,29 @@ A database opened by a v0.6 binary is classified once, before anything is writte
 | What is there | Classification | What happens |
 |---|---|---|
 | No `schema_version`, and no `effects` table | **empty** | every known migration is applied in order, and each is recorded |
-| No `schema_version`, and an `effects` table | **baseline** — a v0.1–v0.5 database | `0001_baseline` is recorded **without running its DDL**, because its tables already exist; every later migration is then applied in order |
+| No `schema_version`, and an `effects` table | **baseline** — a v0.1–v0.5 database | `0001_baseline`'s DDL is **run**, then recorded; every later migration is then applied in order |
 | `schema_version` present | **versioned** | §3.3 |
 
-`0001_baseline` is exactly the `_SCHEMA` script v0.5 shipped, and its DDL is `CREATE TABLE IF NOT
-EXISTS` throughout, so the distinction above is about *recording* rather than about the writes.
-It is drawn anyway, because "run it, it is idempotent" is an argument that stops being true the
-first time a migration is not.
+**`0001_baseline`'s DDL runs on the baseline path, and skipping it would be a defect.** An
+earlier draft of this section said it should be *recorded without running*, on the ground that
+its tables already exist. They do not. "Baseline" matches a v0.1, v0.2, v0.3, v0.4 **or** v0.5
+database equally — all five have an `effects` table and no `schema_version` — and the tables
+differ: `continuations` and its unique index arrived in v0.2, `delegations` and its index in
+v0.3. Both reached databases that already existed **precisely because** the store runs its whole
+schema script on every open, which is the mechanism `v0.3 §5.2` names when it says a new table
+*"is what `CREATE TABLE IF NOT EXISTS` handles on a database that already exists"*. Skipping the
+DDL would leave a v0.1 or v0.2 database with no `continuations` and no `delegations` table, and
+every continuation and delegation call would then die on `no such table`.
+
+So `0001_baseline` **is** the `_SCHEMA` script v0.5 shipped, `CREATE TABLE IF NOT EXISTS`
+throughout, and idempotence is the reason it is safe to run rather than a reason to skip it. The
+distinction the classification draws is about *which migrations run afterwards*, not about
+whether the baseline does.
+
+This is recorded rather than silently corrected because §3.5 item 2 asks a migration to be proved
+against *the previous release's own code*, and the singular is what hid the defect: proving
+`0001_baseline` against a v0.5 database proves nothing about a v0.2 one. **T152 therefore builds
+its fixtures from v0.1, v0.2, v0.3 and v0.5**, and the plural is the point.
 
 **A database with neither `schema_version` nor `effects` but with other tables present is
 refused**, naming what it found. It is somebody else's database, and creating CTRLRun's tables in
@@ -390,9 +465,19 @@ it is not a recovery.
 Let `known` be the binary's ordered migration ids and `applied` be the set read from
 `schema_version`.
 
-- **Forward — a newer binary, an older database.** `applied ⊂ known` and `applied` is a prefix of
-  `known`: apply the missing ones in order, recording each. This is the ordinary case and it
-  happens **automatically, at open**, with no flag to suppress it (§3.6).
+The classification is over the **whole shape** of `applied`, and every shape has an answer.
+Leaving one undefined is how a store ends up guessing, and the natural guess here is fail-open:
+
+- **Up to date.** `applied == known`: nothing is applied, the store opens.
+- **Forward — a newer binary, an older database.** `applied` is a **proper prefix** of `known` —
+  every recorded id is known, and they are exactly the first *n* of them, in order, with no gap:
+  apply the rest in order, recording each. This is the ordinary case and it happens
+  **automatically, at open**, with no flag to suppress it (§3.6).
+- **Gapped.** Every recorded id is known, but they are **not a prefix** — `0001` and `0003`
+  recorded, `0002` not. **Refuse**, naming the gap. This is not the forward case and MUST NOT be
+  treated as one: applying `0002` to a database `0003` has already run against runs a migration
+  out of order, against a schema it was never written for. It is the shape an interrupted
+  hand-repair leaves, and the one an earlier draft of this section left undefined.
 - **Backward — an older binary, a newer database.** `applied` contains an id that is not in
   `known`: **refuse at open**, before reading any row from any other table. The message names the
   unknown migration id, the binary's `ctrlrun` version, and the version recorded in
@@ -406,6 +491,10 @@ Let `known` be the binary's ordered migration ids and `applied` be the set read 
 - **Divergent.** `applied` is missing an id in `known` **and** contains one that is not:
   refuse, naming both sides. The store MUST NOT "fill the gap" by applying what is missing. Two
   build lineages have written to this database and neither is authoritative.
+
+**Those five shapes are exhaustive** — up to date, proper prefix, gapped, unknown id, both — and
+a store MUST classify into exactly one. Anything an implementation cannot place is refused, not
+opened: a sixth shape nobody thought of is a database nobody has reasoned about.
 
 Every refusal is at **open**. A `StateStore` constructor that classified a database and then
 proceeded to serve reads while refusing writes would be a store in a state no caller can reason
@@ -477,7 +566,7 @@ migrates one.
 | Id | Adds | For |
 |---|---|---|
 | `0001_baseline` | the v0.5 tables, unchanged | §3.2 |
-| `0002_receipt_chain` | `receipts.seq`, `receipts.prev_hash`, `receipts.hash`; the `receipt_chain` head row | §6 |
+| `0002_receipt_chain` | `receipts.seq`, `receipts.prev_hash`, `receipts.hash`; the `receipt_chain` head row, inserted at `seq = 0` with the genesis hash | §6 |
 | `0003_resolved_by` | `effects.resolved_by` | §5.3 |
 | `0004_policy_provenance` | `approvals.policy_hash_at_approval` | §7.1 |
 
@@ -494,6 +583,12 @@ every one of them is a column some later release has to keep.
 to, `v0.3 §5.2` added a new table specifically to avoid it, and `v0.4 §9.4` added neither. Doing
 it here is the point of the item, and doing it *first* — before Postgres introduces a second
 schema — is the ordering the build list argues for.
+
+**The head starts at `seq = 0` carrying the genesis hash** — `"sha256:" + "00" * 32` — so the
+first chained receipt is `seq = 1` with that value as its `prev_hash`, whether the database was
+empty or already held a thousand unchained receipts. A `head_mismatch` (§6.5) MUST NOT fire on a
+database whose only receipts are `unchained`: a head at `seq = 0` and no chained receipt is a
+consistent chain of length zero, not a truncated one.
 
 Pre-chain receipts keep `seq`, `prev_hash` and `hash` `NULL`. `0002` does **not** backfill them:
 a chain computed over rows that were written before the chain existed would assert an integrity
@@ -516,6 +611,35 @@ module, asserted in a subprocess beside T30, T92, T125b and T134 (T153).
 naming v0.6 for anything but SQLite; that message and its test change here, and the flag now
 accepts a `postgresql://` URL as well.
 
+**And that flag is on exactly one command — `ctrlrun verify` — which makes it a hazard, not a
+convenience.** `v0.4 §3.5` builds one scratch store per guarantee *on the backend `--store-url`
+names*, and `v0.4 §3.1` promises verify *"does not open the operator's store"*. A
+`postgresql://` URL names a database an operator owns. Left unqualified, verify would open it,
+**migrate it automatically with no flag to prevent that** (§3.6), and create and drop scratch
+tables inside it — contradicting §3.6's own sentence and §6.6's, and defeating `v0.4`'s T103,
+which hashes `.ctrlrun/state.db` before and after and has no Postgres analogue.
+
+So the scratch store is defined rather than left to be discovered:
+
+- **Verify creates its own schema** — `ctrlrun_verify_<16 hex>` — for each guarantee, creates the
+  CTRLRun tables inside it at `head`, and **drops it** when the run ends, including when the run
+  ends by exception. That is what `PostgresStateStore(url, schema=…)` (§9.1) is for.
+- **It never touches any other schema.** It does not migrate `public`, does not read it, and does
+  not create anything in it. A migration inside a schema verify created a moment ago is verify's
+  own and is not the operator's database changing.
+- **It refuses a URL it cannot do that with**: no privilege to `CREATE SCHEMA`, or a
+  `search_path` that already names a CTRLRun schema. Exit **2**, naming the reason — `v0.4 §3.8`'s
+  treatment for a configuration verify will not run against, never a silent fallback to `public`.
+- **T154e asserts all three**, including that a CTRLRun database in `public` is byte-identical
+  before and after a verify run — T103's guarantee, carried across to the backend that made it
+  hard.
+
+**A second, quieter conflation is removed with it.** `StoreBackend.url()` (§2.2) is **not** a
+`--store-url` value and must not be described as one: it is an argument to
+`python -m ctrlrun.conformance.store.worker`, addressed to a conformance subprocess, and the two
+have different rules about whose database they may touch. One flag meaning two things is how the
+hazard above got written in the first place.
+
 The decision-making stays where it is. `plan_reservation`, `plan_lease_extension` and
 `check_consumable` are pure functions in `effect.py` and `approval.py`, and **both existing
 backends already decide with them and then only write**. Postgres does the same. `v0.1 §5.4`'s
@@ -536,7 +660,8 @@ The shape of one reservation, inside one transaction:
 
 1. `SELECT` the record.
 2. `plan_reservation(record, …)` — the same pure function SQLite calls.
-3. If the plan refuses, raise. Nothing has been written; the transaction rolls back.
+3. If the plan refuses, raise — **after** performing whatever partial write the refusal itself
+   requires (§4.2.2). For most refusals nothing has been written and the transaction rolls back.
 4. If the plan grants a **new** reservation: `INSERT … ON CONFLICT (effect_key) DO NOTHING`.
    `rowcount == 1` wins.
 5. If `rowcount == 0`, another transaction inserted between steps 1 and 4. **Re-read and re-plan,
@@ -567,6 +692,28 @@ first.
 `consume_approval_and_reserve` stays **one transaction**. A unique violation inside it aborts the
 whole thing, so the approval is untouched and `v0.1 §4.2 A4` holds unchanged; the approval is
 still checked before the reservation is decided, so T4's ordering holds too.
+
+#### 4.2.2 The two refusals that write before they raise
+
+"Nothing has been written" is true of most refusals and **false of two**, and an implementer who
+took the general sentence literally would produce a Postgres store that diverges from SQLite on
+`v0.1 §5.3 E3`. Both already exist in the shipped store and both are deliberate:
+
+| Refusal | What is written first, and kept | Why |
+|---|---|---|
+| A reservation meeting a **lease that has expired** | the existing record is moved to `AMBIGUOUS` | `v0.1 §5.3 E3`. The expired lease is evidence; the attempt that discovered it is refused, but the discovery is not thrown away. Without this write the lapse is never recorded, and the *next* contender rediscovers it, forever |
+| A consumption or answer meeting an **approval past its `expires_at`** | the approval's status is moved to `EXPIRED` | *A lapsed approval is evidence; keep it, then refuse.* Otherwise the record stays `granted` in the table for something that can never be granted |
+
+Both are **committed before the refusal is raised**, which under one transaction means they are
+performed in a transaction of their own, ordered before the refusing one. They are the only two,
+they are additions to the evidence rather than to what is permitted, and neither can turn a
+refusal into an admission. §4.3's Table A applies to each of them as it applies to any other store
+write — a lost `COMMIT` on the ambiguate write is an ambiguous store write, resolved by the same
+re-read.
+
+A backend that skipped them would pass every test that asserts *the attempt was refused* and fail
+`reservation`'s lease case, which is why §2.3's row says **"an expired lease becomes `AMBIGUOUS`
+and is never released"** rather than only "is refused".
 
 ### 4.2.1 The three rejected alternatives
 
@@ -626,14 +773,65 @@ prevented it.
 ### 4.3.2 The re-read
 
 On an ambiguous `COMMIT`, on a **fresh connection** — the old one is not trustworthy and may not
-be usable:
+be usable. There are **two tables**, because a lost `COMMIT` on an `INSERT` and a lost `COMMIT` on
+a compare-and-set `UPDATE` leave different evidence and a single table gives the wrong answer for
+one of them.
+
+#### Table A1 — a lost `COMMIT` on the reservation `INSERT`
 
 | What the re-read finds | Conclusion |
 |---|---|
-| A record carrying **our** `action_id` in the state we were writing | the commit landed; we hold it; proceed |
+| A record **identical to the row we attempted to write** (§4.3.3) | the commit landed; we hold it; proceed |
 | **No** record | the commit did not land; retry the insert, **once**, then §4.2 step 5 |
-| A record carrying **another** `action_id` | somebody else holds it; refuse per `v0.1 §5.4` |
-| A record carrying our `action_id` in a **different** state | somebody moved it — a lapsed lease made `AMBIGUOUS` by a contender is the reachable case; refuse per `v0.1 §5.4` |
+| **Any other record** | feed it back through `plan_reservation` and obey what it says |
+
+**The first row is an identity check on the whole row, not a match on `action_id`, and the
+difference is a double execution.** `Action.action_id` is caller-supplyable — it has a default
+factory, not a mandatory generator — and §5.1 explicitly contemplates two attempts sharing one id
+where a caller rebuilt the same `Action` after a restart. So *"a record carrying our
+`action_id`"*, which is what an earlier draft of this row said, is satisfied by **another
+process's live reservation** made under the same id: that process is executing, this one concludes
+it holds the key, and one logical effect is executed twice through the storage layer.
+
+Worse, that row was *weaker than the pure planner it is supposed to be reusing*.
+`plan_reservation` refuses a record whose lease is live **without consulting `action_id` at all** —
+`DuplicateEffect(state=in_progress)` — so the draft introduced the only place in the codebase
+where "it carries our id" meant proceed. The third row now says the opposite: anything that is not
+byte-for-byte our own write goes back through the planner, which is the function §4.1 promises
+every backend decides with.
+
+"Identical" is defined in §4.3.3 rather than left to an implementer, because "same row" is exactly
+the kind of phrase that becomes "same primary key" in code.
+
+#### Table A2 — a lost `COMMIT` on a compare-and-set `UPDATE`
+
+Every transition after the reservation — `begin_execution`, `commit_effect`, `fail_effect`,
+`mark_ambiguous`, `resolve_effect`, `extend_lease`, `hold_continuation`, `take_continuation` — is
+an `UPDATE`, and for those the record **always exists** and the interesting finding is the one
+Table A1 does not have.
+
+| What the re-read finds | Conclusion |
+|---|---|
+| The record in the state we were writing, still ours | the commit landed; proceed |
+| The record **unchanged and still ours** — the pre-state we matched on | the commit did **not** land; **re-issue the same `UPDATE`**, once, then refuse |
+| The record moved on, or no longer ours | feed it back through the same `_checked` predicate the transition uses, and raise what it raises |
+
+**Row 2 is the one that matters and the one a single table gets wrong.** A lost `COMMIT` on an
+`UPDATE` leaves the record in its pre-state, which is *"our `action_id`, a different state from
+the one we were writing"* — and reading that as "somebody moved it, refuse" would be wrong in the
+two most expensive directions available:
+
+- on **`commit_effect`**, an effect that committed at the remote becomes a refusal, ages out by
+  its lease, and costs a human — for a write that simply needs re-issuing;
+- on **`fail_effect`**, a **proven** non-execution becomes `AMBIGUOUS`, throwing away the one
+  automatic retry `v0.1 §5.4` grants and turning `NotExecuted` into a human's problem.
+
+Neither is unsafe, and that is why it is worth naming: both fail *closed*, and both would make the
+store useless in exactly the situation it was built for. The re-issue is safe because the `UPDATE`
+is conditional — it matches on the pre-state — so if the first one did land, the second matches
+nothing and the first row of this table is what the next re-read sees.
+
+#### The re-read that fails
 
 **Only if the re-read itself fails** does the store refuse and write nothing. The cost of that is
 stated plainly rather than hedged, because it is the operational consequence of the whole design:
@@ -641,6 +839,28 @@ if the lost `COMMIT` did land, an effect key is now `RESERVED` by an attempt tha
 execute, its lease will expire, and the next contender will make it `AMBIGUOUS` and need a human
 (§5). **That costs availability. It never costs a double execution**, and that is the trade this
 library exists to make.
+
+### 4.3.3 What "identical to the row we attempted to write" means
+
+Every column the store was about to write, compared as stored: `effect_key`, `state`, `action_id`,
+`attempt`, `lease_expires_at`, `created_at` and `updated_at`. The store computed each of them
+before issuing the `INSERT`, so it holds the expected values without a second query.
+
+`attempt` and `lease_expires_at` are the two that carry the weight and neither may be dropped:
+
+- **`attempt`** separates our reservation from a *different* attempt on the same key by the same
+  `action_id` — a retry after a `FAILED` record, which renews with `attempt + 1` (`v0.1 §5.4`).
+- **`lease_expires_at`** is `now + lease` from this store's clock at the moment it planned, so two
+  contenders sharing an `action_id` agree on it only if they also planned at the same instant with
+  the same lease.
+
+Where a deployment makes even that collide — a frozen injected clock, one lease, one `action_id`,
+two processes — the two attempts are **indistinguishable in the record**, and the store MUST fail
+closed rather than assume: it treats the row as another's and refuses. That is a refusal for an
+effect this attempt may in fact hold, and it is the correct trade, because the alternative is the
+double execution this whole subsection exists to prevent. It is also unreachable in any deployment
+that lets `Action` generate its own `action_id`, which is the default and what every entry point
+does.
 
 ### 4.4 Connections, encoding and collation
 
@@ -759,6 +979,15 @@ different bar from the one a new **method** faces.
 The `error` string keeps what it already keeps — `v0.1`'s *"resolved committed by X (was: …)"* —
 because a receipt already written must not change meaning. `resolved_by` is additive.
 
+**No receipt carries `resolved_by`, and that is structural rather than an omission.** A receipt is
+written when an action reaches a terminal state (`v0.1 §6.1`); a resolution happens **afterwards**,
+to the effect record, often days later and by somebody who was not the actor. Putting it on a
+receipt would mean either mutating a receipt that has already been written and hashed — which
+§6.5 would correctly report as `content_altered`, the chain detecting its own kernel — or minting
+a second receipt for an action that did not run again. `resolved_by` lives on `EffectRecord`, and
+`ctrlrun effects` and `ctrlrun inspect` are where a reader finds it. §9.5's `ctrlrun.receipt/v3`
+row does not list it.
+
 ### 5.4 A continuation held by a dead process
 
 `v0.2 §6.9`'s elicitation holds a reservation open across a round trip the kernel does not
@@ -780,9 +1009,14 @@ When the process holding it dies, **the continuation outlives its process but no
   `EXECUTING` with a live lease — and the next reservation attempt makes the effect `AMBIGUOUS`
   by the ordinary path. A human or a reconcile hook then answers, as for any other unknown.
 
-T163 asserts all four, and asserts the **reason** and not only the status: a resumption refused
-because the lease lapsed and one refused because the token was already taken are different facts
-and an operator reading the events needs to know which.
+T163 asserts all four, and distinguishes the two refusals **by exception type**: a lapsed lease
+raises `AmbiguousEffect`, an already-taken token raises `InvalidArgument`.
+
+**Not by message, and that is deliberate.** `take_continuation`'s message is identical whether the
+value was forged, already consumed, or belongs to a suspension that has since moved on — *telling
+an agent which of those it hit is telling it how to search*. The two facts an operator needs are
+carried by the type and by the effect record's own state, and a more helpful string here would
+reopen a disclosure the store closed on purpose.
 
 ---
 
@@ -822,6 +1056,21 @@ float-free because `Action` rejects floats at construction, and its timestamps a
 strings. A **second canonicalizer is the drift this codebase must not have**: `v0.1 §2.3` is a
 versioned security primitive, and the whole approval binding rests on there being one of it.
 
+**Which requires one public name that does not exist yet, and §9.1 lists it.** `canonicalize`
+today takes an `Action` and builds a fixed six-key payload; there is no way to ask for the
+canonical form of an arbitrary mapping. Hashing a receipt document (§6.2) or a parsed policy
+(§7.1) therefore needs either a new public function or a private second implementation — and the
+second is what this paragraph forbids by name. So the encoding half is promoted:
+
+```python
+def canonical_bytes(payload: Mapping[str, Any]) -> bytes: ...   # §9.1
+```
+
+and **`canonicalize(action)` is redefined in terms of it**, so there is provably one
+implementation rather than two that agree today. That redefinition changes no byte of any existing
+canonical form — `ctrlrun.action/v1` is unchanged (§9.5) and T164b asserts that every hash written
+before v0.6 still verifies.
+
 ### 6.3 The head
 
 ```sql
@@ -832,10 +1081,24 @@ CREATE TABLE IF NOT EXISTS receipt_chain(
 );
 ```
 
-One row. `put_receipt` inserts the receipt and advances the head **in one transaction**, as a
-compare-and-set: `UPDATE receipt_chain SET seq = ?, hash = ? WHERE id = 1 AND seq = ?`, row count
-checked, retried **once** on zero (a concurrent writer got there first; re-read the head and
-rebuild the receipt's `seq` and `prev_hash`), then refused.
+One row. `put_receipt` inserts the receipt and advances the head **in one transaction**, and it
+**takes the head row's lock first**:
+
+1. `UPDATE receipt_chain SET seq = seq + 1 WHERE id = 1 RETURNING seq, hash` — unconditional, so a
+   concurrent writer **blocks** on the row rather than losing a race.
+2. Build the receipt with that `seq` and the returned `hash` as its `prev_hash`; compute its own
+   `hash`.
+3. `INSERT` the receipt, and write the new `hash` back to the head row.
+4. `COMMIT`.
+
+**This is a lock, not a compare-and-set, and the difference is dropped receipts.** An earlier
+draft used `UPDATE … WHERE id = 1 AND seq = ?` retried **once** on zero. That bound was imported
+from §4.2, where its justification is that a second zero would mean a record vanished, *"which
+nothing in this protocol can do"*. The argument does not transfer to a row **every** writer
+updates: there, a second zero means a third concurrent writer, which is ordinary. Combined with
+the rule that a failed receipt write is not raised, three concurrent actions would have silently
+dropped a receipt — in the one place §6.3 itself identifies as the first in the kernel where two
+unrelated actions contend. Taking the lock first removes the race instead of bounding it.
 
 The head exists to detect **truncation at the end**. Deleting the last N receipts leaves a chain
 that is internally consistent; only a head that still names a `seq` and a `hash` no row carries
@@ -843,15 +1106,45 @@ catches it.
 
 Two costs, both stated:
 
-- **Every receipt write now contends on one row.** This is the first place in the kernel where
-  two unrelated actions contend, and it is a throughput ceiling. Item 8's soak measures it, and
-  `docs/postgres.md` says so.
-- **A receipt whose write fails is logged, not raised** — `v0.1 §6.1`'s rule, unchanged and for
-  its original reason: by the time `put_receipt` runs, the effect has committed at the remote, and
-  raising there reaches the caller as an exception on a successful action, which an agent reads as
-  a failure and retries. Because the insert and the head advance are one transaction, a failed
-  write leaves **no** numbered receipt and an unadvanced head, so it produces a *missing* receipt
-  and never a broken chain. §6.4 says what that means and does not pretend it means nothing.
+- **Every receipt write now serializes on one row.** This is the first place in the kernel where
+  two unrelated actions contend, and it is a throughput ceiling — a real one, since the lock is
+  held for the receipt insert as well. Item 8's soak measures it, and `docs/postgres.md` says so.
+- **A failed receipt write is a lost receipt, and the caller is told.** See §6.3.1, which is a
+  change to shipped behaviour and is recorded as one.
+
+### 6.3.1 What happens when the receipt cannot be written
+
+An earlier draft of this section said *"a receipt whose write fails is logged, not raised —
+`v0.1 §6.1`'s rule, unchanged"*. **That was wrong on every clause**, and the correction matters
+because the subject of §6 is evidence integrity.
+
+`v0.1 §6.1`'s logged-not-raised rule is about the **JSONL file**, and the same paragraph says the
+opposite about the store: *"SQLite is authoritative and the JSONL file is a convenience export of
+what it already holds, so the store is written first … a store that refuses the write has not
+recorded the action, and there is nothing to export."* The swallowing that does exist in the code
+is `Control._fan_out`'s, and it is for **sinks**. `Control._record` calls `put_receipt`
+unguarded, and always has.
+
+So the shipped behaviour is: **a store that cannot write the receipt raises, and the exception
+reaches the caller.** v0.6 keeps it, and the draft's version would have been a change for the
+worse — an action that committed at the remote returning normally with no evidence, no signal, and
+a chain that is blind to the loss by construction (§6.4). Silent evidence loss is not a smaller
+problem than a surprising exception; it is the problem this section exists to prevent.
+
+What v0.6 adds is the honest statement of the residual, because the exception is not free:
+
+- The effect **has already committed at the remote** by the time `put_receipt` runs, and the
+  effect record already says `COMMITTED` — that write happened first and separately. So the
+  guarantee `v0.1 §5.4` rests on is intact: a retry of the same effect key is refused as a
+  duplicate whether or not the receipt exists.
+- An agent that reads the raised exception as a failure and retries is therefore **refused**, not
+  executed twice. That is why raising here is survivable where raising from a sink is not, and it
+  is the distinction the draft collapsed.
+- The action's evidence is not wholly lost: `EXECUTION_COMMITTED` was appended to the **events**
+  log before the receipt was built, on a different write. §6.4's fourth bullet is what an operator
+  reconciles with.
+
+T170 asserts all three, and asserts that nothing swallows the exception.
 
 ### 6.4 What the chain does not cover
 
@@ -866,9 +1159,11 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   reordering, a truncation. What it does not close is a rewrite of the whole log by somebody who
   can do that.
 - **Not a signature.** §11 has the argument.
-- **Not that every action wrote a receipt.** The chain proves that the receipts which were written
-  were not altered. A receipt that failed to write (§6.3) leaves no gap in `seq` and is invisible
-  to the chain by construction; it is visible in the **events** log, which is the other evidence
+- **Not that every action wrote a receipt.** The chain proves that the receipts which were
+  written were not altered. A receipt whose write failed (§6.3.1) leaves no gap in `seq` — the
+  head is advanced in the same transaction, so nothing was numbered — and is therefore invisible
+  to the chain by construction. It is **not** invisible to everything: the write raises to the
+  caller, and `EXECUTION_COMMITTED` is already in the **events** log, which is the other evidence
   stream and is written on a different path. An operator reconciling *"did everything get a
   receipt?"* reads events against receipts, and no chain answers it.
 - **Not the JSONL export's tail.** The export is fully verifiable by recomputation — every
@@ -888,6 +1183,16 @@ none: it gets quoted as if it caught all of them.
 | `missing` | a gap in `seq` |
 | `head_mismatch` | the stored head's `seq`/`hash` ≠ the last receipt's |
 | `unchained` | `seq` is `NULL` — a receipt written before the chain existed (§3.7) |
+
+**The chain reader orders by `seq`, and by nothing else.** No store provides a usable order
+otherwise: `SQLiteStateStore.receipts()` orders by `rowid`, `InMemoryStateStore.receipts()` by
+append order, and Postgres promises neither. `missing` and `head_mismatch` are statements about
+positions in a sequence, so a reader that took physical row order would report them, or fail to,
+according to how the rows happen to sit on disk.
+
+Rows with `seq IS NULL` have **no position**. They are read separately, reported as `unchained`
+with their count, and never interleaved with the chain — a `NULL` sorted to either end would
+manufacture a gap at one end or a head mismatch at the other.
 
 `unchained` is **never** a pass. A pre-chain receipt is reported as unchained with its count, and
 the summary line says how many of how many were verified. Folding them into a green count is
@@ -971,18 +1276,79 @@ with one change:
 | The new decision | What happens |
 |---|---|
 | `APPROVE` | unchanged. The approval is consumed with the reservation (`v0.1 §4.2 A4`) and the receipt records both policy hashes |
-| `DENY` | the action is **refused**, and the approval is left `granted`. The human's answer is not spent on an action that did not run, and the request stays presentable if the policy is corrected |
-| `ALLOW` | the approval is **consumed anyway**, in the same transaction, and the receipt notes that it was consumed against an `allow` decision |
+| `DENY` | the action is **refused**, and the approval is left `granted` (§7.2.1) |
+| `ALLOW` | the approval is **invalidated** after the reservation succeeds, and the receipt notes it (§7.2.2) |
 
 **The `ALLOW` row is a change to shipped behaviour and is the reason this section exists.** Today
 a re-evaluation that returns `ALLOW` leaves `approval_id` unset, so the presented approval is
 never consumed: it stays `granted` for its full TTL, for a hash that a later policy edit could
 make `APPROVE`-requiring again — a live bearer token for an action a human already answered.
-`v0.1 §4.1` calls a request id a bearer token in as many words. Consuming it closes that, costs
-nothing (it is the same one-transaction call), and keeps the invariant an operator would expect:
-**an approval a human granted is spent exactly once, by the action it was granted for.**
+`v0.1 §4.1` calls a request id a bearer token in as many words.
 
-Fail-closed in the only direction that matters: the `DENY` row refuses, and the `ALLOW` row spends.
+#### 7.2.1 Why the `DENY` row leaves the approval granted
+
+The two rows reason in opposite directions and the document owes the argument, because the `ALLOW`
+row's whole case is that a live granted approval is a bearer token — and the `DENY` row leaves one
+live for an action the policy **currently forbids**, which is the worse instance of the same
+hazard.
+
+It is still right, for three reasons that bound the exposure:
+
+- **A human's answer is not spent on an action that did not run.** Consuming it would mean the
+  operator who corrects a mistaken policy edit must also go and ask the human again, for an action
+  they already approved and which was refused by a rule rather than by them.
+- **The token authorizes nothing on its own.** `v0.1 §4.2 A1` binds it to one `action_hash`, and
+  the policy is re-evaluated on every presentation (this table). While the policy says `DENY` the
+  approval opens nothing; if the policy is corrected, it opens exactly the action it was granted
+  for.
+- **The exposure is bounded by `expires_at`**, which is checked at consumption and not only at
+  grant (`v0.1 §4.2 A3`), and the refusal is recorded against the approval so the history shows a
+  grant that met a denial.
+
+The asymmetry, stated in one line: the `ALLOW` row closes a token that would otherwise outlive
+**an action that ran**; the `DENY` row keeps one for **an action that did not**.
+
+#### 7.2.2 Why the `ALLOW` row invalidates rather than consumes
+
+An earlier draft said *consumed anyway, in the same transaction*, and that would have added a
+refusal path to the permissive decision.
+
+`consume_approval_and_reserve` checks the approval **first** — `v0.1 §4.2 A4`, and the store's
+documented ordering for T4, so that a replayed approval is what gets raised when a duplicate
+effect would also apply. Route an `ALLOW` action through it and an approval that is expired,
+already consumed, or denied raises `ApprovalMismatch` — and **an action the policy allows is
+refused because of an approval it did not need.** The reachable case is ordinary: an agent retries
+inside `with_approval(id)` after the operator relaxed the rule, the grant having been spent on the
+first attempt.
+
+So the order is inverted and the coupling removed:
+
+1. The action is decided `ALLOW` and reserves its effect key exactly as any allowed action does.
+   **The approval is not an input to that**, and no failure of it can refuse the action.
+2. **After** the reservation succeeds, the presented approval is moved `granted → consumed` in a
+   write of its own. If that write fails or the approval was never grantable, it is logged and the
+   action proceeds — there is nothing to protect, because the policy permits this action outright.
+3. The receipt records `approval_id` and `approver` with `decision: "allow"`, so the evidence says
+   a human answered and the policy did not require it.
+
+That closes the bearer-token hazard, which is the whole point of the row, without letting the
+approval gate an action that does not have one.
+
+#### 7.2.3 Where this table binds, and where it does not
+
+- **`Control.execute`'s presenting pass only** — the pass that carries a `with_approval` context.
+  That is the only place the case arises.
+- **`Control.resume` is unchanged.** It re-evaluates the policy *for the receipt, not to
+  re-decide*, and applying the `DENY` row there would strand a reservation held open across a
+  round trip the remote may already be acting on — which `v0.2 §6.9.2` forbids. A resumption that
+  the policy would now deny is recorded and completes; the operator's lever is the next action,
+  not this one.
+- **Observe mode is unchanged and asks no human.** Its own gate reads the presented approval only
+  on `APPROVE`, exactly as enforce mode does, and `v0.3 §6.2` already says observe mode never
+  requests one. A counterfactual is not a place to spend a real grant.
+
+Fail-closed in the only direction that matters: the `DENY` row refuses the action, and the `ALLOW`
+row never lets an approval refuse one.
 
 ### 7.3 The control registry
 
@@ -1004,10 +1370,15 @@ actions:
   stripe.refund:
     controls: [maker-checker-refunds]
     rules:
-      - when: amount > 50000
+      - when: {amount_gt: 50000}
         decision: approve
         controls: [maker-checker-refunds]    # a rule may narrow or add
 ```
+
+`when:` is `v0.1 §3.2`'s mapping of `<argument>_<op>` keys, unchanged and not extended here. An
+earlier draft of this example wrote `when: amount > 50000`, which is not the policy language — it
+is an expression, and there is no expression parser. The distinction matters more than a typo:
+§7.4 turned on the same mistake and the mistake there was load-bearing.
 
 Three rules, and they are what keeps this from becoming a compliance feature:
 
@@ -1041,20 +1412,51 @@ actions:
       patient_id: phi
       note: internal
     rules:
-      - when: data_scope contains phi
+      - when: {data_scope_in: [phi]}
         decision: approve
 ```
 
-`data_scope` is the **set of labels present in this action's arguments**, derived at evaluation.
-Three operators address it — `contains`, `in`, `not_in` — reusing the condition evaluator
-`policy.py` already owns and `authority.py` already shares (`v0.3 §4.5`), so there is no second
-place for `True` to start comparing equal to `1`.
+`data_scope` is the **set of labels present in this action's arguments**, derived at evaluation
+from the `data:` map and the arguments actually supplied.
 
-`data_scope` joins `claims`, `issuer` and `expires_at` as a **reserved condition name**, refused
-at load in a document of **any** schema version, for `v0.3 §12.1`'s reason and at `v0.3 §12.1`'s
-stated cost: a policy whose protected function takes an argument called `data_scope` stops
-loading, and the load error says so. Gating the reservation on `v4` would leave one name meaning
-two things in two files, which is the ambiguity `v0.1 §3.2` refuses.
+**The condition is written in `v0.1 §3.2`'s grammar and adds no operator.** `when:` is a mapping
+of `<subject>_<op>` keys; `data_scope_in: [phi]` means *the derived set intersects this list*,
+which is the membership `_in` already expresses. `_eq` and `_neq` compare the whole set. **No
+`contains` and no `not_in` are added**, and the reason is not economy: `_OPERATORS` is shared with
+authority `constraints:` (`v0.3 §4.5` — *one shared implementation, not two*), so an operator
+added here would silently become available to grants, and §11 puts *"matching a grant on a data
+label"* out of scope. An operator that reaches a surface this milestone has excluded is not a
+small addition.
+
+An earlier draft wrote `when: data_scope contains phi` and named three operators including two new
+ones. That was three mistakes in one line — an expression where the language has a mapping, a
+parser this project does not have and §7.4 claimed to be avoiding, and an unnoticed extension of
+the authority surface.
+
+**`data_scope` is reserved as an *argument* name and permitted as a *condition subject*, and those
+are two different checks.** The distinction is what makes the feature implementable at all:
+
+| Check | `data_scope` | Where it lives |
+|---|---|---|
+| May an **argument** be called this? | **No** — `PolicyError` at load | `RESERVED_ARGUMENTS`, as `claims`, `issuer` and `expires_at` are |
+| May a **condition key** split to this subject? | **Yes** | the condition splitter, which today refuses every reserved name |
+
+Today those are one check: the splitter refuses a condition whose subject is in
+`RESERVED_ARGUMENTS`, which is exactly how `claims_eq:` becomes a load error. Adding `data_scope`
+to that set unchanged would make `data_scope_in:` a load error too — **the very condition this
+section asks operators to write**. So the splitter gains a small, explicit allow-list of
+*derived subjects*: names that are refused as arguments and resolved, at evaluation, from
+something other than `action.canonical_arguments`. `data_scope` is its only member in v0.6, and a
+name in it is still refused as an argument.
+
+The reservation is **not gated on the schema version**, for `v0.3 §12.1`'s reason and at
+`v0.3 §12.1`'s stated cost: a policy whose protected function takes an argument called
+`data_scope` stops loading under v0.6, and the load error says so. Gating it on `v4` would leave
+one name meaning two things in two files, which is the ambiguity `v0.1 §3.2` refuses.
+
+**Authority is untouched.** `constraints:` see the same operators they saw in v0.3 and cannot
+address `data_scope`: the derived-subject allow-list is the policy evaluator's, and a grant that
+named one is refused as it always was (§11).
 
 **Redaction, and where it does not apply.** A label may be declared `redact: true`:
 
@@ -1102,7 +1504,7 @@ test of `v0.1 §7`, `v0.2 §10`, `v0.3 §10`, `v0.4 §8` and `v0.5 §8` MUST sti
 ### Item 1 — The store conformance suite (§2)
 
 #### T140 — Every fixture fails its named suite, and every suite has a fixture
-Each of §2.6's twelve broken stores is run through `ctrlrun.conformance.store.run`. Each MUST
+Each of §2.6's thirteen broken stores is run through `ctrlrun.conformance.store.run`. Each MUST
 fail the suite named in its row, and the assertion is on the **case** that failed and its
 **reason**, not only on the suite's status. Both directions of the coverage rule are asserted:
 every suite in §2.3 is named by at least one fixture, and every fixture names a suite that exists.
@@ -1114,13 +1516,27 @@ exception of `reservation`'s cross-process case for `InMemoryStateStore`, which 
 `not_applicable` with §2.4's reason. No other N/A is accepted, from either backend.
 
 #### T142 — The report refuses a degenerate run
-Every case `not_applicable` → `report.ok` is `False`. `--only` naming an unknown case exits
-non-zero. `0/0` is not a pass (`v0.4 §3.8`).
+Every case `not_applicable` → `report.ok` is `False`. `run(backend, only=…)` naming a case that is
+not in the registry **raises**, rather than silently running everything or nothing.
+`0/0` is not a pass (`v0.4 §3.8`).
 
-#### T143 — E1 across OS processes, driven by the suite
-The suite's own cross-process case against a real SQLite file: `processes` subprocesses, one
-winner, N−1 refused, the fake remote called exactly once. It is `v0.1 §7` T3's standard reached
-through the suite rather than a second implementation of it, and T3 itself is unchanged.
+`only` is a `run()` keyword and **not** a CLI flag: §9.4 adds no command, so there is nothing for
+an unknown name to exit from. An earlier draft asserted `--only … exits non-zero`, which described
+a surface this milestone does not build.
+
+#### T143 — E1 twice, and each catches what the other cannot
+Both of §2.4's cases against a real SQLite file. **In-process**: N threads released by a barrier
+after every one has read and before any has written — the window opened on purpose, not raced for
+— exactly one granted, N−1 refused with `v0.1 §5.4`'s errors. **Cross-process**: `processes`
+subprocesses, one winner, N−1 refused, the fake remote called exactly once, which is `v0.1 §7`
+T3's standard reached through the suite rather than a second implementation of it. T3 itself is
+unchanged.
+
+The pair is asserted to be non-redundant, deterministically and in both directions: a store whose
+atomicity is a Python lock passes in-process and fails cross-process; `two-winners` fails
+in-process and cannot be seen by the cross-process case at all, because a subprocess opening the
+backend's `url()` gets the real store and not the fixture. That asymmetry is why there are two
+cases (§2.4).
 
 #### T144 — `outcome` catches both shapes
 `guesses-failed` fails `outcome` on the `FAILED` check and `raises-not-executed` on the
@@ -1169,10 +1585,17 @@ Two opens; the `schema_version` rows and their `applied_at` values are identical
 A `schema_version` carrying an id the binary does not know, **and** missing one it does, is the
 divergent case: refused, naming both sides, and nothing is applied.
 
-#### T152 — Adoption, all four classifications
-Empty database → migrated to head. A v0.5 database → adopted at `0001_baseline` then migrated. A
-database with foreign tables and no `effects` → refused, naming what it found. A database at head
-→ opened, nothing applied.
+#### T152 — Adoption, every classification, from every release that has one
+Empty database → migrated to head. A database with foreign tables and no `effects` → refused,
+naming what it found. A database at head → opened, nothing applied.
+
+And the baseline path **from v0.1, v0.2, v0.3 and v0.5 databases, each built by that release's own
+code** (§3.5 item 2, plural). The v0.1 and v0.2 fixtures are the ones that matter: a v0.1 database
+has no `continuations` and no `delegations` table, and a v0.2 database has no `delegations`. After
+adoption each MUST have every table at head, and the test drives a **continuation and a
+delegation** against the migrated v0.1 database rather than only listing tables — the defect this
+replaces would have left both raising `no such table`, and a schema-name assertion is one an
+implementer can satisfy without the store working.
 
 #### T152b — There is no flag that opens a database without migrating it
 The CLI, the constructor and the environment are searched for one; the test asserts no accepted
@@ -1196,6 +1619,21 @@ commit and the amendment is recorded in §9.6.
 #### T154c — The store refuses a non-UTF8 database
 A database created with `ENCODING SQL_ASCII` is refused at open, naming the encoding (§4.4).
 
+#### T154e — Verify's Postgres scratch store touches nothing it did not create
+`ctrlrun verify --store-url postgresql://…` creates a `ctrlrun_verify_<hex>` schema per guarantee
+and drops it, including when the run ends by exception. A CTRLRun database in `public` is
+**byte-identical before and after** — `v0.4`'s T103 carried across to the backend that made it
+hard — and it is not migrated. A URL the store cannot `CREATE SCHEMA` on, or one whose
+`search_path` already names a CTRLRun schema, exits **2** naming the reason and never falls back
+to `public` (§4.1).
+
+#### T154f — DDL rights, collation and connection discipline
+Three assertions §10 makes rows about and §8 did not reach: a database user without DDL rights
+makes the store refuse to open **naming the missing privilege** rather than reporting the SQL that
+failed (§3.6); the identity columns are declared `COLLATE "C"`, asserted by reading the catalogue
+rather than by reading the DDL string; and two threads receive two different connections while one
+thread receives the same one twice (§4.4).
+
 #### T154d — `Control` never maps a store exception through `v0.1 §5.5`
 A store whose `commit_effect` raises an arbitrary exception: the effect record is not `FAILED`,
 the caller sees the store's exception, and nothing in the path calls `NotExecuted`'s branch.
@@ -1207,6 +1645,22 @@ Deterministic: the window is opened on purpose by killing the connection at `COM
 by racing. The effect ends `AMBIGUOUS` or reserved-by-us **as the re-read determines**, never
 `FAILED`; a blind retry against that key is refused; the events name which branch of §4.3.2 ran.
 **The single most important test in this milestone.**
+
+#### T155b — A lost `COMMIT` on `commit_effect` and on `fail_effect`
+§4.3.2's Table A2, the row a single table gets wrong. The connection is killed during `COMMIT` on
+`commit_effect`: the re-read finds the record **unchanged and still ours**, the store **re-issues**
+the `UPDATE`, and the effect ends `COMMITTED` — not refused, and not aged out to a human. The same
+against `fail_effect`: the effect ends `FAILED` and `v0.1 §5.4`'s automatic retry is still
+available, rather than the proven non-execution becoming `AMBIGUOUS`. Both assert the record and
+the exception, and a mutation that routes A2 through A1's table fails both.
+
+#### T155c — The re-read's identity check is not a match on `action_id`
+§4.3.3, and the double-execution this milestone's review found. Two attempts share one
+`action_id`; the first holds a live reservation; the second loses its `COMMIT` on the `INSERT` and
+re-reads. It MUST refuse — `DuplicateEffect(state=in_progress)`, the answer `plan_reservation`
+gives — and MUST NOT conclude it holds the key. The executor call count is **1**. The mutation
+that reduces §4.3.3's comparison to `action_id` alone makes this test fail with two executions,
+which is the only assertion here that matters.
 
 #### T156 — A failed re-read refuses to proceed
 The `COMMIT` is lost **and** the re-read connection is refused. No effect state is written, the
@@ -1256,6 +1710,17 @@ the lease's reason and the effect becomes `AMBIGUOUS` by the ordinary path.
 §6.5's table, one assertion per row, on the **name** and the `seq` and not only on "invalid".
 Written first.
 
+#### T164b — Promoting `canonical_bytes` changes no existing hash
+Canonicalization is security-critical, and this project's standing rule for touching it is a test
+proving old hashes still verify, or an explicit schema version bump. This is the first. A corpus of `Action`s and their `action_hash`
+values recorded **before** the promotion — including the `v0.1 §7` T7 vectors, the NFC/NFD pair,
+tuples-normalized-to-lists, and nested mappings in adversarial key order — hashes identically
+after `canonicalize` is redefined to call `canonical_bytes`. An approval granted against a
+pre-v0.6 hash still consumes. `ctrlrun.action/v1` is asserted unchanged.
+
+Its control: `canonical_bytes` refuses a `float` at any depth, so the promoted function is
+demonstrably the same primitive and not a permissive lookalike.
+
 #### T165 — An untampered chain verifies
 The positive control (`v0.4 §1.3`). Without it every row of T164 passes against a detector that
 returns "broken" unconditionally.
@@ -1278,10 +1743,13 @@ them, and `ok` is `False` for a run that verified nothing else.
 with the detector disabled reports `fail` with a counterexample; `ctrlrun.guarantees/v2` is the
 catalogue string.
 
-#### T170 — A failed receipt write leaves no gap and is not raised
-The receipt insert fails. Nothing is raised to the caller, the head is unadvanced, `seq` has no
-gap, and the events log still carries the action — §6.3 and §6.4's fourth bullet, asserted
-together because either alone would be misread.
+#### T170 — A failed receipt write raises, and leaves no gap
+The receipt insert fails. Four assertions, together, because any one alone would be misread:
+the exception **reaches the caller** and nothing swallows it; the effect record is already
+`COMMITTED`, so a retry of that key is refused as a duplicate rather than executed twice; the head
+is unadvanced and `seq` has no gap; and `EXECUTION_COMMITTED` is in the events log. §6.3.1's
+correction is what this test pins — the draft it replaces asserted that nothing was raised, which
+would have made an action that committed at the remote return normally with no evidence.
 
 ### Item 7 — Policy versioning and the control registry (§7)
 
@@ -1293,6 +1761,18 @@ not.
 #### T172 — Receipts carry both, and the hash is authoritative
 `policy_hash` and `policy_version` on every receipt; two policies sharing a `version:` string and
 differing in content are distinguished by hash in the evidence.
+
+#### T173b — §7.2 binds `execute`'s presenting pass, and nothing else
+`Control.resume` re-evaluating to `DENY` **completes** the resumption rather than stranding the
+held reservation (`v0.2 §6.9.2`); observe mode asks no human and spends no grant, and a presented
+approval survives an observed action untouched (§7.2.3). Both are asserted by observation of the
+approval's stored status.
+
+#### T173c — An `ALLOW` action is never refused by the approval it did not need
+The policy is relaxed to `ALLOW` between a grant and its presentation, and the approval is
+**expired**, then **already consumed**, then **denied**. In all three the action runs, the effect
+commits, and the receipt records `decision: "allow"`. This is the failure §7.2.2's inversion
+exists to prevent, and without it a draft that consumed in one transaction would pass T173.
 
 #### T173 — The policy changed between grant and consumption, all three rows
 §7.2's table by observation: `APPROVE` unchanged; `DENY` refuses and leaves the approval
@@ -1316,6 +1796,18 @@ A redacted argument is `sha256:…` in the receipt, the events and the JSONL exp
 value in `ApprovalRequest.action`, `PendingApproval` and `ctrlrun approve`'s output; and
 `action_hash` is unchanged by redaction. **If item 7 cuts `redact:` (§7.4), this test is deleted
 and §12 records the cut.**
+
+#### T177c — The CLI surfaces exist and no command was added
+`ctrlrun receipts --verify-chain` reports a break by `seq` and by name against a tampered store,
+and reports the `unchained` count against a migrated v0.5 one; `ctrlrun receipts --control ID`
+filters. The command list is asserted against §9.4's: `receipts`, `verify`, `effects`, `approve`,
+`deny`, `resolve`, `inspect`, `stats`, `delegate`, `revoke`, `init`, `demo`, `gateway` — and
+**nothing new** (§9.4).
+
+#### T177d — An expired lease is displayed as expired, and displaying it changes nothing
+`ctrlrun effects` shows a record whose lease has lapsed as `executing (lease expired)`, and the
+record is **still** `EXECUTING` afterwards: reading is not a transition (§5.2). The test asserts
+the store's record before and after the command.
 
 #### T177b — The throwaway configuration loads and drives a decision, and ships nowhere
 It lives in the test suite; a packaging test asserts no `packs/` path and no new `examples/` path
@@ -1368,7 +1860,14 @@ makes "resolved by a hook" and "resolved by a human" countable separately.
   late is how a one-week criterion becomes a one-week delay.
 - The harness ships separately from the numbers, and **the maintainer reads the table before it
   goes in a PR** (`v0.4 §7.3`).
-- **The unattributed count is published including if it is zero**, and including if it is not.
+- **The exit criterion is `ROADMAP.md`'s and is unchanged: a week with *no* unexplained
+  `AMBIGUOUS`.** An earlier draft of this section required only that the count be *published*,
+  which is a different and weaker criterion — and quietly relaxing a release gate in the document
+  that defines the release is precisely what §1.4 corrected two other sentences for in this same
+  commit. A non-zero unattributed count does not ship; it is a finding, and it is investigated
+  before v0.6 is tagged.
+- **The count is published either way** — including if it is zero, and including if it is not.
+  Publication is what makes the criterion checkable; it is not the criterion.
 - **Item 9 does not tag until item 8 reports.** The exit criterion says a week, the changelog
   would say a week, and a tag before it finishes makes both untrue. This is the one claim in the
   project that would be exactly as false as it looks.
@@ -1384,6 +1883,7 @@ which is why there is so little of it.
 
 ```python
 # ctrlrun/__init__.py — added
+from .action import canonical_bytes
 from .errors import SchemaMismatch
 
 # ctrlrun.postgres — ctrlrun[postgres], lazy, NOT re-exported at package import
@@ -1404,6 +1904,17 @@ class PostgresStateStore:                    # §4 — satisfies StateStore, add
 def run(backend: StoreBackend, *, only: Sequence[str] = (),
         processes: int = 8) -> StoreReport: ...          # §2.2
 ```
+
+```python
+def canonical_bytes(payload: Mapping[str, Any]) -> bytes: ...
+```
+
+`canonical_bytes` is the **encoding half of `v0.1 §2.3`, promoted rather than written** (§6.2):
+sorted keys recursively, `separators=(",", ":")`, `ensure_ascii=False`, UTF-8, `float` rejected at
+any depth. `canonicalize(action)` is redefined to call it, so the chain (§6.2) and the policy hash
+(§7.1) provably share one implementation with the action hash instead of having a second that
+agrees today. It clears §9.2's bar in the only way a new public name can here: without it, the
+alternative is a private second canonicalizer, and §6.2 forbids that by name.
 
 **And no other public name.** No new `Control` method, no new store method, no new event type, no
 new CLI command, no new approval provider, no new sink.
@@ -1454,7 +1965,7 @@ same code path with a different report.
 |---|---|
 | `ctrlrun.action/v1` | **unchanged.** The canonical form of an Action is untouched by this milestone, and every approval granted before it still verifies |
 | `ctrlrun.policy/v4` | new: `version:` (§7.1), `controls:` (§7.3), `data:` (§7.4). `v1`, `v2`, `v3` still load |
-| `ctrlrun.receipt/v3` | new fields: `seq`, `prev_hash`, `policy_hash`, `policy_version`, `controls`, `resolved_by`. Every `v2` field keeps its meaning |
+| `ctrlrun.receipt/v3` | new fields: `seq`, `prev_hash`, `policy_hash`, `policy_version`, `controls`. Every `v2` field keeps its meaning |
 | `ctrlrun.guarantees/v2` | G11 added (§6.6) |
 | `ctrlrun.store-conformance/v1` | new: the store suite's report document (§2.2) |
 | `ctrlrun.verify/v1`, `ctrlrun.inspection/v2`, `ctrlrun.framework-probe/v1` | unchanged |
@@ -1482,9 +1993,48 @@ Six amendments, each in the item that makes it true.
    becomes *"no signatures; see SPEC-v0.6 §11"*, because v0.6 does not add them.
 5. **`docs/ROADMAP.md`'s v0.6 bullet and `docs/THREAT_MODEL.md`'s signing limitation are
    corrected in the same commit as this document** (§1.4), on the rule `v0.4 §9.4` set.
-6. **`v0.1 §4.2 A4`'s consumption rule gains one case** (item 7): an approval presented against a
-   re-evaluated `ALLOW` is consumed, in the same transaction, rather than left granted (§7.2).
-   A4's atomicity is unchanged; what changes is when consumption happens.
+6. **An approval presented against a re-evaluated `ALLOW` is invalidated** (item 7, §7.2, §7.2.2),
+   where today it is left `granted` for its full TTL. **`v0.1 §4.2 A4` is untouched**, and that is
+   the point of the design: the invalidation happens in a write of its own *after* the reservation
+   succeeds, precisely so the approval is never an input to an allowed action and can never refuse
+   one. A4 continues to describe the `APPROVE` path, atomically, unchanged.
+
+### 9.6.1 What the independent review of this document changed
+
+A review in a session that did not write this document found **twenty-one defects**, four of which
+would each have produced an insecure or unimplementable v0.6. They are recorded because this
+project requires a declined finding's reasoning to live in the document it declines a change to —
+and an *accepted* finding that silently rewrote a section leaves the next reader unable to tell
+which sentences were argued and which were repaired.
+
+| Found | Where it is now |
+|---|---|
+| §4.3.2's re-read concluded *"a record carrying **our** `action_id` → we hold it, proceed"*. `action_id` is caller-supplyable and §5.1 blesses two attempts sharing one, so another process's **live reservation** satisfied it: one logical effect executed twice, through the storage layer. It was also weaker than `plan_reservation`, which refuses a live lease without consulting `action_id` at all | §4.3.2 Table A1 row 1 and §4.3.3 — an identity check on every column written, anything else back through the planner; T155c |
+| §6.3 said a failed receipt write is *"logged, not raised — `v0.1 §6.1`'s rule, unchanged"*. That rule is about the **JSONL file**; the same paragraph says the store is authoritative, and `Control._record` calls `put_receipt` unguarded. The draft was a silent-evidence-loss change, in the section about evidence integrity, presented as the status quo | §6.3.1, which keeps the shipped behaviour, states the residual, and is recorded in §9.6; T170 rewritten |
+| §3.2 recorded `0001_baseline` *"without running its DDL"*. "Baseline" matches a v0.1 **or** v0.2 database too, and `continuations` and `delegations` arrived after v0.1 — so every continuation and delegation call on an adopted v0.1 database would have died on `no such table` | §3.2, which runs the DDL; T152, which builds fixtures from four releases instead of one |
+| §7.4 required `data_scope` to be both a reserved argument name and a condition subject. Reserving a name is what makes `claims_eq:` a load error, so `data_scope_…:` would have been one too — the very condition the section asks operators to write. It also invented an expression grammar the language does not have, and added two operators to a set **shared with authority constraints** | §7.4 — the mapping grammar, no new operator, and an explicit derived-subject allow-list distinct from `RESERVED_ARGUMENTS` |
+| §2.5's *"no store method writes `FAILED` except `fail_effect`"* is false of both shipped stores: `resolve_effect` writes it, and is `ctrlrun resolve --failed`. The suite would have failed a correct backend, or invited an implementer to remove the only route out of `AMBIGUOUS` | §2.5 and §10 — *"on a refusal path"* |
+| §4.3.2's single table was written for the reservation `INSERT` and gave the wrong answer for every compare-and-set: a lost `COMMIT` leaves the record in its **pre-state**, which the draft read as *"somebody moved it, refuse"* — turning a committed effect into a human's problem and a proven non-execution into `AMBIGUOUS` | §4.3.2 Table A2, whose row 2 re-issues; T155b |
+| §6.3's head compare-and-set retried **once**, importing a bound from §4.2 whose justification does not transfer to a row every writer updates. Three concurrent writers would have dropped a receipt silently | §6.3 — the head row's lock is taken first, so contention blocks instead of dropping |
+| `durability` could not pass `InMemoryStateStore`, whose storage *is* the object, while T141 allowed exactly one N/A | §2.4's second honest N/A, pinned to `reopen()` returning `None`, with `falsely-declares-no-url` keeping the declaration honest |
+| No fixture could fail `reservation`: a broken store is an in-process wrapper, and the cross-process case's subprocess opens the real backend. T140 — the only check that the suite can fail — could not pass | §2.4's in-process E1 case; T143, which asserts the two cases are non-redundant in both directions |
+| `--store-url` is on **`ctrlrun verify` alone**. A `postgresql://` value would have had verify open, auto-migrate and write scratch tables into an operator's database — contradicting §3.6 and §6.6 in the same document | §4.1's scratch-schema rules; T154e; and `StoreBackend.url()` no longer calls itself a `--store-url` value |
+| §4.2's *"nothing has been written; the transaction rolls back"* is false on two paths that already commit before raising — the lapsed lease made `AMBIGUOUS`, and the expired approval | §4.2.2, which names both and says why they are evidence rather than permission |
+| §7.2's `ALLOW` row consumed the approval *"in the same transaction"*. `consume_approval_and_reserve` checks the approval **first**, so an expired or already-spent grant would have **refused an action the policy allows** | §7.2.2 — invalidate after the reservation, never as an input to it; §7.2.3 for `resume` and observe mode; T173b, T173c |
+| §3.3 left a reachable classification undefined — every applied id known but **not contiguous** — and the natural guess applies a migration out of order | §3.3's five exhaustive shapes, with the gapped one refused |
+| §9.5 listed `resolved_by` on `ctrlrun.receipt/v3`; §9.2, §5.3 and §3.7 all added it to `effects` only. A resolution happens after the receipt was written and hashed | §9.5's row, and §5.3's paragraph on why no receipt carries it |
+| §7.2's two rows reasoned in opposite directions about the same hazard, and only one carried an argument | §7.2.1 |
+| §6.2 and §7.1 both invoked *"`v0.1 §2.3`'s canonicalizer"* over a document. No such function exists — `canonicalize` takes an `Action` — so the draft required either a new public name it forbade or the second canonicalizer §6.2 forbids by name | `canonical_bytes` promoted in §9.1, `canonicalize` redefined in terms of it, T164b proving no hash changed |
+| §6.5's `missing` and `head_mismatch` needed a receipt order no store provides | §6.5 — the reader orders by `seq`; `NULL`-`seq` rows have no position |
+| §8.1 required only that the unattributed `AMBIGUOUS` count be **published**, where `ROADMAP.md`'s exit criterion is that it be **zero** — a release gate relaxed in the document defining the release | §8.1, restated as ROADMAP has it |
+| Five §10 rows and two §9.4 surfaces had no test; T142 asserted a `--only` **flag** that §9.4 forbids | T154e, T154f, T177c, T177d, T173b; T142 corrected to the `run()` keyword |
+| `0002_receipt_chain` did not say what the head row starts at, so `head_mismatch` could fire on a database whose receipts are all `unchained` | §3.7 — `seq = 0`, genesis hash |
+| §5.4 asked for a distinguishable "already taken" refusal that `take_continuation` deliberately does not give, its message being identical by design | §5.4 — distinguished by exception **type**, with the disclosure argument stated |
+
+Three of the four blockers were invisible from the diff and visible only from the shipped code —
+`control.py`'s unguarded `put_receipt`, `policy.py`'s condition splitter, and `state.py`'s
+`_SCHEMA` running on every open. That is the rule's whole justification, and it is the third
+consecutive milestone in which it has held.
 
 ### 9.7 The module map
 
@@ -1533,7 +2083,7 @@ rows are v0.6's own, and none of them is configurable.
 | A `RESERVED` record whose holder is gone | Nothing is concluded. The lease governs, and only a human or a reconcile hook moves it on (§5.1, §5.3) |
 | An expired lease | `AMBIGUOUS` at the next reservation attempt. Never released, never reclaimed, never swept (§5.2) |
 | A continuation whose lease lapsed | Refused; the effect becomes `AMBIGUOUS` by the ordinary path (§5.4) |
-| A receipt whose chain write fails | Logged, not raised. No numbered receipt, no advanced head, no gap (§6.3) |
+| A receipt whose chain write fails | **Raises to the caller.** No numbered receipt, no advanced head, no gap; the effect record is already `COMMITTED` so a retry is refused, and `EXECUTION_COMMITTED` is already in the events log (§6.3.1) |
 | A receipt with `seq IS NULL` | `unchained`. Counted, named, **never a pass** (§6.5) |
 | The chain head is missing | The report says so and does **not** report a valid chain (§6.5, T167) |
 | A rule cites an undefined control id | `PolicyError` at load, naming it (§7.3) |

@@ -16,7 +16,18 @@ any change to one appears here.
   away, and the database is somewhere else?* Every guarantee shipped so far is a guarantee about
   one process holding one SQLite file, and `BEGIN IMMEDIATE` is a whole-database write lock on a
   local file; take the file away and the promise has to be re-earned with a different mechanism.
-  Tests come from §8; public names are frozen in §9.
+  Tests come from §8 (T140–T181); public names are frozen in §9.
+
+  **An independent review in a session that did not write it found twenty-one defects, four of
+  them blockers**, and every one became an edit. Three of the four were invisible from the diff
+  and visible only from the shipped code: a re-read that concluded *"it carries our `action_id`,
+  so we hold it"* — which another process's live reservation satisfies, giving a double execution
+  through the storage layer; a claim that a failed receipt write is *"logged, not raised"*, which
+  is `v0.1 §6.1`'s rule about the **JSONL file** and not about the store, and would have turned
+  the evidence-integrity section into silent evidence loss; and a migration that adopted a
+  pre-v0.6 database *without running its baseline DDL*, which would have left every v0.1 and v0.2
+  database with no `continuations` and no `delegations` table. `docs/SPEC-v0.6.md` §9.6.1 records
+  all twenty-one with where each landed.
 
 ### Changed
 
