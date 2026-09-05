@@ -282,9 +282,16 @@ its canonical arguments, its resource, its environment, the principal's `agent` 
 `action_hash`, and the request's expiry. It does **not** carry the `Action` object, the
 `Control`, the store, or the executor — nothing an adapter could act on rather than display.
 
-**Must call.** `@protect` (which calls `Control.execute`) for every action, and
+**Must call.** `@protect(..., wait=True)` (which calls `Control.execute`) for every action, and
 `ctrlrun.adapter.needs_approval` where the framework needs the decision *before* it invokes the
 tool (§3.5). Nothing else in the kernel is required of an adapter.
+
+**`wait=True` is not optional and it is stated here** because this is the section titled *what
+it must call*. Without it `@protect` raises `ApprovalRequired` past the framework instead of
+routing it through `wait()`, so the interrupt is never reached and the adapter does nothing at
+all — which is `grants-for-itself`'s defect arrived at by omission. The requirement was
+previously derivable only from §3.2 step 7, §3.1's closing sentence and a fixture's description;
+item 6 read all three and still had to check twice.
 
 **May never call.** Directly or through any object it can reach:
 
@@ -299,12 +306,22 @@ tool (§3.5). Nothing else in the kernel is required of an adapter.
 | `StateStore.put_delegation`, `revoke_delegation`, `Control.delegate`, `Control.revoke` | An adapter creates no authority. |
 | `Control.resume`, and raising `Suspended` | That is the *elicitation* round trip, and an approval is not one (§3.1). |
 | Constructing a `Principal` | It sees one and never supplies one (§4.2). |
+| **`ctrlrun.context(agent=..., user=...)`** | The same thing without naming the type. `context()` is a `v0.1 §8` public name any caller may use, and §4.2's checkable claim was scoped to *"no name on the adapter surface"* — so this fitted through the enumeration. It is `--principal-from-client-info`'s **fourth** costume, and the worst of them, because T129's behavioural half runs against a `Control` **with** an identity provider, where `v0.3 §3.2` says the provider wins: a `context()`-based self-assertion passes T129, passes the `identity` suite, and takes effect only in the deployments the kit never builds — the ones with no provider, which is `Control(...)`'s default. Found by item 6. |
+| **Constructing an `InterruptApprovalProvider`** | §9 rests a security argument on an adapter not doing this — *"`clock` is not a §3.8 relaxation for a structural reason rather than a promise: an adapter does not construct the provider"* — and nothing said so. An adapter shipping a `build_provider(store)` convenience, which §2.3's four-line wiring example invites, could pass a clock that never advances and defeat §2.4 steps 2 and 5 entirely, which is the whole of T129d. Missing enumeration rather than missing check: the exact shape `v0.3 §4.3.1` exists to prevent. Found by item 6. |
 | **Constructing a `Control`** | `Control(identity=..., authority=..., clock=..., environment=...)` is every hole in this table by one route, and the most tempting one: an adapter that built its own `Control` would choose the identity provider, which is §4.2 defeated in a constructor keyword. The **operator** builds the `Control` and hands it to the adapter. |
 | `Policy.evaluate` in isolation | `v0.3 §11` — the combined `§4.6` decision or nothing. `needs_approval` and `Control.evaluate` are that. |
 
 **May call.** `ctrlrun.adapter.needs_approval`, `ctrlrun.adapter.banner`, `Control.evaluate`,
 `Control.resolve_principal`, and the accessors `Control.policy`, `Control.environment`,
 `Control.store` **for reads only** — `get_effect`, `get_approval`, `receipts`, `events`.
+
+**Every name in that sentence is frozen by §9**, and it was not: §2.3 argues that enumeration
+matters *because a rule that names no methods is a rule the conformance kit cannot check*, and
+then wrote the permitted side in names — `Control.policy`, `Control.environment`,
+`Control.store`, `receipts`, `events`, and `ApprovalStore` in a §9 signature — that no document
+froze. An adapter author who depends on one has no promise it survives, which is the same defect
+on the other side of the line. Item 6 found it while depending on `Policy.mode`, which *is*
+frozen (`v0.3 §11`) and is the only reason §3.6's ambiguity had a resolution at all.
 
 `Control.store` is on this list and `StateStore` is a mutable object, so "reading is not the
 problem; writing is" is a rule about *calls* and not about *reachability*: the never-list above
@@ -613,12 +630,53 @@ decorator. So two things can differ: an argument the function defaults and the f
 and a `resource` declared only on the decorator.
 
 Both directions are **safe**, and that is why this is a documented divergence rather than a
-defect. A wrong `False` means the framework does not pre-ask, and `Control.execute` then raises
-`ApprovalRequired`, `@protect(wait=True)` routes it through the interrupt, and the human is asked
-anyway — the resumed-in-place shape, reached from the other one. A wrong `True` means a human is
-asked about an action the policy would have allowed, which costs attention and authorizes
-nothing. **In neither direction does an action execute that would not have.** An adapter whose
-framework omits defaulted arguments should say so under §7 item 5.
+defect. A wrong `True` means a human is asked about an action the policy would have allowed,
+which costs attention and authorizes nothing.
+
+A wrong `False` means the framework does not pre-ask and `Control.execute` raises
+`ApprovalRequired`, and **what happens then depends on the shape**. This paragraph used to say
+the interrupt routes it and *"the human is asked anyway"*, which is true only where the primitive
+can still ask. In the decided-before-invocation shape it cannot: the framework's gate has already
+run and passed, so there is no approval item and the SDK holds no answer. The adapter **MUST
+refuse** — nothing granted, nothing executed, the request left `pending` for `ctrlrun approve` —
+and it must not read any record the framework happens to hold for the surrounding call as an
+answer to a question that call never asked. §12.9 records what that cost the first time.
+
+**In neither direction does an action execute that a human did not approve**, which is the
+sentence that matters. It is weaker than the one it replaces, and it is the true one.
+
+**The divergence is not confined to the predicate.** Where `carries_approved_arguments` is
+`True`, §3.4 rebuilds the stored request's `Action` **with the answer's arguments replacing the
+proposal's** and compares `action_hash`. The stored request was built by `@protect`, so it has
+the function's defaults applied; a framework that never saw the signature carries back what the
+model sent. For any protected tool with a defaulted parameter the model omits, the two cannot
+match, and **the honest adapter with the honest declaration is the one that breaks** — every
+approved call refused with `ApprovalMismatch`. Item 6 found this while trying to declare `True`
+truthfully. The three ways out are all bad: declare `False` (a false statement about the
+framework, and a downgrade from prevention to attribution), synthesize the missing arguments from
+`pending.arguments` (which is `echoes-the-payload` by name), or forbid defaults on protected
+tools. **So: an adapter declaring `carries_approved_arguments = True` MUST say in its README
+that a protected tool's parameters may not have defaults the framework can omit**, and that is a
+real limitation of the prevention half rather than a note.
+
+An adapter whose framework omits defaulted arguments should say so under §7 item 5.
+
+**`resource` is a template and core resolves it.** `needs_approval(control, action, arguments,
+resource="payment:{payment_id}")` takes the same template `@protect` takes, and resolves it
+against the arguments exactly as `@protect` does. This was answered nowhere in §2.2, §3.5 or §9,
+and the whole contract settled it once — in a parenthesis in `ARCHITECTURE.md` §6's module map.
+Getting it wrong is not cosmetic: `resource` is in the canonical form, so passing a literal
+template makes the predicate evaluate a *different action* from the one `@protect` will build,
+silently, on every call.
+
+**`needs_approval` does not resolve the effect key, and cannot.** `v0.1 §5.1` resolves the effect
+key **before** policy, and says why: *asking a human to approve an action that can never reserve
+wastes the one scarce resource in the system.* The predicate has no `effect` parameter, so an
+unresolvable template returns `True`, a human reads and answers, and only then does `@protect`
+refuse with `EffectKeyError` — the exact waste `v0.1 §5.1` exists to prevent, reached by the new
+path. The signature is frozen in §9 without one, so this is a **stated cost** rather than a hole:
+an adapter cannot avoid it, and an operator whose effect templates can fail to resolve should
+know that a human may be asked first. Adding `effect` to the predicate is a v0.6 question.
 
 `needs_approval` can also **raise** rather than return: `resolve_principal` refuses an
 unattributable call (`ActionDenied(reason="no_principal")`) or a rejected credential
@@ -632,15 +690,62 @@ or commits or grants outside `Control`. Both needed one new **reader**: `needs_a
 resolves a principal and evaluates, and writes nothing. The distinction is the one `v0.3 §4.3.1`
 draws, and §4.1 puts `needs_approval` in that table and says what it does about each column.
 
+### 3.5.1 Asynchronous frameworks
+
+Nothing in `v0.1`–`v0.4` addresses `async`, and one of the two reference adapters is built on an
+async runner — so the answer existed only in code an adapter author is not allowed to read. Item
+6 raised it as the one question it could not even approximate. Stated here:
+
+**Every name on §2's surface is synchronous, and stays synchronous.** `FrameworkInterrupt.interrupt`,
+`InterruptApprovalProvider.wait` and `ConformanceAdapter.invoke` are `def`, not `async def`. The
+kernel is `sqlite3` and stdlib and has no event loop of its own; giving the surface a second,
+awaitable form would double it for no capability.
+
+**`interrupt()` is called from wherever the framework invoked the tool**, which on an async
+framework is the event loop's thread, inside a running loop. So:
+
+- **`interrupt()` MUST NOT block the loop** where the framework's own primitive would not.
+  In the resumed-in-place shape it does not block at all — it raises, and the framework
+  checkpoints. In the decided-before-invocation shape the answer already exists and reading it
+  is not I/O. An adapter that needed to *wait* inside `interrupt()` on an async framework would
+  be blocking the loop that has to deliver the answer, which is a deadlock and not a contract
+  question — that framework's primitive is the thing to reuse instead.
+- **`@protect` wraps a synchronous function.** An async tool body calls a `@protect`ed
+  synchronous function; it does not decorate a coroutine. Both reference adapters do this and
+  it is what `wait=True` means in an async body.
+- **`ConformanceAdapter.invoke` is synchronous**, and an adapter whose framework is async drives
+  it with `asyncio.run` or the framework's own sync entry point. The kit never runs inside a
+  loop, so `asyncio.run` inside `invoke` is correct rather than merely tolerated.
+
+**Restoring the kernel's exception taxonomy is separate from any of this** and §12.7 covers it:
+a framework that wraps or swallows what a tool raised needs the adapter to undo that, whether it
+is async or not.
+
 ### 3.6 `mode: observe`
 
 The question the build brief left open, settled here with its argument.
 
 **An adapter never interrupts in observe mode.** `v0.3 §6.2` runs every real decision and
-executes anyway, recording what *would* have been blocked; `ApprovalRequired` is never raised,
-so `wait()` is never called and the framework's primitive is never reached. There is nothing for
-an adapter to do differently, and an adapter that synthesized an interrupt in observe mode would
-be asking a human to approve something that is going to run either way.
+executes anyway, recording what *would* have been blocked.
+
+**The rule is unconditional; the argument for it covered only one shape.** For a resumed-in-place
+adapter it follows for free: `ApprovalRequired` is never raised, so `wait()` is never called and
+the primitive is never reached. **A decided-before-invocation adapter has to do it deliberately**,
+because there the primitive is reached from the *predicate*, one step earlier and without
+`Control.execute` ever running — and `ctrlrun.adapter.needs_approval` is `Control.evaluate`,
+which `v0.3 §6.2` evaluates identically under observe mode and will answer `APPROVE`.
+
+So **the predicate of a decided-before-invocation adapter MUST return "no approval needed" when
+`Control.policy.mode` is `observe`**, and `Control.policy` is on §2.3's may-call list for exactly
+this. It is the one place an adapter is required to branch on the mode.
+
+The consequence of getting it wrong is worse than the rule it breaks, which is why it is stated
+rather than left to follow: a framework of that shape does not invoke a tool whose approval was
+declined, so a human's *no* under `mode: observe` **stops the action** — and observe mode's whole
+promise is that every decision is recorded and none is enforced. A deployment evaluating CTRLRun
+in the mode built for evaluating it would have its agent halted. §12.9 has the finding; the kit
+cannot catch it, because §3.6 makes `run()` refuse an observing `Control`, so an adapter that
+interrupts in observe mode scores full marks.
 
 **An adapter MUST NOT print.** `v0.3 §6.5` puts the banner on stderr for every CLI command that
 loads the operator's policy, and an adapter is not a CLI command: it is inside somebody else's
@@ -848,6 +953,13 @@ class ConformanceAdapter(Protocol):
     refuses_before_invoking: bool = False
 
     def invoke(self, request: CallRequest) -> Any: ...
+        # Returns whatever the executor returned. Where the framework **refused before it
+        # invoked** — a declined pre-invocation approval, so the executor never ran and no
+        # CTRLRun action was proposed — let the framework's own refusal **propagate**. Do not
+        # return a value (that is `never-executes`) and do not return `None` (undefined). The
+        # kit catches it and decides the case from the evidence: `denial` asserts that the
+        # executor was not reached and that CTRLRun was not asked (§5.4). Item 6 could not
+        # determine this from the contract and had to guess.
 
 
 class SuiteStatus(StrEnum):
@@ -1754,3 +1866,66 @@ Closing it properly needs somewhere in **core** that both shapes pass through an
 `Control` — `Control` construction itself is the obvious candidate. That is a change to core
 behaviour for every caller, not only adapter ones, and v0.5 adds no such thing (§9). It is
 recorded here as the follow-up it is.
+
+### 12.9 A rule that follows for one shape has to be *required* of the other
+
+§3.6 said *an adapter never interrupts in observe mode* and argued it through `Control.execute`:
+`ApprovalRequired` is never raised, so `wait()` is never called and the primitive is never
+reached. That argument is sound, and it covers exactly one of the two shapes in §3.5.
+
+A decided-before-invocation adapter reaches its framework's primitive from the **predicate**, one
+step earlier, without `Control.execute` running at all. `ctrlrun.adapter.needs_approval` is
+`Control.evaluate`, which `v0.3 §6.2` evaluates identically under observe mode, so it answers
+`APPROVE` and the framework stops the run and asks a human. `ctrlrun-openai-agents` did exactly
+that, and no test caught it: §3.6 makes the conformance kit **refuse** an observing `Control`, so
+an adapter that interrupts in observe mode scores full marks.
+
+The consequence is worse than the rule. A framework of that shape does not invoke a tool whose
+approval was declined — so a human's *no* under `mode: observe` **stops the action**, and observe
+mode's entire promise is that every decision is recorded and none is enforced. The deployment
+most likely to be running it is the one evaluating CTRLRun before trusting it, and what it would
+have seen is its agent halted by the tool that promised to change nothing.
+
+§3.6 now **requires** the predicate to return "no approval needed" under `mode: observe`, rather
+than leaving it to follow from an argument that does not reach that far. It is the one place an
+adapter is required to branch on the mode, and `Control.policy` is on §2.3's may-call list for it.
+
+**Found by item 6**, from the contract alone, by a session that had never read either reference
+adapter — which is what item 6 is for, and the strongest single piece of evidence that the
+exercise is worth its cost.
+
+### 12.10 What item 6 found, and what it says about the contract
+
+Item 6 wrote a third adapter against this document alone, in a session that could read the five
+specifications and `ARCHITECTURE.md` and nothing else — no kernel source, no reference adapter,
+no test. It chose the decided-before-invocation shape deliberately, on the grounds that it must
+touch `needs_approval`, `banner`, `refuses_before_invoking` and `Control.policy` and therefore
+loads more of the contract. Six of its fourteen findings exist only because of that choice, which
+is the finding rather than an artefact of it: **this document was written from one shape and read
+from the other, and that is where it broke.**
+
+Its verdict was *yes, with caveats* — and the caveat that matters: *"somebody else can implement
+this, and the first three things they build will each need a contract edit."*
+
+Every question it could not answer produced an edit: §2.3 gained `ctrlrun.context()` and
+`InterruptApprovalProvider` on the never-list (two omissions that each reopened a hole this
+project has closed before), `wait=True` in the *must call* paragraph where an implementer looks
+for it, and a note that the may-call side must be frozen too. §3.5 gained the `resource`
+resolution rule that the whole contract previously answered only in a parenthesis of
+`ARCHITECTURE.md`, the effect-key ordering cost, and the defaults-versus-binding interaction
+that makes an honest `carries_approved_arguments = True` unusable for a tool with defaulted
+parameters. §3.5.1 answers the async question, which five documents had never addressed.
+§3.6 is §12.9. §5.2 says what `invoke` does when the framework refuses before invoking.
+
+What it did **not** need to ask is the better half of the report. §2.2's `needs_approval`
+paragraph stopped it mid-line while it was writing `Control.evaluate(Action(..., principal=...))`
+— the exact hole §9.1 records — because that paragraph names the hole and not only the fix.
+§2.3's never-list as a table with a *Because* column stopped it reaching for
+`store.append_event`. §3.5's `DENY` paragraph reversed an instinct that would have refused
+without evidence and looked responsible doing it. §3.4's grant-only binding rule, with §12.2
+behind it, stopped it applying the check to a refusal.
+
+The pattern is worth naming, because it is what to do more of: **the sections that worked are the
+ones that record a defect rather than only a decision.** A reader can tell which parts of a
+document have been tested by something other than their author by looking for a §12 entry behind
+them — and everything in item 6's four most serious findings sat in a part with no §12 entry.
