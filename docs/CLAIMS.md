@@ -21,7 +21,7 @@ Regenerated for: **v0.5.0**, with rows re-pointed on `main` since. Line numbers 
 
 | Claim | Code | Proof |
 |---|---|---|
-| "Transaction safety for AI-agent actions" | `Control.execute` — `control.py:528` drives reserve → execute → commit/fail/ambiguous over `EffectState` (`effect.py:67`) | `test_T1_a_lost_response_leaves_the_effect_ambiguous` |
+| "Transaction safety for AI-agent actions" | `Control.execute` — `control.py:529` drives reserve → execute → commit/fail/ambiguous over `EffectState` (`effect.py:67`) | `test_T1_a_lost_response_leaves_the_effect_ambiguous` |
 | "Agents can retry. Your refund shouldn't." | A retry against an `AMBIGUOUS` key is refused — `effect.py:156`, the one place `plan_reservation` decides it for every store | `test_T1_a_blind_retry_is_refused_and_never_reaches_the_remote` |
 | "open-source" | Apache-2.0 `LICENSE`; `license = "Apache-2.0"` in `pyproject.toml` | n/a — licence file |
 | "controlling consequential AI-agent actions" | `@protect` — `control.py:1807`; `context()` — `control.py:132` | `test_T6_unknown_action_raises_ActionDenied_with_reason_unknown_action` |
@@ -46,7 +46,7 @@ Every sentence the README gained in this release, mapped the same way.
 | "Declare their effect and resource templates there" | `Policy.effect_template` / `resource_template` — `policy.py:358`; `McpOptions` — `policy.py:358` | `test_T16_a_v2_document_loads_and_exposes_its_templates`, `test_T16_a_decorator_and_a_policy_template_produce_the_same_action_hash` |
 | "Everything but `tools/call` is relayed untouched" | `parse_request(...).intercept` — `gateway/mcp.py:84` | `test_every_other_method_is_relayed_not_intercepted` |
 | "A lost response over the wire blocks the retry exactly as it does in-process" | `classify` — `gateway/outcome.py:144`, translated into v0.1 §5.5's own vocabulary by the gateway's executor | `test_T23_the_identical_call_sent_again_is_refused_and_the_upstream_called_once` |
-| "the only thing besides a human permitted to move a record out of `AMBIGUOUS`" | `Control._reconciled` — `control.py:1306`; `RECONCILED_STATES` — `effect.py` | `test_T13_a_hook_answering_not_executed_moves_the_record_to_failed`, `test_T14_a_hook_answering_committed_refuses_the_retry_as_a_duplicate` |
+| "the only thing besides a human permitted to move a record out of `AMBIGUOUS`" | `Control._reconciled` — `control.py:1353`; `RECONCILED_STATES` — `effect.py` | `test_T13_a_hook_answering_not_executed_moves_the_record_to_failed`, `test_T14_a_hook_answering_committed_refuses_the_retry_as_a_duplicate` |
 | "and only in the direction its answer points" | `"unknown"` is absent from `RECONCILED_STATES` — `effect.py` | `test_T15_a_hook_that_cannot_answer_leaves_the_record_ambiguous` |
 | "one OpenTelemetry span per action, one span event per step" | `OTelEventSink` — `otel.py:45` | `test_T29_one_action_produces_one_span_named_for_the_action`, `test_T29_every_event_becomes_a_span_event_named_by_its_type` |
 | "Argument values stay out of it unless you ask for them" | `OTelEventSink(arguments=...)` — `otel.py:45` | `test_T29_argument_values_are_not_attributes_by_default` |
@@ -68,11 +68,11 @@ way — and the four the README deliberately *does not* say are below.
 | "narrow it at runtime with `ctrlrun delegate`" | `Control.delegate` — `control.py:1480`; `Authority.plan_delegation` — `authority.py:878`; `ctrlrun delegate` — `cli/main.py:919` | `test_t75_the_delegation_authorizes_an_action_within_its_limits` |
 | "provably a subset of its parent on every dimension, at creation and again at every evaluation" | `contained_dimension` — `authority.py:604` — runs from `plan_delegation` (`authority.py:878`) **and** from the chain walk in `Authority.evaluate` (`authority.py:807`) | `test_t76_each_dimension_violated_alone`, `test_t77b_a_narrowed_parent_narrows_its_children` |
 | "Omitting a dimension the parent constrains is rejected, not inherited" | `contained_dimension` treats an absent child dimension as unconstrained and therefore wider — `authority.py:604`; the subject half is `_subject_contained` (`authority.py:635`) | `test_t81_omission_is_not_unlimited`, `test_T73b_a_subject_addressed_to_every_principal_is_refused`, `test_t76_each_dimension_violated_alone` |
-| "`ctrlrun revoke` cuts a chain of any depth with one write" | `Control.revoke` — `control.py:1496` — writes one row (`state.py:1166`) and visits no children; every evaluation walks to the root | `test_t78_a_revoked_parent_denies_its_grandchild`, `test_put_delegation_is_never_an_upsert` |
-| "`mode: observe` … records what *would* have been blocked, without blocking anything" | `_parse_mode` — `policy.py:405`; `Control._observed` — `control.py:701`; `_WouldHave` — `receipt.py:190`; `ReceiptResult.OBSERVED` — `receipt.py:190` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_a_duplicate_is_recorded_and_still_runs` |
-| "One top-level line" | `mode:` is refused anywhere but the top level — `reject_nested_mode`, `policy.py:424` | `test_T84_mode_is_refused_anywhere_but_the_top_level` |
+| "`ctrlrun revoke` cuts a chain of any depth with one write" | `Control.revoke` — `control.py:1547` — writes one row (`state.py:1166`) and visits no children; every evaluation walks to the root | `test_t78_a_revoked_parent_denies_its_grandchild`, `test_put_delegation_is_never_an_upsert` |
+| "`mode: observe` … records what *would* have been blocked, without blocking anything" | `_parse_mode` — `policy.py:607`; `Control._observed` — `control.py:702`; `_WouldHave` — `receipt.py:190`; `ReceiptResult.OBSERVED` — `receipt.py:190` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_a_duplicate_is_recorded_and_still_runs` |
+| "One top-level line" | `mode:` is refused anywhere but the top level — `reject_nested_mode`, `policy.py:626` | `test_T84_mode_is_refused_anywhere_but_the_top_level` |
 | "`ctrlrun stats` gives you the numbers" | `stats` — `cli/main.py:684`; counted from `would_have.blocked_reason` and nothing else | `test_T86_stats_counts_what_observe_mode_recorded`, `test_T86_stats_reaches_no_network` |
-| "It is not a dry run: it executes" | `_observed` runs the executor on every path, including the ones enforce mode would have refused — `control.py:701` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_an_executor_that_fails_on_a_held_key_still_writes_the_record` |
+| "It is not a dry run: it executes" | `_observed` runs the executor on every path, including the ones enforce mode would have refused — `control.py:702` | `test_T82_observe_executes_what_enforce_would_deny`, `test_T83_an_executor_that_fails_on_a_held_key_still_writes_the_record` |
 | "verifies a bearer token against a JWKS or a pinned key" | `JWTIdentityProvider._verified` — `jwt_identity.py:175`; the algorithm comes from the configured list and never from the token | `test_T88_a_valid_token_becomes_a_principal`, `test_T89_every_invalid_token_is_refused_by_cause` |
 | "maps the verified claims onto a principal" | `_principal` — `jwt_identity.py` — copies only the claims named in `claim_names` | `test_T88_only_the_named_claims_reach_the_principal` |
 | "`pip install \"ctrlrun[identity]\"`" | `identity = ["pyjwt[crypto]>=2.8"]` in `pyproject.toml`; imported lazily by `_jwt()` — `jwt_identity.py` | `test_T92_constructing_without_the_extra_names_the_install_command`, `test_T92_importing_ctrlrun_pulls_in_no_jwt_module` |
@@ -135,7 +135,7 @@ The README also makes two negative claims. They matter as much as the positive o
 | Claim | Where it holds |
 |---|---|
 | "CTRLRun cannot guarantee exactly-once execution against external systems it doesn't control." | Stated, not implemented — see `THREAT_MODEL.md`, "Out of scope". CTRLRun never asserts what a remote did; only `NotExecuted`, raised by the executor, claims that. |
-| "It will not *knowingly* execute the same logical effect twice, and will never treat an unknown outcome as a failure." | `effect.py:191` (refuse retry on `AMBIGUOUS`) and `control.py:959` (only `NotExecuted` → `FAILED`) |
+| "It will not *knowingly* execute the same logical effect twice, and will never treat an unknown outcome as a failure." | `effect.py:191` (refuse retry on `AMBIGUOUS`) and `control.py:960` (only `NotExecuted` → `FAILED`) |
 
 ## Demo output
 
@@ -175,7 +175,7 @@ The adapter section. Every sentence, mapped the same way.
 
 | Claim | Code | Proof |
 |---|---|---|
-| "You probably do not need an adapter" | Three ways in, and `@protect` (`control.py:1807`) covers this process while the gateway covers MCP — an adapter buys only the interrupt | `test_T139_the_adapter_section_says_when_you_do_not_need_one_up_front` |
+| "You probably do not need an adapter" | Three ways in, and `@protect` (`control.py:1864`) covers this process while the gateway covers MCP — an adapter buys only the interrupt | `test_T139_the_adapter_section_says_when_you_do_not_need_one_up_front` |
 | "the adapter reuses it and reimplements nothing" | `FrameworkInterrupt` — `adapter.py:180` — is a Protocol with one method returning a value; it holds no state and writes nothing | `test_T135b_the_adapter_reuses_the_sdks_primitive_and_reimplements_nothing` |
 | "One core provider writes the grant" | `InterruptApprovalProvider.wait` — `adapter.py:254` — calls `grant_approval` / `deny_approval`, and an adapter calls neither | `test_T130_each_broken_fixture_fails_the_suite_named_for_it` |
 | "An adapter never constructs one, and never supplies a principal" | `needs_approval` — `adapter.py:408` — resolves the principal from the `Control` so no adapter builds an `Action` | `test_T129_no_public_callable_takes_a_principal`, `test_T129_the_module_exposes_no_way_to_construct_a_control` |
