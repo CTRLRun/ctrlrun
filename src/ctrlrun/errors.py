@@ -202,6 +202,29 @@ class IdentityError(CTRLRunError):
     """
 
 
+class SchemaMismatch(CTRLRunError):
+    """A store met a database it does not recognise, in either direction (SPEC-v0.6 §3.3).
+
+    Its own type rather than an `InvalidArgument`, and the bar it clears is that an operator's
+    process refusing to start needs a distinguishable exception: *"your database is from the
+    future"* and *"your lease is negative"* have entirely different remedies, and one bucket for
+    both would put a schema problem behind a wiring bug.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        applied: tuple[str, ...] = (),
+        known: tuple[str, ...] = (),
+        running: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.applied = applied
+        self.known = known
+        self.running = running
+
+
 class MissingDependency(CTRLRunError):
     """An optional extra is not installed (SPEC-v0.2 §1.1, §11).
 

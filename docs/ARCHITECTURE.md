@@ -126,7 +126,7 @@ approvals(
 );
 receipts(receipt_id TEXT PRIMARY KEY, action_id TEXT, effect_key TEXT, result TEXT, json TEXT, ts TEXT);
 events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, action_id TEXT, effect_key TEXT, approval_id TEXT, data_json TEXT);
-delegations(                      -- v0.3; a NEW table, so no migration story is needed
+delegations(                      -- v0.3; a new table, which is why v0.3 needed no migration
   delegation_id TEXT PRIMARY KEY, -- "dlg_" + 32 hex
   parent_id TEXT NOT NULL,        -- a root grant's id, or another delegation_id
   depth INTEGER NOT NULL,         -- recorded, never trusted: evaluation walks to the root
@@ -136,6 +136,24 @@ delegations(                      -- v0.3; a NEW table, so no migration story is
   created_at TEXT NOT NULL, revoked_at TEXT, revoked_by TEXT
 );
 ```
+
+schema_version(                   -- v0.6; SPEC-v0.6 §3. Applied migration ids, RECORDED and
+  migration_id TEXT PRIMARY KEY,  -- never inferred: `PRAGMA table_info` answers "what is
+  applied_at TEXT NOT NULL,       -- there", which is not "what has been applied", and the two
+  ctrlrun_version TEXT NOT NULL   -- diverge the moment a migration does a backfill or a repair
+);
+receipt_chain(                    -- v0.6; SPEC-v0.6 §6.3. One row. The chain head, so that
+  id INTEGER PRIMARY KEY CHECK (id = 1),  -- truncation at the END is detectable: deleting the
+  seq INTEGER NOT NULL,           -- last N receipts leaves an internally consistent chain, and
+  hash TEXT NOT NULL              -- only a head naming a seq no row carries catches it
+);
+-- and `receipts` gains `seq`, `prev_hash` and `hash`, NULL for every row written before the
+-- chain existed. `0002_receipt_chain` does not backfill them (SPEC-v0.6 §3.7).
+```
+
+**The schema lives in `migrations.py`**, not here and not in `state.py`: from v0.6 a database is
+brought to it by an ordered, forward-only runner rather than by replaying a script on open, and
+two copies of the schema is the drift that item exists to prevent.
 
 `delegations` holds rows, not grants. `grant_json` stays a string in `state.py` so the store does
 not import `authority.py` and transitively acquire `policy.py`, which is the edge §6 puts in
@@ -154,6 +172,7 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `approval.py` | request/grant/consume, providers | executors |
 | `adapter.py` | `FrameworkInterrupt`, `PendingApproval`, `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner` | the policy evaluator, authority, effect state, executors, sinks, any framework |
 | `effect.py` | key templating, state enum, transition rules | SQLite |
+| `migrations.py` | the schema, the ordered migration list, the runner, and whether a database may open at all | policy, decorator, sinks, `Control` |
 | `state.py` | `StateStore` protocol + SQLite/in-memory impls | policy, decorator, sinks |
 | `control.py` | `Control` orchestration, decorator, context, suspend/resume | CLI |
 | `receipt.py` | Receipt/Event models, `EventSink`, JSONL sink | everything else |
@@ -162,6 +181,10 @@ Pragmas: `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`.
 | `cli/` | click commands, demo | internals beyond `Control` |
 
 Dependencies point downward only. `Control` is the only module that composes the others.
+
+`migrations.py` (v0.6) sits **beside** `state.py` rather than above it, and imports only stdlib
+and `errors.py`. It is what decides whether a store may open, and a store whose admission check
+lived somewhere else would be a store with two front doors.
 
 `verify/` (v0.4) sits **above** `control.py`, beside `cli/`: it composes `Control`, `Policy` and
 `Authority` the way an application does, and nothing in the kernel imports it. `import ctrlrun`

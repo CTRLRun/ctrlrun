@@ -33,7 +33,13 @@ jobs:
 
       # One script, called here and by a developer before pushing, so the two cannot
       # diverge. `test_ci_runs_the_check_script` fails if this step stops calling it.
+      # SPEC-v0.6 §3.5 item 2 asks a migration to be proved against the previous release's
+      # own code. Those fixtures pip-install real releases, and without this they SKIP on a
+      # network failure and the run is green -- the same false green `ci.yml` already refuses
+      # one job over, where a skipped adapter suite "is a failure and not a configuration".
       - name: check
+        env:
+          CTRLRUN_REQUIRE_RELEASE_FIXTURES: "1"
         run: ./scripts/check.sh
 
   # SPEC-v0.4 §5, T118. The composite action, run against this repository's own
