@@ -12,7 +12,9 @@ thing about every real framework it ever ran.
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -249,9 +251,15 @@ def test_T124_the_markdown_table_has_one_row_per_framework_and_is_rendered_from_
             assert row["config_deviation"] in table
 
 
-def test_T124_no_results_are_checked_in():
-    """§7.4 — item 6 ships the harness and no results. A PR carrying findings about other
-    projects that nobody had reviewed is not a PR this repository makes."""
+def test_T124_the_only_results_checked_in_are_the_published_run():
+    """§7.4 — `results/` was empty through v0.4 because nothing had been run. v0.5's item 1
+    is the item that publishes, and it publishes one run: the dated pair the maintainer read.
+    The rule that survives is that no *other* results file rides along, so a second run made
+    by a session and never read cannot reach the repository under cover of the first.
+
+    This reads the git index, where the companion on-disk check reads the directory. The two
+    disagree exactly when `.gitignore` has swallowed a file, which is how v0.2 shipped four
+    policy files that every green build had already accounted for."""
     checked_in = subprocess.run(
         ["git", "ls-files", "research/framework-probe/results"],
         cwd=REPO_ROOT,
@@ -262,9 +270,13 @@ def test_T124_no_results_are_checked_in():
     if checked_in.returncode != 0:  # pragma: no cover - not a checkout
         pytest.skip("no repository checkout")
 
-    tracked = [name for name in checked_in.stdout.split() if not name.endswith(".gitkeep")]
+    tracked = sorted(
+        name.rsplit("/", 1)[-1]
+        for name in checked_in.stdout.split()
+        if not name.endswith(".gitkeep")
+    )
 
-    assert tracked == [], tracked
+    assert tracked == ["2026-09-05.json", "2026-09-05.md"], tracked
 
 
 def test_T124_the_runner_writes_both_files(tmp_path):
@@ -383,32 +395,138 @@ def test_the_scenario_text_is_shared_and_not_per_adapter():
 
 # --- nothing anywhere claims the harness has been run against a real framework ---------------
 
-#: The four whose adapters have never been executed. The stubs and the MCP client have — they
-#: run in this repository's CI, end to end over a loopback socket.
-UNEXECUTED = ("langgraph", "crewai", "openai-agents", "autogen")
+#: The two whose adapters have still never been run against a model, and never executed at all.
+#: The stubs and the MCP client have — they run in this repository's CI, end to end over a
+#: loopback socket — and LangGraph and the Agents SDK were run against `gpt-4o-mini` on
+#: 2026-09-05, which is what `results/` holds.
+NEVER_EXECUTED = ("crewai", "autogen")
+
+#: The two that were, with the version each was run against. Read at runtime everywhere else
+#: (T123); written here because the *claim* is about a specific past run, and a claim about a
+#: past run cannot be re-derived from what happens to be installed now.
+MEASURED = {"langgraph": "1.2.11", "openai-agents": "0.22.0"}
+
+#: The two that reached the model call, with the version each was executed against. Read at
+#: runtime everywhere else (T123); written here because the *claim* in the README is about a
+#: specific past run, and a claim about a past run cannot be re-derived from what happens to be
+#: installed now.
 
 
-def test_the_readme_says_the_framework_adapters_have_never_been_executed():
-    """The study means nothing until the adapters have run, so the sentence that says they have
-    not is at the top of the harness README rather than in a per-adapter docstring nobody
-    reads. `results/` is empty for the same reason."""
+def test_the_readme_says_which_two_were_run_and_which_two_were_not():
+    """The claim that matters most is the negative one, and it is in the leading blockquote.
+
+    Two of four were measured; two were not, and nothing in this file is a finding about those
+    two. A sentence that let a reader carry "the frameworks were measured" away from a run that
+    covered half of them is the shape of an overclaim, and this is what stops it."""
+    block = leading_blockquote()
+
+    assert "Two of the four framework adapters have now been run against a model" in block
+    assert "Two have not" in block
+    assert "were not installed and remain unexecuted in every sense" in block
+    assert "Nothing in this file is a finding about either of them" in block
+
+
+def leading_blockquote() -> str:
+    """The README's opening blockquote, as one whitespace-collapsed string.
+
+    Scoped to the block rather than to the file because "in the same paragraph" is the claim,
+    and a substring search over the whole README passes with the bounding sentence moved to the
+    bottom — which is the exact failure the assertion is meant to prevent.
+    """
+    lines = (PROBE_ROOT / "README.md").read_text(encoding="utf-8").splitlines()
+    quoted = [line[1:] for line in lines if line.startswith(">")]
+    assert quoted, "the README's leading blockquote is gone"
+    return " ".join(" ".join(quoted).split())
+
+
+def test_the_measured_run_states_its_date_its_versions_and_its_repetitions():
+    """A published finding about somebody else's project carries what would let a reader
+    reproduce it or date it: which versions, which model, how many times, and when."""
+    block = leading_blockquote()
+
+    assert "2026-09-05" in block
+    assert "gpt-4o-mini" in block
+    assert "five repetitions" in block
+    for framework, version in MEASURED.items():
+        assert version in block, framework
+
+
+def test_the_readme_says_what_the_run_does_not_establish():
+    """One model, one prompt, one remote. A table with other projects' names in it has to say
+    what it did not vary, in the same document and not in a reply to a complaint."""
     readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
 
-    assert "The four framework adapters have never been executed" in readme
-    assert "adapters written from documented APIs, unexecuted" in readme
-    assert "no README, changelog entry or post may say otherwise" in readme
+    assert "What this run does not establish" in readme
+    assert "One model, one prompt, one remote" in readme
 
 
-@pytest.mark.parametrize("framework", UNEXECUTED)
-def test_every_unexecuted_adapter_says_so_in_its_own_docstring(framework):
+def test_the_readme_explains_that_executed_once_hides_the_mutation():
+    """`executed_once` in the approval-mutation column means the *mutated* action ran, which
+    reads like the opposite of what it is. `outcome` is a closed set fixed by SPEC-v0.4 §7.4
+    and has no value for "the mutation landed", so the README is where that is said."""
+    readme = " ".join((PROBE_ROOT / "README.md").read_text(encoding="utf-8").split())
+
+    assert "does **not** mean the scenario was handled well" in readme
+    assert "the human never approved" in readme
+
+
+@pytest.mark.parametrize("framework", NEVER_EXECUTED)
+def test_a_never_executed_adapter_makes_the_stronger_claim_in_its_docstring(framework):
     module = __import__(
         f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
     )
 
     docstring = " ".join((module.__doc__ or "").lower().split())
 
-    assert "never executed" in docstring, framework
-    assert "not run in this repository's ci" in docstring, framework
+    assert "never executed at all" in docstring, framework
+
+
+WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+
+
+def test_the_readme_agrees_with_itself_about_how_many_defects_the_run_found():
+    """Two sentences counted the findings and disagreed, in the one section whose whole purpose
+    is precision about what the run established. A number written twice must be written twice
+    the same, and it must be the number of rows in the table it introduces."""
+    readme = (PROBE_ROOT / "README.md").read_text(encoding="utf-8")
+    rows = [line for line in readme.splitlines() if re.match(r"^\| \d+ \|", line)]
+    written = {
+        WORDS[word.lower()]
+        for word in re.findall(r"(\w+) defects", readme)
+        if word.lower() in WORDS
+    }
+
+    assert rows, "the findings table is gone"
+    assert written == {len(rows)}, (written, len(rows))
+
+
+@pytest.mark.parametrize("framework", NEVER_EXECUTED)
+def test_an_unexecuted_adapter_says_so_in_its_own_docstring(framework):
+    module = __import__(
+        f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
+    )
+
+    docstring = " ".join((module.__doc__ or "").lower().split())
+
+    assert "never run against a model" in docstring, framework
+    assert "never executed at all" in docstring, framework
+
+
+@pytest.mark.parametrize("framework", sorted(MEASURED))
+def test_a_measured_adapter_says_which_version_and_which_model_it_was_run_on(framework):
+    """A measurement is a claim about a specific installation on a specific day, so the
+    docstring names it. Without the version the sentence reads as a standing property of the
+    adapter, and it is not: the next breaking release can invalidate it, and then the only
+    thing that would say so is a version that is no longer the one installed."""
+    module = __import__(
+        f"framework_probe.adapters.{framework.replace('-', '_')}", fromlist=["ADAPTER"]
+    )
+
+    docstring = " ".join((module.__doc__ or "").split())
+
+    assert "2026-09-05" in docstring, framework
+    assert MEASURED[framework] in docstring, framework
+    assert "gpt-4o-mini" in docstring, framework
 
 
 def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
@@ -423,12 +541,185 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
         if not path.exists():  # pragma: no cover - not a checkout
             continue
         text = path.read_text(encoding="utf-8").lower()
-        offending += [(name, framework) for framework in UNEXECUTED if framework in text]
+        offending += [(name, framework) for framework in NEVER_EXECUTED if framework in text]
 
     assert not offending, offending
 
 
-def test_the_results_directory_holds_nothing_but_its_placeholder():
-    present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
+def test_the_results_directory_holds_a_run_and_the_table_rendered_from_it():
+    """`results/` was empty on purpose until there was a run somebody had read. There is one
+    now, and the Markdown beside it is rendered from the JSON and never written by hand -- so
+    the assertion is that the two agree, not that a file exists."""
+    import json
 
-    assert present == [".gitkeep"], present
+    from framework_probe.results import to_markdown
+
+    present = sorted(path.name for path in (PROBE_ROOT / "results").iterdir())
+    assert present == [".gitkeep", "2026-09-05.json", "2026-09-05.md"], present
+
+    document = json.loads((PROBE_ROOT / "results" / "2026-09-05.json").read_text())
+    rendered = (PROBE_ROOT / "results" / "2026-09-05.md").read_text()
+
+    assert rendered == to_markdown(document) + "\n", (
+        "the table on disk is not what the JSON renders to; it was edited by hand, or the "
+        "renderer changed and the table was not regenerated"
+    )
+
+
+def test_the_published_run_is_what_the_readme_says_it_is():
+    """The README's numbers and the results file must not drift apart. A README quoting a run
+    that is no longer the one checked in is the shape of every stale finding."""
+    import json
+
+    document = json.loads((PROBE_ROOT / "results" / "2026-09-05.json").read_text())
+    by_cell = {(row["framework"], row["scenario"]): row for row in document["results"]}
+
+    assert by_cell[("langgraph", "double-refund")]["outcome"] == "executed_once"
+    assert by_cell[("openai-agents", "double-refund")]["outcome"] == "executed_twice"
+    # The pair that proves the harness can tell the two apart (SPEC-v0.4 §7, the stubs).
+    assert by_cell[("stub-retrying", "double-refund")]["outcome"] == "executed_twice"
+    assert by_cell[("stub-not-retrying", "double-refund")]["outcome"] == "executed_once"
+    for framework in ("crewai", "autogen"):
+        assert "not installed" in by_cell[(framework, "double-refund")]["notes"]
+    for row in document["results"]:
+        if row["framework"] in MEASURED:
+            assert "5 runs" in row["notes"], row
+
+
+# --- What running the harness against real installations found (item 1) --------------------
+
+
+def test_one_model_string_is_shared_by_every_adapter():
+    """§7.3 rule 2. `openai:gpt-4o-mini` here and `gpt-4o-mini` there meant one
+    `CTRLRUN_PROBE_MODEL` could not satisfy both, and the values happening to coincide today is
+    not the same as there being one of them."""
+    from framework_probe.adapters._framework import PROBE_MODEL
+
+    driven = ("langgraph", "openai_agents", "crewai", "autogen")
+    for name in driven:
+        module = __import__(f"framework_probe.adapters.{name}", fromlist=["MODEL"])
+        assert module.MODEL is PROBE_MODEL, name
+        assert "os.environ" not in inspect.getsource(module), (
+            f"{name} reads CTRLRUN_PROBE_MODEL for itself; that is the drift the shared "
+            "constant exists to prevent"
+        )
+
+
+def test_an_adapter_declares_every_distribution_its_run_imports():
+    """§7.3 rule 5's "skipped **by name**" is only reachable if `available()` knows what `run()`
+    needs. It did not: with `langchain` absent, the LangGraph adapter said it was available,
+    raised `ImportError`, and the table carried a row named `langgraph`, with LangGraph's
+    version, whose outcome was `error` — the harness's own environment reported as a framework
+    that broke."""
+    from importlib.metadata import packages_distributions
+
+    from framework_probe.adapters import all_adapters
+
+    #: Top-level module -> the distributions that provide it, read from the installed
+    #: environment rather than guessed: `openai-agents` installs `agents`, and a test that
+    #: assumed the two names matched would pass for the wrong reason on every adapter whose
+    #: names happen to agree.
+    provided_by = packages_distributions()
+
+    for adapter in all_adapters():
+        source = inspect.getsource(adapter.run)
+        imported = set(re.findall(r"^\s+from (\w+)[. ]", source, re.M))
+        imported |= set(re.findall(r"^\s+import (\w+)", source, re.M))
+        declared = {adapter.distribution, *getattr(adapter, "requires", ())}
+        named = set(getattr(adapter, "modules", ()))
+        for module in imported:
+            if module == "framework_probe":
+                continue
+            providers = set(provided_by.get(module, ()))
+            if providers:
+                # Installed here, so the real mapping is readable and is what gets asserted.
+                # It also keeps `modules` honest: a declaration that contradicted the
+                # environment would fail on a developer machine that has the framework.
+                assert not (module in named and not providers & declared), (
+                    f"{adapter.name} declares {module!r} in `modules`, but the installed "
+                    f"environment says it comes from {sorted(providers)}, none of which is "
+                    f"declared {sorted(declared)}"
+                )
+            elif module in named:
+                # Not installed, so the mapping cannot be read and the adapter's own
+                # declaration stands in. This is the CI path: none of these frameworks is a
+                # dependency of this repository, so nothing here is installed.
+                continue
+            else:
+                # Neither installed nor declared. Falling back to `module.replace("_", "-")`
+                # here is what made this test pass locally and fail in CI: it assumes the
+                # import name and the distribution name agree, which is the assumption this
+                # test exists to refuse. `openai-agents` installs `agents` and they do not.
+                providers = {module.replace("_", "-")}
+            assert providers & declared, (
+                f"{adapter.name}.run() imports {module!r} (from {sorted(providers)}), which is "
+                f"in neither `distribution` nor `requires` {sorted(declared)} — a missing "
+                f"dependency would be reported as a framework that broke"
+            )
+
+
+def test_is_installed_is_all_of_them_and_not_any():
+    from framework_probe.adapters.base import is_installed
+
+    assert is_installed("ctrlrun") is True
+    assert is_installed("ctrlrun", "no-such-distribution-9e1f") is False
+    assert is_installed("no-such-distribution-9e1f") is False
+
+
+def test_an_error_row_carries_the_exception_and_a_successful_row_does_not():
+    """Both halves. The second is the one with a failure mode: a stub whose response was
+    deliberately lost has an exception too, and repeating it beside `executed_once` would make
+    every successful row read like a broken one."""
+    from framework_probe.adapters.base import Attempt
+    from framework_probe.results import ERROR, EXECUTED_ONCE
+    from framework_probe.runner import _notes
+
+    assert _notes(Attempt(error="Boom: why"), ERROR) == "Boom: why"
+    assert _notes(Attempt(error="Boom: why", notes="context"), ERROR) == "context; Boom: why"
+    assert _notes(Attempt(error="Boom: why", notes="context"), EXECUTED_ONCE) == "context"
+    assert _notes(Attempt(notes="context"), ERROR) == "context"
+    assert _notes(Attempt(), ERROR) == ""
+
+
+def test_a_frameworks_exception_text_cannot_restructure_the_table():
+    """`notes` used to be written only by this harness's authors. It now carries a measured
+    framework's exception string, and a `|` or a newline in one of those does not make an ugly
+    cell — it makes a *different table*: the row gains a phantom column and then terminates."""
+    from framework_probe.results import SCHEMA, to_markdown
+
+    document = {
+        "schema": SCHEMA,
+        "run_at": "2026-09-04T12:00:00+00:00",
+        "python": "3.12.3",
+        "remote": "fake-mcp/1",
+        "results": [
+            {
+                "framework": "nasty",
+                "version": "1.0",
+                "adapter": "research/framework-probe/framework_probe/adapters/nasty.py",
+                "scenario": scenario,
+                "outcome": "error",
+                "effects_observed": 0,
+                "requests_observed": 0,
+                "config_deviation": None,
+                "notes": "ValueError: boom | pipe and\nnewline here",
+            }
+            for scenario in ("double-refund", "approval-mutation")
+        ],
+    }
+
+    table = to_markdown(document)
+    body = [line for line in table.splitlines() if line.startswith("| nasty")]
+
+    assert len(body) == 1, table
+    assert len(re.findall(r"(?<!\\)\|", body[0])) == 7, body[0]
+    assert "\n" not in body[0]
+
+
+def test_a_very_long_note_does_not_run_away_with_the_row():
+    from framework_probe.results import NOTE_LIMIT, cell
+
+    rendered = cell("x" * (NOTE_LIMIT * 3))
+
+    assert len(rendered) == NOTE_LIMIT
+    assert rendered.endswith("…")

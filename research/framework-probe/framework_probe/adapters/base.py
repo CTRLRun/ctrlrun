@@ -49,6 +49,15 @@ class Adapter(Protocol):
     #: §7.3 rule 4 — `None`, or the single change without which the framework cannot run the
     #: scenario at all. It goes in the table.
     config_deviation: str | None
+    #: Top-level modules `run()` imports whose name is **not** the name of a declared
+    #: distribution with `-` for `_`. Only `openai-agents` needs one: it installs `agents`.
+    #:
+    #: `test_an_adapter_declares_every_distribution_its_run_imports` reads the real mapping
+    #: out of the environment where the framework is installed, and falls back to this where
+    #: it is not — which is every CI run, since none of these frameworks is a dependency of
+    #: this repository. Without it the fallback guessed that the import name and the
+    #: distribution name matched, which is the assumption that test exists to refuse.
+    modules: tuple[str, ...]
 
     def available(self) -> bool:
         """Is the framework installed? An absent one is skipped **by name** (T123)."""
@@ -71,8 +80,19 @@ def read_version(distribution: str) -> str:
         return ""
 
 
-def is_installed(distribution: str) -> bool:
-    return bool(read_version(distribution))
+def is_installed(*distributions: str) -> bool:
+    """Are **all** of these installed?
+
+    Variadic because an adapter's `available()` has to name every distribution its `run()`
+    imports, and not just the one the row is labelled with. It did not, and running the harness
+    is what showed the cost: with `langchain` absent, the LangGraph adapter's `available()`
+    still said yes, `run()` raised `ImportError`, and the table carried a row named `langgraph`,
+    with LangGraph's version, whose outcome was `error` — a finding about the harness's own
+    environment, attributed to a framework, in the same closed-set value as "the framework
+    broke". §7.3 rule 5's "skipped **by name**" is the correct outcome, and it is only reachable
+    if `available()` knows what `run()` needs.
+    """
+    return all(read_version(distribution) for distribution in distributions)
 
 
 def tool_endpoint(url: str) -> str:

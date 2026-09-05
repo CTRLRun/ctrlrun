@@ -1104,9 +1104,17 @@ outcome, approval-mutation outcome, `config_deviation`, notes.
 Adapters: LangGraph, CrewAI, OpenAI Agents SDK, AutoGen, and a plain MCP client against a
 local MCP server. Each declares its framework version at runtime and records it.
 
-**Item 6 ships the harness and no results.** The runs are made and published separately, by
-the maintainer; a PR that carried a results file would be publishing findings about other
-projects that nobody had reviewed.
+**Item 6 ships the harness and no results.** The runs are made and published separately; a PR
+that carried a results file would be publishing findings about other projects that nobody had
+reviewed.
+
+**Amended by v0.5's item 1**, which is that separate publication and the only item that makes
+it. It checks in exactly one dated pair — the JSON of a run and the Markdown rendered from it
+— and the maintainer reads the table before the PR is opened. The rule that survives the
+amendment is that **no second results file rides along**: a run made by a session and read by
+nobody may not reach the repository under cover of one that was. T124 asserts it against the
+git index, and its companion asserts the same against the directory, because those two
+disagree exactly when `.gitignore` has swallowed a file.
 
 ---
 

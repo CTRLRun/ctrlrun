@@ -4,21 +4,23 @@ One `Agent` with one `function_tool`, run once through `Runner.run_sync`. No
 `failure_error_function` is supplied, so the SDK's default handling of a tool that raised is
 what the row measures.
 
-**Never executed.** Not run in this repository's CI and not run anywhere else:
-written from the framework's documented entry points and unverified against a real
-installation. Nothing this adapter would report is a finding until somebody runs it.
+**Run against a model on 2026-09-05.** Five repetitions of each scenario against `openai-agents`
+0.22.0 driving `gpt-4o-mini`, and every cell agreed with itself five times out of five: `double-
+refund` gave three to four effects in a single run, every time. `results/2026-09-05.json` is
+that run, and `../../README.md` says what it does and does not establish. Behaviour, not
+quality.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from ..scenarios import APPROVAL_MUTATION, Scenario
-from ._framework import call_remote, record_approval
+from ._framework import PROBE_MODEL, call_remote, record_approval
 from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
 
-MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "gpt-4o-mini")
+#: One `CTRLRUN_PROBE_MODEL` for every adapter, unprefixed — see `_framework.PROBE_MODEL`.
+MODEL = PROBE_MODEL
 
 
 @dataclass
@@ -27,8 +29,17 @@ class OpenAIAgentsAdapter:
     distribution: str = "openai-agents"
     config_deviation: str | None = None
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `run()` imports nothing outside `agents`.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ()
+    #: The distribution is `openai-agents`; the module it installs is `agents`. Nothing in the
+    #: environment says so when the distribution is absent, so the adapter does.
+    modules: tuple[str, ...] = ("agents",)
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)

@@ -1,27 +1,50 @@
 """LangGraph. SPEC-v0.4 §7.3; version and defaults in `../../README.md`.
 
-A prebuilt ReAct agent with one tool, run once on the scenario prompt. No retry policy is
-attached to the tool node and no `RetryPolicy` is passed to the graph: §7.3 rule 3 says
-framework defaults, and what LangGraph does with a tool that raised is precisely the finding.
+A prebuilt agent with one tool, run once on the scenario prompt. No retry policy is attached
+to the tool node and no `RetryPolicy` is passed to the graph: §7.3 rule 3 says framework
+defaults, and what LangGraph does with a tool that raised is precisely the finding.
 
-**Never executed.** Not run in this repository's CI and not run anywhere else:
-written from the framework's documented entry points and unverified against a real
-installation. Nothing this adapter would report is a finding until somebody runs it,
-and running it needs `langgraph`, a chat model and a key.
+The entry point stays `langgraph.prebuilt.create_react_agent`, and running this adapter is what
+settled that rather than settling the opposite. On langgraph 1.2.11 the prebuilt emits
+`LangGraphDeprecatedSinceV10` — a **warning**, not an exception — naming
+`langchain.agents.create_agent` as its replacement and V2.0 as its removal, and it then
+constructs and runs exactly as before. So the framework **can** run the scenario without a
+change, which is the condition §7.3 rule 4 attaches to permitting one: the change would be
+elective, and an elective change of the code path under measurement is what rule 4 exists to
+surface.
+
+Two reasons beyond the letter of the rule. `create_react_agent` is LangGraph's own
+implementation, while `create_agent` lives in `langchain/agents/factory.py` — a different
+distribution — so a row labelled `langgraph`, carrying a version read from `langgraph`, would be
+reporting langchain's agent loop and its middleware defaults. And the deprecation is itself a
+finding: it belongs in the README's documentation table under §7.3 rule 7, where a reader can
+see it, rather than in an adapter that quietly moved.
+
+**Run against a model on 2026-09-05.** Five repetitions of each scenario against `langgraph`
+1.2.11 with `langchain` 1.4.0 driving `gpt-4o-mini`, and every cell agreed with itself five
+times out of five: `double-refund` gave one effect and one request every time.
+`results/2026-09-05.json` is that run, and `../../README.md` says what it does and does not
+establish. Behaviour, not quality.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from ..scenarios import APPROVAL_MUTATION, Scenario
-from ._framework import call_remote, record_approval
+from ._framework import PROBE_MODEL, call_remote, record_approval
 from .base import Attempt, approve_endpoint, is_installed, read_version, tool_endpoint
 
 #: The one model every framework adapter drives, so the table compares frameworks and not
 #: models. Overridable by environment because a maintainer running this owns that choice.
-MODEL = os.environ.get("CTRLRUN_PROBE_MODEL", "openai:gpt-4o-mini")
+#:
+#: `PROBE_MODEL` is shared and unprefixed. It said `openai:gpt-4o-mini` here and `gpt-4o-mini`
+#: in the Agents SDK adapter until the two were run side by side: one `CTRLRUN_PROBE_MODEL`
+#: cannot be both, so setting it broke whichever adapter did not match its own default, and
+#: §7.3 rule 2 asks for the same text everywhere the framework's API admits it.
+#: `init_chat_model` resolves a bare `gpt-*` to `ChatOpenAI`, which was checked against
+#: langchain 1.4.0 rather than assumed.
+MODEL = PROBE_MODEL
 
 
 @dataclass
@@ -30,8 +53,15 @@ class LangGraphAdapter:
     distribution: str = "langgraph"
     config_deviation: str | None = None
 
+    #: Every distribution `run()` imports, beyond `distribution` itself (§7.3 rule 5).
+    #: `create_react_agent` resolves its model string through langchain's
+    #: `init_chat_model`, which imports the provider package lazily.
+    #: An adapter whose `available()` did not name them all reports a missing dependency as a
+    #: framework that broke.
+    requires: tuple[str, ...] = ("langchain", "langchain-core", "langchain-openai")
+
     def available(self) -> bool:
-        return is_installed(self.distribution)
+        return is_installed(self.distribution, *self.requires)
 
     def version(self) -> str:
         return read_version(self.distribution)
