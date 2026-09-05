@@ -10,19 +10,22 @@ effect *state* — records, transitions and reservations are none of policy's bu
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import operator
 import os
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from enum import StrEnum
+from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import yaml
 
-from .action import Action
+from .action import Action, PlainValue, canonical_bytes
 from .effect import template_placeholders
 from .errors import InvalidArgument, PolicyError
 
@@ -40,8 +43,18 @@ POLICY_SCHEMA_V2: Final = "ctrlrun.policy/v2"
 #: for the reason v0.2 gives: a reader that ignored it would run with a guarantee switched off.
 POLICY_SCHEMA_V3: Final = "ctrlrun.policy/v3"
 
+#: SPEC-v0.6 §7.1, §9.5 — required by any document using `version:`, `controls:` or `data:`.
+#: `v1`, `v2` and `v3` documents load unchanged and get a `policy_hash` like any other; only
+#: those three keys need `v4`.
+POLICY_SCHEMA_V4: Final = "ctrlrun.policy/v4"
+
 #: All of them, newest last, for the message an unknown schema produces.
-SUPPORTED_SCHEMAS: Final = (POLICY_SCHEMA, POLICY_SCHEMA_V2, POLICY_SCHEMA_V3)
+SUPPORTED_SCHEMAS: Final = (
+    POLICY_SCHEMA,
+    POLICY_SCHEMA_V2,
+    POLICY_SCHEMA_V3,
+    POLICY_SCHEMA_V4,
+)
 
 #: SPEC-v0.3 §6.1 — the two values of the top-level `mode:` key, and nothing else. Absent
 #: means `enforce`: the fail-closed default, so a document that predates the key enforces.
@@ -70,7 +83,20 @@ _OPERATORS: Final = ("eq", "neq", "in", *_NUMERIC_COMPARE)
 #: Longest first, so `amount_neq` reads as (amount, neq) and never as (amount_n, eq).
 _OPERATORS_BY_LENGTH: Final = tuple(sorted(_OPERATORS, key=len, reverse=True))
 
-_TOP_LEVEL_KEYS: Final = frozenset({"schema", "actions", "environment", "authority", "mode"})
+_TOP_LEVEL_KEYS: Final = frozenset(
+    {"schema", "actions", "environment", "authority", "mode", "version"}
+)
+
+#: SPEC-v0.6 §7.1 — the top-level keys that need `ctrlrun.policy/v4`, and what an older reader
+#: would do with each. `version:` is the mild one: an older reader ignoring it records no
+#: declared version, which is exactly what a `v3` document has. It is still gated, because
+#: §3.1's key sets are closed and a `version:` an older reader silently dropped would be a typo
+#: that never surfaced.
+_V4_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
+    "version": (
+        "an older reader would refuse the document outright, since its top-level key set is closed"
+    ),
+}
 
 #: SPEC-v0.3 §12.1 — the top-level keys that need `ctrlrun.policy/v3`, and what an older
 #: reader would do with each if it ignored one.
@@ -133,6 +159,15 @@ class Evaluation:
 
     decision: Decision
     reason: str
+    #: SPEC-v0.6 §7.3 — the control ids the **matched rule** cited, unioned with the action's,
+    #: in registry order. Empty where the document declares none, which is every document
+    #: before `ctrlrun.policy/v4`.
+    #:
+    #: **Attribution, not prevention.** These do not participate in the decision: they say which
+    #: written expectation the rule that produced it exists to serve. A field that changed a
+    #: decision would be a control that enforced something, and §7.3's second rule forbids
+    #: exactly that reading.
+    controls: tuple[str, ...] = ()
 
 
 def _is_int(value: object) -> bool:
@@ -280,6 +315,34 @@ class Policy:
     #: which decision is reached, and an evaluator that knew the mode would be a second place
     #: for the two to disagree.
     mode: Literal["observe", "enforce"] = ENFORCE
+    #: SPEC-v0.6 §7.1 — the operator's own label for this document, or `None`. A free string,
+    #: **for humans, and never authoritative**: two documents sharing a `version:` and differing
+    #: in content are two different policies, and `policy_hash` is what says so. Recorded on
+    #: every receipt beside the hash so an operator can read the evidence in their own terms.
+    version: str | None = None
+    #: The canonical form this policy's hash is computed over (§7.1). Held rather than rebuilt so
+    #: `policy_hash` is not recomputed on every action, and private because it is an
+    #: implementation detail of the hash and not a second way to read the policy.
+    _canonical: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @cached_property
+    def policy_hash(self) -> str:
+        """`"sha256:" + hex(SHA-256(canonical_form(...)))` over the **parsed** decision inputs.
+
+        SPEC-v0.6 §7.1. Over the parsed rules and not the file's bytes: two documents differing
+        only in comments, key order or whitespace hash the same, which is correct, because the
+        decision is a function of the rules and not of the formatting. A hash that moved on a
+        reformat would make every receipt's provenance field noise -- an operator who ran a
+        formatter would find nothing before that commit comparable with anything after it.
+
+        `v0.1 §2.3`'s canonicalizer through `canonical_bytes`, which is the same primitive the
+        action hash and the receipt chain use. A second one is what §6.2 forbids by name.
+
+        Authority is **in** it: `v0.3 §4.6` makes authority half of what decided an action, and
+        a hash that noticed a changed rule but not a widened grant would answer "what decided
+        this" with half the answer.
+        """
+        return "sha256:" + hashlib.sha256(canonical_bytes(self._canonical)).hexdigest()
 
     @classmethod
     def from_file(cls, path: str | os.PathLike[str] | None = None) -> Policy:
@@ -333,6 +396,12 @@ class Policy:
                 f"{source}: 'environment' must be a non-empty string, got {_type_name(environment)}"
             )
         mode = _parse_mode(document, source)
+        require_v4(document, str(schema), source)
+        version = document.get("version")
+        if "version" in document and (not isinstance(version, str) or not version.strip()):
+            raise PolicyError(
+                f"{source}: 'version' must be a non-empty string, got {_type_name(version)}"
+            )
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
@@ -344,6 +413,8 @@ class Policy:
             schema=str(schema),
             environment=environment if isinstance(environment, str) else None,
             mode=mode,
+            version=version if isinstance(version, str) else None,
+            _canonical=_canonical_policy(document, str(schema), mode, environment),
         )
 
     def effect_template(self, action_name: str) -> str | None:
@@ -385,6 +456,68 @@ def discover_policy_path() -> Path:
     return Path(configured)
 
 
+def _canonical_policy(
+    document: Mapping[Any, Any],
+    schema: str,
+    mode: str,
+    environment: object,
+) -> Mapping[str, Any]:
+    """The decision inputs of a policy document, in the shape its hash is taken over (§7.1).
+
+    **The parsed inputs, and only those.** `version:` is absent by construction -- it is
+    recorded and never authoritative, so a document relabelled and not otherwise touched hashes
+    the same. `source` is absent too: the same rules loaded from two paths are one policy.
+
+    Rules keep **document order**, because a policy is ordered and first-match wins (`v0.1
+    §3.3`); everything else is a mapping and `canonical_bytes` sorts it. Reordering two rules is
+    a different policy and the hash says so; reordering two keys inside one rule is not.
+    """
+    return {
+        "actions": _plain(document.get("actions")),
+        "authority": _plain(document.get("authority")),
+        "environment": environment if isinstance(environment, str) else None,
+        "mode": mode,
+        "schema": schema,
+    }
+
+
+def _plain(value: object) -> PlainValue:
+    """A YAML fragment as plain JSON-shaped data, so `canonical_bytes` can encode it.
+
+    `yaml.safe_load` already yields dicts, lists, strings, ints, bools and `None`, and
+    `canonical_bytes` refuses anything else -- including the `float` a threshold written as
+    `50000.0` would produce, which is `v0.1 §2.3`'s rule reaching the policy hash and is the
+    right answer: a binary float in a decision input is not portable between two hosts.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(item) for item in value]
+    if value is None or isinstance(value, str | int):  # bool is a subclass of int
+        return value
+    if isinstance(value, datetime | date | time):
+        # `yaml.safe_load` turns an unquoted `expires_at: 2020-01-01T00:00:00Z` into a
+        # `datetime`, and such documents load today -- a grant with an expiry is the ordinary
+        # case. ISO-8601 is what the same value would have been had it been quoted, and what
+        # CTRLRun writes everywhere else, so this loses nothing and invents nothing.
+        #
+        # An earlier version of this function *refused* here, which broke every authority
+        # document with an unquoted expiry. The conformance kit's own `EXPIRED_GRANT` caught it.
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    # A `float`, or anything else. `canonical_bytes` refuses it too, and naming the policy here
+    # is what turns "float is not encodable at payload.actions..." into something an operator can
+    # act on. A float in a *condition* was already refused before v0.6, by the numeric-operand
+    # check; this covers the rest of the document, and the reason is `v0.1 §2.3`'s: provenance
+    # that two hosts computed differently is not provenance.
+    raise PolicyError(
+        f"a policy cannot contain a {_type_name(value)}: the decision inputs are hashed with "
+        "v0.1 §2.3's canonicalizer, which encodes JSON and nothing else. Write a threshold as an "
+        "integer in minor units."
+    )
+
+
 def require_v3(document: Mapping[Any, Any], schema: str, source: str) -> None:
     """Refuse a `ctrlrun.policy/v3` key in an older document (SPEC-v0.3 §12.1).
 
@@ -392,12 +525,33 @@ def require_v3(document: Mapping[Any, Any], schema: str, source: str) -> None:
     may never see: SPEC-v0.3 §8.3's `--authority` file carries `schema` and `authority` and
     nothing else, so the check has to exist on both paths rather than on whichever runs first.
     """
-    if schema == POLICY_SCHEMA_V3:
+    # v4 is a superset: a `v4` document may use every `v3` key. Comparing for equality here was
+    # right while v3 was the newest and becomes a bug the moment it is not.
+    if schema in (POLICY_SCHEMA_V3, POLICY_SCHEMA_V4):
         return
     for key, consequence in _V3_TOP_LEVEL_KEYS.items():
         if key in document:
             raise PolicyError(
                 f"{source}: {key!r} needs 'schema: {POLICY_SCHEMA_V3}'; this document "
+                f"declares {schema!r}, and {consequence}"
+            )
+
+
+def require_v4(document: Mapping[Any, Any], schema: str, source: str) -> None:
+    """Refuse a `ctrlrun.policy/v4` key in an older document (SPEC-v0.6 §7.1).
+
+    `require_v3`'s shape exactly, one version up. Kept separate rather than folded into a
+    version-ordering comparison, because the *consequences* differ per key and the message an
+    operator reads is the point: "an older reader would run every action with no authority
+    check at all" and "an older reader would refuse the document outright" call for different
+    reactions.
+    """
+    if schema == POLICY_SCHEMA_V4:
+        return
+    for key, consequence in _V4_TOP_LEVEL_KEYS.items():
+        if key in document:
+            raise PolicyError(
+                f"{source}: {key!r} needs 'schema: {POLICY_SCHEMA_V4}'; this document "
                 f"declares {schema!r}, and {consequence}"
             )
 
