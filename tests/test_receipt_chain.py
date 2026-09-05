@@ -1137,3 +1137,39 @@ def _a_receipt(receipt_id: str):
         started_at=T0,
         finished_at=T0,
     )
+
+
+@postgres
+def test_verify_chain_reads_a_postgres_store_through_store_url(tmp_path, pg_schema) -> None:
+    """§6.6 and §9.4 together, which the two items landed separately.
+
+    Item 5 put `--store-url` on `ctrlrun receipts` and item 6 put `--verify-chain` on it. Neither
+    test covered the pair, and the pair is the case that matters: an operator on the backend this
+    milestone exists for, checking the chain in their own database.
+    """
+    from click.testing import CliRunner
+
+    from ctrlrun.cli import main as cli
+    from ctrlrun.postgres import PostgresStateStore
+
+    store = PostgresStateStore(POSTGRES_URL, schema=pg_schema, clock=lambda: T0)
+    a_chain(store, 3)
+    store.close()
+
+    url = f"{POSTGRES_URL}?ctrlrun_schema={pg_schema}"
+    intact = CliRunner().invoke(cli.main, ["receipts", "--verify-chain", "--store-url", url])
+    assert intact.exit_code == 0, intact.output
+    assert "3 of 3" in intact.output, intact.output
+
+    import psycopg
+
+    admin = psycopg.connect(POSTGRES_URL, autocommit=True)
+    admin.execute(f'UPDATE "{pg_schema}".receipts SET hash = NULL WHERE seq = 2')
+    admin.close()
+
+    broken = CliRunner().invoke(cli.main, ["receipts", "--verify-chain", "--store-url", url])
+    assert broken.exit_code != 0, broken.output
+    assert "hash_missing" in broken.output, broken.output
+    assert "2 of 3" in broken.output, (
+        f"the summary counts a stripped receipt as verified:\n{broken.output}"
+    )
