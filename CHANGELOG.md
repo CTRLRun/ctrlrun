@@ -9,10 +9,74 @@ any change to one appears here.
 
 ## [Unreleased]
 
-Work towards **0.5.0 "Adapter contract"**. v0.4 asked *does it hold in my setup?* v0.5 asks a
-narrower and harder question: **can somebody else implement this?** The adapter contract is one
-of the six things v1.0 freezes, so it is written to be lived with rather than revised once
-somebody tries it.
+## [0.5.0] - 2026-09-05 — Adapter contract
+
+v0.4 asked *does it hold in my setup?* v0.5 asks a narrower and harder question: **can somebody
+else implement this?** The adapter contract is one of the six things v1.0 freezes, so it is
+written to be lived with rather than revised once somebody tries it.
+
+**The milestone's own answer is yes, with caveats.** A session that could read the five
+specifications and nothing else — no kernel source, no reference adapter, no test — wrote a third
+adapter against the contract and returned fourteen questions it could not answer. Every one
+became an edit, and one of them was a defect in a *shipping* adapter that no test caught. That
+exercise, not the two adapters, is what v0.5 is for.
+
+### Added
+
+- **Two reference adapters**, on their own version line and in their own distributions:
+  `ctrlrun-langgraph` (`adapters-langgraph-1.0`) reuses `interrupt()`, `Command(resume=...)` and
+  the checkpointer; `ctrlrun-openai-agents` (`adapters-openai-agents-1.0`) reuses the SDK's
+  tool-approval interruption. Neither is in the `ctrlrun` wheel or sdist (T136). LangGraph
+  passes the conformance kit 6/6; the Agents SDK 4/4 with two suites `not_applicable`, each with
+  its reason on the report and in the README.
+
+  **Prevention or attribution**, in that word, is the sentence each README leads with.
+  LangGraph's resumption carries the arguments a human answered against and core re-checks them;
+  the Agents SDK records *that* a call was approved and not what its arguments were.
+
+- **`ctrlrun.adapter`** — the surface: `FrameworkInterrupt`, `PendingApproval`,
+  `ApprovalAnswer`, `InterruptApprovalProvider`, `needs_approval`, `banner`, and
+  `Control.resolve_principal` promoted from private. Core, stdlib, in the action path. An
+  adapter returns an answer and **one core provider writes the grant**, through the same calls
+  `ctrlrun approve` makes — which is what makes "never a second approval path" structural.
+
+- **`ctrlrun.conformance`** — this repository's own `v0.1 §7` and `v0.3 §10` acceptance tests,
+  runnable against any adapter, in **core**. It is not a certification and passing it is not a
+  claim about quality: it answers one question, *does an action driven through this adapter get
+  the same refusals as one driven through `@protect`?* Fifteen deliberately broken fixtures were
+  written **first**, and each fails the suite named for it and no other.
+
+- **`docs/adapters.md`**, and a README section that opens by saying when you do **not** need an
+  adapter (T139) — `@protect` covers anything in this process and the gateway anything over MCP.
+
+- **The framework probe was run** against LangGraph 1.2.11 and openai-agents 0.22.0, five
+  repetitions each, and the results are published. Read the `approval-mutation` column carefully:
+  `executed_once` there does not mean the scenario went well.
+
+### Changed
+
+- **`ctrlrun demo --help` said four scenarios and ran five**, stale since v0.3 added the
+  authority escalation.
+
+### Security
+
+Three independent reviews and item 6 found five authorization defects in
+`ctrlrun-openai-agents` before it shipped. All are fixed, mutation-tested, and recorded here
+because the pattern matters more than any one of them: **the SDK's approval record is keyed to a
+tool call, and a CTRLRun grant binds to an action hash**, so every defect was the same shape —
+reading a coarser answer as though it answered a finer question.
+
+- `interrupt()` returned `granted=True` unconditionally.
+- It then accepted a **sticky** per-tool decision, so `always_approve=True` answered for later
+  calls no human saw.
+- It then answered for **every action raised under one tool call**: a human approving a $5 refund
+  authorized a $1,000,000 wire raised beside it, with a receipt naming the channel as approver.
+- `unwrap()` returned the first `CTRLRunError` anywhere in the chain, so a nested `NotExecuted`
+  masked an AMBIGUOUS refund — *safe to retry* reported for an effect that may have landed.
+- **Observe mode interrupted and blocked the action.** Found by item 6 without reading the
+  adapter. §3.6's rule followed for one framework shape and had to be *required* of the other;
+  a deployment evaluating CTRLRun in the mode built for evaluating it would have had its agent
+  halted.
 
 ### Added
 

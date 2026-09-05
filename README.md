@@ -201,6 +201,60 @@ There is a [GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ver
           policy: ctrlrun.yaml
 ```
 
+## Using it inside an agent framework
+
+**You probably do not need an adapter.** `@protect` covers anything running in this process
+today, with no adapter and no framework support: a raw OpenAI call, a LangChain tool and a
+hand-rolled loop are all just decorated functions. The gateway covers anything reaching its
+tools over MCP, in any language. An adapter buys exactly one thing — routing an `approve`
+decision through **the framework's own interrupt** instead of raising past it — so a framework
+with no human-in-the-loop primitive has nothing for an adapter to reuse and does not need one.
+
+Where the framework does have one, the adapter reuses it and reimplements nothing. There is
+never a second place to say yes: two places to approve is one place nobody is watching.
+
+```console
+$ pip install ctrlrun-langgraph
+```
+
+```python
+from ctrlrun import Control, InterruptApprovalProvider
+from ctrlrun_langgraph import LangGraphInterrupt
+
+control = Control(
+    policy, store,
+    approvals=InterruptApprovalProvider(store, LangGraphInterrupt()),
+    identity=..., authority=...,
+)
+```
+
+You build the `Control` — with your policy, your store, your identity provider and your
+authority document — and hand it over. An adapter never constructs one, and never supplies a
+principal: an approval routed through a framework must not become a way for that framework's
+session object to say who is acting.
+
+A human answers where they already answer — `Command(resume=...)` for LangGraph,
+`state.approve(item)` for the OpenAI Agents SDK — and the adapter returns that answer. **One
+core provider writes the grant**, through the same calls `ctrlrun approve` makes, so the
+evidence is identical whichever way the answer arrived.
+
+| | reuses | binding |
+|---|---|---|
+| [`ctrlrun-langgraph`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/langgraph/README.md) | `interrupt()` and the checkpointer | **prevention** — the resumption carries the arguments and core re-checks them |
+| [`ctrlrun-openai-agents`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/openai-agents/README.md) | the SDK's tool-approval interruption | **attribution** — the SDK records *that* a call was approved, not what its arguments were |
+
+That column is the sentence to read first, and each adapter's README says which it is and why,
+in that word. Prevention means CTRLRun refuses a mutated action itself. Attribution means the
+binding across the interrupt is the framework's, and CTRLRun records who answered without being
+able to re-check it.
+
+**Adapters ship on their own version line** — `adapters-langgraph-1.0`, never `0.5.1`. An
+adapter breaks when its framework makes a breaking release, which is somebody else's schedule
+and not a kernel event. Each states its supported kernel range and framework range.
+
+[`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the
+three ways in, and how to write one for a framework not listed here.
+
 ## Two more things
 
 **Resolving an unknown outcome without a human.** `@protect(..., reconcile=...)` takes a
