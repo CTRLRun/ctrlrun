@@ -17,6 +17,7 @@ thing being verified is not the thing that ships.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -53,6 +54,33 @@ def _version() -> str:
         return version("ctrlrun")
     except PackageNotFoundError:  # pragma: no cover - a source tree with no install
         return "0.0.0"
+
+
+def _refuse_unless_scratchable(url: str) -> None:
+    """Refuse a Postgres URL verify cannot make its own schema in (SPEC-v0.6 §4.1).
+
+    Exit 2 naming the reason, never a silent fallback to `public`: `v0.4 §3.8`'s treatment for a
+    configuration verify will not run against. The probe schema is created and dropped
+    immediately, so the check costs one round trip and leaves nothing behind.
+    """
+    from uuid import uuid4
+
+    from ..errors import MissingDependency
+
+    probe = f"ctrlrun_verify_probe_{uuid4().hex[:12]}"
+    try:
+        from ..postgres import PostgresStateStore
+
+        PostgresStateStore.create_schema(url, probe)
+        PostgresStateStore.drop_schema(url, probe)
+    except MissingDependency as missing:
+        raise VerifyRefused(str(missing)) from missing
+    except Exception as refused:
+        raise VerifyRefused(
+            f"verify cannot create a scratch schema in that database: {refused}. It needs "
+            "CREATE on the database so it can make, migrate and drop a schema of its own -- it "
+            "never touches the operator's (SPEC-v0.6 §4.1)"
+        ) from refused
 
 
 def _selected(only: Sequence[str]) -> tuple[str, ...] | None:
@@ -98,11 +126,18 @@ def run(
     exception**. The operator's store is not opened, not read and not created (§3.5, T103).
     """
     selection = _selected(only)
-    if store_url is not None and store_url.strip() not in ("", SQLITE_STORE_URL):
+    chosen = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
+    if chosen != SQLITE_STORE_URL and not chosen.startswith(("postgresql://", "postgres://")):
         raise VerifyRefused(
-            f"--store-url {store_url!r} names a backend v0.4 does not have. The only value is "
-            f"{SQLITE_STORE_URL!r}; a second store backend is v0.6 (SPEC-v0.4 §3.1)"
+            f"--store-url {store_url!r} names a backend CTRLRun does not have. The values are "
+            f"{SQLITE_STORE_URL!r} and a postgresql:// URL (SPEC-v0.6 §4.1)"
         )
+    if chosen != SQLITE_STORE_URL:
+        # SPEC-v0.6 §4.1. A Postgres URL names a database an operator owns, and `v0.4 §3.1`
+        # promises verify does not open the operator's store. So verify makes a schema of its
+        # own per guarantee, migrates only that, and drops them all when the run ends -- and it
+        # refuses a URL it cannot do that with rather than falling back to `public`.
+        _refuse_unless_scratchable(chosen)
     loaded = load(config, authority)
     if loaded.policy.mode == OBSERVE:
         # §3.8 — running the scenarios and reporting ten failures would be true and useless;
@@ -119,7 +154,7 @@ def run(
     scratch = Path(tempfile.mkdtemp(prefix="ctrlrun-verify-"))
     results: list[GuaranteeResult] = []
     try:
-        engine = Engine(loaded, scratch)
+        engine = Engine(loaded, scratch, chosen)
         for guarantee in reg.GUARANTEES:
             if selection is not None and guarantee.id not in selection:
                 results.append(
@@ -135,6 +170,8 @@ def run(
             scenario = getattr(engine, guarantee.id.lower())
             results.append(scenario())
     finally:
+        with contextlib.suppress(Exception):
+            engine.drop_scratch_schemas()
         shutil.rmtree(scratch, ignore_errors=True)
     finished_at = datetime.now(UTC)
 
@@ -157,7 +194,10 @@ def run(
                 "max_delegation_depth": loaded.authority.max_delegation_depth,
             }
         ),
-        store={"backend": SQLITE_STORE_URL, "scratch": True},
+        store={
+            "backend": "postgres" if chosen != SQLITE_STORE_URL else SQLITE_STORE_URL,
+            "scratch": True,
+        },
         started_at=started_at,
         finished_at=finished_at,
         ctrlrun_version=_version(),

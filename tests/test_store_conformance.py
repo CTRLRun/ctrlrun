@@ -110,8 +110,15 @@ def test_T141_sqlite_reports_no_not_applicable(tmp_path):
     assert report.not_applicable_cases == (), report.to_text()
 
 
-def test_T141_in_memory_reports_exactly_the_two_honest_na(tmp_path):
-    """§2.4's table, by name. A third N/A from this backend is a failure, not a property."""
+def test_T141_in_memory_reports_only_the_two_honest_reasons(tmp_path):
+    """§2.4's table, by **reason**. A third reason from this backend is a failure, not a property.
+
+    Counted by reason rather than by case: the cross-process family grew when contended cases
+    were added for `consume_approval_and_reserve`, `take_continuation` and `grant`/`deny`, and
+    every one of them is inapplicable here for the *same* reason -- this backend's storage cannot
+    be opened from another process. Pinning a number would have made adding a contended case look
+    like a regression; pinning the reasons is what §2.4 actually says.
+    """
     report = run(InMemoryBackend(tmp_path))
     na = {
         (suite.name, case.id)
@@ -120,7 +127,16 @@ def test_T141_in_memory_reports_exactly_the_two_honest_na(tmp_path):
         if case.status is SuiteStatus.NOT_APPLICABLE
     }
     assert ("reservation", "e1-cross-process") in na, report.to_text()
-    assert {name for name, _ in na} == {"reservation", "durability"}, report.to_text()
+    reasons = {
+        case.reason
+        for suite in report.suites
+        for case in suite.cases
+        if case.status is SuiteStatus.NOT_APPLICABLE
+    }
+    assert reasons == {
+        "this backend's storage cannot be opened from another process",
+        "this backend's storage does not outlive the object that holds it",
+    }, reasons
     for suite in report.suites:
         for case in suite.cases:
             if case.status is SuiteStatus.NOT_APPLICABLE:

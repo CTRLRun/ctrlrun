@@ -985,13 +985,23 @@ before issuing the `INSERT`, so it holds the expected values without a second qu
   contenders sharing an `action_id` agree on it only if they also planned at the same instant with
   the same lease.
 
-Where a deployment makes even that collide — a frozen injected clock, one lease, one `action_id`,
-two processes — the two attempts are **indistinguishable in the record**, and the store MUST fail
-closed rather than assume: it treats the row as another's and refuses. That is a refusal for an
-effect this attempt may in fact hold, and it is the correct trade, because the alternative is the
-double execution this whole subsection exists to prevent. It is also unreachable in any deployment
-that lets `Action` generate its own `action_id`, which is the default and what every entry point
-does.
+**Where two attempts are identical in every column, no comparison can separate them, and the
+earlier draft of this paragraph asked for something unimplementable.** It said the store MUST
+fail closed on the indistinguishable case — a frozen clock, one lease, one `action_id`, two
+processes. But the identical case *is* the indistinguishable case: failing closed there would
+refuse every ambiguous commit that actually landed, which is every ordinary use of this path, and
+would make the re-read pointless.
+
+So the residual is stated instead of legislated away. **What closes it is upstream: `action_id`
+identifies one attempt.** `Action` generates a fresh one per attempt, and two *concurrent*
+attempts sharing one `action_id` is a caller-side violation no store can defend against —
+`action_id` is the store's entire notion of who holds a key, so a caller that reuses one has
+already told the store the two are the same attempt.
+
+What the seven columns buy is that the **realistic** collision is caught: a second attempt under
+a reused `action_id` at any other instant, with any other lease, or at a different `attempt`
+number differs in a column and is refused. Only a clock frozen *across processes* — which is a
+test harness, not a deployment — produces two rows a store cannot tell apart.
 
 ### 4.4 Connections, encoding and collation
 

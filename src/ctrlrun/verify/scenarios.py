@@ -23,6 +23,7 @@ to break:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -36,6 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
+from uuid import uuid4
 
 from ..action import Action, Principal
 from ..approval import DEFAULT_APPROVAL_TTL, ApprovalStatus, LocalApprovalProvider
@@ -66,7 +68,7 @@ from ..errors import (
 )
 from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
 from ..receipt import Event, EventType, Receipt, ReceiptResult, iso_timestamp
-from ..state import InMemoryStateStore, SQLiteStateStore
+from ..state import InMemoryStateStore, SQLiteStateStore, StateStore
 from . import guarantees as reg
 from .report import Counterexample, GuaranteeResult, Status
 from .worker import OUTCOME_COMMITTED
@@ -494,11 +496,55 @@ class Engine:
     — including when it ends by exception (§3.5).
     """
 
-    def __init__(self, loaded: _Loaded, scratch: Path) -> None:
+    def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
         self._loaded = loaded
         self._scratch = scratch
+        self._store_url = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
+        self._schemas: list[str] = []
+        self._urls: dict[str, str] = {}
         self._t0 = _base_instant(loaded.authority)
         self._default_environment = (loaded.policy.environment or "production").strip()
+
+    # --- the scratch store, on whichever backend --store-url names (SPEC-v0.6 §4.1) -------
+
+    @property
+    def _on_postgres(self) -> bool:
+        return self._store_url.startswith(("postgresql://", "postgres://"))
+
+    def _store_for(self, gid: str, clock: _Clock) -> tuple[StateStore, str]:
+        """A scratch store for one guarantee, and the address a subprocess can open it by.
+
+        **Verify never opens, migrates or writes to the operator's store**, and on Postgres that
+        is a promise about a database an operator owns rather than about a file. So verify
+        creates a schema of its own -- `ctrlrun_verify_<hex>` -- per guarantee, migrates only
+        that, and drops it when the run ends, including when the run ends by exception. It never
+        touches `public` (§4.1, T154e).
+        """
+        directory = self._scratch / gid
+        directory.mkdir(parents=True, exist_ok=True)
+        if not self._on_postgres:
+            store = SQLiteStateStore(directory / "state.db", clock=clock)
+            self._urls[gid] = f"sqlite://{directory / 'state.db'}"
+            return store, self._urls[gid]
+        from ..postgres import PostgresStateStore
+
+        schema = f"ctrlrun_verify_{uuid4().hex[:16]}"
+        PostgresStateStore.create_schema(self._store_url, schema)
+        self._schemas.append(schema)
+        joiner = "&" if "?" in self._store_url else "?"
+        self._urls[gid] = f"{self._store_url}{joiner}ctrlrun_schema={schema}"
+        return PostgresStateStore(self._store_url, schema=schema, clock=clock), self._urls[gid]
+
+    def drop_scratch_schemas(self) -> None:
+        """Remove every schema this run created. Called even when the run ends by exception."""
+        if not self._on_postgres:
+            return
+        from ..postgres import PostgresStateStore
+
+        for schema in self._schemas:
+            with contextlib.suppress(Exception):
+                PostgresStateStore.drop_schema(self._store_url, schema)
+        self._schemas.clear()
 
     # --- derivation ---------------------------------------------------------------------
 
@@ -661,17 +707,15 @@ class Engine:
 
     def control(
         self, gid: str, *, clock: _Clock | None = None, authority: bool = True
-    ) -> tuple[Control, SQLiteStateStore, _Recorder, _Clock]:
+    ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         """One scratch store per guarantee, and a `Control` composed the way an app composes one.
 
         `Control.from_file()` is not used: it would open the operator's store. The store is a
         file, because `SQLiteStateStore` refuses `:memory:` precisely so that G4 can mean
         something.
         """
-        directory = self._scratch / gid
-        directory.mkdir(parents=True, exist_ok=True)
         moving = clock if clock is not None else _Clock(self._t0)
-        store = SQLiteStateStore(directory / "state.db", clock=moving)
+        store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
         control = Control(
             self.policy,
@@ -686,11 +730,9 @@ class Engine:
 
     def _control_for(
         self, gid: str, selection: _Selection, *, clock: _Clock | None = None
-    ) -> tuple[Control, SQLiteStateStore, _Recorder, _Clock]:
-        directory = self._scratch / gid
-        directory.mkdir(parents=True, exist_ok=True)
+    ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
-        store = SQLiteStateStore(directory / "state.db", clock=moving)
+        store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
         control = Control(
             self.policy,
@@ -704,7 +746,7 @@ class Engine:
         return control, store, recorder, moving
 
     def approve(
-        self, control: Control, store: SQLiteStateStore, action: Action, selection: _Selection
+        self, control: Control, store: StateStore, action: Action, selection: _Selection
     ) -> str | None:
         """Grant verify's own approval, through the call `ctrlrun approve` makes (§3.5).
 
@@ -825,7 +867,7 @@ class Engine:
         self,
         gid: str,
         selection: _Selection | None,
-        store: SQLiteStateStore,
+        store: StateStore,
         recorder: _Recorder,
         body: Callable[[dict[str, Any]], None],
     ) -> GuaranteeResult:
@@ -1156,7 +1198,7 @@ class Engine:
     def _contend(
         self,
         control: Control,
-        store: SQLiteStateStore,
+        store: StateStore,
         selection: _Selection,
         keys: Sequence[str],
         label: str,
@@ -1179,7 +1221,7 @@ class Engine:
                         "authority_yaml": self._loaded.authority_text,
                         "authority_source": str(self._loaded.authority_path or ""),
                         "authority_standalone": self._loaded.authority_standalone,
-                        "store_path": str(store.path),
+                        "store_url": self._urls["G4"],
                         "environment": selection.environment,
                         "action": selection.action,
                         "arguments": dict(selection.arguments),
@@ -1726,7 +1768,7 @@ class Engine:
     def _refuse_delegation(
         self,
         control: Control,
-        store: SQLiteStateStore,
+        store: StateStore,
         recorder: _Recorder,
         parent: Grant,
         child: Grant,
@@ -1766,7 +1808,7 @@ class Engine:
     def _refuse_omission(
         self,
         control: Control,
-        store: SQLiteStateStore,
+        store: StateStore,
         recorder: _Recorder,
         parent: Grant,
         narrowed: Grant,
@@ -1936,7 +1978,7 @@ def _effect_dict(record: EffectRecord) -> dict[str, Any]:
 
 
 def counterexample(
-    store: SQLiteStateStore, recorder: _Recorder, expected: str, observed: str
+    store: StateStore, recorder: _Recorder, expected: str, observed: str
 ) -> Counterexample:
     """The ordered evidence for one scenario, in `event_id` order (§4.5)."""
     return Counterexample(
@@ -1995,7 +2037,7 @@ def _named_event(recorder: _Recorder, type_: EventType, **data: Any) -> bool:
     )
 
 
-def _last_receipt(store: SQLiteStateStore, action_id: str) -> Receipt | None:
+def _last_receipt(store: StateStore, action_id: str) -> Receipt | None:
     for receipt in reversed(store.receipts()):
         if receipt.action_id == action_id:
             return receipt

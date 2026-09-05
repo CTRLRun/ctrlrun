@@ -61,10 +61,10 @@ def attempt(payload: str) -> None:
         from ..action import Action, Principal
         from ..approval import LocalApprovalProvider
         from ..authority import Authority
+        from ..conformance.store.backends import store_from_url
         from ..control import Control
         from ..errors import CTRLRunError
         from ..policy import Policy
-        from ..state import SQLiteStateStore
 
         policy = Policy.from_file(request["policy_path"])
         authority = (
@@ -76,7 +76,10 @@ def attempt(payload: str) -> None:
                 standalone=request["authority_standalone"],
             )
         )
-        store = SQLiteStateStore(request["store_path"])
+        # Whichever backend `--store-url` named (SPEC-v0.6 §4.1). The address travels in the
+        # payload rather than a bare path, because a Postgres scratch store is a schema and not
+        # a file.
+        store = store_from_url(request["store_url"])
         control = Control(
             policy,
             store,
