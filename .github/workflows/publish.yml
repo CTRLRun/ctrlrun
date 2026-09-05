@@ -5,9 +5,17 @@ name: Publish
 # and that is the whole of it. A library that exists to keep consequential actions from
 # happening twice should not ship behind a long-lived credential someone can replay.
 
+# `v*` publishes the kernel; `adapters-<framework>-*` publishes that adapter. Adapters ship on
+# their own version line (SPEC-v0.5 §6.2) precisely so a framework's breaking release is not a
+# kernel event, so they are separate tags into the same workflow rather than a second workflow.
+# A second one was written and deleted: it would have matched `v*` as well, and two workflows
+# racing to upload the same distribution is the duplicate execution this project exists to stop.
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+      - "adapters-langgraph-*"
+      - "adapters-openai-agents-*"
 
 permissions:
   contents: read
@@ -18,6 +26,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      target: ${{ steps.target.outputs.target }}
+      path: ${{ steps.target.outputs.path }}
+      kernel: ${{ steps.target.outputs.kernel }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +36,25 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Which distribution does this tag name
+        id: target
+        run: |
+          set -eu
+          case "$GITHUB_REF_NAME" in
+            v*)                          target=ctrlrun;               path=.;                       kernel=true  ;;
+            adapters-langgraph-*)        target=ctrlrun-langgraph;     path=adapters/langgraph;      kernel=false ;;
+            adapters-openai-agents-*)    target=ctrlrun-openai-agents; path=adapters/openai-agents;  kernel=false ;;
+            *) echo "::error::$GITHUB_REF_NAME names no distribution"; exit 1 ;;
+          esac
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "kernel=$kernel" >> "$GITHUB_OUTPUT"
+          echo "publishing $target from $path"
+
       - name: Build
         run: |
-          python -m pip install --upgrade pip build twine
-          python -m build
+          python -m pip install --upgrade pip build twine packaging
+          python -m build --outdir dist "${{ steps.target.outputs.path }}"
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
@@ -38,14 +64,25 @@ jobs:
       # it fails here rather than on PyPI, where a version number can never be reused.
       - name: The tag matches the packaged version
         id: version
+        env:
+          PROJECT_PATH: ${{ steps.target.outputs.path }}
         run: |
-          version=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          tag="${GITHUB_REF_NAME#v}"
+          version=$(python -c "import tomllib,os,pathlib; print(tomllib.loads((pathlib.Path(os.environ['PROJECT_PATH'])/'pyproject.toml').read_text())['project']['version'])")
+          # `v0.5.0` names 0.5.0 exactly. `adapters-langgraph-1.0` names the **version line**,
+          # so 1.0.0 satisfies it -- SPEC-v0.5 §6.2 versions adapters `MAJOR.MINOR` and the
+          # distribution carries the patch. Anything else is refused.
+          case "$GITHUB_REF_NAME" in
+            v*) tag="${GITHUB_REF_NAME#v}"
+                if [ "$tag" != "$version" ]; then
+                  echo "::error::tag v$tag does not match pyproject version $version"; exit 1
+                fi ;;
+            *)  tag="${GITHUB_REF_NAME##*-}"
+                case "$version" in
+                  "$tag"|"$tag".*) : ;;
+                  *) echo "::error::tag $GITHUB_REF_NAME does not match version $version"; exit 1 ;;
+                esac ;;
+          esac
           echo "tag=$tag  packaged=$version"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::tag v$tag does not match pyproject version $version"
-            exit 1
-          fi
           # PEP 440 pre-release (a/b/rc) or a dev release routes to TestPyPI.
           if python -c "import sys;from packaging.version import Version;sys.exit(0 if Version('$version').is_prerelease else 1)"; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
@@ -56,7 +93,12 @@ jobs:
 
       # The same gates the release has to pass on main, re-run against the artifacts that
       # are about to be uploaded rather than against the working tree.
+      # Kernel only. An adapter's sdist carries its module and its README; its tests live in
+      # this repository's `tests/` and run in CI's `adapters` job against the source tree, which
+      # is where they can drive a real framework. Running "its own tests" against an adapter
+      # sdist would assert nothing, and a gate that asserts nothing is worse than no gate.
       - name: The sdist can run its own tests
+        if: steps.target.outputs.kernel == 'true'
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
           cd /tmp/sdist
@@ -67,6 +109,7 @@ jobs:
           pytest -q
 
       - name: The quick start works from the wheel
+        if: steps.target.outputs.kernel == 'true'
         run: |
           python -m venv /tmp/qs
           /tmp/qs/bin/pip install dist/*.whl
@@ -74,6 +117,32 @@ jobs:
           timeout 60 /tmp/qs/bin/ctrlrun demo
           /tmp/qs/bin/ctrlrun init
           test -f ctrlrun.yaml
+
+      # SPEC-v0.5 §6.1 in the other direction, and the adapter's equivalent of the two gates
+      # above: the wheel installs, the module imports, and it carries none of the kernel.
+      - name: The adapter wheel installs and carries no kernel
+        if: steps.target.outputs.kernel == 'false'
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          set -eu
+          python - <<'PY'
+          import pathlib, tarfile, zipfile
+          names = []
+          for path in pathlib.Path("dist").iterdir():
+              if path.suffix == ".whl":
+                  names += zipfile.ZipFile(path).namelist()
+              elif path.name.endswith(".tar.gz"):
+                  with tarfile.open(path) as archive:
+                      names += archive.getnames()
+          assert names, "nothing was built"
+          bad = [n for n in names if "/ctrlrun/" in n or n.startswith("ctrlrun/")]
+          assert not bad, bad
+          print("ok:", len(names), "entries, none of them the kernel")
+          PY
+          python -m venv /tmp/adapter
+          /tmp/adapter/bin/pip install dist/*.whl
+          /tmp/adapter/bin/python -c "import ${TARGET//-/_}; print('${TARGET} imports')"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -88,7 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/ctrlrun
+      url: https://test.pypi.org/p/${{ needs.build.outputs.target }}
     permissions:
       id-token: write # the OIDC token trusted publishing exchanges; nothing else
     steps:
@@ -106,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/ctrlrun
+      url: https://pypi.org/p/${{ needs.build.outputs.target }}
     permissions:
       id-token: write
     steps:

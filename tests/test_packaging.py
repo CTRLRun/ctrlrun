@@ -763,7 +763,7 @@ def test_every_documented_install_names_a_distribution_this_repository_builds():
     or a doc written ahead of the code fails here.
 
     What it deliberately does **not** claim is that the name is on PyPI. That is a release-time
-    fact and `.github/workflows/release.yml` is what makes it true; saying otherwise would be
+    fact and `.github/workflows/publish.yml` is what makes it true; saying otherwise would be
     the kind of loosely-true assertion this suite keeps refusing.
     """
     import tomllib
