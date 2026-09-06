@@ -1,6 +1,6 @@
 """The README's header assets: the demo animation, its tape, and the social preview.
 
-The GIF is a recording of `ctrlrun demo`'s first scenario, and a recording is a claim about
+The GIF is a recording of `ctrlrun demo`'s first two scenarios, and a recording is a claim about
 output that can drift the day the demo changes. So the tape is committed, the lines the
 recording ends on are committed beside it, and this file asserts that every one of them is a
 line the demo prints and a line the README quotes. When the demo's output changes, the README
@@ -49,11 +49,41 @@ def test_the_tape_writes_the_gif_the_readme_embeds():
 
 
 def test_the_recording_ends_on_the_line_that_matters():
-    """The share unit is a failure and a refusal, so the last line held on screen is the
-    count that proves the refund happened once."""
-    assert _expected_lines()[-1].strip() == "remote refund calls: 1"
+    """The share unit is a failure and a refusal. The recording shows two: the count that
+    proves the refund happened once, and, held last on screen, the approval that was bound to
+    one action and refused for another."""
+    lines = [line.strip() for line in _expected_lines()]
+    assert "remote refund calls: 1" in lines
+    assert lines[-1] == "✗ BLOCKED — approved action ≠ requested action (mismatch)"
     tape = (ASSETS / "demo.tape").read_text(encoding="utf-8")
-    assert "remote refund calls: 1" in tape
+    assert "sed '/approved action/q'" in tape
+
+
+def test_the_recording_is_paced_and_hides_nothing_but_the_pacing():
+    """The demo prints everything at once; the tape releases it a line at a time so a reader
+    can follow. The only off-screen setup is that loop, and the two pipes are typed in the open."""
+    tape = (ASSETS / "demo.tape").read_text(encoding="utf-8")
+    hidden = tape.split("Hide", 1)[1].split("Show", 1)[0]
+    assert "slow()" in hidden and "sleep" in hidden
+    assert "ctrlrun" not in hidden, "the demo itself must not run off screen"
+    assert "Type \"ctrlrun demo | sed '/approved action/q' | slow\"" in tape
+
+
+def test_the_wordmark_ships_for_both_themes_and_the_readme_uses_both():
+    for name in (
+        "wordmark.svg",
+        "wordmark-light.svg",
+        "wordmark-dark.svg",
+        "logo.svg",
+        "favicon.svg",
+    ):
+        assert "#F5A623" in (ASSETS / name).read_text(encoding="utf-8"), f"{name} lacks the accent"
+    for name in ("wordmark-light.svg", "wordmark-dark.svg", "favicon.svg"):
+        site = (REPO_ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
+        assert site == (ASSETS / name).read_text(encoding="utf-8"), f"docs/images/{name} drifted"
+    head = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    assert 'srcset="docs/assets/wordmark-dark.svg"' in head
+    assert 'src="docs/assets/wordmark-light.svg"' in head
 
 
 @pytest.mark.authority

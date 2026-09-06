@@ -5,3 +5,8 @@ Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, abo
    agent retries the same refund
    ✗ BLOCKED — effect may already have committed; blind retry refused
    remote refund calls: 1
+   only a human moves it on:  ctrlrun resolve refund:txn_1 --committed|--failed
+2. Approval mutation
+   agent proposes refund €2,000  →  human approves apr_15b1568d362999c10f7fd49c320619fb (bound to the action hash)
+   agent executes refund €5,000  →
+   ✗ BLOCKED — approved action ≠ requested action (mismatch)

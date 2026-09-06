@@ -1,7 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="600" height="120" viewBox="0 0 600 120" role="img" aria-label="CTRLRun">
-  <style>.t{fill:#14161b}@media (prefers-color-scheme: dark){.t{fill:#f2f3f5}}</style>
   <rect x="8" y="18" width="94" height="88" rx="21" fill="#B8730A"/>
   <rect x="8" y="10" width="94" height="88" rx="21" fill="#F5A623"/>
   <path d="M44 34 L74 54 L44 74 Z" fill="#14161b" stroke="#14161b" stroke-width="7" stroke-linejoin="round"/>
-  <text class="t" x="124" y="84" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="72" font-weight="800" letter-spacing="-2" fill="#14161b">CTRL<tspan font-weight="400" letter-spacing="-1">Run</tspan></text>
+  <text class="t" x="124" y="84" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="72" font-weight="800" letter-spacing="-2" fill="#f2f3f5">CTRL<tspan font-weight="400" letter-spacing="-1">Run</tspan></text>
 </svg>

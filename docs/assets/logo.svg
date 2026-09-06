@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="CTRLRun">
+  <!-- The mark: a keycap — the CTRL key — with the run triangle cut out of it. Amber is the
+       brand accent (#F5A623 on dark, #B8730A as the key's edge and the light-mode link colour). -->
+  <rect x="40" y="72" width="432" height="400" rx="96" fill="#B8730A"/>
+  <rect x="40" y="40" width="432" height="400" rx="96" fill="#F5A623"/>
+  <path d="M204 152 L344 240 L204 328 Z" fill="#14161b" stroke="#14161b" stroke-width="28" stroke-linejoin="round"/>
+</svg>

@@ -1,14 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="CTRLRun — the last check before an AI agent does something it can't undo">
   <rect width="1280" height="640" fill="#14161b"/>
-  <rect x="72" y="72" width="76" height="76" rx="15" fill="none" stroke="#c9ccd3" stroke-width="7"/>
-  <path d="M94 92 L122 110 L94 128 Z" fill="#c9ccd3"/>
-  <text x="168" y="130" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="58" font-weight="700" letter-spacing="-1" fill="#c9ccd3">CTRL<tspan font-weight="400">Run</tspan></text>
-  <text x="72" y="248" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">The last check before an AI agent</text>
-  <text x="72" y="304" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">does something it can't undo.</text>
-  <text x="72" y="356" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="26" fill="#a7abb4">Autonomy belongs to the action, not the agent.</text>
+  <rect x="72" y="78" width="74" height="70" rx="17" fill="#B8730A"/>
+  <rect x="72" y="72" width="74" height="70" rx="17" fill="#F5A623"/>
+  <path d="M100 91 L124 107 L100 123 Z" fill="#14161b" stroke="#14161b" stroke-width="6" stroke-linejoin="round"/>
+  <text x="166" y="130" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.5" fill="#f2f3f5">CTRL<tspan font-weight="400" letter-spacing="-0.5">Run</tspan></text>
+  <text x="72" y="248" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">The last check before an AI agent</text>
+  <text x="72" y="304" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">does something it can't undo.</text>
+  <text x="72" y="356" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="26" fill="#a7abb4">Autonomy belongs to the action, not the agent.</text>
   <rect x="72" y="412" width="1136" height="156" rx="12" fill="#1e2128" stroke="#2c3038" stroke-width="2"/>
+  <rect x="72" y="412" width="6" height="156" rx="3" fill="#F5A623"/>
   <text x="104" y="462" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#a7abb4">refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS</text>
   <text x="104" y="500" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#a7abb4">agent retries the same refund</text>
   <text x="104" y="538" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="700" fill="#f28b82">✗ BLOCKED — effect may already have committed; blind retry refused</text>
-  <text x="1208" y="608" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" fill="#6f747d">pip install ctrlrun</text>
+  <text x="1208" y="608" text-anchor="end" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="20" fill="#F5A623">pip install ctrlrun</text>
 </svg>
