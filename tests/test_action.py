@@ -251,6 +251,44 @@ def test_T7_non_string_argument_key_raises_invalid_argument(arguments: dict[Any,
         _action(arguments=arguments)
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"note": "\ud800"}, id="lone-high-surrogate-value"),
+        pytest.param({"note": "\udfff"}, id="lone-low-surrogate-value"),
+        pytest.param({"\ud800": "note"}, id="surrogate-key"),
+        pytest.param({"meta": {"note": "ok\ud83d"}}, id="nested-surrogate"),
+        pytest.param({"items": ["fine", "\udc00"]}, id="surrogate-in-a-list"),
+    ],
+)
+def test_T7_unencodable_string_raises_invalid_argument(arguments: dict[Any, Any]) -> None:
+    """A lone UTF-16 surrogate is a `str` Python accepts and UTF-8 cannot represent.
+
+    It arrives the ordinary way: `json.loads('"\\ud800"')` produces one, so an MCP tool call
+    carries it into the action path. Canonicalization used to raise `UnicodeEncodeError` from
+    inside `json.dumps(...).encode()`, which is outside the closed error set in `errors.py` --
+    a caller catching `CTRLRunError` did not catch it. Found by `fuzz/`."""
+    with pytest.raises(InvalidArgument):
+        _action(arguments=arguments)
+
+
+def test_T7_an_unencodable_string_is_refused_as_a_ctrlrun_error() -> None:
+    """The half that matters to a caller: it is in the closed set, not merely refused."""
+    from ctrlrun.errors import CTRLRunError
+
+    with pytest.raises(CTRLRunError):
+        assert _action(arguments=json.loads('{"note": "\\ud800"}')).action_hash
+
+
+def test_T7_a_paired_surrogate_is_an_ordinary_character_and_is_accepted() -> None:
+    """The negative control. `\\ud83d\\ude00` is a *pair* -- Python decodes it to one
+    emoji -- so a refusal keyed on "contains a surrogate code point" rather than on
+    encodability would reject a string every JSON encoder in the world accepts."""
+    action = _action(arguments={"note": json.loads('"\\ud83d\\ude00"')})
+    assert action.action_hash.startswith("sha256:")
+    assert "\U0001f600" in canonicalize(action).decode("utf-8")
+
+
 def test_T7_a_tuple_and_the_equivalent_list_produce_the_same_hash() -> None:
     from_tuple = _action(arguments={"items": (1, "a", {"k": ("deep",)})})
     from_list = _action(arguments={"items": [1, "a", {"k": ["deep"]}]})

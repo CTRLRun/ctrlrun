@@ -37,32 +37,20 @@ def policy_from_yaml(text: str, *, source: str = "<string>") -> Policy:
 
 # --- known findings ---------------------------------------------------------------------------
 
-#: A finding that is real, reported, and not yet fixed. It is recorded here rather than worked
-#: around in the decoder, because a fuzzer whose corpus is pruned to avoid its own findings is
-#: a fuzzer that reports zero forever.
+#: Findings that are real, reported, and not yet fixed -- recorded here rather than worked
+#: around in the decoder, because a fuzzer whose corpus is pruned to avoid its own findings
+#: reports zero forever.
 #:
-#: `test_the_known_findings_still_reproduce` asserts each of these **still happens**. The day
-#: one is fixed that test goes red and the entry must be deleted -- which is the point. A
-#: documented limit that quietly starts passing is the failure mode this whole file is about.
-KNOWN_FINDINGS: dict[str, str] = {
-    "lone-surrogate-in-a-string": (
-        "canonical_bytes raises UnicodeEncodeError, not InvalidArgument, for a string holding "
-        "an unpaired UTF-16 surrogate. Reachable: json.loads('\"\\\\ud800\"') produces one, so "
-        "an MCP tool call can carry it. Fail-closed holds -- the gateway and Control both wrap "
-        "the action path in `except Exception` -- but the error escapes the closed set in "
-        "errors.py and violates InvalidArgument's documented contract."
-    ),
-}
-
-
-def _has_surrogate(value: object) -> bool:
-    if isinstance(value, str):
-        return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
-    if isinstance(value, dict):
-        return any(_has_surrogate(k) or _has_surrogate(v) for k, v in value.items())
-    if isinstance(value, list | tuple):
-        return any(_has_surrogate(item) for item in value)
-    return False
+#: **Empty, and the machinery stays.** It held `lone-surrogate-in-a-string` --
+#: `canonical_bytes` raising `UnicodeEncodeError` instead of `InvalidArgument` for an unpaired
+#: UTF-16 surrogate -- until that was fixed in `action.py`. The entry's own test asserted the
+#: finding *still reproduced*, so the fix turned it red and the entry had to go. That is the
+#: mechanism working, and it is why the dict is left in place for the next one.
+#:
+#: `test_the_seed_corpus_reproduces_every_known_finding` compares this to what the corpus
+#: actually produces, in both directions, so an entry cannot be added without a reproducer and
+#: a reproducer cannot start failing unnoticed.
+KNOWN_FINDINGS: dict[str, str] = {}
 
 
 # --- decoders ---------------------------------------------------------------------------------
@@ -211,10 +199,14 @@ def check_canonical(document: dict[Any, Any]) -> str | None:
         first = _encode(document, "the first pass")
     except InvalidArgument:
         return None  # a refusal in words is the contract working
-    except UnicodeEncodeError:
-        if _has_surrogate(document):
-            return "lone-surrogate-in-a-string"
-        raise AssertionError("UnicodeEncodeError with no surrogate in the input") from None
+    except UnicodeEncodeError as exc:
+        # Was `KNOWN_FINDINGS["lone-surrogate-in-a-string"]`. `action.py` refuses an
+        # unencodable string with `InvalidArgument` now, so this escaping again is a
+        # regression and not a recorded limit.
+        raise AssertionError(
+            f"canonicalization raised UnicodeEncodeError, which is outside the closed error "
+            f"set in errors.py: {exc}"
+        ) from exc
 
     assert not must_refuse, "canonicalization accepted a document holding " + " and ".join(
         must_refuse

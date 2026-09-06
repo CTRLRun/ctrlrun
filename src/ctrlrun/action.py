@@ -42,6 +42,30 @@ def _new_action_id() -> str:
     return f"act_{secrets.token_hex(_ID_HEX_BYTES)}"
 
 
+def _encodable(text: str, path: str) -> str:
+    """Refuse a `str` that UTF-8 cannot represent (SPEC-v0.1 §2.3).
+
+    A lone UTF-16 surrogate is such a string: Python accepts it, UTF-8 has no encoding for it,
+    and it arrives the ordinary way -- `json.loads('"\\ud800"')` produces one, so an MCP tool
+    call carries it into the action path. It is refused here for the reason `float` is: an
+    argument that cannot be canonicalized cannot be hashed, and an `Action` that can be built
+    but never hashed is a trap set at construction and sprung somewhere else.
+
+    A refusal and not a repair. `errors="replace"` would map two distinct arguments to one
+    canonical form, which is the collision §2.3 exists to prevent. A *paired* surrogate is not
+    affected: Python has already decoded it to the character it denotes.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise InvalidArgument(
+            f"{path} holds a string UTF-8 cannot encode at position {exc.start}: {exc.reason}. "
+            "A lone surrogate has no canonical form, and substituting one would give two "
+            "distinct actions the same hash (v0.1 §2.3)"
+        ) from exc
+    return text
+
+
 def _frozen_value(value: object, path: str) -> FrozenValue:
     """Validate an argument value and return a deep-frozen copy of it."""
     if isinstance(value, float):
@@ -49,7 +73,9 @@ def _frozen_value(value: object, path: str) -> FrozenValue:
             f"float is not an allowed argument type at {path}: "
             "use integer minor units (amount=200000) or a decimal string ('2000.00')"
         )
-    if value is None or isinstance(value, str | int):  # bool is a subclass of int
+    if isinstance(value, str):
+        return _encodable(value, path)
+    if value is None or isinstance(value, int):  # bool is a subclass of int
         return value
     if isinstance(value, Mapping):
         return _frozen_mapping(value, path)
@@ -65,6 +91,7 @@ def _frozen_mapping(value: Mapping[Any, Any], path: str) -> Mapping[str, FrozenV
     for key, item in value.items():
         if not isinstance(key, str):
             raise InvalidArgument(f"argument keys must be str, got {type(key).__name__} at {path}")
+        _encodable(key, f"{path} key {key!r}")
         result[key] = _frozen_value(item, f"{path}.{key}")
     return MappingProxyType(result)
 
@@ -214,13 +241,30 @@ def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
 
     `ctrlrun.action/v1` is unchanged by this promotion and T164b is the corpus that proves it.
     """
-    return json.dumps(
+    encoded = json.dumps(
         _no_floats(payload, "payload"),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
-    ).encode("utf-8")
+    )
+    try:
+        return encoded.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # A lone UTF-16 surrogate: a `str` Python accepts and UTF-8 cannot represent. It
+        # arrives the ordinary way -- `json.loads('"\ud800"')` produces one -- so an MCP tool
+        # call carries it here, and this used to escape as `UnicodeEncodeError`, outside the
+        # closed set in `errors.py`. A caller catching `CTRLRunError` did not catch it.
+        #
+        # Checked here rather than per string in `_no_floats`: the encode already walks every
+        # character, so this costs nothing on the path that succeeds. It is a refusal, not a
+        # repair -- `errors="replace"` would map two distinct arguments to one canonical form,
+        # which is the collision the whole of §2.3 exists to prevent.
+        raise InvalidArgument(
+            f"an argument holds a string that UTF-8 cannot encode at position {exc.start}: "
+            f"{exc.reason}. A lone surrogate has no canonical form, and substituting one "
+            "would give two distinct actions the same hash (v0.1 §2.3)"
+        ) from exc
 
 
 def _no_floats(value: object, path: str) -> PlainValue:

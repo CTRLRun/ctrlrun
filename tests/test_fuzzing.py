@@ -280,42 +280,55 @@ def test_the_policy_check_catches_an_unstable_policy_hash(monkeypatch):
 # --- the findings that are real and not yet fixed -----------------------------------------------
 
 
-def test_the_known_findings_still_reproduce():
-    """`KNOWN_FINDINGS` records a defect that is real, reported, and unfixed. This asserts each
-    one **still happens**.
+def test_there_are_no_recorded_findings_and_the_machinery_stays():
+    """`KNOWN_FINDINGS` is empty, and that is a result rather than a default.
 
-    The day it is fixed this goes red and the entry must be deleted. That is the point: a
-    recorded limit that quietly starts passing is exactly the false green the rest of this file
-    exists to prevent, and an excuse list nobody re-checks becomes permanent."""
-    assert properties.KNOWN_FINDINGS, "no known findings; delete this test with the last entry"
-
-    assert properties.check_canonical({"note": "\ud800"}) == "lone-surrogate-in-a-string", (
-        "canonical_bytes no longer raises UnicodeEncodeError for an unpaired surrogate -- "
-        "if it now raises InvalidArgument, delete the KNOWN_FINDINGS entry and this assertion"
+    It held `lone-surrogate-in-a-string` -- `canonical_bytes` raising `UnicodeEncodeError`
+    instead of `InvalidArgument` -- and the entry's test asserted the finding *still
+    reproduced*. Fixing it in `action.py` turned that test red, which is what forced the entry
+    out. The dict stays for the next one.
+    """
+    assert properties.KNOWN_FINDINGS == {}, (
+        "a finding was recorded; add a reproducer to the corpus and a test asserting it still "
+        "reproduces, so that fixing it forces the entry out"
     )
 
 
-def test_the_surrogate_finding_is_reachable_from_a_json_payload():
-    """Severity, asserted rather than asserted-in-prose. `json.loads` produces a lone surrogate
-    from a six-character escape, so an MCP tool call can carry one into the action path, and
-    what comes back out is not in the closed error set that `errors.py` defines."""
+def test_the_surrogate_that_was_a_finding_is_now_refused_in_words():
+    """The regression test for the finding this directory turned up.
+
+    `json.loads` produces a lone surrogate from a six-character escape, so an MCP tool call can
+    carry one into the action path. It used to reach `action_hash` and raise
+    `UnicodeEncodeError`, outside the closed error set in `errors.py`."""
     from ctrlrun import Action, Principal
-    from ctrlrun.errors import CTRLRunError
+    from ctrlrun.errors import CTRLRunError, InvalidArgument
 
     arguments = json.loads('{"note": "\\ud800"}')
-    assert arguments == {"note": "\ud800"}
+    assert arguments == {"note": "\ud800"}, "the payload no longer carries a surrogate"
+
+    with pytest.raises(InvalidArgument):
+        Action(name="pay", environment="prod", principal=Principal(agent="a"), arguments=arguments)
+    try:
+        Action(name="pay", environment="prod", principal=Principal(agent="a"), arguments=arguments)
+    except CTRLRunError:
+        pass
+    except UnicodeEncodeError:  # pragma: no cover - the regression
+        raise AssertionError("the finding is back: UnicodeEncodeError escapes again") from None
+
+
+def test_a_paired_surrogate_is_still_accepted():
+    """The negative control on the fix. A refusal keyed on "contains a surrogate code point"
+    rather than on encodability would reject an ordinary emoji, and every test above would
+    still pass."""
+    from ctrlrun import Action, Principal
 
     action = Action(
-        name="pay", environment="prod", principal=Principal(agent="a"), arguments=arguments
+        name="pay",
+        environment="prod",
+        principal=Principal(agent="a"),
+        arguments=json.loads('{"note": "\\ud83d\\ude00"}'),
     )
-    with pytest.raises(UnicodeEncodeError):
-        _ = action.action_hash
-    try:
-        _ = action.action_hash
-    except CTRLRunError:  # pragma: no cover - the finding is that this does not happen
-        raise AssertionError("the finding is fixed; update KNOWN_FINDINGS") from None
-    except UnicodeEncodeError:
-        pass
+    assert action.action_hash.startswith("sha256:")
 
 
 def test_the_seed_corpus_reproduces_every_known_finding():

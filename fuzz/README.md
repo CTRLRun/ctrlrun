@@ -70,23 +70,34 @@ and requires the check to notice. A property that cannot fail proves nothing.
 are recorded rather than worked around in the decoder, because a fuzzer whose corpus is pruned
 to avoid its own findings reports zero forever.
 
-`test_the_known_findings_still_reproduce` asserts each one **still happens**. The day it is
-fixed that test goes red and the entry must be deleted — which is the point. A recorded limit
-that quietly starts passing is the failure mode this directory is about.
+`test_the_seed_corpus_reproduces_every_known_finding` compares the dict against what the corpus
+actually produces, in **both** directions: an entry cannot be added without a reproducer, and a
+reproducer cannot quietly stop reproducing.
 
-### `lone-surrogate-in-a-string`
+**It is currently empty, and that is a result rather than a default.**
 
-`canonical_bytes` raises `UnicodeEncodeError`, not `InvalidArgument`, for a string holding an
-unpaired UTF-16 surrogate.
+### `lone-surrogate-in-a-string` — found here, fixed in `action.py`
 
-Reachable: `json.loads('"\ud800"')` produces one, so an MCP tool call can carry it into the
-action path. `Action(...)` accepts it and `action_hash` is where it fails.
+`canonical_bytes` raised `UnicodeEncodeError`, not `InvalidArgument`, for a string holding an
+unpaired UTF-16 surrogate. Reachable the ordinary way: `json.loads` produces one from a
+six-character escape, so an MCP tool call carried it into the action path; `Action(...)`
+accepted it and `action_hash` was where it failed.
 
-Fail-closed **holds** — both the gateway and `Control` wrap the action path in
-`except Exception` — so this is a contract violation and a crash, not an authorization bypass.
-What it breaks is the closed error set in `errors.py` and `InvalidArgument`'s documented
-promise: a caller catching `CTRLRunError` does not catch this.
+Fail-closed **held** — the gateway and `Control` both wrap the action path in
+`except Exception` — so it was a contract violation and a crash, not an authorization bypass.
+What it broke was the closed error set in `errors.py`: a caller catching `CTRLRunError` did not
+catch it.
 
-The fix is narrow and belongs to whoever owns `src/`: reject unencodable strings in
-`_no_floats` alongside the float and non-string-key checks. It changes no hash that previously
-succeeded, so `v0.1 §2.3`'s "old hashes still verify" rule is satisfied without a schema bump.
+`_encodable` in `action.py` now refuses it at construction, beside the `float` and
+non-string-key checks, and `canonical_bytes` refuses it again at the encode. A refusal and not
+a repair: `errors="replace"` would map two distinct arguments onto one canonical form, which is
+the collision §2.3 exists to prevent. A *paired* surrogate is unaffected, and a negative control
+asserts that, because a check keyed on "contains a surrogate code point" rather than on
+encodability would reject an ordinary emoji and pass every other test here.
+
+No hash that previously succeeded changes, so §2.3's "old hashes still verify" rule holds
+without a schema bump.
+
+**The entry did not have to be noticed and removed by hand.** Its own test asserted the finding
+*still reproduced*, so fixing the bug turned that test red — which is what forced the entry out
+and the reproducer in `corpus/canonical/seed-10-surrogate` into a regression input.
