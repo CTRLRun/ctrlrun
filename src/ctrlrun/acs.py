@@ -331,6 +331,11 @@ class AcsControlHook:
         try:
             self._control.resume(held, report_what_happened)
         except (NotExecuted, _Unknown):
+            # Not a failure to handle -- these two are how `report_what_happened` states the
+            # outcome, and `Control.resume` has already written the `failed` or `ambiguous`
+            # receipt before re-raising (control.py §5.5). There is nothing left to do, and
+            # turning either into an error response would tell ACS the hook broke when what
+            # actually happened is that the tool call did.
             pass
         except InvalidArgument:
             # No held suspension matches. A restarted Guardian, a result fired twice, or one

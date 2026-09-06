@@ -1,0 +1,35 @@
+# CodeQL configuration -- which of `security-and-quality`'s queries this repository acts on.
+#
+# The workflow's first run produced 205 findings. Reading them was the point, and this file
+# records what the reading concluded. Two quality queries account for 112 of them, and in every
+# case sampled the finding was the query meeting a Python idiom rather than a defect. They are
+# excluded here, at the suite, rather than dismissed one alert at a time: a dismissal is bound to
+# an alert, so the next Protocol method written would raise a fresh one and the judgment would
+# have to be made again by whoever happened to see it.
+#
+# Everything else was acted on rather than silenced. `py/repeated-import`'s 19 findings were
+# correct and the redundant imports were deleted; `py/bad-tag-filter` found a real case-
+# sensitivity bug in a test helper and it was fixed. Nothing security-relevant is excluded here:
+# every `error`-severity and every `security-severity` query in the suite still runs, and the
+# five findings they produced were triaged individually and dismissed with a reason recorded in
+# the code-scanning tab.
+
+name: "CTRLRun Python"
+
+query-filters:
+  # 79 findings, every one of them `...`. The Ellipsis literal is a statement with no effect, and
+  # it is also how Python spells an empty body. `state.py`, `approval.py`, `identity.py`,
+  # `receipt.py`, `adapter.py` and `conformance/store/backends.py` are largely Protocol
+  # definitions -- ARCHITECTURE.md §6 puts the protocols at the module boundaries -- and the
+  # tests use the same form for functions that exist only to be decorated by `@protect`. The
+  # query cannot distinguish either from a statement whose result someone forgot to use.
+  - exclude:
+      id: py/ineffectual-statement
+
+  # 33 findings, all in `tests/` and `examples/cookbook/`, and all the same shape: `import
+  # ctrlrun` beside `from ctrlrun import protect`. In an example that is deliberate, because the
+  # reader is being shown both the package and the name; in a test it is how one file refers to
+  # a module for a patch and to a name for a `pytest.raises`. Style, and not the style this
+  # repository has chosen.
+  - exclude:
+      id: py/import-and-import-from
