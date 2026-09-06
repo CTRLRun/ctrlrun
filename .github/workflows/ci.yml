@@ -258,19 +258,18 @@ jobs:
           assert skipped == 0, f"{skipped} adapter tests skipped; the frameworks did not install"
           PY
 
-  # The documentation audit (docs/STYLE.md). Four checks, one job of their own so a docs PR
-  # gets a docs answer:
+  # The documentation audit (docs/STYLE.md). One job of its own so a docs PR gets a docs answer,
+  # and every step in it is now a hard failure:
   #
-  #   - the rendered capability tables match docs/capabilities.yaml -- a hard failure, and
-  #     also a test in `tests/test_docs_audit.py`, because a hand-edited table is the drift
-  #     this generator exists to make impossible;
+  #   - nine generators, each with `--check`, so no rendered table, reference page, recipe
+  #     directory, readiness block, badge row or study table can be hand-edited;
   #   - runnable snippets, the forbidden-words lint and the link check.
   #
-  # The last three carry `continue-on-error: true` for now. They were wired in against the
-  # documentation as it stood, and the findings they raised on that day are the baseline the
-  # writing sessions clear. Each flag comes off the moment its check passes on `main`, one
-  # step at a time, and never all three together on trust -- a red step that is allowed to be
-  # red is documentation, not a guard, and the point of the flag is to be temporary.
+  # The last three carried `continue-on-error: true` from session 0 to session 6. They were
+  # wired in against the documentation as it stood, and the findings they raised that day were
+  # the baseline the writing sessions had to clear; a job that was red on arrival would have
+  # taught everyone to ignore it. The baseline is clear, so the flags are gone -- a red step
+  # that is allowed to be red is documentation, not a guard.
   docs:
     runs-on: ubuntu-latest
     steps:
@@ -315,16 +314,17 @@ jobs:
       - name: The badge row matches the generator
         run: python tools/docs_audit/render_badges.py --check
 
+      # The three audits landed `continue-on-error` in session 0, because a baseline nobody had
+      # cleared yet would have made the job red on arrival and taught everyone to ignore it.
+      # The baseline is clear -- 96 runnable blocks, 182 documents, 0 findings and 0 broken
+      # links -- so the flags come off here. An audit that cannot fail is an audit nobody runs.
       - name: Runnable snippets execute offline
-        continue-on-error: true
         run: python tools/docs_audit/snippets.py
 
       - name: Forbidden words
-        continue-on-error: true
         run: python tools/docs_audit/lint.py
 
       - name: Internal links and anchors resolve
-        continue-on-error: true
         run: python tools/docs_audit/links.py
 
   # The definition of done says the demo runs with no network and the README quick start

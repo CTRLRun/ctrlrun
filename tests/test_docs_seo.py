@@ -117,10 +117,35 @@ def test_the_definitional_words_appear_where_the_plan_says():
         assert word in text, f"{slug} does not carry {word!r}"
 
 
+SITE = "https://docs.ctrlrun.dev"
+
+
 def test_the_site_declares_its_social_image_and_indexing():
+    """The share image is an **absolute URL on the site's own domain**.
+
+    It was `/images/social-preview.png`, and Mintlify expanded that against the deployment's
+    origin rather than the custom domain, so every share card on the internet pointed at
+    `ctrlrun.mintlify.app`. Found by fetching the deployed home page and reading its `og:image`.
+    A relative path is not wrong so much as it is resolved by somebody else.
+    """
     document = json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))
     seo = document["seo"]
 
-    assert seo["metatags"]["og:image"].startswith("/images/")
+    for tag in ("og:image", "twitter:image"):
+        assert seo["metatags"][tag] == f"{SITE}/images/social-preview.png", tag
+    assert seo["metatags"]["og:url"] == SITE
+    assert seo["metatags"]["canonical"] == SITE
     assert seo["metatags"]["twitter:card"] == "summary_large_image"
     assert (DOCS / "images" / "social-preview.png").exists()
+
+
+def test_the_home_pages_share_title_is_not_the_site_name_twice():
+    """Mintlify renders `<title> - <site name>`, so a home page titled `CTRLRun` on a site
+    named `CTRLRun` shared as **"CTRLRun - CTRLRun"**. The override says something instead."""
+    text = (DOCS / "index.mdx").read_text(encoding="utf-8")
+    document = json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))
+    for tag in ("og:title", "twitter:title"):
+        found = re.search(rf'^"{tag}": "(.*)"$', text, re.M)
+        assert found, f"the home page sets no {tag}"
+        assert found.group(1) != document["name"], f"{tag} is the site name again"
+        assert len(found.group(1)) <= 60, f"{tag} is {len(found.group(1))} characters"
