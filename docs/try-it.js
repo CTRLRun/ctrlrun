@@ -11,8 +11,10 @@
  * version it prints is whatever is released on PyPI, which is the version a reader would get
  * from `pip install ctrlrun`.
  *
- * Verified against Pyodide 314.0.6 (Python 3.14.2) with ctrlrun 0.5.0 on 2026-09-06 by
- * docs/assets/verify-browser-demo.mjs, which runs this same sequence under Node.
+ * Verified against Pyodide 314.0.6 (Python 3.14.2) with ctrlrun 0.5.0 by
+ * docs/assets/verify-browser-demo.mjs, which reads PROGRAM out of this file and runs it under
+ * Node. It read its own copy until 2026-09-06, and a syntax error in the copy that shipped
+ * reached the deployed page.
  */
 (function () {
   "use strict";
@@ -24,8 +26,17 @@
   // Pyodide's own builds; `click` arrives as ctrlrun's dependency through micropip.
   var PACKAGES = ["micropip", "pyyaml"];
 
+  // The Python this page runs. `runPython` returns the value of the last expression, so the
+  // last line is an expression rather than an assignment, and it is a single line: a trailing
+  // `+` outside brackets is a SyntaxError, which is exactly what shipped here and put a
+  // traceback in front of every reader. Two harnesses claimed to have verified this page and
+  // neither ran this string — `verify-browser-wiring.mjs` loads this script with Pyodide
+  // stubbed, and `verify-browser-demo.mjs` carried its own copy of the program. The demo
+  // harness now reads this array, and `tests/test_docs_travelling.py` compiles it on every
+  // commit, which needs no network and no Node. Keep it JSON-parseable: double-quoted strings,
+  // no comment inside the array, no trailing comma.
   var PROGRAM = [
-    "import importlib.metadata, io",
+    "import importlib.metadata, io, platform",
     "from contextlib import redirect_stdout",
     "from pathlib import Path",
     "from ctrlrun.cli.demo import run_demo",
@@ -33,8 +44,8 @@
     "buffer = io.StringIO()",
     "with redirect_stdout(buffer):",
     "    run_demo(Path('/tmp/ctrlrun-demo'))",
-    "'ctrlrun ' + importlib.metadata.version('ctrlrun') + ' on Python ' +",
-    "  __import__('platform').python_version() + '\\n\\n' + buffer.getvalue()",
+    "version = importlib.metadata.version('ctrlrun')",
+    "f'ctrlrun {version} on Python {platform.python_version()}\\n\\n' + buffer.getvalue()"
   ].join("\n");
 
   function ready(fn) {

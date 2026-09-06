@@ -105,6 +105,51 @@ def test_the_page_says_it_runs_the_released_version_and_where_the_proof_is():
     assert "2026-09-06" in TRY_IT and "2026-09-06" in HARNESS
 
 
+def _browser_demo_program() -> str:
+    """The Python the Try-it page runs, lifted out of the JavaScript that carries it."""
+    body = re.search(r"var PROGRAM = \[(.*?)\]\.join", SCRIPT, re.S)
+    assert body, "docs/try-it.js: no PROGRAM array — the page's Python moved"
+    try:
+        lines = json.loads(f"[{body.group(1)}]")
+    except json.JSONDecodeError as exc:  # pragma: no cover - a malformed array is the failure
+        raise AssertionError(
+            f"docs/try-it.js: PROGRAM is no longer JSON-parseable ({exc}). Keep it to "
+            "double-quoted strings with no comment inside the array and no trailing comma: "
+            "verify-browser-demo.mjs parses it the same way."
+        ) from exc
+    return "\n".join(lines)
+
+
+def test_the_browser_demo_program_is_valid_python():
+    """The page's Python is a string inside a JavaScript file, which nothing else compiles.
+
+    It shipped ending a line on a trailing `+` outside brackets. That is a SyntaxError, so
+    every reader who pressed the button got a traceback where the demo should have been, and
+    both harnesses stayed green: the wiring one stubs Pyodide, and the demo one carried its own
+    copy of the program. This compiles the string the page actually runs, on every commit,
+    with no network and no Node.
+    """
+    program = _browser_demo_program()
+    compile(program, "docs/try-it.js PROGRAM", "exec")
+
+
+def test_the_program_ends_on_an_expression_pyodide_can_return():
+    """`runPython` returns the value of the last expression. An assignment there returns
+    `None`, and the page would reveal an empty transcript with nothing raised."""
+    last = _browser_demo_program().rstrip().splitlines()[-1]
+    assert not last.startswith((" ", "\t")), f"the last line is indented, not a value: {last!r}"
+    assert re.match(r"^\w+\s*=[^=]", last) is None, f"the last line assigns: {last!r}"
+    assert "buffer.getvalue()" in last, f"the last line does not return the demo: {last!r}"
+
+
+def test_the_harness_runs_the_program_the_page_runs():
+    """A harness with its own copy of the artifact verifies the copy. This one reads
+    docs/try-it.js, so the program it proves is the program the reader gets."""
+    assert "try-it.js" in HARNESS, "the harness no longer reads the page's script"
+    assert "runPython(PROGRAM)" in HARNESS
+    assert "run_demo(" not in HARNESS, "the harness has grown its own copy of the program again"
+
+
 @pytest.mark.authority
 def test_the_page_quotes_lines_the_demo_prints():
     """The transcript on the page is the demo's own output, not a sketch of it.
