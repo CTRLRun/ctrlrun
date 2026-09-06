@@ -11,14 +11,21 @@ sequence of actions. A failing test is the fastest possible report.
 Expect an acknowledgement within 72 hours and an assessment within seven days. If a fix is
 warranted you will be credited in the release notes unless you ask not to be.
 
+## Provenance
+
+Releases carry PyPI provenance attestations from GitHub Actions. Distributions are published
+through trusted publishing, so there is no API token to leak or replay, and each wheel and sdist
+carries an attestation naming the workflow that built it. Every GitHub Action the workflows use
+is pinned to a commit. `docs/how-this-is-built.md` says what has and has not been reviewed.
+
 ## Supported versions
 
 CTRLRun is pre-1.0. Only the latest release receives fixes.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | yes |
-| < 0.1 | no |
+| 0.6.x | yes |
+| < 0.6 | no |
 
 ## What counts as a vulnerability
 

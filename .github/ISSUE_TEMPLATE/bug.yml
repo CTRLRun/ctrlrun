@@ -1,0 +1,52 @@
+name: Bug
+description: Something did not do what the documentation says it does.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If an action ran that should have been refused, an approval matched the wrong action, an effect happened twice, or an unknown outcome was recorded as `failed`, that is a security report and not a bug: see [SECURITY.md](https://github.com/CTRLRun/ctrlrun/blob/main/SECURITY.md) and report it privately.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`ctrlrun --version`, and the store backend (SQLite or Postgres)."
+      placeholder: ctrlrun, version 0.6.0 · sqlite
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the documentation says should happen
+      description: Quote the sentence, with a link. Every sentence in the README has a row in `docs/CLAIMS.md`; if you found the row, name it.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: inspect
+    attributes:
+      label: "`ctrlrun inspect <action_id> --json`"
+      description: The whole history of the action, as JSON. The `action_id` is on the receipt and in `.ctrlrun/events.jsonl`. Remove argument values you cannot share; keep the structure.
+      render: json
+  - type: textarea
+    id: receipt
+    attributes:
+      label: The receipt
+      description: The line from `.ctrlrun/receipts.jsonl`, or the output of `ctrlrun receipts --last 1 --json`.
+      render: json
+  - type: textarea
+    id: policy
+    attributes:
+      label: The policy
+      description: The `ctrlrun.yaml` in force, or the smallest one that reproduces it.
+      render: yaml
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: A failing test is the fastest possible report. `examples/` shows the shape.

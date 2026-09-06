@@ -1,0 +1,3 @@
+# Every path has an owner who is asked for review. Anything under src/ additionally needs the
+# maintainer's word before it merges, green CI or not (CONTRIBUTING.md).
+*   @arpanghoshal

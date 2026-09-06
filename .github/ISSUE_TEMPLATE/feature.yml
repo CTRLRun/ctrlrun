@@ -1,0 +1,39 @@
+name: Feature request
+description: Something CTRLRun should do that it does not.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every addition answers one question first: *does this improve control or correctness of an agent action that can affect the real world?* If it helps a model think, improves prompts, stores memory, retrieves documents, chooses models or visualises traces, it belongs somewhere else. `docs/ROADMAP.md` lists what is planned and `VISION.md` what is not a build spec.
+  - type: dropdown
+    id: guarantee
+    attributes:
+      label: Which guarantee does it relate to?
+      description: The six rows of the README's capability matrix, or none of them.
+      options:
+        - Approval binding
+        - One effect, once
+        - Unknown is not failed
+        - Fail closed
+        - Authority and delegation
+        - Receipts
+        - None of these (say why it belongs here)
+    validations:
+      required: true
+  - type: textarea
+    id: situation
+    attributes:
+      label: The situation
+      description: What the agent does, what can go wrong, and what CTRLRun would need to refuse or record. Real domains help — money, infrastructure, permissions, records, communications.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+  - type: textarea
+    id: fail-closed
+    attributes:
+      label: How it fails closed
+      description: What the feature refuses when its inputs are missing, malformed or ambiguous. A feature that makes a consequential action permissive by default will not be added.

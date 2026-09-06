@@ -1,0 +1,44 @@
+name: Scorecard
+
+# OpenSSF Scorecard: a third party's reading of this repository's practices, published so the
+# badge in the README is somebody else's measurement rather than this project's own claim.
+# Written from ossf/scorecard's own workflow (read 2026-09-06):
+# https://github.com/ossf/scorecard/blob/main/.github/workflows/scorecard-analysis.yml
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "17 6 * * 1"
+  push:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # to upload the SARIF results to code scanning
+      id-token: write # the OIDC token that verifies the published result
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishing is what makes the badge and the public API results for this repository;
+          # it needs `id-token: write` above and nothing else.
+          publish_results: true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - uses: github/codeql-action/upload-sarif@3c3833e0f8c1c83d449a7478aa59c036a9165498 # v3.29.11
+        with:
+          sarif_file: results.sarif
