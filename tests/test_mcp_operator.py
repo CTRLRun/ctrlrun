@@ -1284,3 +1284,85 @@ def test_T193_an_unknown_action_id_is_an_error_not_an_empty_document(server, con
     document, status = _call(server, "inspect_action", {"action_id": "act_nope"})
     assert status == 200
     assert _error(document)["code"] == -32602
+
+
+def test_a_forged_line_cannot_reach_the_access_log(caplog):
+    """`v0.1 §5.3`'s rule about `_approver`, applied where refusing is not available.
+
+    `BaseHTTPRequestHandler` hands its access log the client's request line. A newline in it
+    forges a whole record in a line-per-record log, and an operator reading that log cannot tell
+    the forged line from a real one -- which is the same hazard `state.py` refuses a control
+    character in an approver's name for. A log line cannot be refused, so it is escaped.
+    """
+    import logging
+
+    from ctrlrun.gateway.wire import printable
+
+    forged = 'GET /x\nWARNING approved by "cli:local"'
+    assert "\n" not in printable(forged)
+    assert "\\n" in printable(forged)
+
+    with caplog.at_level(logging.DEBUG, logger="ctrlrun.mcp_operator"):
+        logging.getLogger("ctrlrun.mcp_operator").debug("%s", printable(forged))
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+
+
+def test_printable_leaves_an_ordinary_request_line_alone():
+    """The control: escaping that mangled every log line would be worse than the hazard."""
+    from ctrlrun.gateway.wire import printable
+
+    assert printable('GET /mcp HTTP/1.1" 200 -') == 'GET /mcp HTTP/1.1" 200 -'
+
+
+def test_the_gateway_does_not_import_the_operator_console():
+    """`ARCHITECTURE.md` §6: dependencies point downward.
+
+    The operator console is built on the gateway's helpers, so it imports them. The gateway
+    must not know the console exists -- and for a while it did: `check_jwt_flags` was moved into
+    `server.py` and typed against `GatewayConfig | OperatorConfig`, which needed
+    `if TYPE_CHECKING: from .operator import OperatorConfig` and made the two modules a cycle.
+    CodeQL's `py/unsafe-cyclic-import` found it six times before anyone read the diff that way,
+    and no test would have.
+
+    `wire.py` is what both import instead. It knows what a JSON-RPC envelope is and nothing
+    about either server.
+    """
+    import ctrlrun.gateway.server as server
+    import ctrlrun.gateway.wire as wire
+
+    # Imports and code references, not prose: `server.py` may *mention* the console in a
+    # docstring -- a cross-reference is not a dependency -- and asserting on the word instead
+    # of on the import is how a test starts failing for the wrong reason.
+    server_source = Path(server.__file__).read_text(encoding="utf-8")
+    for forbidden in (
+        "from .operator import",
+        "from ctrlrun.gateway.operator import",
+        "import operator",
+        "OperatorConfig",
+        "OperatorServer",
+    ):
+        assert forbidden not in server_source, (
+            f"gateway/server.py depends on the console: {forbidden}"
+        )
+
+    wire_source = Path(wire.__file__).read_text(encoding="utf-8")
+    for forbidden in ("from .server import", "from .operator import"):
+        assert forbidden not in wire_source, forbidden
+
+
+def test_each_gateway_module_imports_on_its_own_in_either_order():
+    """The behavioural half. A cycle that is real at run time shows up as an import that works
+    in one order and not the other, and only in whichever order nothing happened to try."""
+    import subprocess
+    import sys
+
+    for first, second in [
+        ("ctrlrun.gateway.operator", "ctrlrun.gateway.server"),
+        ("ctrlrun.gateway.server", "ctrlrun.gateway.operator"),
+    ]:
+        finished = subprocess.run(
+            [sys.executable, "-c", f"import {first}; import {second}; print('ok')"],
+            capture_output=True,
+            text=True,
+        )
+        assert finished.returncode == 0, f"{first} then {second}: {finished.stderr[-400:]}"

@@ -122,6 +122,7 @@ def expect(
                 )
         return None
     except BaseException as other:
+        _not_ours_to_grade(other)
         return failed(
             case_id,
             title,
@@ -1108,6 +1109,25 @@ def resolution_two_targets(backend: StoreBackend, processes: int = CONTENDERS) -
 # --- outcome (v0.1 §5.5, one layer down; SPEC-v0.6 §2.5) ------------------------------------
 
 
+def _not_ours_to_grade(raised: BaseException) -> None:
+    """Re-raise what this suite has no business turning into a verdict (`v0.1 §5.5`).
+
+    A `KeyboardInterrupt` or a `SystemExit` belongs to the operator running the suite, never to
+    the store being graded. Two cases caught `BaseException` on a path that reached
+    `passed(...)`, so pressing Ctrl-C during either made the case report **pass** -- a false
+    green in the suite whose whole purpose is to refuse them.
+
+    `v0.1 §5.5` says the executor path must catch `BaseException`, record, and then **re-raise**;
+    the sin was never the breadth of the catch, it was the swallow. This is that rule where
+    there is nothing to record: an exception that is not an `Exception` leaves the case.
+
+    `test_a_keyboard_interrupt_is_never_graded` drives both cases through a store that raises
+    `KeyboardInterrupt` from the call inside the `try`, and asserts it reaches the caller.
+    """
+    if not isinstance(raised, Exception):
+        raise raised
+
+
 def _every_refusal(store: StateStore) -> list[tuple[str | None, Callable[[], Any]]]:
     """Every refusal path the protocol has, as (effect_key, call) pairs.
 
@@ -1204,8 +1224,10 @@ def outcome_no_not_executed(backend: StoreBackend, processes: int = CONTENDERS) 
                 f"a store method raised NotExecuted: {wrong}. That is the executor's opt-in to "
                 "FAILED, and a store has never spoken to the remote (§2.5)",
             )
-        except BaseException:
-            pass
+        except BaseException as other:
+            # Any other refusal is fine -- this case asserts only that it is not `NotExecuted`.
+            # An interrupt is not a refusal and is not this suite's to swallow.
+            _not_ours_to_grade(other)
     return passed("no-not-executed", title)
 
 
@@ -1609,7 +1631,8 @@ def delegation_insert(backend: StoreBackend, processes: int = CONTENDERS) -> Cas
 
     try:
         store.put_delegation(_delegation(identifier))
-    except BaseException:
+    except BaseException as raised:
+        _not_ours_to_grade(raised)
         record = store.get_delegation(identifier)
         if record is None or record.revoked_at is None:
             return failed(

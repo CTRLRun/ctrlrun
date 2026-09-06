@@ -356,3 +356,98 @@ def test_T140f_import_ctrlrun_does_not_reach_the_store_suite():
             [sys.executable, str(script)], capture_output=True, text=True, check=True
         )
     assert done.stdout.strip() == "", f"import ctrlrun pulled in {done.stdout.strip()}"
+
+
+# --- An interrupt is the operator, not the subject (SPEC-v0.1 §5.5) ------------------------
+
+
+class _InterruptingStore:
+    """A store that raises `KeyboardInterrupt` from one named method, and is otherwise real.
+
+    Not a hand-written double: it wraps a real store so it refuses everything the real one
+    refuses (a double that can do what the real code would not invalidates the tests using it),
+    and sabotages exactly one call.
+
+    `after` is how many calls to that method are let through first, and it is the whole point:
+    both cases under test call the method during setup, *outside* the `try`, where an interrupt
+    already propagates. Interrupting the first call would prove nothing about the handler. The
+    count aims it at the call inside the `try`.
+    """
+
+    def __init__(self, store, method: str, after: int) -> None:
+        self._store = store
+        self._method = method
+        self._left = after
+
+    def __getattr__(self, name: str):
+        if name != self._method:
+            return getattr(self._store, name)
+        inner = getattr(self._store, name)
+
+        def maybe_interrupted(*args, **kwargs):
+            if self._left > 0:
+                self._left -= 1
+                return inner(*args, **kwargs)
+            raise KeyboardInterrupt("the operator pressed Ctrl-C")
+
+        return maybe_interrupted
+
+
+class _InterruptingBackend:
+    """`SQLiteBackend`, with one store method interrupted."""
+
+    def __init__(self, root: Path, method: str, after: int) -> None:
+        from ctrlrun.conformance.store.backends import SQLiteBackend
+
+        self._inner = SQLiteBackend(root)
+        self._method = method
+        self._after = after
+        self.name = self._inner.name
+
+    def _wrap(self, store):
+        return None if store is None else _InterruptingStore(store, self._method, self._after)
+
+    def open(self):
+        return self._wrap(self._inner.open())
+
+    def open_with_clock(self, clock):
+        # The `outcome` cases build their store through this rather than `open()`, so a wrapper
+        # that covered only `open()` was bypassed and interrupted nothing.
+        return self._wrap(self._inner.open_with_clock(clock))
+
+    def reopen(self):
+        return self._wrap(self._inner.reopen())
+
+    def describe(self):
+        return self._inner.describe()
+
+    def reset(self):
+        self._inner.reset()
+
+
+@pytest.mark.parametrize(
+    "case_name,method,after",
+    [
+        # `_every_refusal` reserves three effects during setup; the fourth call is the first
+        # refusal, inside the `try`.
+        ("no-not-executed", "reserve_effect", 3),
+        # `delegation_insert` inserts once, revokes, then inserts again inside the `try`.
+        ("insert-not-upsert", "put_delegation", 1),
+    ],
+)
+def test_a_keyboard_interrupt_is_never_graded(tmp_path, case_name, method, after):
+    """SPEC-v0.1 §5.5's rule, applied to the kit that grades a store.
+
+    Both cases caught `BaseException` on a path that reaches `passed(...)`, so pressing Ctrl-C
+    during either made the case report **pass** -- a false green in the suite whose whole
+    purpose is to refuse them. CodeQL's `py/catch-base-exception` pointed at the line; the
+    reason it matters is this one, not the style.
+
+    An interrupt belongs to the operator running the suite, never to the store being graded. It
+    must reach them, which means it must leave the case rather than become a verdict about
+    somebody else's code.
+    """
+    backend = _InterruptingBackend(tmp_path, method, after)
+
+    with pytest.raises(KeyboardInterrupt):
+        run(backend, only=[case_name])

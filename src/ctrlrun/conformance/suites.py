@@ -192,6 +192,22 @@ class Executor:
         return "committed"
 
 
+def _not_ours_to_grade(raised: BaseException) -> None:
+    """Re-raise what this kit has no business turning into a verdict (`v0.1 §5.5`).
+
+    A `KeyboardInterrupt` or a `SystemExit` belongs to the operator running the kit, never to
+    the adapter being graded. Without this, Ctrl-C during a run does not stop it: each case in
+    turn catches the interrupt, writes a `failed` row blaming the adapter, and the report that
+    comes out is a conformance verdict nobody's code earned.
+
+    `v0.1 §5.5` requires the executor path to catch `BaseException`, record, and **re-raise**.
+    The breadth of the catch was never the problem -- an adapter may raise anything and the kit
+    must grade it -- so this narrows nothing except the one thing that is not the adapter's.
+    """
+    if not isinstance(raised, Exception):
+        raise raised
+
+
 def unwrapped(interrupt: FrameworkInterrupt) -> FrameworkInterrupt:
     """The adapter's own interrupt, however many proxies are around it.
 
@@ -385,6 +401,7 @@ def expect(
             )
         return None
     except BaseException as other:
+        _not_ours_to_grade(other)
         return failed(
             identifier,
             title,
@@ -527,6 +544,7 @@ def kernel_failed_permits_retry(adapter: ConformanceAdapter) -> CaseResult:
     try:
         adapter.invoke(request)
     except BaseException as refused:
+        _not_ours_to_grade(refused)
         return failed(
             "T8",
             kernel_failed_permits_retry.title,
@@ -606,6 +624,7 @@ def kernel_no_interrupt_on_allow(adapter: ConformanceAdapter) -> CaseResult:
     try:
         adapter.invoke(request)
     except BaseException as raised:
+        _not_ours_to_grade(raised)
         return failed(
             "A1",
             kernel_no_interrupt_on_allow.title,
@@ -693,6 +712,7 @@ def binding_matching_answer(adapter: ConformanceAdapter) -> CaseResult:
     try:
         adapter.invoke(request)
     except BaseException as raised:
+        _not_ours_to_grade(raised)
         return failed(
             "B2",
             binding_matching_answer.title,
@@ -1092,6 +1112,7 @@ def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> Confo
                 try:
                     outcomes.append(item.body(adapter))
                 except BaseException as broke:
+                    _not_ours_to_grade(broke)
                     outcomes.append(
                         failed(
                             item.id, item.title, f"the case raised {type(broke).__name__}: {broke}"
