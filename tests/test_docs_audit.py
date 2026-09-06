@@ -21,6 +21,14 @@ if not TOOLS.exists():  # pragma: no cover - not a checkout
 
 sys.path.insert(0, str(TOOLS))
 
+#: `MANIFEST.in` prunes `.github` and `adapters` from the sdist, so from inside one the README's
+#: links into `adapters/` cannot resolve and there is no workflow to read. The same signal the
+#: packaging tests use: a checkout has `adapters/`; a distribution does not.
+IN_CHECKOUT = (REPO_ROOT / "adapters").is_dir() and (REPO_ROOT / ".github").is_dir()
+checkout_only = pytest.mark.skipif(
+    not IN_CHECKOUT, reason="not a repository checkout: the sdist prunes .github and adapters"
+)
+
 import links  # noqa: E402
 import lint  # noqa: E402
 import render_capabilities as capabilities  # noqa: E402
@@ -346,8 +354,19 @@ def test_a_root_relative_docs_path_resolves_under_docs(tmp_path, monkeypatch):
     assert [b.target for b in broken] == ["/concepts/missing"]
 
 
+@checkout_only
 def test_the_real_documents_have_no_broken_internal_links():
-    assert links.check_paths(links.documents()) == []
+    assert links.check_paths(links.documents_to_check()) == []
+
+
+def test_a_generated_fragment_is_not_checked_on_its_own_but_a_page_is():
+    """The grid under `docs/generated/` links to pages later sessions write; it is checked
+    where it is embedded. The exclusion is narrow: a page under `docs/` is still checked."""
+    checked = {links.relative(path) for path in links.documents_to_check()}
+
+    assert not any(name.startswith("docs/generated/") for name in checked)
+    assert "README.md" in checked
+    assert any(name.startswith("docs/") for name in checked)
 
 
 # --- the capabilities generator -----------------------------------------------------------
@@ -487,6 +506,7 @@ def test_the_generator_refuses_a_null_claim_without_a_note(tmp_path):
 # --- CI runs all four ---------------------------------------------------------------------
 
 
+@checkout_only
 def test_ci_runs_the_three_checks_and_the_drift_check():
     """`docs/STYLE.md` says the `docs` job runs them. A guard that CI does not run is prose."""
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -495,6 +515,7 @@ def test_ci_runs_the_three_checks_and_the_drift_check():
         assert f"python tools/docs_audit/{script}" in workflow, script
 
 
+@checkout_only
 def test_the_scripts_run_as_scripts():
     """Each tool is documented as `python tools/docs_audit/<x>.py`; imported-from-tests is not
     the same thing, so each is started the way a person starts it."""

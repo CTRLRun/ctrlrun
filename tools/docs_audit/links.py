@@ -31,6 +31,17 @@ from urllib.parse import unquote
 
 from _files import DOCUMENT_PATTERNS, REPO_ROOT, documents, outside_fences, relative
 
+#: A render under `docs/generated/` is a fragment, embedded into a page by a later session and
+#: never published on its own. Its links are checked on the page that embeds it, where they
+#: either resolve or fail with that page — and until a page embeds it, a link to a page not
+#: yet written is a plan, not a broken link.
+EXCLUDED: tuple[str, ...] = ("docs/generated/*",)
+
+
+def documents_to_check() -> list[Path]:
+    return documents(patterns=DOCUMENT_PATTERNS, exclude=EXCLUDED)
+
+
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _HREF = re.compile(r"""href=["']([^"']+)["']""")
 _GITHUB = re.compile(r"^https://github\.com/CTRLRun/ctrlrun/(?:blob|tree)/[^/]+/(.*)$")
@@ -154,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("paths", nargs="*", type=Path, help="documents to check; default: all")
     arguments = parser.parse_args(argv)
-    paths = [p.resolve() for p in arguments.paths] or documents(patterns=DOCUMENT_PATTERNS)
+    paths = [p.resolve() for p in arguments.paths] or documents_to_check()
     broken = check_paths(paths)
     for item in broken:
         print(item)
