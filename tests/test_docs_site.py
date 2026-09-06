@@ -88,10 +88,12 @@ def _body(page: Path) -> str:
     return _FRONTMATTER.sub("", page.read_text(encoding="utf-8"), count=1)
 
 
-# `re.I` because HTML tag names are case-insensitive: without it a `<SCRIPT>` block stays in
-# the text and its contents count against the page's prose budget, which is the one thing
-# this helper exists to prevent.
-_SCRIPT = re.compile(r"<script.*?</script>", re.S | re.I)
+# Tag names are case-insensitive and an end tag may carry whitespace before its `>`, so
+# `</SCRIPT >` closes a block exactly as `</script>` does. A filter that misses either leaves the
+# block in the text, where a structured-data payload counts against the page's prose budget --
+# the one thing this helper exists to prevent. `\bscript` rather than `script` so that a tag
+# merely starting with those letters is not treated as the start of one.
+_SCRIPT = re.compile(r"<\s*script\b.*?<\s*/\s*script\s*>", re.S | re.I)
 
 
 def _prose(page: Path) -> str:
@@ -353,21 +355,35 @@ actions:
     assert wrong == [], wrong
 
 
-def test_the_prose_filter_strips_a_script_block_whatever_its_case(tmp_path: Path):
-    """`<SCRIPT>` is the same tag as `<script>`, and the word budget must not see either.
+@pytest.mark.parametrize(
+    ("opening", "closing"),
+    [
+        ("<script", "</script>"),
+        ("<SCRIPT", "</SCRIPT>"),
+        ("<script", "</script >"),
+        ("<script", "</ script>"),
+        ("<script", "</SCRIPT\n>"),
+    ],
+    ids=["plain", "upper-case", "space-before-gt", "space-after-slash", "newline"],
+)
+def test_the_prose_filter_strips_a_script_block_however_its_tags_are_written(
+    tmp_path: Path, opening: str, closing: str
+):
+    """Every spelling of the tags closes the same block, and the word budget must see none of it.
 
-    A case-sensitive filter leaves an upper-case block in the text, where a structured-data
-    payload -- which is markup for a search engine, not words a reader reads -- would be counted
-    against the page's budget and could push a page over it for a reason no author could see.
+    HTML tag names are case-insensitive and an end tag may carry whitespace before its `>`. A
+    filter that misses a spelling leaves the block in the text, where a structured-data payload
+    -- markup for a search engine, not words a reader reads -- is counted against the page's
+    budget and can push a page over it for a reason no author could see.
     """
     page = tmp_path / "page.mdx"
     page.write_text(
-        '---\ntitle: t\n---\n\nvisible prose\n\n<SCRIPT type="application/ld+json">\n'
-        '{"@type": "SoftwareApplication", "hidden": "wordone wordtwo wordthree"}\n</SCRIPT>\n',
+        f'---\ntitle: t\n---\n\nvisible prose\n\n{opening} type="application/ld+json">\n'
+        f'{{"@type": "SoftwareApplication", "hidden": "wordone wordtwo"}}\n{closing}\n',
         encoding="utf-8",
     )
 
     prose = _prose(page)
 
     assert "visible prose" in prose
-    assert "wordone" not in prose, "an upper-case script block reached the word budget"
+    assert "wordone" not in prose, f"{opening} ... {closing} reached the word budget"
