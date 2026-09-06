@@ -99,25 +99,57 @@ def test_the_page_tells_a_reader_what_to_do_when_it_does_not_run():
     assert "That is this page failing, not the library." in " ".join(TRY_IT.split())
 
 
+VERIFIED = json.loads((DOCS / "assets" / "browser-demo.verified.json").read_text(encoding="utf-8"))
+
+
 def test_the_page_says_it_runs_the_released_version_and_where_the_proof_is():
     assert "verify-browser-demo.mjs" in TRY_IT
     assert "released version" in TRY_IT
-    assert "2026-09-06" in TRY_IT and "2026-09-06" in HARNESS
 
 
-def _browser_demo_program() -> str:
-    """The Python the Try-it page runs, lifted out of the JavaScript that carries it."""
-    body = re.search(r"var PROGRAM = \[(.*?)\]\.join", SCRIPT, re.S)
-    assert body, "docs/try-it.js: no PROGRAM array — the page's Python moved"
+def test_the_page_quotes_the_run_the_harness_recorded():
+    """`browser-demo.verified.json` is written by the harness at the end of a run that passed,
+    and it is the only source for the numbers the page quotes: the date, the Pyodide, Python
+    and SQLite versions in the "Verified" paragraph, and the `ctrlrun X on Python Y` line at
+    the top of the transcript. A page that quoted a version nothing had run would be the copy
+    problem again, one level up."""
+    for key in ("date", "pyodide", "python", "sqlite", "ctrlrun"):
+        assert VERIFIED.get(key), f"browser-demo.verified.json has no {key}"
+    verified = TRY_IT.split("Verified, and how to check", 1)[1].split("</Accordion>", 1)[0]
+    assert f"**{VERIFIED['date']}**" in verified, "the page's verified date is not the run's"
+    assert f"Pyodide {VERIFIED['pyodide']}" in verified
+    assert f"Python {VERIFIED['python']}" in verified
+    assert f"SQLite {VERIFIED['sqlite']}" in verified
+    assert f"`ctrlrun` {VERIFIED['ctrlrun']} from PyPI" in verified
+    transcript = TRY_IT.split("```text", 1)[1].split("```", 1)[0]
+    assert transcript.strip().startswith(
+        f"ctrlrun {VERIFIED['ctrlrun']} on Python {VERIFIED['python']}"
+    ), transcript.strip().splitlines()[0]
+    assert f"Last run {VERIFIED['date']}" in HARNESS, "the harness comment names another run"
+    assert "browser-demo.verified.json" in HARNESS
+
+
+def _python_in_the_script(name: str) -> str:
+    """One of the Python programs the Try-it page runs, lifted out of the JavaScript."""
+    body = re.search(rf"var {name} = \[(.*?)\]\.join", SCRIPT, re.S)
+    assert body, f"docs/try-it.js: no {name} array — the page's Python moved"
     try:
         lines = json.loads(f"[{body.group(1)}]")
     except json.JSONDecodeError as exc:  # pragma: no cover - a malformed array is the failure
         raise AssertionError(
-            f"docs/try-it.js: PROGRAM is no longer JSON-parseable ({exc}). Keep it to "
+            f"docs/try-it.js: {name} is no longer JSON-parseable ({exc}). Keep it to "
             "double-quoted strings with no comment inside the array and no trailing comma: "
             "verify-browser-demo.mjs parses it the same way."
         ) from exc
     return "\n".join(lines)
+
+
+def _browser_demo_program() -> str:
+    return _python_in_the_script("PROGRAM")
+
+
+def _playground_module() -> str:
+    return _python_in_the_script("PLAYGROUND")
 
 
 def test_the_browser_demo_program_is_valid_python():
@@ -196,6 +228,163 @@ def test_the_harness_runs_the_program_the_page_runs():
     assert "try-it.js" in HARNESS, "the harness no longer reads the page's script"
     assert "runPython(PROGRAM)" in HARNESS
     assert "run_demo(" not in HARNESS, "the harness has grown its own copy of the program again"
+
+
+# --- the playground ------------------------------------------------------------------------
+
+
+def _playground_step():
+    """`step`, from the module the page runs, executed here against the checkout's ctrlrun.
+
+    The page's JavaScript owns the DOM and nothing else: every outcome a reader sees is the JSON
+    this function returns. So the sequence the page tells the reader to try is run here, natively,
+    and each outcome asserted — with no Node, no Pyodide and no network. This is the third check
+    the page describes, and it exists because the first two once both stayed green while the
+    page's own copy of the Python was broken.
+    """
+    namespace: dict[str, object] = {}
+    exec(compile(_playground_module(), "docs/try-it.js PLAYGROUND", "exec"), namespace)
+    step = namespace["step"]
+
+    def call(**request):
+        return json.loads(step(json.dumps(request)))
+
+    return call
+
+
+def test_the_playground_module_is_valid_python_and_defines_step():
+    namespace: dict[str, object] = {}
+    exec(compile(_playground_module(), "docs/try-it.js PLAYGROUND", "exec"), namespace)
+    assert callable(namespace.get("step"))
+
+
+def test_the_playground_runs_the_sequence_the_page_tells_the_reader_to_try():
+    """Steps 1 to 6 of "Try this, in order", each outcome as the page states it."""
+    step = _playground_step()
+
+    # 1. €500 on txn_1: allowed and committed.
+    first = step(op="refund", payment_id="txn_1", amount=50000, lose_reply=False)
+    assert first["outcome"] == "executed", first
+    assert first["receipt"]["decision"] == "allow"
+    assert first["receipt"]["result"] == "committed"
+    assert first["remote_calls"] == 1
+
+    # 2. €2,000 on txn_2: a human decides; approve; €5,000 on it is refused; €2,000 executes.
+    asked = step(op="refund", payment_id="txn_2", amount=200000, lose_reply=False)
+    assert asked["outcome"] == "approval_required", asked
+    assert asked["remote_calls"] == 0
+    granted = step(op="approve", request_id=asked["request_id"])
+    assert granted["approval_id"] == asked["request_id"]
+    assert granted["action_hash"].startswith("sha256:")
+    mutated = step(op="refund", payment_id="txn_2", amount=500000, approval_id=asked["request_id"])
+    assert mutated["outcome"] == "approval_mismatch", mutated
+    assert mutated["reason"] == "mismatch"
+    assert mutated["remote_calls"] == 0, "the mutated amount reached the remote"
+    assert mutated["receipt"]["result"] == "blocked"
+    approved = step(op="refund", payment_id="txn_2", amount=200000, approval_id=asked["request_id"])
+    assert approved["outcome"] == "executed", approved
+    assert approved["receipt"]["decision"] == "approve"
+    assert approved["receipt"]["approval_id"] == asked["request_id"]
+    assert approved["remote_calls"] == 1
+
+    # 3. The same approval presented again: consumed.
+    replayed = step(op="refund", payment_id="txn_2", amount=200000, approval_id=asked["request_id"])
+    assert replayed["outcome"] == "approval_mismatch", replayed
+    assert replayed["reason"] == "consumed"
+    assert replayed["remote_calls"] == 1
+
+    # 4. €20,000 on txn_3: denied, and no request was created.
+    denied = step(op="refund", payment_id="txn_3", amount=2000000, lose_reply=False)
+    assert denied["outcome"] == "denied", denied
+    assert "request_id" not in denied
+    assert denied["remote_calls"] == 0
+    assert denied["receipt"]["result"] == "denied"
+
+    # 5. €500 on txn_4 with the reply lost: AMBIGUOUS; the retry is refused; one remote call.
+    lost = step(op="refund", payment_id="txn_4", amount=50000, lose_reply=True)
+    assert lost["outcome"] == "reply_lost", lost
+    assert lost["receipt"]["result"] == "ambiguous"
+    assert lost["remote_calls"] == 1
+    retried = step(op="refund", payment_id="txn_4", amount=50000, lose_reply=False)
+    assert retried["outcome"] == "ambiguous_retry", retried
+    assert retried["remote_calls"] == 1, "the blind retry reached the remote"
+    assert retried["receipt"]["result"] == "blocked"
+
+    # 6. €500 on txn_1 again: the effect already happened.
+    duplicate = step(op="refund", payment_id="txn_1", amount=50000, lose_reply=False)
+    assert duplicate["outcome"] == "duplicate", duplicate
+    assert duplicate["remote_calls"] == 1
+
+
+def test_the_playground_refuses_a_negative_amount_as_the_policy_says():
+    """Both ends of every band are bound; a refund of a negative amount is a charge."""
+    step = _playground_step()
+    charged = step(op="refund", payment_id="txn_1", amount=-500, lose_reply=False)
+    assert charged["outcome"] == "denied", charged
+    assert charged["remote_calls"] == 0
+
+
+def test_the_playground_has_no_way_to_grant_but_the_human_button():
+    """No auto-approve, no dry run, no flag: the only path to a grant is `op: approve` with a
+    request id, which is `grant_approval` on the store — the write `ctrlrun approve` makes."""
+    module = _playground_module()
+    assert "grant_approval(" in module
+    assert module.count("grant_approval(") == 1
+    for forbidden in ("auto_approve", "dry_run", "ScriptedApprovalProvider", "mode"):
+        assert forbidden not in module, forbidden
+    step = _playground_step()
+    with pytest.raises(Exception):  # noqa: B017 - an unknown request id is not a grant
+        step(op="approve", request_id="apr_0000")
+
+
+def test_the_playground_policy_on_the_page_is_the_policy_in_the_module():
+    """The page shows a YAML block and the module carries one; a reader reasons from the block
+    they can see, so the two are held equal rather than described as equal."""
+    module = _playground_module()
+    in_module = re.search(r'POLICY = """\n(.*?)"""', module, re.S)
+    assert in_module, "the module no longer carries POLICY as a triple-quoted string"
+    shown = TRY_IT.split("```yaml", 1)[1].split("```", 1)[0]
+
+    assert shown.strip() == in_module.group(1).strip()
+
+
+def test_the_page_names_every_outcome_the_module_can_return():
+    """Each `outcome` the module reports has the line the page tells the reader to expect."""
+    module = _playground_module()
+    outcomes = set(re.findall(r'result\["outcome"\] = "(\w+)"', module))
+    assert outcomes == {
+        "executed",
+        "approval_required",
+        "approval_mismatch",
+        "denied",
+        "duplicate",
+        "ambiguous_retry",
+        "reply_lost",
+    }
+    for exception in (
+        "ApprovalRequired",
+        "ApprovalMismatch",
+        "ActionDenied",
+        "DuplicateEffect",
+        "AmbiguousEffect",
+        "AMBIGUOUS",
+        "consumed",
+    ):
+        assert exception in TRY_IT, exception
+    assert 'case "' in SCRIPT
+    for outcome in outcomes:
+        assert f'case "{outcome}":' in SCRIPT, f"the page has no branch for {outcome}"
+
+
+def test_the_playground_wires_every_control_the_page_mounts():
+    playground = re.search(r'PLAYGROUND_ID = "([^"]+)"', SCRIPT).group(1)
+    assert f'id="{playground}"' in TRY_IT
+    for name in ("amount", "payment_id", "lose_reply", "run", "approve"):
+        assert f'name="{name}"' in TRY_IT, name
+        assert f'[name="{name}"]' in SCRIPT, f"the script never selects {name}"
+    assert "runPython(PLAYGROUND)" in SCRIPT
+    assert "runPython(PLAYGROUND)" in HARNESS, "the harness does not run the playground"
+    assert "step(" in HARNESS
 
 
 @pytest.mark.authority
