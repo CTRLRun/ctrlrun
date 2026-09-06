@@ -161,6 +161,28 @@ def test_the_transcript_box_scrolls_down_rather_than_growing():
     assert box.get("whiteSpace") == "pre", "the demo's columns are aligned; do not wrap them"
 
 
+def test_the_transcript_does_not_depend_on_how_the_theme_lays_the_box_out():
+    """The site's theme sets `display: flex` on this `<pre>`, and we do not own that rule.
+
+    In a flex container every appended child is a flex item in a *row*, so a reveal that
+    appended a node per line laid the whole transcript out sideways: measured on the deployed
+    page, all five refusals sat at the same y and the box scrolled 6530px wide against a 529px
+    frame. `say` never hit it, because setting `textContent` makes one item however the box is
+    laid out. So the lines go inside a single block child, which is one flex item, and the
+    page also asks for `display: block`. Either alone fixes it; both together mean a theme
+    that changes its mind cannot put the transcript in a row again.
+    """
+    assert 'body.style.display = "block"' in SCRIPT
+    assert "output.appendChild(body)" in SCRIPT, "the transcript needs one container child"
+    assert "body.appendChild(node)" in SCRIPT
+    assert "output.appendChild(node)" not in SCRIPT, "a line appended straight into the <pre>"
+
+    style = re.search(r"<pre\s*\n\s*style=\{\{(.*?)\}\}", TRY_IT, re.S)
+    assert style, "docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
+    box = dict(re.findall(r"(\w+):\s*\"([^\"]*)\"", style.group(1)))
+    assert box.get("display") == "block", "the theme's flex would lay the lines out in a row"
+
+
 def test_the_reveal_follows_the_newest_line_only_for_a_reader_at_the_bottom():
     """Following the output is right until somebody scrolls up to re-read, and then it is
     yanking them away from what they are reading."""
