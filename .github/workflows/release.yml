@@ -28,7 +28,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # to create the Release and upload its assets; nothing else here writes
+      contents: write # to create the Release and upload its assets
+      id-token: write # the OIDC token Sigstore signs the provenance against
+      attestations: write # to record the attestation against the repository
     steps:
       - name: Which tag
         id: tag
@@ -74,6 +76,30 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
+
+      # Signed provenance for the artifacts this release is about to carry. The action signs
+      # against the workflow's OIDC identity, so what it attests is *this* workflow, at *this*
+      # commit, having built *these* bytes -- there is no key anywhere, and nothing to leak or
+      # rotate, which is the same argument trusted publishing makes in `publish.yml`.
+      - name: Attest the distributions
+        id: attest
+        if: steps.existing.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      # The bundle the action leaves in the runner's temp directory is not something a person
+      # downloading a release can see. This writes it into `dist/`, where the `gh release
+      # create dist/*` below carries it, and refuses to write anything if the statement is not
+      # about the artifacts in that directory. See `scripts/release_provenance.py`.
+      - name: The provenance a downloader can check
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          python scripts/release_provenance.py \
+            --bundle "$BUNDLE" --dist dist --name "ctrlrun-$VERSION"
 
       # The entry for `X.Y.Z` in the CHANGELOG *as it stood at the tag*. A pre-release tag
       # (0.1.0a1, 0.3.0rc1) falls back to its release's entry, since the CHANGELOG is kept per
