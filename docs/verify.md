@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: CTRLRun/ctrlrun@main
+      - uses: CTRLRun/ctrlrun@v0.6.0
         with:
           policy: ctrlrun.yaml
 ```
@@ -225,6 +225,13 @@ jobs:
 The action installs `ctrlrun`, runs `ctrlrun verify --json --junit`, renders the job summary
 and the badge JSON **from that report** — not from a second run, so they cannot disagree — and
 uploads the three files as one artifact.
+
+**The ref pins the action's steps and not the package they install.** `install` defaults to
+`ctrlrun`, unpinned, so `@v0.6.0` runs whatever version PyPI serves on the day the job runs —
+pinning the action is not pinning the thing being verified with. Set `install: ctrlrun==0.6.0`
+where you want the run to be reproducible, and pin the action by commit rather than by tag
+where you want a ref that cannot be moved; this repository holds its own workflows to the
+commit form and a test enforces it.
 
 It fails the job when a guarantee failed and when the configuration was refused, and succeeds
 when guarantees are N/A. N/A is not a failure and it is not a pass; the job's green means

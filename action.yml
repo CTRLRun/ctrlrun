@@ -40,7 +40,9 @@ inputs:
     default: "3.11"
   install:
     description: >-
-      The pip requirement to install. Defaults to the published package; set it to `.` to
+      The pip requirement to install. Defaults to the published package, **unpinned** — the
+      ref you pin the action to does not pin this, so a pinned action still installs whatever
+      PyPI serves that day. Give it `ctrlrun==<version>` for a reproducible run, or `.` to
       verify with the checkout rather than with the last release.
     required: false
     default: ctrlrun
