@@ -142,6 +142,32 @@ def test_the_program_ends_on_an_expression_pyodide_can_return():
     assert "buffer.getvalue()" in last, f"the last line does not return the demo: {last!r}"
 
 
+def test_the_transcript_box_scrolls_down_rather_than_growing():
+    """A `min-height` with no `max-height` is a box that can only get taller.
+
+    That is what shipped. The transcript grew the page instead of scrolling, `scrollTop`
+    stayed 0 so the script's follow-the-newest-line was dead code, and the only scrollbar the
+    reader got was the horizontal one the long lines need. Measured in a browser at 820px: the
+    box grew to 910px with `scrollHeight == clientHeight`. With both bounds it holds at 452px
+    and scrolls to 458.
+    """
+    style = re.search(r"<pre\s*\n\s*style=\{\{(.*?)\}\}", TRY_IT, re.S)
+    assert style, "docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
+    box = dict(re.findall(r"(\w+):\s*\"([^\"]*)\"", style.group(1)))
+
+    assert "maxHeight" in box, "minHeight without maxHeight is a box that can only grow"
+    assert box.get("overflowY") == "auto", "the box cannot scroll vertically"
+    assert box.get("overflowX") == "auto", "the long lines must scroll inside the box"
+    assert box.get("whiteSpace") == "pre", "the demo's columns are aligned; do not wrap them"
+
+
+def test_the_reveal_follows_the_newest_line_only_for_a_reader_at_the_bottom():
+    """Following the output is right until somebody scrolls up to re-read, and then it is
+    yanking them away from what they are reading."""
+    assert "output.scrollHeight - output.scrollTop - output.clientHeight" in SCRIPT
+    assert "if (following) output.scrollTop = output.scrollHeight;" in SCRIPT
+
+
 def test_the_harness_runs_the_program_the_page_runs():
     """A harness with its own copy of the artifact verifies the copy. This one reads
     docs/try-it.js, so the program it proves is the program the reader gets."""

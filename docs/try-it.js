@@ -103,9 +103,15 @@
           } else {
             node = document.createTextNode(line);
           }
+          // Follow the newest line, but only for a reader who is already at the bottom:
+          // yanking somebody back who has scrolled up to re-read scenario 1 is worse than
+          // not following at all. The box has a max height, so this is a real scroll — it
+          // was dead code while the box could only grow, and the reader got a horizontal
+          // scrollbar and a page that got taller instead of a terminal that scrolled.
+          var following = output.scrollHeight - output.scrollTop - output.clientHeight < 40;
           output.appendChild(node);
           output.appendChild(document.createTextNode("\n"));
-          output.scrollTop = output.scrollHeight;
+          if (following) output.scrollTop = output.scrollHeight;
           window.setTimeout(next, line.trim() === "" ? 0 : LINE_MS);
         }
         next();
