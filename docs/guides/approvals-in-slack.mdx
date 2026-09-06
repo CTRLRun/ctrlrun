@@ -52,8 +52,16 @@ URL that can receive the POST.
   </Step>
 
   <Step title="Receive the request">
-    One POST per `APPROVAL_REQUESTED`, with the `CTRLRun-Signature` header, an HMAC-SHA256 over
-    `timestamp.body` computed on the exact bytes sent. Verify it before you read the body.
+    One POST per `APPROVAL_REQUESTED`, with a `CTRLRun-Signature` header. Verify it before you
+    read the body. The header is two comma-separated fields:
+
+    ```text
+    CTRLRun-Signature: t=1757142078,v1=6f1c…8ad2
+    ```
+
+    `t` is unix seconds and `v1` is the hex HMAC-SHA256, keyed on your secret, over the exact
+    bytes `f"{t}.{body}"` — the body as sent, not re-serialized. Compare it with a constant-time
+    comparison, and refuse a `t` outside your replay window (five minutes).
 
     ```json
     {
@@ -81,20 +89,30 @@ URL that can receive the POST.
     (five minutes by default):
 
     ```json
-    {"decision": "grant", "approver": "dana@example.com"}
+    {
+      "request_id": "apr_…",
+      "action_hash": "sha256:…",
+      "decision": "grant",
+      "approver": "dana@example.com"
+    }
     ```
+
+    **All four are required.** `request_id` must equal the one in the path, and `action_hash`
+    must equal the one on the stored request — echo back what the request gave you. A body
+    carrying only `decision` and `approver` is refused with *the path and the body name
+    different requests*, which is the shape of this guide's own earlier example.
 
     `decision` is `grant` or `deny`; `approver` is a non-empty string recorded on the receipt.
     A replayed grant inside the window is idempotent, because the record is already granted;
     outside it, the timestamp check refuses. The endpoint answers 200 on success and a 4xx with
-    the reason on a bad signature, an unknown request id, an expired request, or a request
-    already answered the other way.
+    the reason on a bad signature, an unknown request id, a hash that does not match, an expired
+    request, or a request already answered the other way.
   </Step>
 
   <Step title="Watch it land">
     ```bash
-    ctrlrun inspect apr_…     # the request's history, then the grant
-    ctrlrun receipts --last 1  # approver: dana@example.com
+    ctrlrun inspect act_…            # the action's history, proposal through grant
+    ctrlrun receipts --last 1 --json  # "approver": "dana@example.com"
     ```
 
     If the human never answers, the request expires at `expires_at` (the approval TTL, fifteen

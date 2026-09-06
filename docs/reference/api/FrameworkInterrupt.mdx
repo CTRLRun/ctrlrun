@@ -8,7 +8,15 @@ description: "One framework's human-in-the-loop primitive, and nothing else (SPE
 `ctrlrun.FrameworkInterrupt` — class, defined at `src/ctrlrun/adapter.py:179`
 
 ```python
+from ctrlrun import FrameworkInterrupt
+```
+
+
+```python
 class FrameworkInterrupt(Protocol)
+    framework: str
+    carries_approved_arguments: bool
+    def interrupt(pending: PendingApproval) -> ApprovalAnswer
 ```
 
 One framework's human-in-the-loop primitive, and nothing else (SPEC-v0.5 §2.1).

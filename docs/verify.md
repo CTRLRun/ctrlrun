@@ -47,7 +47,7 @@ opens a socket, and it writes nothing outside a temporary directory.
 
 That is the whole claim. It is not a statement that your system is secure, that your policy is
 a good policy, or that CTRLRun has audited anything. A configuration that permits everything
-and constrains nobody can pass all ten guarantees, because the guarantees are about **the
+and constrains nobody can pass every guarantee in the catalogue, because they are about **the
 kernel doing what it says under that configuration** — not about whether the configuration is
 wise.
 
@@ -183,7 +183,7 @@ ctrlrun verify [--authority PATH] [--json] [--junit PATH] [--only G1,G3] [--stor
 | `--json` | One `ctrlrun.verify/v1` document on stdout, carrying the SHA-256 of both documents verify read, and on each failure a counterexample: the ordered events, receipts and effect records that show the violation. |
 | `--junit PATH` | A JUnit XML file for CI. An N/A is `<skipped>` and never a pass. |
 | `--only G1,G3` | Runs exactly those. Everything else is `skipped`, the report carries `"partial": true`, and **no badge is written** — a fraction computed over a subset somebody chose is a false green in a different costume. |
-| `--store-url URL` | Reserved. v0.4 accepts the SQLite backend; anything else exits 2 naming v0.6. |
+| `--store-url URL` | The backend to grade against: `sqlite` (the default) or a `postgresql://` URL. Verify creates a scratch schema per guarantee there, drops them all when the run ends, and never opens your store. Anything else exits 2 naming the two it knows. |
 
 There is **no flag that relaxes a check**. No argument and no environment variable makes
 verify's `Control` behave differently from the one your deployment runs. The moment one exists,

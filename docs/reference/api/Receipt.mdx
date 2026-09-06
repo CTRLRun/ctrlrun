@@ -8,8 +8,13 @@ description: "Portable evidence of one action that reached a terminal state (SPE
 `ctrlrun.Receipt` — class, defined at `src/ctrlrun/receipt.py:244`
 
 ```python
-class Receipt()
-    def __init__(receipt_id: str, action_id: str, action: str, action_hash: str, principal: Principal, resource: str | None, arguments: Mapping[str, Any], environment: str, decision: Decision, decision_reason: str, result: ReceiptResult, started_at: datetime, finished_at: datetime, approval_id: str | None, approver: str | None, effect_key: str | None, attempt: int, error: str | None, execution: ReceiptResult | None, would_have: _WouldHave | None, seq: int | None, prev_hash: str | None, policy_hash: str | None, policy_version: str | None, controls: tuple[str, ...], hash: str | None)
+from ctrlrun import Receipt
+```
+
+
+```python
+class Receipt
+    def __init__(receipt_id: str, action_id: str, action: str, action_hash: str, principal: Principal, resource: str | None, arguments: Mapping[str, Any], environment: str, decision: Decision, decision_reason: str, result: ReceiptResult, started_at: datetime, finished_at: datetime, approval_id: str | None = None, approver: str | None = None, effect_key: str | None = None, attempt: int = 1, error: str | None = None, execution: ReceiptResult | None = None, would_have: _WouldHave | None = None, seq: int | None = None, prev_hash: str | None = None, policy_hash: str | None = None, policy_version: str | None = None, controls: tuple[str, ...] = (), hash: str | None = None)
 ```
 
 Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1).

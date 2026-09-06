@@ -8,8 +8,13 @@ description: "What a provider is told about the call it is resolving a principal
 `ctrlrun.IdentityContext` — class, defined at `src/ctrlrun/identity.py:35`
 
 ```python
-class IdentityContext()
-    def __init__(action: str, environment: str, headers: Mapping[str, str], agent: str | None, user: str | None)
+from ctrlrun import IdentityContext
+```
+
+
+```python
+class IdentityContext
+    def __init__(action: str, environment: str, headers: Mapping[str, str] = (lambda: _NO_HEADERS)(), agent: str | None = None, user: str | None = None)
 ```
 
 What a provider is told about the call it is resolving a principal for (§3.1).

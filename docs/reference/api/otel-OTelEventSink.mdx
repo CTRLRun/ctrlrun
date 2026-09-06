@@ -8,8 +8,15 @@ description: "Export every `Event` and `Receipt` as OpenTelemetry spans (SPEC-v0
 `ctrlrun.otel.OTelEventSink` — class, defined at `src/ctrlrun/otel.py:45`
 
 ```python
-class OTelEventSink()
-    def __init__(tracer_provider: Any, arguments: bool, max_open_spans: int)
+from ctrlrun.otel import OTelEventSink
+```
+
+Needs the `otel` extra: `pip install "ctrlrun[otel]"`. Importing it without that raises `MissingDependency` carrying the install command.
+
+
+```python
+class OTelEventSink
+    def __init__(*, tracer_provider: Any = None, arguments: bool = False, max_open_spans: int = DEFAULT_MAX_OPEN_SPANS)
 ```
 
 Export every `Event` and `Receipt` as OpenTelemetry spans (SPEC-v0.2 §8).

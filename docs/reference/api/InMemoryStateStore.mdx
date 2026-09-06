@@ -8,8 +8,13 @@ description: "Everything held in process memory: for tests and `ctrlrun demo`."
 `ctrlrun.InMemoryStateStore` — class, defined at `src/ctrlrun/state.py:579`
 
 ```python
-class InMemoryStateStore()
-    def __init__(clock: Callable[[], datetime])
+from ctrlrun import InMemoryStateStore
+```
+
+
+```python
+class InMemoryStateStore
+    def __init__(*, clock: Callable[[], datetime] = _utc_now)
 ```
 
 Everything held in process memory: for tests and `ctrlrun demo`.

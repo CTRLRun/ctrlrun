@@ -41,6 +41,34 @@ EXTRA_NAMES: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Which extra installs each module that needs one. A reference page that named a class and
+#: not the install line was browsable and not usable: nothing on
+#: `postgres-PostgresStateStore` or `otel-OTelEventSink` said `pip install "ctrlrun[postgres]"`,
+#: and none of the seventy-one pages carried an import line at all.
+EXTRA_FOR: dict[str, str] = {
+    "ctrlrun.postgres": "postgres",
+    "ctrlrun.otel": "otel",
+    "ctrlrun.jwt_identity": "identity",
+    "ctrlrun.acs": "gateway",
+    "ctrlrun.gateway": "gateway",
+    "ctrlrun.conformance": "conformance",
+    "ctrlrun.conformance.store": "conformance",
+}
+
+
+def _how_to_import(module_path: str, name: str) -> list[str]:
+    """The two lines a reader needs before any of the rest of the page is usable."""
+    lines = ["```python", f"from {module_path} import {name}", "```", ""]
+    extra = EXTRA_FOR.get(module_path)
+    if extra is not None:
+        lines += [
+            f'Needs the `{extra}` extra: `pip install "ctrlrun[{extra}]"`. '
+            "Importing it without that raises `MissingDependency` carrying the install command.",
+            "",
+        ]
+    return lines
+
+
 def _load():  # noqa: ANN202 - griffe's types are the return value
     import griffe
 
@@ -78,26 +106,80 @@ def _kind(member) -> str:  # noqa: ANN001
     return str(member.kind.value) if hasattr(member.kind, "value") else str(member.kind)
 
 
+def _parameters(parameters, *, drop_self: bool = False) -> str:  # noqa: ANN001
+    """A parameter list a reader can call, markers and defaults included.
+
+    This used to render `name: annotation` and nothing else, which dropped two things and
+    broke every call on the page. It dropped the **`*`**, so twenty-seven keyword-only
+    signatures read as positional — `protect('stripe.refund', 'refund:{id}')` raises
+    `TypeError: takes 1 positional argument but 2 were given`, from the reference page for
+    `protect`. And it dropped **defaults**, so forty-four optional parameters read as
+    required. The launch-readiness audit tried thirteen of these pages and all thirteen
+    raised. `*args` and `**options` were rendered bare too, which is how
+    `serve(*, upstream, alias, **options)` became `serve(upstream, alias, options)`.
+    """
+    rendered: list[str] = []
+    seen_var_positional = False
+    for parameter in parameters:
+        kind = getattr(parameter.kind, "value", str(parameter.kind))
+        name = str(parameter.name)
+        if drop_self and name in {"self", "cls"}:
+            continue
+        if kind == "variadic positional":
+            seen_var_positional = True
+            name = f"*{name}"
+        elif kind == "variadic keyword":
+            name = f"**{name}"
+        elif kind == "keyword-only" and not seen_var_positional:
+            rendered.append("*")
+            seen_var_positional = True
+        piece = name if parameter.annotation is None else f"{name}: {parameter.annotation}"
+        if parameter.default is not None and kind not in {
+            "variadic positional",
+            "variadic keyword",
+        }:
+            piece += f" = {parameter.default}"
+        rendered.append(piece)
+    return ", ".join(rendered)
+
+
+#: Rendered under a class that has no `__init__` of its own, so a Protocol says what it asks
+#: an implementer for. `FrameworkInterrupt` rendered as `class FrameworkInterrupt(Protocol)`
+#: and nothing else, while a neighbouring page required one of the attributes it never named.
+_MEMBER_KINDS = ("function", "attribute")
+
+
+def _members(member) -> list[str]:  # noqa: ANN001
+    lines: list[str] = []
+    for name, child in member.members.items():
+        if name.startswith("_"):
+            continue
+        kind = _kind(child)
+        if kind == "function":
+            returns = f" -> {child.returns}" if child.returns is not None else ""
+            lines.append(
+                f"    def {name}({_parameters(child.parameters, drop_self=True)}){returns}"
+            )
+        elif kind == "attribute":
+            annotation = f": {child.annotation}" if child.annotation is not None else ""
+            lines.append(f"    {name}{annotation}")
+    return lines
+
+
 def _signature(member) -> str:  # noqa: ANN001
     kind = _kind(member)
     if kind == "function":
-        params = ", ".join(
-            str(p.name) if p.annotation is None else f"{p.name}: {p.annotation}"
-            for p in member.parameters
-        )
         returns = f" -> {member.returns}" if member.returns is not None else ""
-        return f"def {member.name}({params}){returns}"
+        return f"def {member.name}({_parameters(member.parameters)}){returns}"
     if kind == "class":
         bases = ", ".join(str(b) for b in member.bases)
+        header = f"class {member.name}({bases})" if bases else f"class {member.name}"
         init = member.members.get("__init__")
         if init is not None and _kind(init) == "function":
-            params = ", ".join(
-                str(p.name) if p.annotation is None else f"{p.name}: {p.annotation}"
-                for p in init.parameters
-                if p.name != "self"
-            )
-            return f"class {member.name}({bases})\n    def __init__({params})"
-        return f"class {member.name}({bases})"
+            params = _parameters(init.parameters, drop_self=True)
+            return f"{header}\n    def __init__({params})"
+        body = _members(member)
+        return "\n".join([header, *body]) if body else header
     return f"{member.name}"
 
 
@@ -185,6 +267,8 @@ def _page(member, module_path: str, name: str) -> str:  # noqa: ANN001
         "{/* " + MARKER + " */}",
         "",
         f"`{module_path}.{name}` — {_kind(member)}" + (f", defined at `{where}`" if where else ""),
+        "",
+        *_how_to_import(module_path, name),
         "",
         "```python",
         _signature(member),

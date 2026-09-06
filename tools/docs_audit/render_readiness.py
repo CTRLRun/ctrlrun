@@ -58,6 +58,27 @@ def _version() -> str:
         return str(tomllib.load(handle)["project"]["version"])
 
 
+#: A changelog heading: `## [0.6.0] - unreleased — Durable runtime`, or with a date. The file
+#: uses a hyphen and an em dash interchangeably as the separator, so both are accepted.
+_HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\]\s*[-—]\s*(?P<when>[^\s—]+)", re.M)
+
+
+def released() -> str | None:
+    """The newest version the changelog gives a date to, or `None` if it gives none.
+
+    The readiness block used to say *"Version 0.6.0, on PyPI"* off `pyproject.toml` alone, and
+    on the day it was written 0.6.0 was `unreleased` and PyPI held 0.5.0 — a false sentence on
+    the README, produced by a generator, which is the failure a generator is supposed to make
+    impossible. The changelog is the source because it is the file that already has to be
+    right before a tag, and it flips this line on its own when the release lands.
+    """
+    text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    for found in _HEADING.finditer(text):
+        if found.group("when").lower() != "unreleased":
+            return found.group("version")
+    return None
+
+
 def collected() -> int:
     """How many tests `pytest` collects right now."""
     result = subprocess.run(
@@ -88,6 +109,7 @@ def measure() -> dict:
     run = soak()
     return {
         "version": _version(),
+        "released": released(),
         "tests": collected(),
         "guarantees": _guarantees(),
         "soak": None
@@ -111,7 +133,7 @@ def _guarantees() -> int:
 
 def _lines(data: dict, *, full: bool) -> list[str]:
     version, tests, guarantees = data["version"], data["tests"], data["guarantees"]
-    run = data["soak"]
+    run, published = data["soak"], data.get("released")
     link = "https://pypi.org/project/ctrlrun/"
 
     def where(text: str, page: str) -> str:
@@ -128,7 +150,12 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         return text
 
     lines = [
-        f"- **Version {version}**, on [PyPI]({link}), Python 3.11 and later.",
+        (
+            f"- **Version {version}**, on [PyPI]({link}), Python 3.11 and later."
+            if published == version
+            else f"- **Version {version} is in development**; [PyPI]({link}) has {published}. "
+            "Python 3.11 and later."
+        ),
         where(
             f"- **{tests:,} tests**, every version specified before it was written and every "
             "requirement mutation-tested.",
@@ -238,7 +265,7 @@ def check(data: dict, pages: list[Path] | None = None) -> list[str]:
             f"the block claims {recorded['tests']:,} tests and the suite collects {current:,}; "
             "run --write"
         )
-    for key in ("version", "guarantees", "soak"):
+    for key in ("version", "released", "guarantees", "soak"):
         if recorded.get(key) != data.get(key):
             drift.append(f"{key} changed since the block was generated; run --write")
     for fmt in FORMATS:

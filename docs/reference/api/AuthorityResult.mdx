@@ -8,8 +8,13 @@ description: "What the authority axis decided, and which grant it decided on (§
 `ctrlrun.AuthorityResult` — class, defined at `src/ctrlrun/authority.py:457`
 
 ```python
-class AuthorityResult()
-    def __init__(passed: bool, reason: str, grant_id: str | None, delegation_id: str | None, depth: int, dimension: str | None, missing_parent_id: str | None, expired_parent_id: str | None, depth_exceeded: int | None, cycle_at: str | None)
+from ctrlrun import AuthorityResult
+```
+
+
+```python
+class AuthorityResult
+    def __init__(passed: bool, reason: str, grant_id: str | None = None, delegation_id: str | None = None, depth: int = 0, dimension: str | None = None, missing_parent_id: str | None = None, expired_parent_id: str | None = None, depth_exceeded: int | None = None, cycle_at: str | None = None)
 ```
 
 What the authority axis decided, and which grant it decided on (§4.8).

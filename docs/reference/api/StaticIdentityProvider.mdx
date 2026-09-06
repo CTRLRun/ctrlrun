@@ -8,8 +8,13 @@ description: "A fixed principal, for development, tests and single-tenant demons
 `ctrlrun.StaticIdentityProvider` — class, defined at `src/ctrlrun/identity.py:87`
 
 ```python
-class StaticIdentityProvider()
-    def __init__(agent: str, user: str | None, claims: Mapping[str, ClaimValue], issuer: str | None, expires_at: datetime | None)
+from ctrlrun import StaticIdentityProvider
+```
+
+
+```python
+class StaticIdentityProvider
+    def __init__(agent: str, user: str | None = None, claims: Mapping[str, ClaimValue] = (lambda: NO_CLAIMS)(), issuer: str | None = None, expires_at: datetime | None = None)
 ```
 
 A fixed principal, for development, tests and single-tenant demonstrations (§3.3).

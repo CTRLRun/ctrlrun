@@ -8,7 +8,14 @@ description: "Somewhere a copy of every `Event` and `Receipt` goes (SPEC-v0.2 §
 `ctrlrun.EventSink` — class, defined at `src/ctrlrun/receipt.py:410`
 
 ```python
+from ctrlrun import EventSink
+```
+
+
+```python
 class EventSink(Protocol)
+    def on_event(event: Event) -> None
+    def on_receipt(receipt: Receipt) -> None
 ```
 
 Somewhere a copy of every `Event` and `Receipt` goes (SPEC-v0.2 §4.1).

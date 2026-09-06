@@ -8,8 +8,13 @@ description: "Requests go to the StateStore; `wait()` polls it (SPEC-v0.1 §4.3)
 `ctrlrun.LocalApprovalProvider` — class, defined at `src/ctrlrun/approval.py:369`
 
 ```python
-class LocalApprovalProvider()
-    def __init__(store: ApprovalStore, clock: Callable[[], datetime], poll_interval: timedelta)
+from ctrlrun import LocalApprovalProvider
+```
+
+
+```python
+class LocalApprovalProvider
+    def __init__(store: ApprovalStore, *, clock: Callable[[], datetime] = _utc_now, poll_interval: timedelta = DEFAULT_POLL_INTERVAL)
 ```
 
 Requests go to the StateStore; `wait()` polls it (SPEC-v0.1 §4.3).

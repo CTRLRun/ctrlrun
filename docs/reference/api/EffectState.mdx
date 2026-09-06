@@ -8,7 +8,18 @@ description: "Where a logical effect stands (SPEC-v0.1 §5.2)."
 `ctrlrun.EffectState` — class, defined at `src/ctrlrun/effect.py:74`
 
 ```python
+from ctrlrun import EffectState
+```
+
+
+```python
 class EffectState(StrEnum)
+    NEW
+    RESERVED
+    EXECUTING
+    COMMITTED
+    FAILED
+    AMBIGUOUS
 ```
 
 Where a logical effect stands (SPEC-v0.1 §5.2).

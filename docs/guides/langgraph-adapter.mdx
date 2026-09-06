@@ -53,8 +53,10 @@ them against a real LangGraph install in this repository's CI.
     result = graph.invoke({"payment_id": "txn_1", "amount": 2000}, config)
     if "__interrupt__" in result:
         pending = graph.get_state(config).tasks[0].interrupts[0].value
-        # `pending` is JSON: the action, its arguments, the resource, the principal, the hash
-        # and the request's expiry. Put it in front of a human however you already do.
+        # `pending` is JSON: request_id, action_id, action, action_hash, arguments, resource,
+        # environment, agent, user, created_at, expires_at. There is no `principal` key and no
+        # `hash` key — the principal is split into `agent` and `user`, and the hash is
+        # `action_hash`. Put it in front of a human however you already do.
         graph.invoke(
             Command(resume={
                 "approved": True,

@@ -8,7 +8,14 @@ description: "Drive every suite through `adapter` and report what each came to (
 `ctrlrun.conformance.run` — function, defined at `src/ctrlrun/conformance/suites.py:1063`
 
 ```python
-def run(adapter: ConformanceAdapter, deployment: Control | None) -> ConformanceReport
+from ctrlrun.conformance import run
+```
+
+Needs the `conformance` extra: `pip install "ctrlrun[conformance]"`. Importing it without that raises `MissingDependency` carrying the install command.
+
+
+```python
+def run(adapter: ConformanceAdapter, deployment: Control | None = None) -> ConformanceReport
 ```
 
 Drive every suite through `adapter` and report what each came to (SPEC-v0.5 §5).

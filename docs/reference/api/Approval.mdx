@@ -8,7 +8,12 @@ description: "A human's grant, bound to one `action_hash` (SPEC-v0.1 §4.1)."
 `ctrlrun.Approval` — class, defined at `src/ctrlrun/approval.py:111`
 
 ```python
-class Approval()
+from ctrlrun import Approval
+```
+
+
+```python
+class Approval
     def __init__(approval_id: str, action_hash: str, approver: str, granted_at: datetime, expires_at: datetime)
 ```
 

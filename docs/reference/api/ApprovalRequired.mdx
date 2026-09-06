@@ -8,8 +8,13 @@ description: "The action needs a human. `request_id` is what `ctrlrun approve` t
 `ctrlrun.ApprovalRequired` — class, defined at `src/ctrlrun/errors.py:88`
 
 ```python
+from ctrlrun import ApprovalRequired
+```
+
+
+```python
 class ApprovalRequired(CTRLRunError)
-    def __init__(message: str | None, request_id: str, action_id: str | None)
+    def __init__(message: str | None = None, *, request_id: str, action_id: str | None = None)
 ```
 
 The action needs a human. `request_id` is what `ctrlrun approve` takes (SPEC §4.3).
