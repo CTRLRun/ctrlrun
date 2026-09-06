@@ -88,7 +88,7 @@ otel = [
 # asymmetric algorithm — which is what a JWKS deployment uses — raises at verification time
 # rather than at install time. An extra that installs cleanly and then cannot verify an RS256
 # token is worse than one that names its dependency.
-identity = ["pyjwt[crypto]>=2.8"]
+identity = ["pyjwt[crypto]>=2.13.0"]
 # SPEC-v0.6 §4. The Postgres backend is the one thing in v0.6 that needs a third-party
 # driver; the migration runner, the chain, the policy hash and the store conformance suite
 # are all core and stdlib, for `v0.4 §1`'s reason -- a check somebody has to remember to
