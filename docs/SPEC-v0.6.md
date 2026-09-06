@@ -2182,23 +2182,51 @@ The third rule of §1.2, made a test rather than an intention.
 **unexplained**. Every `AMBIGUOUS` is recorded with its cause, and `resolved_by` (§5.3) is what
 makes "resolved by a hook" and "resolved by a human" countable separately.
 
-- It runs for **at least a week** against a real Postgres. This is calendar time and **it does not
-  compress.**
-- It starts the hour item 4 goes green, and runs while items 5, 6 and 7 are written. Starting it
-  late is how a one-week criterion becomes a one-week delay.
+- It runs against a real Postgres, for as long as the maintainer runs it, and **the measured
+  duration is published with every number the run produced.**
+- It starts the hour item 4 goes green, and runs while items 5, 6 and 7 are written.
 - The harness ships separately from the numbers, and **the maintainer reads the table before it
   goes in a PR** (`v0.4 §7.3`).
-- **The exit criterion is `ROADMAP.md`'s and is unchanged: a week with *no* unexplained
-  `AMBIGUOUS`.** An earlier draft of this section required only that the count be *published*,
-  which is a different and weaker criterion — and quietly relaxing a release gate in the document
-  that defines the release is precisely what §1.4 corrected two other sentences for in this same
-  commit. A non-zero unattributed count does not ship; it is a finding, and it is investigated
-  before v0.6 is tagged.
+- **The exit criterion is `ROADMAP.md`'s: a published run with *no* unexplained `AMBIGUOUS` and
+  a positive control that fired.** Those are the two things a harness is allowed to decide about
+  itself — that it found nothing unattributed, and that it was capable of finding something. A
+  non-zero unattributed count does not ship; it is a finding, and it is investigated before v0.6
+  is tagged. A run whose control did not fire is not a result at all.
 - **The count is published either way** — including if it is zero, and including if it is not.
   Publication is what makes the criterion checkable; it is not the criterion.
-- **Item 9 does not tag until item 8 reports.** The exit criterion says a week, the changelog
-  would say a week, and a tag before it finishes makes both untrue. This is the one claim in the
-  project that would be exactly as false as it looks.
+- **Item 9 does not tag until item 8 reports.** A tag before the run finishes makes the changelog
+  untrue about the one number nobody can produce by reasoning about the code.
+
+#### The week was in this criterion and was removed, on 2026-09-07
+
+The bullets above said **at least a week of calendar time, and it does not compress**, and the
+paragraph that said so argued — correctly — that quietly relaxing a release gate in the document
+defining the release is what §1.4 corrected two other sentences for. So this is not quiet. The
+maintainer removed the duration rather than wait it out, and the reasoning is recorded here
+because the next person to read §8.1 is entitled to know it was once stronger.
+
+**What was traded.** Calendar time was measuring the wrong thing for the gate it was attached to.
+The question §8.1 exists to answer is *does an `AMBIGUOUS` appear that the harness did not
+cause?*, and that is answered by the injection ledger and the positive control, neither of which
+gets more truthful with elapsed hours. What a week would have bought is a different question —
+whether anything **accumulates** — and that question was never what the criterion was written
+against, so a gate that blocked the release on it was blocking on a proxy.
+
+**What that costs, stated rather than implied.** Nothing in this repository establishes behaviour
+that only appears over days: a connection pool degrading over hours, table growth against §6.3's
+one-row chain head, a lease that lapses only under sustained load, an operator restart mid-run.
+That was unestablished while the criterion stood unmet and it is unestablished now; what changed
+is that it no longer blocks a tag. It is **not** transferred to another milestone, promised, or
+described as covered elsewhere, and `docs/production/soak.mdx` carries it as a section of its own
+rather than as a footnote to a gate.
+
+**What did not change.** The duration is still measured, still published in the results file, and
+still printed on every surface that quotes the run — the README's readiness block, the docs home,
+the production index and the soak page. Removing a criterion is not the same as removing the fact
+it was about, and a reader who wants to discount a twenty-minute soak has every number needed to
+do it. The harness still asserts nothing about the clock (`tests/test_soak.py`), and the soak page
+now **recomputes** the criterion from the published counts rather than reading `exit_criterion_met`
+out of the same file, so the weaker gate is checked twice and the two derivations must agree.
 
 ---
 

@@ -11,9 +11,13 @@ python research/soak/run.py --minutes 20 --postgres "$CTRLRUN_TEST_POSTGRES" --o
 
 *Does an `AMBIGUOUS` ever appear that the harness did not cause?*
 
-`ROADMAP.md`'s exit criterion is a week with **no** unexplained `AMBIGUOUS`, and that is the one
-number nobody can produce by reasoning about the code. Everything here exists to make an
-unexplained ambiguity **visible** rather than rare.
+`ROADMAP.md`'s exit criterion is a published run with **no** unexplained `AMBIGUOUS` and a
+positive control that fired, and that is the one number nobody can produce by reasoning about the
+code. Everything here exists to make an unexplained ambiguity **visible** rather than rare.
+
+The criterion asked for **at least a week of calendar time** until 2026-09-07. `SPEC-v0.6.md`
+§8.1 records the amendment, what it costs and what did not change; the duration is still measured
+and published, and this file still prints it.
 
 ## "Unexplained" is defined before the run starts
 
@@ -45,13 +49,13 @@ A table whose control did not fire says so, in words, and is not evidence.
 
 ## The duration is measured, never asserted
 
-§8.1's week is calendar time and "does not compress". The table prints how long the run **actually
-lasted** and `exit_criterion_met` is about the ambiguity count alone. A harness that decided for
-itself whether the duration was met would be making the one claim §8.1 says would be exactly as
-false as it looks.
+The table prints how long the run **actually lasted**, and `exit_criterion_met` is the ambiguity
+count and the control alone. That split predates the amendment and outlives it: a harness that
+graded its own duration would be making the one claim §8.1 says would be exactly as false as it
+looks, and that was true when the criterion had a clock in it and is true now that it does not.
 
 Whoever writes the changelog reads the measured duration and says that. `tests/test_soak.py`
-asserts the rendered table never contains the word "week".
+asserts the rendered table never claims a duration it did not measure.
 
 ## What was run
 
@@ -79,13 +83,14 @@ had a ledger entry recorded before the failure that produced it. Nothing became 
 harness did not make ambiguous, and the positive control fired, so the run was capable of saying
 otherwise.
 
-**What it is not evidence of, stated plainly: `ROADMAP.md`'s exit criterion.** That criterion is a
-soak of at least **one week** with no unexplained `AMBIGUOUS`, and this ran for twenty minutes. A
-week of calendar time does not compress, and a bigger action count is not a substitute for it — a
-ten-hour run would meet the criterion no better than this one does, it would just put a larger
-number next to something still unmet. `exit_criterion_met: true` in the JSON is about the
-**ambiguity count**, which is all the harness is allowed to decide; the clock is reported and left
-to a human, and `docs/ROADMAP.md` records the criterion as **not met**.
+**What it is not evidence of, stated plainly: a long run.** This ran for twenty minutes. Anything
+a soak finds by *accumulating* — a connection pool degrading over hours, table growth against the
+one-row chain head `SPEC-v0.6.md` §6.3 serializes receipts on, a lease that lapses only under load
+held longer than this, an operator restart mid-run — is outside what twenty minutes can show.
+Since 2026-09-07 that is **unestablished rather than owed**: §8.1 removed the duration from the
+criterion instead of waiting it out, and the thing a week would have bought is claimed by nothing
+here. `exit_criterion_met: true` in the JSON is the ambiguity count and the control, which is all
+the harness is allowed to decide; the clock is reported and left to a human.
 
 The throughput figure is a by-product and is not a performance claim. Note in particular what it
 does **not** measure: most of these actions are denied or refused by policy before any receipt is

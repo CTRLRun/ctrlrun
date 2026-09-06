@@ -139,9 +139,9 @@ class Ledger:
 def classify(ambiguities: list[Ambiguity], ledger: Ledger) -> list[Finding]:
     """Every `AMBIGUOUS` with no recorded injection behind it (§8.1).
 
-    This is the exit criterion, and it is deliberately the whole of it: `ROADMAP.md` asks for a
-    week with **no** unexplained `AMBIGUOUS`, so a non-empty return is a finding to investigate
-    and not a number to publish beside a green tick.
+    This is half the exit criterion and the positive control is the other: `ROADMAP.md` asks for
+    a published run with **no** unexplained `AMBIGUOUS` that was capable of finding one, so a
+    non-empty return is a finding to investigate and not a number to publish beside a green tick.
     """
     explained = ledger.explained_keys()
     return [

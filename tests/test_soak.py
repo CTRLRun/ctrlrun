@@ -2,8 +2,11 @@
 
 The harness lives in `research/soak/`, outside `src/` and never packaged — but **its definition
 of "unexplained" is the release gate**, so it is tested here rather than trusted. `ROADMAP.md`'s
-exit criterion is a week with no unexplained `AMBIGUOUS`, and a harness that miscounts is a
-criterion that cannot be met or cannot be failed.
+exit criterion is a published run with no unexplained `AMBIGUOUS` and a positive control that
+fired, and a harness that miscounts is a criterion that cannot be met or cannot be failed. §8.1
+took a week of calendar time out of that criterion on 2026-09-07 and records why; what the
+harness owes it did not change, and got more load-bearing rather than less — the clock is no
+longer there to stand in front of the count.
 
 What these assert is the two ways the count can lie:
 
@@ -146,11 +149,12 @@ def test_the_table_says_the_criterion_is_unmet_when_the_control_did_not_fire() -
 
 
 def test_the_table_reports_the_duration_it_measured_and_asserts_nothing_about_it() -> None:
-    """§8.1's week is calendar time and does not compress, so the harness **measures** it.
+    """The harness **measures** the duration and grades none of it.
 
-    A harness that decided for itself whether the criterion's duration was met would be making
-    the one claim §8.1 says would be exactly as false as it looks. `exit_criterion_met` is about
-    the ambiguity count; the clock is reported and left to a human.
+    True while §8.1's criterion had a week in it, and true now that it does not: a harness that
+    decided for itself whether its own run was long enough would be making the one claim §8.1
+    says would be exactly as false as it looks. `exit_criterion_met` is the ambiguity count and
+    the positive control; the clock is reported and left to a human.
     """
     document = report(
         started=T0,
@@ -167,8 +171,8 @@ def test_the_table_reports_the_duration_it_measured_and_asserts_nothing_about_it
     text = render(document)
     assert "7m 0s" in text
     assert "week" not in text.lower(), (
-        "the table claims a duration it did not measure; §8.1's week is the maintainer's "
-        "criterion and not something a thirty-minute run may assert"
+        "the table reaches for a duration it did not measure; how long a run needs to be is "
+        "the maintainer's judgement and never something the run itself may assert"
     )
 
 

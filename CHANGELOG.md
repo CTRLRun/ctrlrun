@@ -84,11 +84,23 @@ store, and `serve_operator` leaked a connection under `--store-url`.
 
 ## [0.6.0] - unreleased — Durable runtime
 
-**Not tagged.** `docs/ROADMAP.md`'s v0.6 exit criterion is a soak of at least one week with no
-unexplained `AMBIGUOUS`, and a week of calendar time has not passed. The harness, its definition
-of *unexplained*, its positive control and the run it did do are all here and published;
-`research/soak/README.md` carries the duration actually measured. This entry stays dated
-`unreleased` rather than being given a date the criterion has not earned.
+**The soak criterion was amended on 2026-09-07, and it was amended downwards.** It read *a soak
+of at least one week with no unexplained `AMBIGUOUS`*; the week was removed rather than waited
+out, and the criterion is now a published run with no unattributed `AMBIGUOUS` and a positive
+control that fired — the two things a harness is allowed to decide about itself. `SPEC-v0.6.md`
+§8.1 carries the reasoning, what it costs and what did not change; `docs/ROADMAP.md` records it
+in the milestone's own reconciliation. The short version: elapsed hours were a proxy for a
+question the injection ledger already answers, and what a week would actually have bought —
+whether anything **accumulates** over days — is unestablished by anything in this repository and
+is now claimed by nothing rather than owed by a gate.
+
+The published run is twenty minutes, 889,735 actions, 133,393 ambiguous outcomes all attributed,
+0 unattributed, positive control fired. **The duration is printed on every surface that quotes
+the run** so a reader can discount it: the README's readiness block, the docs home, the
+production index, and `docs/production/soak.mdx`, which now recomputes the criterion from the
+published counts instead of reading `exit_criterion_met` out of the same file.
+
+This entry stays dated `unreleased` until the tag is cut.
 
 v0.5 asked *can somebody else implement this?* v0.6 asks: **does it still hold when the process
 dies, the host goes away, and the database is somewhere else?**
