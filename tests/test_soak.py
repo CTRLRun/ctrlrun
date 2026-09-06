@@ -22,6 +22,23 @@ from pathlib import Path
 import pytest
 
 RESEARCH = Path(__file__).resolve().parents[1] / "research" / "soak"
+
+# **The harness is not in the sdist, and this file is.** `MANIFEST.in` ships `tests/*.py` so a
+# distribution packager can run the suite; §8.1 keeps `research/soak/` out on
+# `research/framework-probe/`'s precedent. So from inside an sdist there is nothing to import,
+# and the `package` CI job found it: `ModuleNotFoundError: No module named 'soak'`.
+#
+# The skip is **narrow on purpose**, and the narrowness is the whole argument. It fires only when
+# the directory is genuinely absent, and that absence is itself asserted by
+# `test_T136_the_ctrlrun_distributions_contain_no_adapter`, which builds a distribution and
+# looks inside it. So there is no configuration in which both go unchecked: in a checkout this
+# module runs, and in an sdist the packaging test is what proves the directory should be
+# missing. Same reasoning as T136's own two halves.
+if not RESEARCH.is_dir():  # pragma: no cover - running from a distribution
+    pytest.skip(
+        "research/soak/ is not in this distribution, which SPEC-v0.6 §8.1 requires",
+        allow_module_level=True,
+    )
 if str(RESEARCH) not in sys.path:
     sys.path.insert(0, str(RESEARCH))
 
@@ -182,7 +199,15 @@ def _empty_ledger() -> Ledger:
 
 def test_the_harness_ships_nowhere() -> None:
     """§8.1: `research/soak/` is outside `src/` and never packaged, on
-    `research/framework-probe/`'s precedent."""
+    `research/framework-probe/`'s precedent.
+
+    This runs in a checkout only — the module-level skip above sees to that — and what it checks
+    there is that the harness has not crept into `src/` and that `MANIFEST.in` has not grown a
+    line shipping it. The *distribution* half is asserted from inside the distribution by
+    `test_T136_the_ctrlrun_distributions_contain_no_adapter`, which builds one and looks.
+    `MANIFEST.in` resolves against the working tree rather than the index, so reading it is a
+    check on intent and building is the check on fact; both are wanted.
+    """
     root = Path(__file__).resolve().parents[1]
     assert (root / "research" / "soak" / "run.py").exists()
     assert not (root / "src" / "ctrlrun" / "soak").exists()
