@@ -171,6 +171,31 @@ The README also makes negative claims. They matter as much as the positive ones.
 | "`ctrlrun verify` cannot see your executors" | `docs/verify.md`, "What it does not mean"; `THREAT_MODEL.md`, "Known v0.4 limitations" |
 | "it makes no claim about any standard" | No standards vocabulary outside a sentence that negates it, in the README, in a docstring or in CLI output: `test_T139_the_readme_makes_no_conformance_claim`, and `tools/docs_audit/lint.py` on every document |
 
+## The docs site: Home and Concepts
+
+Every claim on the docs site's Home page and Concepts pages, mapped the same way. Most of them
+are the README's claims in a second place, so the rows point at the rows above rather than
+restating the code; the ones that are new to the site carry their own code and proof.
+
+| Page | Claim | Proved by |
+|---|---|---|
+| `index` | the hero, the promise, the demo transcript and the capability grid | the header rows above; the grid is the generator's output for `docs/capabilities.yaml`, checked by `test_the_generated_copies_match_the_generator` |
+| `index` | "This site is an MCP server" | Mintlify hosts one at `/mcp` for every site (its documentation, read 2026-09-06); the URL is the site's and changes with the domain, and `test_the_home_page_carries_the_fixed_copy_and_the_generated_grid` asserts the configuration line is present |
+| `get-started/install` | "installs the kernel and exactly two dependencies, `pyyaml` and `click`" | `test_core_declares_only_pyyaml_and_click`, `test_the_core_dependencies_have_not_grown` |
+| `get-started/install` | "importing `ctrlrun` imports nothing from an extra" | `test_T30_a_subprocess_importing_ctrlrun_pulls_in_no_module_from_an_extra` |
+| `get-started/install` | "raises `MissingDependency` with the install command in the message" | `test_a_missing_extra_raises_MissingDependency_naming_the_install_command` |
+| `get-started/quickstart` | every block on the page, and the outputs shown | the blocks are `runnable` and pass `tools/docs_audit/snippets.py` in one temporary directory, in order; the outputs are pasted from one run of the same blocks |
+| `concepts/action-and-hash` | "The action hash is the SHA-256 of that canonical form"; sorted keys, no whitespace, UTF-8, `float` rejected; `action_id` excluded | `canonicalize` / `action_hash` — `action.py`; `float` refused — `action.py:47`; `test_T7_canonical_form_is_exactly_the_specified_serialization`, `test_T7_nested_dicts_are_sorted_recursively`, `test_T60_claims_do_not_change_the_action_hash` |
+| `concepts/decisions` | three decisions, first match wins, unknown denied, principal-addressing conditions refused at load | the "Write down what the agent may do" rows above |
+| `concepts/approval-binding` | A1–A4, the mismatch leaving the approval granted, one core provider writing every grant | the matrix row "An approval is bound to the exact action…", the "Three ways to use it" adapter rows, and `test_T2_a_mutated_action_leaves_the_approval_granted` |
+| `concepts/approval-binding` | the `DENY` and `ALLOW` rows when the policy changed between grant and consumption | "the approval is re-checked against the policy in force at execution" above |
+| `concepts/effect-keys` | reservation atomic across threads, processes and hosts; an expired lease is `AMBIGUOUS`, never free; `COMMITTED` refuses, `FAILED` permits, `AMBIGUOUS` refuses a blind retry | the matrix row "One logical effect executes once…"; `LEASE_EXPIRED` — `effect.py:56`; `test_T160_an_expired_lease_frees_nothing_and_no_read_transitions_it`, `test_T8_a_failed_attempt_permits_a_retry_that_commits` |
+| `concepts/outcomes-and-ambiguous` | the outcome table; only a human or a reconcile hook moves a record on, and only in the direction the answer points; nothing sweeps; a lost `COMMIT` on Postgres is `AMBIGUOUS` | the matrix row "An unknown outcome is AMBIGUOUS…", the reconciliation rows, "A crashed worker's effect stays `AMBIGUOUS`…" and the Postgres rows above; `test_T160_there_is_no_reaper` |
+| `concepts/receipts-and-evidence` | the receipt's fields, the JSONL sink, the policy hash and version, the chain and what it does not prove | the matrix row "Every executed action leaves a portable JSON receipt", the receipt-chain and policy-versioning rows above, and `test_T11_every_demo_receipt_carries_every_field_in_the_spec` |
+| `concepts/authority-and-delegation` | opt-in then fail-closed, no `decision:` on a grant, stricter of the two, containment at creation and at every evaluation, omission rejected, one-write revocation, identity consumed | the authority rows under "Write down what the agent may do" and "What it guarantees" above |
+| `concepts/observe-mode` | executes, records `would_have`, one top-level line, counted by `ctrlrun stats`, never asks a human | the observe-mode rows above; `_observed` — `control.py:738` |
+| `concepts/fail-closed` | the refusal table, one exception per row | the matrix row "An unknown action, a missing policy or a missing principal is denied.", `ActionDenied` — `errors.py:29`, `DuplicateEffect` — `errors.py:126`, `AmbiguousEffect` — `errors.py:141`, and `test_a_policy_deny_is_denied_the_same_way_as_an_unknown_action` |
+
 ## Demo output
 
 The README quotes `ctrlrun demo` verbatim.

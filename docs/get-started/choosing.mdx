@@ -1,0 +1,50 @@
+---
+title: "Choosing between them"
+description: "In-process Python: the decorator. Tools behind MCP: the gateway. A framework with its own approval UI: an adapter. For one host you need no server, no database and no dashboard."
+---
+
+In-process Python takes the decorator, tools behind MCP take the gateway, and a framework with
+its own approval UI takes an adapter. The decision is about where the call that acts lives, not
+about which framework you use.
+
+## The decision table
+
+| Where the call that acts lives | Use | Because |
+|---|---|---|
+| A Python function you can decorate, in the agent's process | `@protect` | It sees the real arguments, raises refusals as exceptions, and needs nothing installed |
+| A tool server the agent reaches over MCP, in any language | the gateway | The agent and the server stay as they are; the gateway sits between them |
+| A LangGraph graph whose humans answer with `Command(resume=...)` | `ctrlrun-langgraph` | The approval request goes through `interrupt()` rather than raising past the graph |
+| An OpenAI Agents SDK run whose humans answer with `state.approve(item)` | `ctrlrun-openai-agents` | The approval request goes through the SDK's tool-approval interruption |
+| A framework with no human-in-the-loop primitive | `@protect` | There is nothing for an adapter to reuse |
+| Both a decorated function and an MCP server | both | They share one policy and one store; an effect key reserved by one is refused by the other |
+
+Two questions settle most cases. Can you decorate the function that acts? Then the decorator.
+Does your framework already have a place where a human says yes? Then, and only then, an
+adapter routes the request there.
+
+## What you don't need on one host
+
+For a single host, the whole of the default configuration is a policy file and a directory:
+
+| You do not need | Because |
+|---|---|
+| a server | the decorator and the store run in your process |
+| a database | the store is a SQLite file, `.ctrlrun/state.db`, beside your policy; reservation is atomic across processes on that host through `BEGIN IMMEDIATE` |
+| a dashboard | receipts are JSON lines beside the store, and `ctrlrun receipts`, `inspect` and `stats` read them |
+| a message queue or an approval service | `ctrlrun approve` writes the grant; a webhook provider can route the request to Slack when you want that |
+| an identity provider | `ctrlrun.context(agent=...)` names the principal; a header or JWT provider replaces it when the process is fronted by something that authenticates |
+
+When the store has to be shared across hosts, that is the one thing that changes:
+[Run on Postgres](/guides/run-on-postgres).
+
+## What changes nothing
+
+The three ways in share one policy, one store, one set of guarantees and one receipt format. A
+refund refused by the gateway is refused for the same reason and recorded in the same shape as
+one refused by the decorator, and `ctrlrun verify` checks the configuration behind all three.
+
+## Next
+
+- [60-second quickstart](/get-started/quickstart), for the decorator.
+- [Put the gateway in front of MCP](/guides/gateway-in-front-of-mcp).
+- [Why](/why).

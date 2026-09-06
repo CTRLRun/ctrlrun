@@ -102,4 +102,4 @@ same distributions to a GitHub Release with the tag's changelog entry.
 
 - [`docs/THREAT_MODEL.md`](THREAT_MODEL.md): what the guarantees do not cover.
 - [`docs/verify.md`](verify.md): running the guarantees against your own configuration.
-- [`CONTRIBUTING.md`](../CONTRIBUTING.md): the rules, in the form a contributor follows them.
+- [`CONTRIBUTING.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CONTRIBUTING.md): the rules, in the form a contributor follows them.

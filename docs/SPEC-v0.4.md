@@ -128,7 +128,7 @@ N/A is a statement about the *configuration*, and a failed control is a statemen
 Read on **2026-09-04** unless a document states otherwise.
 
 - **OWASP Top 10 for Agentic Applications (2026)**, OWASP GenAI Security Project, announced
-  **2025-12-09** (<https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/>).
+  **2025-12-09** ([https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)).
   Ten entries, coded `ASI01:2026` – `ASI10:2026`. §6 fixes the structure of the mapping
   document; **item 5 re-derives every entry code and title from the published document
   itself** rather than from this section, and records the version string and date it read.
@@ -139,7 +139,7 @@ Read on **2026-09-04** unless a document states otherwise.
   and validates against a checked-in copy of the widely-used `junit-10.xsd`, and the real
   requirement — *the file is accepted by the parsers people actually run* — is stated as
   such rather than dressed up as conformance.
-- **Shields.io endpoint badges** (<https://shields.io/badges/endpoint-badge>): a badge
+- **Shields.io endpoint badges** ([https://shields.io/badges/endpoint-badge](https://shields.io/badges/endpoint-badge)): a badge
   rendered from a JSON document the project hosts, fetched by Shields at render time.
   §5 chooses this mechanism and argues why.
 - `v0.1 §7`, `v0.2 §10`, `v0.3 §9`–`§10`, `docs/ROADMAP.md` (v0.4), `docs/THREAT_MODEL.md`.

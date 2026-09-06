@@ -1,0 +1,9 @@
+# Files under docs/ that are not pages of the site.
+BUILD-PROMPTS-*.md
+README.md
+IA.md
+STYLE.md
+SEO.md
+capabilities.yaml
+generated/
+assets/

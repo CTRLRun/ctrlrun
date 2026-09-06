@@ -96,10 +96,16 @@ def test_the_publish_workflow_attests_through_trusted_publishing():
         assert workflow["jobs"][job]["permissions"] == {"id-token": "write"}
 
 
-def test_dependabot_keeps_the_pins_current():
+def test_dependabot_keeps_the_pins_current_and_nothing_else():
+    """Actions are pinned to SHAs, so Dependabot is what moves them: grouped, monthly. There is
+    no pip entry on purpose: the version floors in pyproject.toml are deliberate minimums with a
+    reason on each, and a bot raising them would exclude working installations for nothing."""
     config = yaml.safe_load((REPO_ROOT / ".github" / "dependabot.yml").read_text())
-    ecosystems = {entry["package-ecosystem"] for entry in config["updates"]}
-    assert {"github-actions", "pip"} <= ecosystems
+    ecosystems = {entry["package-ecosystem"]: entry for entry in config["updates"]}
+    assert set(ecosystems) == {"github-actions"}
+    actions = ecosystems["github-actions"]
+    assert actions["schedule"]["interval"] == "monthly"
+    assert "groups" in actions, "ungrouped updates are one pull request per action"
 
 
 # --- the third party's reading -------------------------------------------------------------
