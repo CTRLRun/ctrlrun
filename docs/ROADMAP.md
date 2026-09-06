@@ -117,7 +117,7 @@ Versioned as `adapters-<framework>-MAJOR.MINOR` — `adapters-crewai-1.0`, `adap
 
 Standards: none of its own.
 
-## v0.6 — Durable runtime (Code complete 2026-09-06; **not tagged** — see Exit)
+## v0.6 — Durable runtime ✅ shipped
 
 - Postgres StateStore (cross-host reservation).
 - Schema migrations, recovery on restart, policy versioning, receipt integrity — a hash chain, which detects **alteration** and not authorship.
