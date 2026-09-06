@@ -21,7 +21,7 @@ asserts this page names every key the loader accepts.
 | Key | Type | When omitted | Notes |
 |---|---|---|---|
 | `id` | string, unique | **error** | what a delegation names as its parent and what receipts cite |
-| `subject` | `{agent, user}` | **error** | who the grant is for; at least `agent`. A wildcard subject is refused: a grant is for someone |
+| `subject` | `{agent, user}` | **error** | who the grant is for; at least one of `agent` and `user`. Both absent is refused, because a subject matching every principal is not one anybody writes on purpose. *Any agent* is spelled `agent: "*"`, which greps |
 | `actions` | list of action-name patterns | **error** | `stripe.refund`, or `stripe.*` |
 | `resources` | list of resource patterns | any resource | `payment:*`, `payment:EU-*`; matched against the action's resolved `resource` template |
 | `constraints` | map of condition → operand | no value limit | the same seven operators as a policy rule, over the action's arguments; `amount_lte: 10000000` |

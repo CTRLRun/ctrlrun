@@ -8,8 +8,13 @@ description: "One ordered step in the life of an action (SPEC-v0.1 §6.2)."
 `ctrlrun.Event` — class, defined at `src/ctrlrun/receipt.py:154`
 
 ```python
-class Event()
-    def __init__(type: EventType, action_id: str | None, ts: datetime, data: Mapping[str, Any], effect_key: str | None, approval_id: str | None, event_id: int | None)
+from ctrlrun import Event
+```
+
+
+```python
+class Event
+    def __init__(type: EventType, action_id: str | None, ts: datetime, data: Mapping[str, Any] = dict(), effect_key: str | None = None, approval_id: str | None = None, event_id: int | None = None)
 ```
 
 One ordered step in the life of an action (SPEC-v0.1 §6.2).

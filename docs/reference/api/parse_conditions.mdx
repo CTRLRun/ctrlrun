@@ -8,7 +8,12 @@ description: "Parse a `when:`-shaped mapping into conditions, keyed by the raw c
 `ctrlrun.parse_conditions` — function, defined at `src/ctrlrun/policy.py:934`
 
 ```python
-def parse_conditions(mapping: Mapping[Any, Any], where: str, allow_derived: bool) -> Mapping[str, Condition]
+from ctrlrun import parse_conditions
+```
+
+
+```python
+def parse_conditions(mapping: Mapping[Any, Any], *, where: str, allow_derived: bool = False) -> Mapping[str, Condition]
 ```
 
 Parse a `when:`-shaped mapping into conditions, keyed by the raw condition key.

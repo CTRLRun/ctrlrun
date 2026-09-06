@@ -8,8 +8,13 @@ description: "Nobody answered the approval request in time (SPEC-v0.1 §4.3)."
 `ctrlrun.ApprovalTimeout` — class, defined at `src/ctrlrun/errors.py:103`
 
 ```python
+from ctrlrun import ApprovalTimeout
+```
+
+
+```python
 class ApprovalTimeout(CTRLRunError)
-    def __init__(message: str | None, request_id: str)
+    def __init__(message: str | None = None, *, request_id: str)
 ```
 
 Nobody answered the approval request in time (SPEC-v0.1 §4.3).

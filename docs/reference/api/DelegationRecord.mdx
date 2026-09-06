@@ -8,8 +8,13 @@ description: "One row of the `delegations` table (SPEC-v0.3 §5.2)."
 `ctrlrun.DelegationRecord` — class, defined at `src/ctrlrun/state.py:320`
 
 ```python
-class DelegationRecord()
-    def __init__(delegation_id: str, parent_id: str, depth: int, grant_json: str, created_by_agent: str, created_by_user: str | None, created_via: str, created_at: datetime, revoked_at: datetime | None, revoked_by: str | None)
+from ctrlrun import DelegationRecord
+```
+
+
+```python
+class DelegationRecord
+    def __init__(delegation_id: str, parent_id: str, depth: int, grant_json: str, created_by_agent: str, created_by_user: str | None, created_via: str, created_at: datetime, revoked_at: datetime | None = None, revoked_by: str | None = None)
 ```
 
 One row of the `delegations` table (SPEC-v0.3 §5.2).

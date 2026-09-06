@@ -31,10 +31,21 @@ def help_texts() -> list[tuple[str, str]]:
 
     from ctrlrun.cli.main import main
 
+    # `prog_name` is not cosmetic. Without it click takes the program name from `sys.argv[0]`,
+    # which under pytest and under this generator is `main` -- so every one of the fourteen
+    # blocks on a page that promises "the command's own --help, verbatim" opened with
+    # `Usage: main [OPTIONS] COMMAND [ARGS]...`, a command that does not exist. A reader who
+    # tried it got command-not-found from the reference page. Found by the launch-readiness
+    # audit, reading the page as a stranger.
     runner = CliRunner()
-    texts = [("ctrlrun", runner.invoke(main, ["--help"], env={"COLUMNS": COLUMNS}).output)]
+    invoked = runner.invoke(main, ["--help"], env={"COLUMNS": COLUMNS}, prog_name="ctrlrun")
+    texts = [("ctrlrun", invoked.output)]
     for name in main.commands:
-        result = runner.invoke(main, [name, "--help"], env={"COLUMNS": COLUMNS})
+        # `prog_name` is the *group's* name; click appends the subcommand itself, so passing
+        # "ctrlrun demo" here produced `Usage: ctrlrun demo demo`.
+        result = runner.invoke(
+            main, [name, "--help"], env={"COLUMNS": COLUMNS}, prog_name="ctrlrun"
+        )
         texts.append((f"ctrlrun {name}", result.output))
     return texts
 

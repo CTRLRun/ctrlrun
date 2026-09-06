@@ -8,6 +8,11 @@ description: "An optional extra is not installed (SPEC-v0.2 §1.1, §11)."
 `ctrlrun.MissingDependency` — class, defined at `src/ctrlrun/errors.py:228`
 
 ```python
+from ctrlrun import MissingDependency
+```
+
+
+```python
 class MissingDependency(CTRLRunError)
     def __init__(module: str, extra: str)
 ```

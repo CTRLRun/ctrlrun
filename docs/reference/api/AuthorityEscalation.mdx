@@ -8,8 +8,13 @@ description: "A delegation that may not exist: it is not contained in its parent
 `ctrlrun.AuthorityEscalation` — class, defined at `src/ctrlrun/errors.py:65`
 
 ```python
+from ctrlrun import AuthorityEscalation
+```
+
+
+```python
 class AuthorityEscalation(CTRLRunError)
-    def __init__(message: str | None, reason: str, parent_id: str | None, dimension: str | None)
+    def __init__(message: str | None = None, *, reason: str, parent_id: str | None = None, dimension: str | None = None)
 ```
 
 A delegation that may not exist: it is not contained in its parent (SPEC-v0.3 §5.3).

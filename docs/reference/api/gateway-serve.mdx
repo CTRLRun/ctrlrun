@@ -8,7 +8,14 @@ description: "Run a gateway in front of one upstream MCP server (SPEC-v0.2 §6.1
 `ctrlrun.gateway.serve` — function, defined at `src/ctrlrun/gateway/__init__.py:40`
 
 ```python
-def serve(upstream: str, alias: str, options: Any) -> None
+from ctrlrun.gateway import serve
+```
+
+Needs the `gateway` extra: `pip install "ctrlrun[gateway]"`. Importing it without that raises `MissingDependency` carrying the install command.
+
+
+```python
+def serve(*, upstream: str, alias: str, **options: Any) -> None
 ```
 
 Run a gateway in front of one upstream MCP server (SPEC-v0.2 §6.1).

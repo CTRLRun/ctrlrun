@@ -290,11 +290,9 @@
   "seo": {
     "metatags": {
       "og:site_name": "CTRLRun",
-      "og:image": "/images/social-preview.png",
+      "og:image": "https://docs.ctrlrun.dev/images/social-preview.png",
       "twitter:card": "summary_large_image",
-      "twitter:image": "/images/social-preview.png",
-      "og:url": "https://docs.ctrlrun.dev",
-      "canonical": "https://docs.ctrlrun.dev"
+      "twitter:image": "https://docs.ctrlrun.dev/images/social-preview.png"
     },
     "indexing": "navigable"
   },

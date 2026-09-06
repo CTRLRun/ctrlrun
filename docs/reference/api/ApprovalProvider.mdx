@@ -8,7 +8,14 @@ description: "How a human is asked, and how the answer comes back (SPEC-v0.1 §4
 `ctrlrun.ApprovalProvider` — class, defined at `src/ctrlrun/approval.py:304`
 
 ```python
+from ctrlrun import ApprovalProvider
+```
+
+
+```python
 class ApprovalProvider(Protocol)
+    def request(action: Action, ttl: timedelta) -> ApprovalRequest
+    def wait(request_id: str, timeout: timedelta | None) -> Approval | None
 ```
 
 How a human is asked, and how the answer comes back (SPEC-v0.1 §4.3).
