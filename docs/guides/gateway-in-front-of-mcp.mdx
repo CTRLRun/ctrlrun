@@ -121,7 +121,7 @@ validated, never trusted.
 - No code changes: the agent and the server are untouched.
 - Any language: the gateway is a process in front of an HTTP endpoint.
 - Approvals bound to the exact tool call, arguments included.
-- Every call leaves a receipt, refused ones too.
+- Every call that **reaches a decision** leaves a receipt, denied ones included. A call still waiting on a human has not been decided yet and has none until it is.
 - Measure first: `mode: observe` in the same policy records what enforcing would block.
 
 ## If it didn't work

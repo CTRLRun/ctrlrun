@@ -8,8 +8,13 @@ description: "A grant created at runtime by a principal who already holds one (S
 `ctrlrun.Delegation` — class, defined at `src/ctrlrun/authority.py:417`
 
 ```python
-class Delegation()
-    def __init__(delegation_id: str, parent_id: str, depth: int, grant: Grant, created_by: Principal, created_via: Literal['api', 'cli'], created_at: datetime, revoked_at: datetime | None, revoked_by: str | None)
+from ctrlrun import Delegation
+```
+
+
+```python
+class Delegation
+    def __init__(delegation_id: str, parent_id: str, depth: int, grant: Grant, created_by: Principal, created_via: Literal['api', 'cli'], created_at: datetime, revoked_at: datetime | None = None, revoked_by: str | None = None)
 ```
 
 A grant created at runtime by a principal who already holds one (SPEC-v0.3 §5.1).

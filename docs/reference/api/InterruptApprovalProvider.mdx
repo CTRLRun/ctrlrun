@@ -8,8 +8,13 @@ description: "An `ApprovalProvider` whose `wait()` routes through a framework's 
 `ctrlrun.InterruptApprovalProvider` — class, defined at `src/ctrlrun/adapter.py:209`
 
 ```python
-class InterruptApprovalProvider()
-    def __init__(store: ApprovalStore, interrupt: FrameworkInterrupt, clock: Callable[[], datetime])
+from ctrlrun import InterruptApprovalProvider
+```
+
+
+```python
+class InterruptApprovalProvider
+    def __init__(store: ApprovalStore, interrupt: FrameworkInterrupt, *, clock: Callable[[], datetime] = _utc_now)
 ```
 
 An `ApprovalProvider` whose `wait()` routes through a framework's own primitive.

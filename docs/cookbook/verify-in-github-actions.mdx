@@ -59,26 +59,32 @@ Pin `CTRLRun/ctrlrun` to a release tag once you rely on it.
 The agent sees nothing; this is the operator's check. The build sees:
 
 ```text
+k8s.delete_namespace: denied: no principal is available
 CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
-policy     ctrlrun.yaml (ctrlrun.policy/v2, mode: enforce)
+policy     /home/runner/work/agent/agent/ctrlrun.yaml (ctrlrun.policy/v2, mode: enforce)
 authority  none
 store      sqlite, scratch (created and destroyed for this run)
 
-G1   mutated approval refused         PASS  stripe.refund
-G2   replayed approval refused        PASS  stripe.refund
-G3   duplicate effect refused         PASS  stripe.refund
-G4   one winner under concurrency     PASS  stripe.refund (8 processes)
-G5   ambiguous blocks a blind retry   PASS  stripe.refund
+G1   mutated approval refused         PASS  k8s.delete_namespace
+G2   replayed approval refused        PASS  k8s.delete_namespace
+G3   duplicate effect refused         PASS  k8s.delete_namespace
+G4   one winner under concurrency     PASS  k8s.delete_namespace (8 processes)
+G5   ambiguous blocks a blind retry   PASS  k8s.delete_namespace
 G6   unknown action refused           PASS
-G7   no principal refused             PASS  stripe.refund
+G7   no principal refused             PASS  k8s.delete_namespace
 G8   expired authority refused        N/A   no authority section
 G9   delegation cannot escalate       N/A   no authority section
-G10  unknown exception is ambiguous   PASS  stripe.refund
-G11  an altered receipt is detected   PASS  stripe.refund
+G10  unknown exception is ambiguous   PASS  k8s.delete_namespace
+G11  an altered receipt is detected   PASS  k8s.delete_namespace
 
 9/9 declared guarantees pass. 2 not applicable: G8, G9.
-applicable 9 passed 9 not applicable 2
 ```
+
+The first line is on stderr, from G7's own scenario driving an action with no principal — the
+guarantee passing, not a problem. Every row names `k8s.delete_namespace` because verify takes
+the first action that fits each scenario in alphabetical order; which one appears says nothing
+about it. The `policy` line is the resolved absolute path, so yours will differ.
+
 
 Two guarantees are not applicable because the policy has no `authority:` section; they are
 listed with the reason and excluded from the denominator. Green means nothing that could be

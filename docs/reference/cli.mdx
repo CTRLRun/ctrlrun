@@ -13,7 +13,7 @@ nothing and migrates nothing. Each section below is the command's own `--help`, 
 ## ctrlrun
 
 ```text
-Usage: main [OPTIONS] COMMAND [ARGS]...
+Usage: ctrlrun [OPTIONS] COMMAND [ARGS]...
 
   CTRLRun — the execution safety layer for AI agents.
 
@@ -40,7 +40,7 @@ Commands:
 ## ctrlrun init
 
 ```text
-Usage: main init [OPTIONS]
+Usage: ctrlrun init [OPTIONS]
 
   Write a starter ctrlrun.yaml and create .ctrlrun/.
 
@@ -51,7 +51,7 @@ Options:
 ## ctrlrun demo
 
 ```text
-Usage: main demo [OPTIONS]
+Usage: ctrlrun demo [OPTIONS]
 
   Run the five scenarios, in process, with no network.
 
@@ -62,7 +62,7 @@ Options:
 ## ctrlrun approve
 
 ```text
-Usage: main approve [OPTIONS] REQUEST_ID
+Usage: ctrlrun approve [OPTIONS] REQUEST_ID
 
   Grant a pending approval request.
 
@@ -76,7 +76,7 @@ Options:
 ## ctrlrun deny
 
 ```text
-Usage: main deny [OPTIONS] REQUEST_ID
+Usage: ctrlrun deny [OPTIONS] REQUEST_ID
 
   Refuse a pending approval request.
 
@@ -90,7 +90,7 @@ Options:
 ## ctrlrun receipts
 
 ```text
-Usage: main receipts [OPTIONS]
+Usage: ctrlrun receipts [OPTIONS]
 
   Show the receipts this store holds.
 
@@ -110,7 +110,7 @@ Options:
 ## ctrlrun effects
 
 ```text
-Usage: main effects [OPTIONS]
+Usage: ctrlrun effects [OPTIONS]
 
   Show the logical effects this store knows about.
 
@@ -127,7 +127,7 @@ Options:
 ## ctrlrun resolve
 
 ```text
-Usage: main resolve [OPTIONS] EFFECT_KEY
+Usage: ctrlrun resolve [OPTIONS] EFFECT_KEY
 
   Say what actually happened to an effect with an unknown outcome.
 
@@ -143,7 +143,7 @@ Options:
 ## ctrlrun inspect
 
 ```text
-Usage: main inspect [OPTIONS] ACTION_ID
+Usage: ctrlrun inspect [OPTIONS] ACTION_ID
 
   Show one action's whole history: proposal, decision, approval, effect,
   receipt.
@@ -159,7 +159,7 @@ Options:
 ## ctrlrun stats
 
 ```text
-Usage: main stats [OPTIONS]
+Usage: ctrlrun stats [OPTIONS]
 
   Count what this store's receipts say, from the local store and nothing else.
 
@@ -179,7 +179,7 @@ Options:
 ## ctrlrun verify
 
 ```text
-Usage: main verify [OPTIONS]
+Usage: ctrlrun verify [OPTIONS]
 
   Run the declared guarantees against this configuration (SPEC-v0.4).
 
@@ -197,14 +197,16 @@ Options:
   --json            Emit one ctrlrun.verify/v1 document.
   --junit FILE      Also write a JUnit XML file for CI.
   --only TEXT       Comma-separated guarantee ids, e.g. G1,G3.
-  --store-url TEXT  Reserved; v0.4 accepts 'sqlite'.
+  --store-url TEXT  The backend to grade against: 'sqlite' (the default) or a
+                    postgresql:// URL. Verify runs in a scratch store it creates
+                    there and never opens yours.
   --help            Show this message and exit.
 ```
 
 ## ctrlrun delegate
 
 ```text
-Usage: main delegate [OPTIONS]
+Usage: ctrlrun delegate [OPTIONS]
 
   Create a delegated grant beneath an existing one.
 
@@ -228,7 +230,7 @@ Options:
 ## ctrlrun revoke
 
 ```text
-Usage: main revoke [OPTIONS] DELEGATION_ID
+Usage: ctrlrun revoke [OPTIONS] DELEGATION_ID
 
   Revoke a delegation, and with it every delegation beneath it.
 
@@ -244,7 +246,7 @@ Options:
 ## ctrlrun gateway
 
 ```text
-Usage: main gateway [OPTIONS]
+Usage: ctrlrun gateway [OPTIONS]
 
   Front an MCP server, applying this directory's policy to every tools/call.
 

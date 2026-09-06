@@ -8,8 +8,13 @@ description: "The principal holds no grant that covers this action (SPEC-v0.3 §
 `ctrlrun.AuthorityDenied` — class, defined at `src/ctrlrun/errors.py:40`
 
 ```python
+from ctrlrun import AuthorityDenied
+```
+
+
+```python
 class AuthorityDenied(ActionDenied)
-    def __init__(message: str | None, reason: str, action_id: str | None, grant_id: str | None, delegation_id: str | None)
+    def __init__(message: str | None = None, *, reason: str, action_id: str | None = None, grant_id: str | None = None, delegation_id: str | None = None)
 ```
 
 The principal holds no grant that covers this action (SPEC-v0.3 §4.3).

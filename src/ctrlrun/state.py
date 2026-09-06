@@ -932,7 +932,7 @@ class SQLiteStateStore:
     insert that races past the lock still fails rather than overwriting a reservation.
 
     A connection is opened per thread; `sqlite3` connections are not shareable. Separate
-    processes simply open the same file, which is the point.
+    processes open the same file, which is the point.
     """
 
     def __init__(

@@ -203,3 +203,149 @@ def test_the_site_ignores_what_is_not_a_page():
     ignored = (DOCS / ".mintignore").read_text(encoding="utf-8")
     for name in ("BUILD-PROMPTS-*.md", "README.md", "IA.md", "STYLE.md", "generated/", "assets/"):
         assert name in ignored, name
+
+
+def test_no_page_states_a_guarantee_count_the_catalogue_does_not_have():
+    """`ctrlrun verify` grew from ten guarantees to eleven and four pages kept saying ten.
+
+    Found by the launch-readiness audit, which ran verify and read the number. A count in
+    prose is a claim like any other, and this is the cheapest way to hold one: scan for a
+    number-of-guarantees phrase and compare it with the catalogue.
+    """
+    from ctrlrun.verify.guarantees import GUARANTEES
+
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+    }
+    # Only a count **of the catalogue**. "Two guarantees are not applicable" is a count of the
+    # N/As in one run and is not this claim, so the pattern needs the determiner that makes it
+    # about the whole set — which is exactly how the wrong ones were written: *all ten
+    # guarantees*.
+    number = r"(\d+|" + "|".join(words) + r")"
+    pattern = re.compile(
+        rf"\b(?:all|every one of the|the whole set of)\s+{number}\s+guarantees\b"
+        rf"|\b{number}\s+guarantees (?:you can check|in the catalogue)\b",
+        re.I,
+    )
+    wrong: list[str] = []
+    for page in PAGES:
+        for line in _prose(page).splitlines():
+            for found in pattern.finditer(line):
+                token = next(group for group in found.groups() if group).lower()
+                stated = words.get(token, int(token) if token.isdigit() else None)
+                if stated is not None and stated != len(GUARANTEES):
+                    wrong.append(f"{page.name}: {line.strip()[:90]!r}")
+    assert wrong == [], f"the catalogue has {len(GUARANTEES)}; these say otherwise: {wrong}"
+
+
+def test_the_verify_shapes_the_roadmap_quotes_are_the_ones_verify_reports():
+    """`ROADMAP.md` is a site page and quoted `10/10` and `5/5` long after both moved."""
+    roadmap = (DOCS / "ROADMAP.md").read_text(encoding="utf-8")
+    assert "10/10" not in roadmap and "5/5" not in roadmap, "a stale verify shape is quoted"
+    assert "11/11" in roadmap and "6/6" in roadmap
+
+
+def test_how_this_is_built_does_not_undercount_the_suite_it_describes():
+    """Its thesis is that every claim maps to a test, so its own count has to be one.
+
+    A floor, like the readiness block's and for the same reason: the suite only grows, and a
+    number every pull request had to regenerate would be regenerated without being read. It
+    was 1,625 functions and 2,442 cases against a real 1,704 and 3,944 — off by fifteen
+    hundred, on the page that argues the tests are the evidence.
+    """
+    functions: set[str] = set()
+    for module in (REPO_ROOT / "tests").glob("*.py"):
+        functions.update(re.findall(r"^def (test_\w+)", module.read_text(encoding="utf-8"), re.M))
+
+    text = (DOCS / "how-this-is-built.md").read_text(encoding="utf-8")
+    found = re.search(r"([\d,]+) test functions, ([\d,]+) cases", text)
+    assert found, "the page no longer states a suite size"
+    stated_functions = int(found.group(1).replace(",", ""))
+    stated_cases = int(found.group(2).replace(",", ""))
+
+    assert stated_functions <= len(functions), (
+        f"the page claims {stated_functions:,} test functions and there are {len(functions):,}"
+    )
+    assert stated_cases >= stated_functions, "cases cannot be fewer than functions"
+    # The stated case count is a floor too, and 3,900 is the size of the suite when this was
+    # written. A drop below it is a suite that lost a tenth of itself unnoticed.
+    assert stated_cases >= 3_900, stated_cases
+
+
+def test_no_page_says_every_call_leaves_a_receipt():
+    """It does not. An approval-required call has no receipt until somebody decides it.
+
+    Five pages said *"every call leaves a receipt, refused ones too"*. A receipt is written
+    when an action reaches a **terminal** state, and *waiting on a human* is not one — so a
+    reader following `cookbook/protect-an-mcp-server` counted four protected calls and three
+    receipts and had no way to tell whether that was the docs or a bug. Reproduced by the
+    launch-readiness audit and again below, so this is a measurement rather than an opinion.
+    """
+    import tempfile
+
+    import ctrlrun
+    from ctrlrun import Control, Policy, SQLiteStateStore
+    from ctrlrun.errors import ActionDenied, ApprovalRequired
+
+    document = """schema: ctrlrun.policy/v2
+actions:
+  a.small:
+    effect: "e:{id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 10 }
+        decision: allow
+      - decision: approve
+  a.nope:
+    decision: deny
+"""
+    with tempfile.TemporaryDirectory() as directory:
+        policy_path = Path(directory) / "ctrlrun.yaml"
+        policy_path.write_text(document, encoding="utf-8")
+        store = SQLiteStateStore(Path(directory) / "state.db")
+        control = Control(Policy.from_file(policy_path), store)
+
+        @ctrlrun.protect("a.small", effect="e:{id}", control=control)
+        def small(id: str, amount: int) -> str:
+            return "ok"
+
+        @ctrlrun.protect("a.nope", control=control)
+        def nope() -> str:
+            return "ok"
+
+        with ctrlrun.context(agent="ag"):
+            small(id="1", amount=5)
+            try:
+                nope()
+            except ActionDenied:
+                pass
+            else:
+                raise AssertionError("the deny rule did not deny")
+            try:
+                small(id="2", amount=500)
+            except ApprovalRequired:
+                pass
+            else:
+                raise AssertionError("the approve rule did not ask")
+
+        written = len(list(store.receipts()))
+    assert written == 2, f"three calls, {written} receipts — the shape of this claim changed"
+
+    forbidden = re.compile(r"every (?:`?tools/call`?|call) (?:leaves|has) a receipt", re.I)
+    wrong = []
+    for page in PAGES:
+        for line in _prose(page).splitlines():
+            found = forbidden.search(line)
+            if found and "reaches a decision" not in line:
+                wrong.append(f"{page.name}: {line.strip()[:90]!r}")
+    assert wrong == [], wrong

@@ -8,8 +8,13 @@ description: "A human replaced by a fixed script: for tests and `ctrlrun demo` (
 `ctrlrun.ScriptedApprovalProvider` — class, defined at `src/ctrlrun/approval.py:425`
 
 ```python
-class ScriptedApprovalProvider()
-    def __init__(store: ApprovalStore, script: Iterable[str | ScriptedOutcome], approver: str, clock: Callable[[], datetime])
+from ctrlrun import ScriptedApprovalProvider
+```
+
+
+```python
+class ScriptedApprovalProvider
+    def __init__(store: ApprovalStore, script: Iterable[str | ScriptedOutcome], *, approver: str = 'cli:scripted', clock: Callable[[], datetime] = _utc_now)
 ```
 
 A human replaced by a fixed script: for tests and `ctrlrun demo` (SPEC-v0.1 §4.3).

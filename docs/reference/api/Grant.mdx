@@ -8,8 +8,13 @@ description: "One permission: this subject may propose these actions, under thes
 `ctrlrun.Grant` — class, defined at `src/ctrlrun/authority.py:299`
 
 ```python
-class Grant()
-    def __init__(id: str, subject: Subject, actions: tuple[str, ...], resources: tuple[str, ...] | None, constraints: Mapping[str, Condition], environments: tuple[str, ...] | None, expires_at: datetime | None, delegable: bool)
+from ctrlrun import Grant
+```
+
+
+```python
+class Grant
+    def __init__(id: str, subject: Subject, actions: tuple[str, ...] = (), resources: tuple[str, ...] | None = None, constraints: Mapping[str, Condition] = (lambda: NO_CONSTRAINTS)(), environments: tuple[str, ...] | None = None, expires_at: datetime | None = None, delegable: bool = False)
 ```
 
 One permission: this subject may propose these actions, under these limits (§4.2).

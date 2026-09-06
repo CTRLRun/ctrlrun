@@ -138,8 +138,6 @@ delegations(                      -- v0.3; a new table, which is why v0.3 needed
   created_via TEXT NOT NULL,      -- api|cli: an act, or an assertion at a terminal
   created_at TEXT NOT NULL, revoked_at TEXT, revoked_by TEXT
 );
-```
-
 schema_version(                   -- v0.6; SPEC-v0.6 §3. Applied migration ids, RECORDED and
   migration_id TEXT PRIMARY KEY,  -- never inferred: `PRAGMA table_info` answers "what is
   applied_at TEXT NOT NULL,       -- there", which is not "what has been applied", and the two

@@ -8,7 +8,12 @@ description: "Bind a function to an action name: every call becomes a decided, r
 `ctrlrun.protect` — function, defined at `src/ctrlrun/control.py:1967`
 
 ```python
-def protect(name: str, effect: str | None, resource: str | None, wait: bool, lease: timedelta | None, reconcile: Callable[[str], ReconcileOutcome] | None, reconcile_eagerly: bool, control: Control | None) -> Callable[[Callable[P, R]], Callable[P, R]]
+from ctrlrun import protect
+```
+
+
+```python
+def protect(name: str, *, effect: str | None = None, resource: str | None = None, wait: bool = False, lease: timedelta | None = None, reconcile: Callable[[str], ReconcileOutcome] | None = None, reconcile_eagerly: bool = False, control: Control | None = None) -> Callable[[Callable[P, R]], Callable[P, R]]
 ```
 
 Bind a function to an action name: every call becomes a decided, recorded Action.
