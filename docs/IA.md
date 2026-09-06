@@ -90,10 +90,10 @@ Architecture and specifications
   ├─ Architecture                      architecture/overview
   └─ Specifications                    architecture/specifications
 Changelog                              changelog
-Try it in your browser                 try-it                       (session 5b)
+Try it in your browser                 try-it
 Research: does your framework
-  double-execute?                      research/does-your-framework-double-execute  (5b)
-Get the badge                          verify/get-the-badge         (session 5b)
+  double-execute?                      study/does-your-framework-double-execute
+Get the badge                          verify/get-the-badge
 ```
 
 ## Home and Why
@@ -251,12 +251,12 @@ signature · what is not covered. Query: *ctrlrun faq* and each question verbati
 
 `changelog` — renders `CHANGELOG.md`. Query: *ctrlrun changelog* · *ctrlrun 0.6*.
 
-## The three things that travel (session 5b)
+## The three things that travel
 
 | Path | Purpose | Query |
 |---|---|---|
 | `try-it` | `ctrlrun demo` in the browser via Pyodide, the same five refusals the README shows, a run-again button, and one line to install it for real. Any scenario the browser cannot run says so by name. | *try ctrlrun* |
-| `research/does-your-framework-double-execute` | The framework-probe results, rendered from `research/framework-probe/results/*.json` by script; *No published results yet* until a file exists. Behaviour, not quality. | *does langgraph retry tool calls* · *agent framework double execution study* |
+| `study/does-your-framework-double-execute` | The framework-probe results, rendered from `research/framework-probe/results/*.json` by script; *No published results yet* until a file exists. Behaviour, not quality. | *does langgraph retry tool calls* · *agent framework double execution study* |
 | `verify/get-the-badge` | The two-minute version of adding the verified badge: the workflow, what *declared guarantees pass* means, what N/A means. No gallery until a repo carries it. | *ctrlrun verified badge* |
 
 ---

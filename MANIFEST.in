@@ -17,7 +17,7 @@ recursive-include docs *.md
 # `tests/test_docs_audit.py` compares the two. `tools/docs_audit/` is the generator and the
 # three checks, imported by that test, so an sdist that ran its tests without them would be
 # the same failure as shipping tests without their data.
-recursive-include docs *.yaml *.mdx *.txt *.json *.svg *.png
+recursive-include docs *.yaml *.mdx *.txt *.json *.svg *.png *.js *.mjs
 include docs/.mintignore
 recursive-include tools *.py *.txt
 # The README's header assets, and the sources they are rendered from.

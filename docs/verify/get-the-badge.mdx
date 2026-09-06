@@ -1,0 +1,121 @@
+---
+title: "Get the verified badge"
+description: "Two minutes: run ctrlrun verify in a workflow, publish the badge JSON, and point Shields at it. What the badge means, and what N/A means."
+---
+
+Two minutes, three steps: run `ctrlrun verify` on every push, publish the badge JSON it writes,
+and point a Shields endpoint badge at the file. The badge then says what your own configuration
+proved, and updates itself.
+
+<Steps>
+  <Step title="Verify on every push">
+    ```yaml
+    name: CTRLRun verify
+
+    on:
+      push:
+        branches: [main]
+      pull_request:
+
+    jobs:
+      verify:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+          - uses: CTRLRun/ctrlrun@main
+            id: verify
+            with:
+              policy: ctrlrun.yaml
+              badge-path: verify-badge.json
+    ```
+
+    The action installs `ctrlrun`, runs it against your policy in a scratch store with no
+    network, renders the job summary and the badge JSON from that one report, and fails the job
+    if a guarantee failed. Pin the action to a release tag once you rely on it.
+  </Step>
+
+  <Step title="Publish the badge JSON">
+    The action **writes** the badge and never publishes it: publishing needs `contents: write`,
+    and asking for write access to your repository as the price of a badge is a bad trade for a
+    tool whose subject is least privilege. So this job is yours, and the cost is visible.
+
+    ```yaml
+      badge:
+        needs: verify
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        runs-on: ubuntu-latest
+        permissions:
+          contents: write     # this job only; the workflow above is read-only
+        steps:
+          - uses: actions/checkout@v4
+          - uses: actions/download-artifact@v4
+            with:
+              name: ctrlrun-verify
+              path: badge
+          - run: |
+              set -eu
+              test -s badge/verify-badge.json
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              if git fetch origin badges:refs/remotes/origin/badges 2>/dev/null; then
+                git switch -c badges refs/remotes/origin/badges
+              else
+                git switch --orphan badges
+              fi
+              cp badge/verify-badge.json verify-badge.json
+              git add -f verify-badge.json
+              git commit -m "verify" || { echo "badge unchanged"; exit 0; }
+              git push origin badges
+    ```
+
+    Three things about that job are load-bearing: `contents: write` is on the job and not the
+    workflow; it runs on a push to your default branch and never on a pull request, so a fork
+    cannot write your badge; and it publishes the badge the verify job already produced rather
+    than running verify a second time, so the badge and the report cannot disagree.
+  </Step>
+
+  <Step title="Point Shields at it">
+    ```markdown
+    [![CTRLRun verified](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/OWNER/REPO/badges/verify-badge.json)](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
+    ```
+
+    Link it to what the badge means, as above. A badge nobody can click through to is a claim
+    without a definition.
+  </Step>
+</Steps>
+
+## What the badge means
+
+The badge means the **declared guarantees pass**: every guarantee in the catalogue that your
+configuration can exercise was exercised, and none of them failed. It reads `verified N/M`,
+where `M` is what your configuration can exercise, not the size of the catalogue.
+
+It does not mean secure, safe, compliant, certified or audited. It says nothing about your
+executors, your `reconcile` hooks, where you put the decorator, your deployment, or whether your
+policy is the right policy.
+
+## What N/A means
+
+A guarantee your configuration cannot exercise is reported not applicable, with the reason, and
+**excluded from both sides of the fraction**. A policy with no `approve` rule cannot exercise
+approval binding; one with no `effect:` templates cannot exercise the effect guarantees; one
+with no `authority:` section cannot exercise the authority guarantees.
+
+So a badge reading `verified 6/6` on a policy with five N/As is honest, and `11/11` for the same
+policy would not be. Not applicable is not a pass, there is no flag that folds one into the
+count, and a run where nothing is applicable exits 2 and writes no badge at all. A partial run
+with `--only` writes no badge either.
+
+## If the badge does not appear
+
+- The `badges` branch has no `verify-badge.json` yet: the badge job runs only on a push to your
+  default branch, so merge once.
+- Shields caches for a few minutes.
+- The badge URL and the branch the job pushes to must be the same; a mismatch is a 404 on your
+  front page.
+
+## Next
+
+- [Verify in CI](/guides/verify-in-ci): the inputs, the outputs and the two report shapes.
+- [What verify guarantees](/security/verify-guarantees): the eleven, and the four things verify cannot see.
+- [Get started](/get-started/quickstart) · [Why](/why).
