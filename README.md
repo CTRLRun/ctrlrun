@@ -8,17 +8,22 @@
 <p align="center">
   <strong>The last check before an AI agent does something it can't undo.</strong><br>
   Autonomy belongs to the action, not the agent.<br>
-  Every consequential action happens once, exactly as approved, or not at all — and leaves a receipt.
+  Every consequential action happens once, exactly as approved, or not at all — and leaves a receipt.<br>
+  <br>
+  Runs in production on a single file, or on Postgres across hosts. Apache-2.0.
 </p>
 
+<!-- generated from tools/docs_audit/render_badges.py (readme) — edit the list, not this -->
 <p align="center">
-  <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/v/ctrlrun?color=444&label=pypi" alt="PyPI"></a>
-  <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/pyversions/ctrlrun?color=444" alt="Python versions"></a>
+  <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/v/ctrlrun?color=B8730A&label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/pyversions/ctrlrun?color=B8730A" alt="Python versions"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://docs.ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
+  <a href="https://docs.ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=444" alt="License"></a>
+  <a href="https://github.com/CTRLRun/ctrlrun/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=B8730A" alt="License"></a>
 </p>
+<!-- end generated -->
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
@@ -462,6 +467,34 @@ you put the decorator, your deployment, and whether your policy is the right pol
 If an agent only reads and answers, you don't need CTRLRun. The moment it can **send, pay,
 refund, delete, deploy, grant, revoke, approve, submit, purchase or cancel**, you do.
 
+## Running it in production
+
+**SQLite is the default and is production-grade on one host.** A file, no server, no ops — and
+the concurrency guarantee is held by `BEGIN IMMEDIATE` and a unique constraint, across processes
+and not merely across threads. **Postgres is for many hosts**: `pip install "ctrlrun[postgres]"`,
+one URL, the same `StateStore` protocol extended by nothing, graded by the suite written for
+SQLite. Choose by how many machines write, not by how serious you are.
+
+<!-- generated from the suite, pyproject and the soak (readme) — run the generator -->
+- **Version 0.6.0**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
+- **3,936 tests**, every version specified before it was written and every requirement mutation-tested.
+- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy and your store.
+- **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired.
+- **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
+- **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
+
+**Not yet:**
+
+- No external security audit. (planned for v0.8 or v0.9)
+- No third-party review of the kernel. (every review so far was run inside this project)
+- No sector packs. (the policy templates are starting points, not a product)
+<!-- end generated -->
+
+[docs.ctrlrun.dev/production](https://docs.ctrlrun.dev/production/index) is the whole section:
+choosing a store, what reservation does under a lost `COMMIT`, migrations, recovery after a
+crash, the receipt chain, the soak, and what to watch once it is running.
+
 ## Documentation
 
 **[docs.ctrlrun.dev](https://docs.ctrlrun.dev)** is the documentation: concepts, guides, a
@@ -472,6 +505,7 @@ cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no ins
 | Start here | [Why](https://docs.ctrlrun.dev/why) · [60-second quickstart](https://docs.ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://docs.ctrlrun.dev/try-it) |
 | The ideas | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) |
 | Doing something | [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
+| Running it for real | [Production](https://docs.ctrlrun.dev/production/index) · [Postgres](https://docs.ctrlrun.dev/production/postgres) · [Recovery](https://docs.ctrlrun.dev/production/recovery) · [Operations](https://docs.ctrlrun.dev/production/operations) |
 | MCP | [Overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
 | Every key, flag and error | [Reference](https://docs.ctrlrun.dev/reference/policy-yaml) |
 | Compared with other things | [Compare](https://docs.ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://docs.ctrlrun.dev/faq) |

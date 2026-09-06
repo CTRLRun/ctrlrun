@@ -1,12 +1,26 @@
 ---
 title: "Frequently asked questions"
 sidebarTitle: "FAQ"
-description: "Twelve questions engineers ask about CTRLRun: idempotency keys, workflow engines, adapters, guarantees, timeouts, receipts, and what is not covered."
+description: "Fourteen questions engineers ask: is it production-ready, SQLite or Postgres, idempotency keys, workflow engines, adapters, timeouts and receipts."
 ---
 
-The twelve questions that come up first, answered in under eighty words each.
+The fourteen questions that come up first, answered in under eighty words each.
 
 <AccordionGroup>
+  <Accordion title="Is it production-ready?">
+    It runs in production on a single file or on Postgres across hosts, and every guarantee is
+    graded by one suite against both stores. What it has not had: an external security audit, a
+    third-party review of the kernel, and a soak of the length the roadmap asks for. Those are
+    listed on [Run it in production](/production/index) rather than left for you to find.
+  </Accordion>
+
+  <Accordion title="Is SQLite really enough?">
+    On one host, yes. `BEGIN IMMEDIATE` is a write lock on the file, so one effect executes once
+    across threads and across OS processes on that machine, and the conformance suite grades
+    SQLite case for case beside Postgres. Move when a second host must write to the store, not
+    before. [The choice, in one table](/production/postgres).
+  </Accordion>
+
   <Accordion title="Isn't this just idempotency keys?">
     No. An idempotency key deduplicates at one API that chose to support it, inside its
     retention window. An effect key deduplicates at the agent, before the call, across every
@@ -101,6 +115,8 @@ The twelve questions that come up first, answered in under eighty words each.
   "@context": "https://schema.org",
   "@type": "FAQPage",
   "mainEntity": [
+    {"@type": "Question", "name": "Is CTRLRun production-ready?", "acceptedAnswer": {"@type": "Answer", "text": "It runs in production on a single file or on Postgres across hosts, and every guarantee is graded by one suite against both stores. It has not had an external security audit, a third-party review of the kernel, or a soak of the length the roadmap asks for."}},
+    {"@type": "Question", "name": "Is SQLite really enough for production?", "acceptedAnswer": {"@type": "Answer", "text": "On one host, yes. BEGIN IMMEDIATE is a write lock on the file, so one effect executes once across threads and across OS processes on that machine. Move to Postgres when a second host must write to the store, not before."}},
     {"@type": "Question", "name": "Isn't this just idempotency keys?", "acceptedAnswer": {"@type": "Answer", "text": "No. An idempotency key deduplicates at one API that chose to support it, inside its retention window. An effect key deduplicates at the agent, before the call, across every remote it touches, is bound to the approval and the receipt, and refuses a retry when the outcome is unknown."}},
     {"@type": "Question", "name": "Why not a durable workflow engine?", "acceptedAnswer": {"@type": "Answer", "text": "A workflow engine makes a workflow finish, retrying activities until they succeed. CTRLRun decides whether a consequential effect is authorized and refuses to retry an unknown outcome. Run the workflow in the engine and decorate the activity that acts."}},
     {"@type": "Question", "name": "Do I need an adapter for my framework?", "acceptedAnswer": {"@type": "Answer", "text": "Probably not. The @protect decorator covers anything in your Python process and the gateway covers anything behind an MCP server in any language. An adapter only routes an approval through the framework's own interrupt."}},

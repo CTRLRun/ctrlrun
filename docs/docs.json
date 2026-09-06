@@ -49,6 +49,20 @@
             ]
           },
           {
+            "group": "Production",
+            "pages": [
+              "production/index",
+              "production/postgres",
+              "production/how-reservation-works",
+              "production/migrations",
+              "production/recovery",
+              "production/receipt-integrity",
+              "production/soak",
+              "production/operations",
+              "postgres"
+            ]
+          },
+          {
             "group": "MCP",
             "pages": [
               "mcp/overview",
@@ -259,7 +273,6 @@
               "ACS",
               "adapters",
               "authority",
-              "postgres",
               "verify",
               "CLAIMS",
               "ROADMAP"

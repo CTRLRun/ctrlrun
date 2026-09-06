@@ -10,6 +10,9 @@ mode: "wide"
 Autonomy belongs to the action, not the agent. Every consequential action happens once, exactly
 as approved, or not at all — and leaves a receipt.
 
+**Runs in production on a single file, or on Postgres across hosts.** SQLite is the default and
+is production-grade on one host; Postgres is for many. Apache-2.0.
+
 CTRLRun is a Python library that sits between an agent's decision to act and the call that acts.
 It binds a human's approval to the exact action they saw, executes one logical effect at most
 once across processes and hosts, treats an unknown outcome as unknown rather than failed, denies
@@ -102,13 +105,16 @@ the same demo without an install, or read the full transcript in the
   <Card title="Framework adapters" href="/get-started/three-ways-in">
     An approval routed through the framework's own interrupt; never a second path. Since v0.5.
   </Card>
-  <Card title="Postgres store" href="/guides/run-on-postgres">
+  <Card title="Runs on one host or many" href="/production/index">
+    SQLite on one host, Postgres across hosts, the same guarantees either way. Since v0.6.
+  </Card>
+  <Card title="Postgres store" href="/production/postgres">
     The same store on Postgres, graded by the suite written for SQLite. Since v0.6.
   </Card>
-  <Card title="Versioned schema" href="/guides/run-on-postgres">
+  <Card title="Versioned schema" href="/production/migrations">
     Migrations run at open, forward only, and an unknown schema is refused. Since v0.6.
   </Card>
-  <Card title="Recovery on restart" href="/guides/resolve-an-ambiguous-effect">
+  <Card title="Recovery on restart" href="/production/recovery">
     A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it. Since v0.6.
   </Card>
   <Card title="Receipt chain" href="/security/receipt-chain">
@@ -138,9 +144,30 @@ Most readers need the decorator. An adapter buys exactly one thing, routing an a
 the framework's own interrupt, and a framework with no such primitive does not need one.
 [Choosing between them](/get-started/choosing) has the decision table.
 
+## Where it stands
+
+{/* generated from the suite, pyproject and the soak (mdx) — run the generator */}
+- **Version 0.6.0**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
+- **3,936 tests**, every version specified before it was written and every requirement mutation-tested.
+- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy and your store.
+- **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired.
+- **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
+- **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
+
+**Not yet:**
+
+- No external security audit. (planned for v0.8 or v0.9)
+- No third-party review of the kernel. (every review so far was run inside this project)
+- No sector packs. (the policy templates are starting points, not a product)
+{/* end generated */}
+
 ## Start here
 
 <Columns cols={2}>
+  <Card title="Run it for real" icon="server" href="/production/index">
+    Which store, what a lost `COMMIT` does, what survives a crash, and what to watch.
+  </Card>
   <Card title="MCP" icon="plug" href="/mcp/overview">
     The gateway in front of any MCP server, this site as an MCP server, and what is planned.
   </Card>

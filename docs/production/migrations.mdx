@@ -1,0 +1,75 @@
+---
+title: "Migrations and schema versions"
+description: "Migrations run at open, forward only, and nothing half-applies. Five shapes a database can be in, and three of them are a refusal."
+---
+
+Deploy a newer CTRLRun over an existing database and it migrates at open, forward only, one
+transaction per migration. You run no command and set no flag, because there is no flag: a
+database that opened un-migrated would be a database serving reads it half understands.
+
+## The five shapes, and what each does
+
+Let *known* be the migration ids your binary ships, and *applied* be what the database records.
+
+| What the database records | What happens |
+|---|---|
+| Exactly *known* | opens, nothing applied |
+| The first *n* of *known*, in order, with no gap | **the ordinary case**: the rest are applied, in order, at open |
+| Known ids, but not a prefix — `0001` and `0003`, not `0002` | **refused**, naming the gap |
+| An id the binary does not know — an older binary, a newer database | **refused at open**, naming the unknown id, your version, and the version that wrote it |
+| Missing one it knows **and** carrying one it does not | **refused**, naming both sides |
+
+The five are exhaustive and the store classifies into exactly one. Anything it cannot place is
+refused, not opened: a sixth shape nobody thought of is a database nobody has reasoned about.
+
+**The fourth row is the direction that gets forgotten and the one that corrupts.** A binary that
+reads a table it half understands does not fail. It succeeds, with the columns it knows, silently
+dropping the ones it does not — and a receipt row whose chain fields it never wrote is a gap in
+the chain nobody caused deliberately. Refusing to start is the cheap failure, and it is
+`SchemaMismatch`, raised before a row is read from any other table.
+
+## Nothing half-applies
+
+Each migration runs in one transaction, and both engines have transactional DDL, so a migration
+that raises part way rolls back to the previous version — including the row that would have
+recorded it. That is a claim about database engines, so the test suite ships a deliberately broken
+migration whose second statement raises, and proves the store refuses to open, the version is
+unchanged, and every row is intact.
+
+Two rules follow for anyone writing one: a migration does nothing outside its transaction — no
+file writes, no network, no concurrent index build — and it reads and writes columns rather than
+your Python objects.
+
+## Rolling out
+
+```
+old binary + old database   →  fine
+new binary + old database   →  migrates at open, automatically
+old binary + new database   →  refuses at open, naming both versions
+```
+
+So a rolling deploy is safe in the forward direction and **stops** in the backward one. Plan a
+rollback as a database restore, not as a redeploy of the previous image, and take the backup
+before the first new process starts.
+
+## What this does not do
+
+- **There is no down migration.** Forward only. Reverting means restoring a backup.
+- **There is no flag, keyword or environment variable that opens a database without migrating
+  it.** A test searches the CLI, the constructor and the environment for one.
+- **A migration is not a data repair.** It moves the schema forward and preserves every row; it
+  does not correct rows that were already wrong.
+- **It does not migrate a database that is not CTRLRun's.** A database with foreign tables and no
+  effects table is refused, naming what it found.
+
+**Verified by** `T147` — a database built by the previous release's **own code**, migrated, and
+every row compared by content rather than counted — `T148` for the refusal that names both
+versions, `T149` for the broken migration that rolls back, `T150` for re-opening applying nothing,
+`T151` and `T152` for the divergent and adoption shapes from four earlier releases, and `T152b`
+for the flag that does not exist.
+
+## Next
+
+- [SQLite or Postgres](/production/postgres): where the schema lives.
+- [Operations](/production/operations): what to check after a deploy.
+- [Get started](/get-started/quickstart) · [Why](/why).

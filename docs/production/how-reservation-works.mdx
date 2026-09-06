@@ -1,0 +1,71 @@
+---
+title: "How reservation works"
+description: "One effect key, one winner. And the two rows nobody merges: an exception before COMMIT, and an exception during it."
+---
+
+Before your executor runs, the store reserves the effect key, and exactly one attempt wins. On
+SQLite that is `BEGIN IMMEDIATE`; on Postgres it is `INSERT … ON CONFLICT (effect_key) DO
+NOTHING` with the row count checked, under the default isolation level. Every later transition is
+a conditional `UPDATE` that matches on the state it expects, with the row count checked again. The
+guarantee is the unique index, not the isolation level.
+
+## The two rows that must never be merged
+
+This is the part that decides whether a lost database connection costs you a refund or a
+duplicate one.
+
+| The store saw | The write is | What happens |
+|---|---|---|
+| **Before `COMMIT`** — a connect failure, a statement error, a constraint violation, a statement timeout | **failed** — nothing committed | roll back, raise, and you may retry the write immediately |
+| A serialization failure or a deadlock, at any point | **failed** — the server said so, in band | as above |
+| **During or after `COMMIT`** — the connection lost mid-`COMMIT`, a timeout on `COMMIT`, the socket closing before the command tag arrives | **unknown** | **re-read the record on a fresh connection** and let the answer decide |
+| The re-read itself fails | **unresolvable** | refuse; write no effect state; raise |
+
+**Before `COMMIT`: nothing committed, retry the write. During `COMMIT`: unknown, so re-read.**
+Two rows, two behaviours, two tests. Reading the first as the second refuses work a single query
+could have recovered. Reading the second as the first retries a write that already landed.
+
+A serialization failure sits in the first row on purpose: the server is telling you in band that
+it rolled the transaction back, which is the closest a database gets to your executor raising
+`NotExecuted`. A cancelled statement is **not** in that set, because a statement timeout during a
+`COMMIT` is exactly the unknown case.
+
+## What the re-read looks for
+
+It is an identity check on the whole row, never a match on the action id. Two attempts can share
+an id — the id names an attempt, and a caller that rebuilt the same action after a restart has
+the same one — so *"a record carrying our id"* is satisfied by **another process's live
+reservation**, and concluding you hold the key there is a double execution.
+
+- Finds the row you were about to write, column for column: the commit landed, proceed.
+- Finds nothing: it did not land, retry the insert once.
+- Finds anything else: hand it back to the same planner every reservation uses, and obey it.
+
+On a later transition the record always exists, so the interesting finding is different: an
+**unchanged** record means the commit did not land, and the store re-issues the same conditional
+`UPDATE` once. Refusing there would turn a committed effect into a human's problem, and a proven
+failure into an unknown one.
+
+## What this does not do
+
+- **It does not tell you what the remote did.** Reservation is about the store. An executor that
+  raised something other than `NotExecuted` leaves an `AMBIGUOUS` effect that no query settles.
+- **It does not reclaim a key.** A lease that lapsed becomes `AMBIGUOUS` when the next contender
+  arrives. [Nothing sweeps](/production/recovery).
+- **A failed re-read costs availability.** The key stays reserved by an attempt that will never
+  run, its lease lapses, and a person answers. That is the trade: it never costs a second
+  execution.
+- **It does not hold a row lock across your executor.** Advisory locks, `SERIALIZABLE` and
+  `SELECT … FOR UPDATE` were each rejected, and the reasons are in the specification.
+
+**Verified by** `T155` — the connection is killed during `COMMIT` on purpose rather than raced
+for — `T155b` for the re-issued update on commit and on fail, `T155c` for the identity check that
+is not a match on the action id, `T156` for the failed re-read that writes nothing, and `T157`
+and `T158` for one winner across two hosts and a `kill -9` mid-transaction. `G4` in `ctrlrun
+verify` contends real processes against your own store.
+
+## Next
+
+- [Recovery after a crash](/production/recovery): what a restarted process may conclude.
+- [Outcomes and AMBIGUOUS](/concepts/outcomes-and-ambiguous): the other unknown, the one no query settles.
+- [Get started](/get-started/quickstart) · [Why](/why).
