@@ -278,6 +278,9 @@ jobs:
       - name: The Python API reference matches the docstrings
         run: python tools/docs_audit/render_api.py --check
 
+      - name: The cookbook directories are what their pages show
+        run: python tools/docs_audit/render_cookbook.py --check
+
       - name: Runnable snippets execute offline
         continue-on-error: true
         run: python tools/docs_audit/snippets.py

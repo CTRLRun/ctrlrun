@@ -1,0 +1,17 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/iam-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  iam.grant_role:
+    effect: "grant:{principal}:{role}"
+    resource: "project:{project}"
+    rules:
+      - when: { role_eq: admin }
+        decision: deny
+      - when: { role_in: [reader, viewer] }
+        decision: allow
+      - decision: approve
+  iam.revoke_role:
+    effect: "revoke:{principal}:{role}"
+    decision: allow

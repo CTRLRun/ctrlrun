@@ -1,0 +1,11 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/reconcile-against-the-remote.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+  k8s.scale:
+    effect: "scale:{cluster}:{deployment}:{replicas}"
+    decision: allow

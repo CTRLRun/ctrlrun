@@ -1,0 +1,11 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/resolve-an-ambiguous-effect.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  dns.update_record:
+    effect: "dns:{zone}:{name}"
+    decision: allow
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow

@@ -1,6 +1,6 @@
 ---
 title: "Roll out observe, then enforce"
-description: "Put mode: observe at the top of the policy, run real traffic for a week, read ctrlrun stats to see what enforcement would have blocked and why, fix the policy, then switch the line to enforce."
+description: "Put mode: observe at the top of the policy, run real traffic for a week, read ctrlrun stats to see what enforcement would have blocked and why."
 ---
 
 Start with `mode: observe`: every action is decided exactly as enforce mode would decide it,
@@ -85,11 +85,17 @@ the gateway in front of them. The blocks below simulate a week in a few calls.
     ```
 
     ```text
-    observed actions              7
-    would have been blocked       4
-      approval_required           2
-      policy_denied               1
-      duplicate_effect            1
+    CTRLRun — 2026-09-06T10:55:05.474Z .. 2026-09-06T10:55:05.476Z   (observe mode)
+
+    actions                            7
+    would have been denied             1
+       rule[2]                         1
+    would have needed approval         2
+    would have been blocked            1
+       duplicate                       1
+    ambiguous outcomes                 0
+
+    Actions still awaiting a human have no receipt yet and are not counted.
     ```
 
     Counted from the local store and nothing else: no network, no upload. `--since 7d` narrows
@@ -97,11 +103,11 @@ the gateway in front of them. The blocks below simulate a week in a few calls.
   </Step>
 
   <Step title="Fix the policy, not the count">
-    Each `approval_required` is a real approval request you will field once you enforce. If the
-    rate is wrong, the band is wrong: raise the autonomous limit for the action, or add a rule
-    for the case that dominates. Each `policy_denied` is an action your agent performs today
-    that will stop; decide whether that is the point. `duplicate_effect` is a retry loop you
-    did not know about.
+    Each *would have needed approval* is a real approval request you will field once you
+    enforce. If the rate is wrong, the band is wrong: raise the autonomous limit for the action,
+    or add a rule for the case that dominates. Each *would have been denied* is an action your
+    agent performs today that will stop, named by the rule; decide whether that is the point.
+    A *duplicate* is a retry loop you did not know about.
   </Step>
 
   <Step title="Enforce">

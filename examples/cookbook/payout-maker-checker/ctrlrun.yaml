@@ -1,0 +1,23 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/payout-maker-checker.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v3
+
+authority:
+  grants:
+    - id: treasury-lead
+      subject: { agent: "treasury-lead", user: "mira@example.com" }
+      actions: ["bank.payout"]
+      resources: ["account:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+
+actions:
+  bank.payout:
+    effect: "payout:{account}:{reference}"
+    resource: "account:{account}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 1000000 }
+        decision: allow
+      - decision: approve

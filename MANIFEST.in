@@ -34,6 +34,8 @@ recursive-include tests *.md
 # fails on a fresh checkout, which is the failure `prune internal` exists to avoid.
 recursive-include examples *.py
 recursive-include examples *.yaml
+# The cookbook's verify recipe is a shell script; `tests/test_cookbook.py` runs it.
+recursive-include examples *.sh
 # And the READMEs. `examples/authority/` is two documents to *read*, so its README is the
 # example rather than a note beside one — and a test asserts what it says, which is how the
 # sdist job caught this line missing rather than the release did.

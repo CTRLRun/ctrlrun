@@ -1,0 +1,13 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/database-migration-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  db.migrate:
+    effect: "migration:{database}:{version}"
+    rules:
+      - when: { database_eq: staging }
+        decision: allow
+      - decision: approve
+  db.rollback:
+    decision: deny

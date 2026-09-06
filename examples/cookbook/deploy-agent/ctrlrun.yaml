@@ -1,0 +1,16 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/deploy-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  k8s.rollout_restart:
+    effect: "restart:{cluster}:{deployment}"
+    decision: allow
+  k8s.apply:
+    effect: "apply:{cluster}:{manifest_hash}"
+    rules:
+      - when: { cluster_in: [staging, dev] }
+        decision: allow
+      - decision: approve
+  k8s.delete_namespace:
+    decision: deny
