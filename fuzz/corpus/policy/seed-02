@@ -1,0 +1,4 @@
+schema: ctrlrun.policy/v3
+actions:
+  pay:
+    default: deny
