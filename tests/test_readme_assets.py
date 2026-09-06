@@ -128,7 +128,18 @@ def test_the_social_preview_is_1280_by_640_and_rendered_from_its_svg():
 
 
 def test_the_header_carries_the_fixed_copy_and_the_five_badges():
-    head = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    """The header is the wordmark, the three fixed lines, the badges and the animation.
+
+    It carried the capability matrix too, and this test required it there. That is the front
+    door decision the matrix was moved for: a six-by-four table is the right document for
+    somebody evaluating CTRLRun and the wrong one for somebody deciding whether to keep
+    reading, so the first section after the animation is now the failure itself. The
+    requirement is inverted rather than deleted — no table above the first H2, the marker
+    still in the file, and the first section named — because a header that quietly grew a
+    table again would otherwise pass.
+    """
+    text = README.read_text(encoding="utf-8")
+    head = text.split("\n## ", 1)[0]
 
     assert "The last check before an AI agent does something it can't undo." in head
     assert "Autonomy belongs to the action, not the agent." in head
@@ -144,5 +155,8 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
         "pypi/l/ctrlrun",
     ):
         assert badge in head, badge
-    assert "generated from docs/capabilities.yaml (readme)" in head
-    assert head.count("\n|---|") == 1, "exactly one table above the first H2"
+    marker = "generated from docs/capabilities.yaml (readme)"
+    assert marker not in head, "the capability matrix is not the first screen"
+    assert marker in text, "the capability matrix was moved, not dropped"
+    assert head.count("\n|---|") == 0, "no table above the first H2"
+    assert text.split("\n## ", 2)[1].startswith("The refund that happened twice")
