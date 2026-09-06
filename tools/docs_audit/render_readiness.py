@@ -146,7 +146,7 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         if full:
             return f"{text} [Read more](/{page})."
         if page == "production/soak":
-            return f"{text} [What it does not establish](https://docs.ctrlrun.dev/{page})."
+            return f"{text} [What it does not establish](https://ctrlrun.dev/{page})."
         return text
 
     lines = [
