@@ -1,12 +1,121 @@
 ---
 title: "Try it in your browser"
-description: "Run ctrlrun demo here, with no install: Python and the released ctrlrun wheel load into this tab and the five scenarios run in front of you."
+description: "Break a protected agent action with no install: real Python and the released ctrlrun wheel run in this tab, and every refusal you see is CTRLRun's own."
 ---
 
-Press the button and `ctrlrun demo` runs in this tab: real Python, the released `ctrlrun` wheel
-from PyPI, and the same five scenarios you would get from `pip install ctrlrun && ctrlrun demo`.
-Nothing is sent anywhere. The demo is in-process, writes its evidence to an in-memory
-filesystem, and opens no socket.
+Real Python and the released `ctrlrun` wheel from PyPI load into this tab. Below is one
+protected refund under one policy, with a fake Stripe that commits before its reply can go
+missing. Change the amount, lose the reply, approve one amount and execute another, and read
+what CTRLRun did. Every line in the box was produced by `ctrlrun` here: the page owns the
+controls and nothing else. Nothing is sent anywhere; the store is in memory and no socket is
+opened.
+
+The policy the refund runs under, in cents:
+
+```yaml
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 1000000 }
+        decision: approve
+      - decision: deny
+```
+
+<div id="ctrlrun-playground">
+  <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "flex-end" }}>
+    <label style={{ display: "flex", flexDirection: "column", fontSize: "13px" }}>
+      Amount, in euros
+      <input type="number" name="amount" defaultValue="500" step="1" style={{ padding: "8px", fontSize: "15px", width: "140px", borderRadius: "6px", border: "1px solid #B8730A" }} />
+    </label>
+    <label style={{ display: "flex", flexDirection: "column", fontSize: "13px" }}>
+      Payment id
+      <input type="text" name="payment_id" defaultValue="txn_1" style={{ padding: "8px", fontSize: "15px", width: "140px", borderRadius: "6px", border: "1px solid #B8730A" }} />
+    </label>
+    <label style={{ display: "flex", gap: "6px", alignItems: "center", fontSize: "13px", paddingBottom: "10px" }}>
+      <input type="checkbox" name="lose_reply" />
+      lose the reply after the remote commits
+    </label>
+    <button
+      type="button"
+      name="run"
+      style={{
+        background: "#F5A623",
+        color: "#14161b",
+        border: "1px solid #B8730A",
+        borderRadius: "8px",
+        padding: "10px 18px",
+        fontSize: "15px",
+        cursor: "pointer",
+      }}
+    >
+      Refund
+    </button>
+    <button
+      type="button"
+      name="approve"
+      style={{
+        background: "#14161b",
+        color: "#8bd5a0",
+        border: "1px solid #8bd5a0",
+        borderRadius: "8px",
+        padding: "10px 18px",
+        fontSize: "15px",
+        cursor: "pointer",
+      }}
+    >
+      Approve, as the human
+    </button>
+  </div>
+  <pre
+    style={{
+      background: "#14161b",
+      color: "#c9ccd3",
+      borderRadius: "8px",
+      padding: "16px",
+      marginTop: "12px",
+      display: "block",
+      overflowX: "auto",
+      overflowY: "auto",
+      fontSize: "13px",
+      lineHeight: "1.5",
+      minHeight: "180px",
+      maxHeight: "min(60vh, 440px)",
+      whiteSpace: "pre",
+    }}
+  >
+Press Refund. The first press downloads about 10 MB of Python; after that the browser caches it.
+  </pre>
+</div>
+
+## Try this, in order
+
+1. **€500** on `txn_1` — allowed. It runs, and the receipt says `committed`.
+2. Payment id **`txn_2`**, **€2,000** — `ApprovalRequired`, with the request id a human would
+   answer. Press *Approve*, change the amount to **€5,000**, press *Refund*:
+   `ApprovalMismatch`. The approval was bound to the action the human saw. Put **€2,000** back
+   and it executes on that same approval.
+3. **€2,000** on `txn_2` once more — `ApprovalMismatch (consumed)`: the approval was single-use.
+4. **`txn_3`**, **€20,000** — `ActionDenied`. No request is created; a human is not asked about
+   a refund the policy refuses at any size.
+5. **`txn_4`**, **€500**, with *lose the reply* ticked — the remote commits, the reply is lost,
+   the effect is `AMBIGUOUS`. Untick and press *Refund* again: `AmbiguousEffect`, the blind
+   retry is refused, and `remote refund calls` is still 1. That is the case this library exists
+   for: [Outcomes and AMBIGUOUS](/concepts/outcomes-and-ambiguous).
+6. Back to **`txn_1`**, **€500** — `DuplicateEffect`. One logical effect,
+   [one reservation](/concepts/effect-keys).
+
+Every refusal above is the exception your own code would catch, with the reason it carries.
+[Approval binding](/concepts/approval-binding) and [Decisions](/concepts/decisions) are the two
+pages behind steps 2 to 4.
+
+## The five scenarios, end to end
+
+Press the button and `ctrlrun demo` runs in this tab: the same five scenarios you would get
+from `pip install ctrlrun && ctrlrun demo`, on the same wheel.
 
 <div id="ctrlrun-browser-demo">
   <button
@@ -44,10 +153,9 @@ Press the button. The first run downloads about 10 MB of Python; after that the 
   </pre>
 </div>
 
-## What you should see
+<Accordion title="What the demo prints">
 
-All five scenarios run in the browser. This is the output from the verification run described
-below, with the generated ids masked:
+This is the output from the verification run described below, with the generated ids masked:
 
 ```text
 ctrlrun 0.5.0 on Python 3.14.2
@@ -97,6 +205,8 @@ Scenario 1 is the one to read twice: **`remote refund calls: 1`**. The refund co
 fake remote, the reply was lost, the agent retried, and the retry was refused. The customer was
 refunded once.
 
+</Accordion>
+
 ## What is running
 
 | | |
@@ -109,30 +219,34 @@ refunded once.
 The version line in the output is the released version, so it can be behind `main`. Everything
 else on this site describes the current release.
 
-## Verified, and how to check
+<Accordion title="Verified, and how to check">
 
 The Python this page runs was verified under Node against the same Pyodide build on
-**2026-09-06**: Pyodide 314.0.6, Python 3.14.2, SQLite 3.39.0, `ctrlrun` 0.5.0 from PyPI, all
-five scenarios. Not a copy of it — the harness reads the program out of `try-it.js` and runs
-that. It carried its own copy until that date, which is how a syntax error in the page's copy
-reached this page: both harnesses were green, one having stubbed the Python and the other
-having verified a program the page never ran. Two harnesses are committed, and you can run
-both:
+**2026-09-07**: Pyodide 314.0.6, Python 3.14.2, SQLite 3.39.0, `ctrlrun` 0.5.0 from PyPI, the
+playground's whole sequence and all five demo scenarios. Not a copy of it — the harness reads
+both programs out of `try-it.js` and runs those. It carried its own copy until 2026-09-06, which
+is how a syntax error in the page's copy reached this page: both harnesses were green, one
+having stubbed the Python and the other having verified a program the page never ran. Two
+harnesses are committed, and you can run both:
 
 ```bash
 npm install pyodide jsdom
-node docs/assets/verify-browser-demo.mjs    # Python, the wheel, and the five scenarios
-node docs/assets/verify-browser-wiring.mjs  # this page's button, against a real DOM
+node docs/assets/verify-browser-demo.mjs    # Python, the wheel, the playground sequence, the five scenarios
+node docs/assets/verify-browser-wiring.mjs  # this page's controls, against a real DOM
 ```
 
 [`verify-browser-demo.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-demo.mjs)
 is the one that proved the demo runs. A third check needs neither Node nor the network:
-`tests/test_docs_travelling.py` lifts the program out of the JavaScript and compiles it on
-every commit, so a syntax error fails CI rather than this page.
+`tests/test_docs_travelling.py` lifts both programs out of the JavaScript on every commit,
+compiles the demo's, and **runs the playground's** through the six steps above against the
+checkout's own `ctrlrun`, asserting each outcome. A refusal that stopped happening fails CI
+rather than this page.
 [`verify-browser-wiring.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-wiring.mjs)
-is the one that proves the button on this page gets wired: this site is a single-page
+is the one that proves the controls on this page get wired: this site is a single-page
 application, and the first version of the script looked for its container before the page had
 rendered it, so the button did nothing.
+
+</Accordion>
 
 ## If it does not run here
 

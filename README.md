@@ -47,8 +47,9 @@ an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says 
 pip install ctrlrun && ctrlrun demo
 ```
 
-No Python to hand? [Try it in your browser](https://ctrlrun.dev/try-it) runs the same five
-scenarios on the released wheel, in the tab, with nothing sent anywhere.
+No Python to hand? [Break a protected action in your browser](https://ctrlrun.dev/try-it):
+one refund under one policy on the released wheel, in the tab, with nothing sent anywhere.
+Approve €2,000, execute €5,000, lose a reply, retry — and read what refused you.
 
 ## What `ctrlrun demo` shows
 

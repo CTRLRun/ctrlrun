@@ -214,6 +214,13 @@ have recovered or retrying work nothing can.
 
 ### Documentation
 
+- **The browser page is a playground.** `/try-it` runs one protected refund on the released
+  wheel in the tab: an amount, a payment id, a *lose the reply* switch, a *Refund* button and
+  an *Approve* button that is the human. Every line it prints is `ctrlrun`'s own — the page's
+  Python is a module over the public API, read out of the JavaScript by the same regex the
+  Node harness uses, and `tests/test_docs_travelling.py` runs it natively through the six
+  steps the page suggests on every commit. The harness records what it ran in
+  `docs/assets/browser-demo.verified.json`, and the page's quoted versions are held to it.
 - **The front door leads somewhere.** The docs home shows `@protect` and a policy before it
   shows anything else, the capability grid shows the six guarantees and folds the other twenty,
   the quickstart is titled for what it takes and opens with `pip install`, the cookbook sidebar
