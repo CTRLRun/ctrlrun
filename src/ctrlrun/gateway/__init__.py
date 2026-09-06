@@ -204,8 +204,6 @@ def serve_operator(**options: Any) -> None:
         serve_operator_forever,
     )
 
-    otel = bool(options.pop("otel", False))
-    otel_arguments = bool(options.pop("otel_arguments", False))
     authority_path = options.pop("authority", None)
     store_url = options.pop("store_url", None)
     environment = options.pop("environment", None)
@@ -213,27 +211,33 @@ def serve_operator(**options: Any) -> None:
     config = OperatorConfig(**options)
     control = Control.from_file(environment=environment)
     authority = _authority(control, authority_path)
-    sinks = list(control.sinks)
-    if otel:
-        from ..otel import OTelEventSink
-
-        sinks.append(OTelEventSink(arguments=otel_arguments))
-    store = control.store if store_url is None else _named_store(store_url)
+    store = control.store
+    if store_url is not None:
+        # `--store-url` names a different store from the one beside the policy, so the one
+        # `from_file` opened is closed here rather than left held for the life of the process.
+        # A review found it leaked: only the second was closed in the `finally`.
+        store.close()
+        store = _named_store(store_url)
     # SPEC-mcp-operator §9.4 — one rebuild carrying everything, for the reason `serve` gives:
     # two successive rebuilds each naming a subset is how a section goes missing. `--authority`
     # changes no decision this server makes (§4.3); it is loaded so that the `Control` is the
     # operator's own and not a second, different one.
+    #
+    # **No `--otel` and no extra sink**, and SPEC-mcp-operator §5.2 says why: this server
+    # appends its three events to the store, as `ctrlrun approve` does, and `Control` is the
+    # only thing that fans out to sinks. A flag that exported nothing would be a flag the
+    # operator believed took effect.
     control = Control(
         control.policy,
         store,
         control.approvals,
-        sinks=sinks,
+        sinks=control.sinks,
         authority=authority,
         environment=control.environment,
     )
     identity = operator_identity_provider(config)
     server = OperatorServer(config, control, identity)
-    _announce_operator(control, config, identity)
+    _announce_operator(control, config, identity, store)
     try:
         serve_operator_forever(server)
     finally:
@@ -247,7 +251,7 @@ def _named_store(store_url: str) -> Any:
     return _store(store_url)
 
 
-def _announce_operator(control: Any, config: Any, identity: Any) -> None:
+def _announce_operator(control: Any, config: Any, identity: Any, store: Any) -> None:
     """SPEC-mcp-operator §6 — the block printed before the socket opens.
 
     Everything here is something an operator can get wrong in a way that is invisible until an
@@ -260,6 +264,10 @@ def _announce_operator(control: Any, config: Any, identity: Any) -> None:
     """
     print(f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}")
     print(f"environment  {control.environment}")
+    # SPEC-mcp-operator §6 — for a server whose whole premise is "both processes on one host
+    # against one store", and which has a `--store-url` that silently changes it, this is the
+    # line an operator most needs. A review found the block printing everything but this.
+    print(f"store        {getattr(store, 'path', store)}")
     print(f"identity     {type(identity).__name__}")
     if config.principal_header is not None:
         print(

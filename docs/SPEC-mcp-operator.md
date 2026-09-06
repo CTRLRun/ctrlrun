@@ -79,16 +79,22 @@ differently and both differences are stated rather than left to be inferred:
 | Validate every mirrored header against the body (§6.4) | **Applies in full.** The body is believed and the headers are checked, by the same `ctrlrun.gateway.mcp.parse_request`. A disagreement is HTTP 400 and `-32020`, exactly as at the gateway |
 | Relay everything that is not `tools/call` (§6.3) | **Does not apply.** There is nowhere to relay to. `initialize`, `notifications/initialized`, `tools/list` and `tools/call` are answered; every other method is `-32601 Method not found` |
 | `Origin` is validated before anything else (§6.1) | **Applies in full**, with the same empty-by-default `--allow-origin` allowlist |
-| Bodies are bounded by `--max-body-bytes` (§6.4) | **Applies in full**, same 1 MiB default |
+| Bodies are bounded by `--max-body-bytes` (§6.4) | **Applies in full**, same 1 MiB default, and the bound is on the *allocation* as well as on the decision: a `Content-Length` that is negative or unparseable is refused before anything is read |
+| A repeated identity header is a refusal, never a collapse (`v0.3 §3.1`) | **Applies in full**, and the check is in `OperatorServer.handle` — not only in the stdlib handler — because `handle` is the surface §9.1 freezes and the one a deployment embeds behind its own proxy |
 | `Mcp-Session-Id` | Never minted, never interpreted. This server holds no session |
 
 ### 2.1 Loopback only, and no `--allow-remote`
 
-`--listen` defaults to `127.0.0.1:8901`. A host that is not `127.0.0.1`, `localhost` or `::1` is
-`InvalidArgument` at startup, and **there is no flag that permits one**. This is the single place
-the operator server is stricter than the gateway, and the reason is §4.1: its read tools answer
-without a credential. A process whose reads are unauthenticated must not be the process that
-opens a port to a network.
+`--listen` defaults to `127.0.0.1:8901`. A host outside `{127.0.0.1, localhost, ::1, [::1]}` is
+`InvalidArgument` at startup, and **there is no flag that permits one**. Both IPv6 spellings are
+accepted because `[::1]:8901` is what an operator types; the socket family is chosen from the
+host, since `ThreadingHTTPServer` inherits `AF_INET` and a review found `::1` accepted by the
+config and then unable to bind at all. T183 binds every host in the set rather than asserting
+that the string was stored.
+
+This is the single place the operator server is stricter than the gateway, and the reason is
+§4.1: its read tools answer without a credential. A process whose reads are unauthenticated must
+not be the process that opens a port to a network.
 
 A deployment that needs it reachable from elsewhere puts a proxy in front of it, on the same
 host, terminating authentication there — which is what `--principal-header` already requires of
@@ -211,8 +217,20 @@ cost of a JWKS fetch (`v0.3 §3.4`) a cost of reading.
 ### 4.2 Write tools refuse without one
 
 `approve`, `deny` and `resolve` resolve identity per §3.3 **before** they touch the store, and
-refuse on every row of that table. A refused write MUST leave the store byte-identical: no
-status transition, no event, no receipt.
+refuse on every row of that table. **A write this server refuses MUST leave the store
+byte-identical**: no status transition, no event, no receipt. That covers every refusal in §3.3
+and §7 that this server produces itself.
+
+**A refusal the *store* produces is a different thing, and there is exactly one that writes.**
+Answering a request whose `expires_at` has passed moves it from `pending` to `expired` and
+commits, then refuses (`v0.1 §4.1`, `check_answerable`): *a lapsed approval is evidence, keep it,
+then refuse*. That is the kernel's rule and this server does not get to have a different one —
+`ctrlrun approve` and the webhook endpoint reach the same transition through the same call. It is
+carved out here rather than left implicit because an earlier draft of this section asserted
+byte-identity over *every* refusal, which is false, and a reader would have concluded something
+untrue about the evidence log. T190 asserts the delta explicitly rather than asserting nothing
+about it. No other store refusal writes: an unknown, granted, denied or consumed request, and an
+effect that is not `AMBIGUOUS`, all refuse without moving anything.
 
 ### 4.3 Authority is not evaluated, and this is the same argument `v0.5 §4.1` makes
 
@@ -244,8 +262,15 @@ authority, and the store already refuses to apply it to anything but an `AMBIGUO
 `StateStore.get_approval`, and keeps those whose status is `pending` and whose `expires_at` has
 not passed. Both methods are already on the frozen protocol. A `StateStore.pending_approvals()`
 would be a new row on a protocol three backends implement and a new case in the store conformance
-suite (`v0.6 §2`), for a read that composes from what is there; the cost is that the walk is
-linear in the event log, and that is stated rather than hidden.
+suite (`v0.6 §2`), for a read that composes from what is there.
+
+The cost is stated rather than hidden, and it is larger than the walk: `limit` bounds the
+**response**, not the work. The scan stops early only once it has found `limit` *pending*
+requests, so a store holding a hundred thousand answered ones does a hundred thousand
+`get_approval` calls for one listing. `receipts`, `effects` and `inspect_action` likewise read
+the store's collection in full before slicing. That is acceptable at the size this server is for
+— one team's approval queue on one host — and it is the reason §2.1 refuses to open a port: the
+read path is unauthenticated *and* unbounded in work, and either alone would be tolerable.
 
 **A record whose stored status is `pending` and whose `expires_at` has passed is not pending.**
 The store marks it `expired` when somebody tries to answer it (`v0.1 §4.1`, `check_answerable`),
@@ -257,11 +282,17 @@ Each entry carries: `request_id`, `action_id`, `action` (the name), `action_hash
 claims), `created_at`, `expires_at`, `expires_in_seconds`, and `policy_hash` (`v0.6 §7.1`) where
 the request carries one.
 
-`principal.claims` are withheld, for `v0.3 §2.4`'s reason applied one step further out: a claim
-can hold an employee number, a case id or a licence, and this listing is rendered by a
-third-party assistant into somebody's chat history. `inspect_action` returns the inspection
-document unchanged, claims included, because that document is the evidence record and an
-approver looking one action up has asked for it; the *listing* is a queue.
+`principal.claims` are withheld, and so is `issuer`, for `v0.3 §2.4`'s reason applied one step
+further out: a claim can hold an employee number, a case id or a licence, and this listing is
+rendered by a third-party assistant into somebody's chat history. `inspect_action` returns the
+inspection document unchanged — claims included, once the action has a receipt to carry them
+(`v0.3 §2.4`) — because that document is the evidence record and an approver looking one action
+up has asked for it; the *listing* is a queue.
+
+T182 asserts the withholding against the **whole rendered document** and not against the
+`principal` key, because a claim reaching some other field would satisfy the narrower
+assertion — and it asserts the other half too, that the same claims *are* in `inspect_action`,
+without which it is a test that the listing is empty.
 
 ### 4.5 The three write tools
 
@@ -313,8 +344,21 @@ something the kernel does not already do.
 
 ### 5.2 Events
 
-`APPROVAL_GRANTED`, `APPROVAL_DENIED` and `EFFECT_RESOLVED`, with the data the CLI writes, plus
-`data.via = "mcp-operator"` on each. `via` is a **new key in an existing event's data**, which
+`APPROVAL_GRANTED`, `APPROVAL_DENIED` and `EFFECT_RESOLVED`, appended to the **store**, with the
+data the CLI writes plus `data.via = "mcp-operator"` on each.
+
+To the store and **not** through the `Control`'s `EventSink`s, because this server does not
+compose the kernel (§1.1) and `Control` is the only thing that fans out. That is exactly what
+`ctrlrun approve` does, so an approval answered here reaches an OTel exporter or the JSONL file
+by the same route it does from the terminal — which is to say, not at all until the action that
+consumes the approval writes its receipt. It is stated because it would otherwise be discovered,
+and it is why §9.4 has no `--otel`: a flag that exported nothing would be a flag the operator
+believed took effect.
+
+The event is appended **after** the transition and is not part of it. An `append_event` that
+failed would leave a granted approval with no `APPROVAL_GRANTED` beside it — `v0.1 §6`'s existing
+window, which `ctrlrun approve` and the webhook endpoint have too, and which this server does not
+widen or narrow. `via` is a **new key in an existing event's data**, which
 `v0.1 §6.2` permits — event data is an open mapping — and not a new event type. A reader that
 does not know the key ignores it.
 
@@ -402,7 +446,7 @@ well-formed and authenticated and the answer is *no*.
 
 Numbering continues `v0.6 §8`, whose last test is T181.
 
-### T182 — Read tools answer with no credential
+### T182 — Read tools answer with no credential, and the listing withholds claims
 
 Against a store holding one pending request, one receipt and one effect: `list_pending_approvals`,
 `inspect_action`, `receipts`, `effects` and `stats` each return a result over a request carrying
@@ -479,6 +523,11 @@ Over the whole of §7's table, for each row that names a write tool: the event c
 approval and effect record are identical before and after. Written as one table-driven test so
 that a new refusal shape added later without this property fails.
 
+**And the one row that is not byte-identical**, asserted as its own case with its own expected
+delta: answering a lapsed request moves it `pending → expired` and appends no event. A table
+that had simply omitted the row would be a table whose "every row" claim was false, which is how
+the first draft of §4.2 came to assert something the kernel does not do.
+
 And the logging half of §3.3: a refused write emits **exactly one** warning on the
 `ctrlrun.mcp_operator` logger, and for an expired credential that line names the person and the
 expiry while the client's message names neither.
@@ -518,9 +567,13 @@ equality, not by shape: §1.1's "not a second composer" is worth nothing if the 
 #   ctrlrun.gateway.serve_operator(**options) -> None
 
 # ctrlrun.reporting — core, stdlib, NOT re-exported at package import
+#   ctrlrun.reporting.inspection_for        — reads a store and chooses; one producer (§9.1)
 #   ctrlrun.reporting.inspection_document
+#   ctrlrun.reporting.effect_document
+#   ctrlrun.reporting.approval_document
 #   ctrlrun.reporting.stats_document
 #   ctrlrun.reporting.since_boundary
+#   ctrlrun.reporting.tally
 #   ctrlrun.reporting.INSPECTION_SCHEMA
 #   ctrlrun.reporting.STATS_SCHEMA
 ```
@@ -542,6 +595,13 @@ this server have **one** producer each rather than two that agree today. It sits
 `control.py` beside `cli/` and `verify/`, it imports no module from an extra, and nothing in the
 kernel imports it. The CLI keeps every line that *renders* a document for a human, because only
 the CLI prints (`ARCHITECTURE §6`).
+
+**The choosing moved with the serializing**, and that is a correction an independent review
+asked for: an earlier draft moved only `inspection_document`, leaving each caller to decide
+*which* receipt, *which* effect key and *which* `action_hash` — and the receipt-versus-
+`ACTION_PROPOSED` fallback is the subtle half, the one that decides whether an action still
+awaiting a human can be inspected at all. `inspection_for(store, action_id)` owns both, and T193
+asserts the two callers agree on an action with a receipt **and** on one without.
 
 ### 9.2 No new error type, event type, schema, table, column or policy key
 
@@ -582,17 +642,53 @@ ctrlrun mcp-operator [--listen HOST:PORT] [--path PATH] [--environment ENV]
                      [--store-url URL]
                      ( --principal-header NAME --user-header NAME
                      | --identity-jwt [--identity-jwt-* ...] )
-                     [--authority PATH] [--otel [--otel-arguments]]
+                     [--authority PATH]
 ```
 
 Every `--identity-jwt-*` flag is `ctrlrun gateway`'s, spelled identically and meaning the same
-thing. There is no `--principal`, no `--allow-remote`, no `--upstream`, no `--alias`, no
-`--wait-approvals`, and no flag that relaxes any check (§1.1).
+thing — and validated by the same function, not by a copy of it: `--identity-jwt` requires the
+four settings that have no safe default, and any `--identity-jwt-*` flag without it is refused.
+A copy would have drifted, and an independent review found that the first draft had no copy at
+all: a server could start with an unpinned `typ`, which accepts an ID token. The checks are
+`InvalidArgument` and never `assert`, because `python -O` deletes an assert and a guard a
+runtime flag can remove is not a guard.
+
+There is no `--principal`, no `--allow-remote`, no `--upstream`, no `--alias`, no
+`--wait-approvals`, no `--otel` (§5.2 — it would export nothing), and no flag that relaxes any
+check (§1.1).
 
 `--authority` is accepted and loaded for one reason only: `Control.from_file()` may find an
 `authority:` section in the policy, and a `Control` built without it would be a *different*
 `Control` from the operator's — which is the thing `v0.4 §3.9` forbids verify from doing. It
 changes no decision this server makes (§4.3).
+
+### 9.5 What the independent review changed
+
+This is an authorization surface, so it got a review in a session that did not write it, reading
+the specification and every file that calls into the changed code. Ten findings; **all ten were
+accepted** and none was declined, so there is nothing to record here as a decline. Four changed
+the contract and are named because a reader of an earlier draft would otherwise be reading
+something false.
+
+| Found | Was | Is |
+|---|---|---|
+| The `--identity-jwt-*` checks were absent, and three `assert`s stood in for them | A server could start with an unpinned issuer, audience, algorithm or `typ`; under `python -O` the asserts vanished, and an unpinned `typ` accepts an ID token — an OIDC login would approve a payment | The gateway's `check_jwt_flags` is **shared, not copied** (§9.4), and every check is an `InvalidArgument`. T185 covers each missing setting and runs one case under `-O` |
+| §4.2 claimed every refusal leaves the store byte-identical | False: answering a lapsed request moves it `pending → expired` and commits before refusing (`v0.1 §4.1`). T190's table omitted the row, so the claim was asserted nowhere | §4.2 carves out the one store refusal that writes and says why the kernel is right; T190 asserts the delta explicitly |
+| T189 split the source on a marker and checked 81% of it | A `Control.execute` inside `do_POST` passed. The excluded fifth was the part that handles the socket | The forbidden vocabulary is in the test, assembled from pieces so it cannot match itself, and the scan covers the whole file. M26 confirms |
+| `::1` was accepted by §2.1 and could not bind at all | `ThreadingHTTPServer` inherits `AF_INET`, so `--listen ::1:8901` exited with a `gaierror` traceback — an `OSError` the CLI does not catch. T183 asserted only that the string was stored: mutation pattern 3 | The socket family is chosen from the host, `[::1]` is accepted too, and T183 **binds** every host in the set |
+
+The other six: `--otel` was inert and is gone (§5.2, §9.4); §11's "anything unexpected → store
+unchanged" overclaimed and now names `v0.1 §6`'s existing event window; a `Content-Length` of
+`-1` reached `read(-1)` and is refused (§2); the repeated-identity-header check lived only in the
+stdlib handler and is now in `handle` (§2); the startup block omitted the `store` line §6 shows;
+`serve_operator` leaked the store `from_file` opened when `--store-url` named another. Two
+subsumed guards were collapsed and §9.1's frozen list was completed.
+
+Four questions the review could not turn into findings are recorded because the absence is worth
+as much as a finding: no path reaches a store write without a resolved, unexpired, human
+principal; the attributed name cannot forge a row (`v0.1 §5.3`'s `_approver` refuses every
+character that could); `GET`/`DELETE` never reach `handle`; and `--since` behaves exactly as it
+did before the move to `ctrlrun.reporting`, exit code included.
 
 ## 10. Explicitly out of scope
 
@@ -635,5 +731,5 @@ Everything `v0.6 §11` excludes, plus:
 | A write tool, credential expired | `-41014`, store unchanged |
 | `resolve` with no reason | `-32602`, store unchanged |
 | An unknown tool, an unknown method, a bad argument | A JSON-RPC error, store unchanged |
-| Anything the store refuses | The store's refusal, unchanged, store unchanged |
-| Anything unexpected | `-32603`, logged, store unchanged, and nothing about the exception on the wire |
+| Anything the store refuses | The store's refusal, unchanged. Store unchanged, **except** that answering a lapsed request records the lapse (§4.2) |
+| Anything unexpected | `-32603`, logged, and nothing about the exception on the wire. Store unchanged for everything this server checks; a store call that committed and whose event then failed is `v0.1 §6`'s existing window, which `ctrlrun approve` has too (§5.2) |

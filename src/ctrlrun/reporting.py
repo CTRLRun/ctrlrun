@@ -28,10 +28,12 @@ from .receipt import (
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_BY_STATE,
     Event,
+    EventType,
     Receipt,
     ReceiptResult,
     iso_timestamp,
 )
+from .state import StateStore
 
 #: SPEC-v0.2 §5 — the schema of one `ctrlrun inspect --json` document.
 #: SPEC-v0.3 §12.2 — v2 where the header block gained the principal's issuer, expiry and
@@ -44,6 +46,46 @@ STATS_SCHEMA: Final = "ctrlrun.stats/v1"
 
 #: The three relative units of SPEC-v0.3 §6.4, and the `timedelta` keyword each names.
 _RELATIVE_UNITS: Final[Mapping[str, str]] = {"m": "minutes", "h": "hours", "d": "days"}
+
+
+def inspection_for(store: StateStore, action_id: str) -> dict[str, Any] | None:
+    """One action's whole history, chosen and assembled, or `None` if there is no such action.
+
+    **The choosing is here and not at the call site**, and that is the correction an independent
+    review asked for: moving only the serializer left `ctrlrun inspect --json` and the operator
+    server each deciding *which* receipt, *which* effect key and *which* `action_hash` — and the
+    receipt-versus-`ACTION_PROPOSED` fallback below is the subtle part, the one that decides
+    whether an action still awaiting a human can be inspected at all. Two copies of that agree
+    today and disagree later, which is the whole argument for this module.
+    """
+    events = tuple(event for event in store.events() if event.action_id == action_id)
+    receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
+    if not events and receipt is None:
+        return None
+
+    # The hash comes from the receipt, or from `ACTION_PROPOSED` for an action still awaiting a
+    # human — which has no receipt yet (SPEC-v0.1 §6.1) and is exactly the case where the
+    # pending request is the only thing there is to show.
+    action_hash = receipt.action_hash if receipt is not None else None
+    if action_hash is None:
+        action_hash = next(
+            (
+                str(event.data["action_hash"])
+                for event in events
+                if event.type is EventType.ACTION_PROPOSED and "action_hash" in event.data
+            ),
+            None,
+        )
+    approvals: tuple[ApprovalRecord, ...] = (
+        () if action_hash is None else store.approvals_for(action_hash)
+    )
+
+    key = receipt.effect_key if receipt is not None else None
+    if key is None:
+        key = next((event.effect_key for event in events if event.effect_key), None)
+    effect = None if key is None else store.get_effect(key)
+
+    return inspection_document(action_id, receipt, effect, approvals, events)
 
 
 def inspection_document(

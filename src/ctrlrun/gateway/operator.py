@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,15 +44,10 @@ from ..identity import (
     IdentityProvider,
 )
 from ..receipt import Event, EventType, iso_timestamp
-from ..reporting import (
-    effect_document,
-    inspection_document,
-    since_boundary,
-    stats_document,
-)
+from ..reporting import effect_document, inspection_for, since_boundary, stats_document
 from ..state import RESOLUTIONS, StateStore
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
-from .server import _header, _json, _Response, json_rpc_error
+from .server import _header, _json, _Response, check_jwt_flags, json_rpc_error
 
 _LOG = logging.getLogger("ctrlrun.mcp_operator")
 
@@ -64,7 +60,15 @@ DEFAULT_PATH: Final = "/mcp"
 #: §2.1 — the only hosts this server will bind. There is no flag that adds to this list, and
 #: T183 asserts the absence by name: the read tools answer without a credential (§4.1), so this
 #: process must not be the one that opens a port to a network.
-LOOPBACK: Final = frozenset({"127.0.0.1", "localhost", "::1"})
+#:
+#: `[::1]` is here as well as `::1` because that is the form an operator types into a
+#: `HOST:PORT` argument, and the CLI's `rpartition(":")` hands the brackets through. A review
+#: found `::1` accepted by the config and then unable to bind at all: `ThreadingHTTPServer`
+#: inherits `AF_INET`, so the socket family has to be chosen from the host (`_family`).
+LOOPBACK: Final = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+#: The IPv6 spellings of loopback, and the ones that need `AF_INET6`.
+_IPV6_LOOPBACK: Final = frozenset({"::1", "[::1]"})
 
 #: §3.3 — what `IdentityContext.action` carries. Never an action name a policy could match:
 #: this server proposes no action, and `mcp.<alias>.<tool>` is the gateway's namespace (§9.3).
@@ -101,13 +105,17 @@ _DEFAULT_PENDING_LIMIT: Final = 50
 _DEFAULT_RECEIPT_LIMIT: Final = 20
 
 
-@dataclass
+@dataclass(frozen=True)
 class OperatorConfig:
     """Everything `ctrlrun mcp-operator` was started with (SPEC-mcp-operator §9.4).
 
     There is no `principal` and no `allow_remote`, and their absence is asserted by name
     (T183): §2.1 and §3.1 are each a pair of sentences that hold together or not at all, and a
     flag added later must fail a test rather than a review.
+
+    `frozen=True`, as `GatewayConfig` is, so §2.1's loopback rule is an invariant and not a
+    construction-time check: `build_operator_server` re-reads `host` when it binds, and a
+    mutable config handed out by `OperatorServer.config` would put that read after anything.
     """
 
     host: str = DEFAULT_LISTEN[0]
@@ -167,6 +175,19 @@ class OperatorConfig:
                 "whose user is None, because an agent with no user is a machine credential "
                 "(SPEC-mcp-operator §3.2)"
             )
+        if self.identity_jwt and self.user_header is not None:
+            # §3.2 — with --identity-jwt the human comes from --identity-jwt-user-claim, so a
+            # --user-header here is a flag that cannot take effect, which the gateway refuses
+            # by name for the same reason (`v0.3 §8.2`).
+            raise InvalidArgument(
+                "--user-header is only meaningful with --principal-header; with --identity-jwt "
+                "the human comes from --identity-jwt-user-claim"
+            )
+        # §3.1 — the gateway's own `--identity-jwt-*` checks, shared rather than copied: every
+        # such flag needs `--identity-jwt`, and `--identity-jwt` needs the four settings that
+        # have no safe default. A copy would have drifted, and the half that would have gone
+        # missing is the one that matters — an unpinned `typ` accepts an ID token.
+        check_jwt_flags(self)
         if self.identity_jwt and not self.identity_jwt_user_claim:
             raise InvalidArgument(
                 "--identity-jwt needs --identity-jwt-user-claim, for the reason in "
@@ -187,9 +208,13 @@ def operator_identity_provider(config: OperatorConfig) -> IdentityProvider:
         )
     from ..jwt_identity import JWTIdentityProvider
 
-    assert config.identity_jwt_issuer is not None
-    assert config.identity_jwt_audience is not None
-    assert config.identity_jwt_token_type is not None
+    # `check_jwt_flags` (§3.1) has already refused a configuration missing any of these, and it
+    # is an `InvalidArgument` rather than an `assert` deliberately: `python -O` removes asserts,
+    # and a guard that a runtime flag can delete is not a guard. These three are `or ""` rather
+    # than asserted for the same reason — the provider refuses an empty issuer or audience at
+    # construction, so an impossible state stays a refusal on every interpreter.
+    issuer = config.identity_jwt_issuer or ""
+    audience = config.identity_jwt_audience or ""
     secret = None
     if config.identity_jwt_secret_file is not None:
         secret = Path(config.identity_jwt_secret_file).read_text(encoding="utf-8").strip()
@@ -198,8 +223,8 @@ def operator_identity_provider(config: OperatorConfig) -> IdentityProvider:
         public_key=config.identity_jwt_public_key,
         secret=secret,
         algorithms=config.identity_jwt_algorithms,
-        issuer=config.identity_jwt_issuer,
-        audience=config.identity_jwt_audience,
+        issuer=issuer,
+        audience=audience,
         token_type=config.identity_jwt_token_type or None,
         header=config.identity_jwt_header,
         agent_claim=config.identity_jwt_agent_claim,
@@ -333,8 +358,8 @@ TOOLS: Final[tuple[_Tool, ...]] = (
         "resolve",
         True,
         "WRITES. States what actually happened to an effect whose outcome is unknown. "
-        "Requires an authenticated human and a reason; both are recorded, and a 'failed' "
-        "resolution permits a retry that is currently blocked.",
+        "Requires an authenticated human and a reason; the answer is recorded under that "
+        "person's name, and a 'failed' resolution permits a retry that is currently blocked.",
         {
             "effect_key": _STRING,
             "outcome": {"type": "string", "enum": sorted(RESOLUTIONS)},
@@ -383,8 +408,32 @@ class OperatorServer:
 
     # --- the request path ---------------------------------------------------------------
 
-    def handle(self, body: bytes, headers: Mapping[str, str]) -> _Response:
-        """Decide one POST. Returns what the client gets."""
+    def handle(self, body: bytes, headers: Mapping[str, str], *, raw: Any = None) -> _Response:
+        """Decide one POST. Returns what the client gets.
+
+        `raw` is the request's header pairs **before** they were collapsed into a mapping, where
+        the caller has them. `v0.3 §3.1` refuses a repeated identity header rather than
+        collapsing it, and a `Mapping[str, str]` has already made that choice — so the check has
+        to see the pairs. It used to live only in the stdlib handler, which meant a deployment
+        that embedded `OperatorServer` behind its own HTTP layer — the obvious way to satisfy
+        §2.1's "put a proxy in front of it" in-process — lost the guard entirely and inherited
+        whatever that framework's collapse rule happened to be. A review found it. Where `raw`
+        is `None` the mapping's own items are checked, which catches nothing a mapping can
+        express and is stated so that the residue is visible rather than assumed.
+        """
+        repeated = _repeated_identity_header(self._config, headers.items() if raw is None else raw)
+        if repeated is not None:
+            _LOG.warning("refused: the identity header %r appeared more than once", repeated)
+            code, token, status = NO_PRINCIPAL
+            return _json(
+                status,
+                json_rpc_error(
+                    _request_id(body),
+                    code,
+                    token,
+                    f"the {repeated!r} header appeared more than once",
+                ),
+            )
         origin = _header(headers, "origin")
         if origin is not None and origin not in self._config.allow_origins:
             # §2, and `v0.2 §6.1`: the transport requires Origin validation against DNS
@@ -659,30 +708,12 @@ class OperatorServer:
         return entry
 
     def _inspect(self, action_id: str) -> dict[str, Any]:
-        store = self.store
-        events = tuple(event for event in store.events() if event.action_id == action_id)
-        receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
-        if not events and receipt is None:
+        """§9.1 — the same producer `ctrlrun inspect --json` uses, choosing included. T193
+        asserts equality, for an action with a receipt and for one still awaiting a human."""
+        document = inspection_for(self.store, action_id)
+        if document is None:
             raise _Refused(_INVALID_PARAMS, "ctrlrun.unknown_action", 200, f"no action {action_id}")
-        action_hash = receipt.action_hash if receipt is not None else None
-        if action_hash is None:
-            action_hash = next(
-                (
-                    str(event.data["action_hash"])
-                    for event in events
-                    if event.type is EventType.ACTION_PROPOSED and "action_hash" in event.data
-                ),
-                None,
-            )
-        approvals: Sequence[ApprovalRecord] = (
-            () if action_hash is None else store.approvals_for(action_hash)
-        )
-        key = receipt.effect_key if receipt is not None else None
-        if key is None:
-            key = next((event.effect_key for event in events if event.effect_key), None)
-        effect = None if key is None else store.get_effect(key)
-        # §9.1 — the same producer `ctrlrun inspect --json` uses. T193 asserts equality.
-        return inspection_document(action_id, receipt, effect, approvals, events)
+        return document
 
     def _receipts(self, limit: int, control_id: object) -> dict[str, Any]:
         found = self.store.receipts()
@@ -742,16 +773,26 @@ class OperatorServer:
         store = self.store
         record = store.get_approval(request_id)
         approval = store.grant_approval(request_id, who)
-        if record is not None:
-            store.append_event(
-                self._event(
-                    EventType.APPROVAL_GRANTED,
-                    record.request.action.action_id,
-                    approval_id=request_id,
-                    approver=approval.approver,
-                    action_hash=approval.action_hash,
-                )
+        # `grant_approval` refuses an unknown id (`v0.1 §4.1`, `check_answerable`) and nothing
+        # deletes an approval row, so the record exists by here. This is an invariant check and
+        # not a guard against a caller: the previous spelling, `if record is not None:`, was a
+        # branch that could not be False and so was documentation rather than defence.
+        if record is None:  # pragma: no cover - grant_approval refused an unknown id above
+            raise _Refused(
+                _INTERNAL_ERROR,
+                "ctrlrun.internal_error",
+                500,
+                f"{request_id} was granted and then could not be read back",
             )
+        store.append_event(
+            self._event(
+                EventType.APPROVAL_GRANTED,
+                record.request.action.action_id,
+                approval_id=request_id,
+                approver=approval.approver,
+                action_hash=approval.action_hash,
+            )
+        )
         return {
             "status": "granted",
             "request_id": request_id,
@@ -764,15 +805,21 @@ class OperatorServer:
         store = self.store
         record = store.get_approval(request_id)
         store.deny_approval(request_id, who)
-        if record is not None:
-            store.append_event(
-                self._event(
-                    EventType.APPROVAL_DENIED,
-                    record.request.action.action_id,
-                    approval_id=request_id,
-                    approver=who,
-                )
+        if record is None:  # pragma: no cover - deny_approval refused an unknown id above
+            raise _Refused(
+                _INTERNAL_ERROR,
+                "ctrlrun.internal_error",
+                500,
+                f"{request_id} was denied and then could not be read back",
             )
+        store.append_event(
+            self._event(
+                EventType.APPROVAL_DENIED,
+                record.request.action.action_id,
+                approval_id=request_id,
+                approver=who,
+            )
+        )
         return {"status": "denied", "request_id": request_id, "approver": who}
 
     def _resolve_effect(self, arguments: Mapping[str, Any], who: str) -> dict[str, Any]:
@@ -845,11 +892,6 @@ class OperatorServer:
             effect_key=effect_key,
             approval_id=approval_id,
         )
-
-
-# FORBIDDEN — everything below this marker is T189's own vocabulary. The test splits the source
-# here so that the names it forbids cannot match themselves. Nothing executable follows in this
-# class; the module-level helpers below are pure.
 
 
 def _checked(tool: _Tool, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -965,29 +1007,35 @@ def build_operator_server(server: OperatorServer) -> ThreadingHTTPServer:
             if self.path.rstrip("/") != config.path.rstrip("/"):
                 self.send_error(404)
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            declared = self.headers.get("Content-Length")
+            try:
+                length = int(declared) if declared is not None else 0
+            except ValueError:
+                # A length this server cannot read is a body it cannot bound, and an unbounded
+                # read on a surface whose read tools need no credential (§4.1) is a local
+                # process able to exhaust the console at the moment approvals need answering.
+                self._respond(_Response(400))
+                return
+            if length < 0:
+                # `-1` used to pass the size comparison below and reach `rfile.read(-1)`, which
+                # reads to EOF: the limit bounded the decision and not the allocation. A review
+                # found it. 400 and not 413 — a negative length is malformed, not too large.
+                self._respond(_Response(400))
+                return
             if length > config.max_body_bytes:
                 self._respond(_Response(413))
                 return
             body = self.rfile.read(length)
-            repeated = _repeated_identity_header(config, self.headers.items())
-            if repeated is not None:
-                # `v0.3 §3.1` — `dict(...)` collapses a repeated field to one value, and under
-                # an authority model that collapse picks the principal. A proxy that appends
-                # rather than overwrites is a common default, so joining its value to the
-                # client's is how a client chooses its own identity. Refuse instead.
-                _LOG.warning("refused: the identity header %r appeared more than once", repeated)
-                code, token, status = NO_PRINCIPAL
-                self._respond(
-                    _json(
-                        status,
-                        json_rpc_error(
-                            None, code, token, f"the {repeated!r} header appeared more than once"
-                        ),
-                    )
+            self._respond(
+                server.handle(
+                    body,
+                    dict(self.headers.items()),
+                    # `v0.3 §3.1` — the pairs, before `dict()` collapses a repeated field to one
+                    # value. Under an authority model that collapse picks the principal, and a
+                    # proxy that appends rather than overwrites is a common default.
+                    raw=list(self.headers.items()),
                 )
-                return
-            self._respond(server.handle(body, dict(self.headers.items())))
+            )
 
         def _respond(self, response: _Response) -> None:
             self.send_response(response.status)
@@ -1004,8 +1052,23 @@ def build_operator_server(server: OperatorServer) -> ThreadingHTTPServer:
     class Server(ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+        # `ThreadingHTTPServer` inherits `AF_INET`, so an IPv6 host raises `gaierror` at bind —
+        # an `OSError`, which the CLI's `except (ValueError, CTRLRunError)` does not catch, so
+        # `--listen ::1:8901` exited with a traceback. A review found it: the config accepted
+        # the host and a test asserted the acceptance, and nothing had ever bound it.
+        address_family = _family(config.host)
 
-    return Server((config.host, config.port), Handler)
+    return Server((_bind_host(config.host), config.port), Handler)
+
+
+def _family(host: str) -> int:
+    """`AF_INET6` for the IPv6 loopback spellings, `AF_INET` otherwise (§2.1)."""
+    return socket.AF_INET6 if host in _IPV6_LOOPBACK else socket.AF_INET
+
+
+def _bind_host(host: str) -> str:
+    """The host as `socket` wants it: `[::1]` is what an operator types, `::1` is what binds."""
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
 
 
 def _repeated_identity_header(

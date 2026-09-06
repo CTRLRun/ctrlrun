@@ -34,7 +34,7 @@ from ..receipt import (
     iso_timestamp,
     verify_chain,
 )
-from ..reporting import inspection_document, since_boundary, stats_document
+from ..reporting import inspection_for, since_boundary, stats_document
 from ..state import RESOLUTIONS, SQLiteStateStore, StateStore
 from .demo import run_demo
 
@@ -484,26 +484,27 @@ def inspect(action_id: str, as_json: bool, store_url: str | None) -> None:
     """Show one action's whole history: proposal, decision, approval, effect, receipt."""
     store = _store(store_url)
     try:
+        # SPEC-mcp-operator §9.1 — one producer for `ctrlrun.inspection/v2`, choosing included,
+        # because the operator MCP server returns the same document and two builders that agree
+        # today are two that disagree later (T193).
+        document = inspection_for(store, action_id)
         events = tuple(event for event in store.events() if event.action_id == action_id)
         receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
 
-    if not events and receipt is None:
+    if document is None:
         # SPEC-v0.2 §5 — non-zero, on stderr, with nothing on stdout, so a script cannot
         # mistake "no such action" for "an action with no events". Matched exactly: no
         # prefixes and no globs, as v0.1 §3.1 matches an action name.
         raise click.ClickException(f"no action {action_id}")
 
-    approvals = _approvals_for(store, receipt, events)
-    effect = _effect_of(store, receipt, events)
     if as_json:
-        # SPEC-mcp-operator §9.1 — one producer for `ctrlrun.inspection/v2`, in
-        # `ctrlrun.reporting`, because the operator MCP server returns the same document and
-        # two builders that agree today are two that disagree later (T193).
-        document = inspection_document(action_id, receipt, effect, approvals, events)
         click.echo(json.dumps(document, ensure_ascii=False, indent=2))
         return
+
+    approvals = _approvals_for(store, receipt, events)
+    effect = _effect_of(store, receipt, events)
     for line in _inspection_lines(action_id, receipt, effect, approvals, events):
         click.echo(line)
 
@@ -961,12 +962,6 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
 @click.option("--identity-jwt-leeway", type=float, default=60.0, show_default=True)
 @click.option("--identity-jwt-jwks-min-refresh", type=float, default=30.0, show_default=True)
 @click.option("--identity-jwt-http-timeout", type=float, default=5.0, show_default=True)
-@click.option("--otel", is_flag=True, help="Export one span per event (ctrlrun[otel]).")
-@click.option(
-    "--otel-arguments",
-    is_flag=True,
-    help="Include argument values as span attributes. Off by default.",
-)
 @STORE_URL_OPTION
 def mcp_operator(
     listen: str,
@@ -992,8 +987,6 @@ def mcp_operator(
     identity_jwt_leeway: float,
     identity_jwt_jwks_min_refresh: float,
     identity_jwt_http_timeout: float,
-    otel: bool,
-    otel_arguments: bool,
     store_url: str | None,
 ) -> None:
     """Answer approvals from an MCP client, over loopback (SPEC-mcp-operator.md).
@@ -1036,8 +1029,6 @@ def mcp_operator(
             identity_jwt_leeway=identity_jwt_leeway,
             identity_jwt_jwks_min_refresh=identity_jwt_jwks_min_refresh,
             identity_jwt_http_timeout=identity_jwt_http_timeout,
-            otel=otel,
-            otel_arguments=otel_arguments,
         )
     except (ValueError, CTRLRunError) as exc:
         raise click.ClickException(str(exc)) from exc

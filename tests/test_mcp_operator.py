@@ -35,6 +35,7 @@ from ctrlrun.approval import ApprovalStatus, LocalApprovalProvider
 from ctrlrun.cli.main import main
 from ctrlrun.effect import RESOLVED_BY_HUMAN
 from ctrlrun.gateway.operator import (
+    LOOPBACK,
     OperatorConfig,
     OperatorServer,
     build_operator_server,
@@ -204,7 +205,7 @@ def _ambiguous(control, payment_id="txn_amb"):
     def executor():
         raise TimeoutError("no response from api.stripe.com after 30s")
 
-    with pytest.raises(Exception):
+    with pytest.raises(TimeoutError):
         control.execute(action, executor, f"refund:{payment_id}")
     record = control.store.get_effect(f"refund:{payment_id}")
     assert record is not None and record.state is EffectState.AMBIGUOUS
@@ -291,6 +292,62 @@ def test_T182_a_read_never_consults_the_identity_provider(server, control, ident
 
     assert identity.calls == []
 
+    # The positive control, in this test: a `Recording` that forgot to append would satisfy the
+    # assertion above whatever the server did. One write, and the provider is asked exactly once.
+    _, request_id = _pending(control)
+    _call(server, "approve", {"request_id": request_id}, credential="alice")
+    assert identity.calls == ["mcp-operator.approve"]
+
+
+def test_T182_the_pending_listing_withholds_claim_values(server, control, store):
+    """§4.4. `agent` and `user`, and **not** claims.
+
+    A claim can hold an employee number, a case id or a licence, and this listing is rendered by
+    a third-party assistant into somebody's chat history. `inspect_action` carries them, because
+    that document is the evidence record and an approver has asked for it; the listing is a
+    queue. Written because the mutation table found the claim had no check behind it: putting
+    `claims` back into the entry broke nothing.
+    """
+    action = Action(
+        name="stripe.refund",
+        arguments={"payment_id": "txn_c", "amount": 200000},
+        principal=Principal(
+            agent="refund-agent",
+            user="bob",
+            claims={"employee_no": 4471, "case": "CASE-9"},
+            issuer="https://issuer.example/",
+        ),
+        environment=control.environment,
+    )
+    with pytest.raises(ApprovalRequired) as raised:
+        control.execute(action, lambda: "re_1", "refund:txn_c")
+    request_id = raised.value.request_id
+
+    document = _structured(_call(server, "list_pending_approvals")[0])
+    entry = document["pending"][0]
+    assert entry["principal"] == {"agent": "refund-agent", "user": "bob"}
+
+    # The whole rendered document, not just the one key: a claim that leaked through some other
+    # field would satisfy the assertion above.
+    rendered = json.dumps(document)
+    assert "4471" not in rendered
+    assert "CASE-9" not in rendered
+    assert "employee_no" not in rendered
+    assert "issuer.example" not in rendered
+
+    # And the other half, without which this is a test that the listing is empty: the same
+    # claims *are* in the evidence document an approver can ask for by name. They arrive with
+    # the receipt (`v0.3 §2.4`), so the action is approved and run first -- an action still
+    # awaiting a human has no receipt and its inspection document has no claims either.
+    _call(server, "approve", {"request_id": request_id}, credential="alice")
+    with with_approval(request_id):
+        control.execute(action, lambda: "re_c", "refund:txn_c")
+
+    inspected = json.dumps(
+        _structured(_call(server, "inspect_action", {"action_id": action.action_id})[0])
+    )
+    assert "4471" in inspected and "CASE-9" in inspected
+
 
 # --- T183 — no way to bind a non-loopback address ---------------------------------------
 
@@ -304,9 +361,22 @@ def test_T183_a_non_loopback_listen_is_refused(host):
     assert "loopback" in str(raised.value)
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
-def test_T183_loopback_is_accepted(host):
-    assert _config(host=host).host == host
+@pytest.mark.parametrize("host", sorted(LOOPBACK))
+def test_T183_every_accepted_host_actually_binds(host, control, identity):
+    """Accepting a host the process cannot bind is mutation pattern 3: a positive assertion
+    against behaviour the environment prevents.
+
+    The first version of this test asserted only that `OperatorConfig` stored the string, and a
+    review showed `--listen ::1:8901` exiting with a `gaierror` traceback — `ThreadingHTTPServer`
+    inherits `AF_INET`. So the test binds each one now, on port 0, and closes it.
+    """
+    config = _config(host=host, port=0)
+    assert config.host == host
+    httpd = build_operator_server(OperatorServer(config, control, identity))
+    try:
+        assert httpd.server_address[1] > 0
+    finally:
+        httpd.server_close()
 
 
 def test_T183_there_is_no_flag_that_permits_a_remote_bind():
@@ -461,16 +531,95 @@ def test_T185_principal_header_without_user_header_is_refused_at_startup():
     assert "--user-header" in str(raised.value)
 
 
-def test_T185_identity_jwt_without_a_user_claim_is_refused_at_startup():
+JWT_OK = {
+    "identity_jwt": True,
+    "identity_jwt_public_key": "/dev/null",
+    "identity_jwt_algorithms": ("RS256",),
+    "identity_jwt_issuer": "https://issuer.example/",
+    "identity_jwt_audience": "ctrlrun",
+    "identity_jwt_token_type": "at+jwt",
+    "identity_jwt_user_claim": "email",
+}
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "identity_jwt_algorithms",
+        "identity_jwt_issuer",
+        "identity_jwt_audience",
+        "identity_jwt_token_type",
+    ],
+)
+def test_T185_identity_jwt_needs_the_four_settings_with_no_safe_default(missing):
+    """§3.1 — the gateway's `--identity-jwt-*` checks, shared rather than copied.
+
+    An independent review found them missing here entirely: `OperatorConfig` required only
+    `--identity-jwt-user-claim`, so a server could start with no pinned issuer, audience,
+    algorithm or token type. The last of those is the sharp one — an unpinned `typ` accepts an
+    ID token, which a browser session hands out freely, so an OIDC login would approve a
+    payment. `""` is the explicit "this issuer sets no typ" and stays distinguishable from
+    omission.
+    """
+    settings = dict(JWT_OK)
+    settings[missing] = () if missing.endswith("algorithms") else None
+    with pytest.raises(InvalidArgument) as raised:
+        OperatorConfig(**settings)
+    assert missing.replace("_", "-").replace("identity-jwt", "--identity-jwt") in str(raised.value)
+
+
+def test_T185_a_jwt_flag_without_identity_jwt_is_refused():
+    """A flag that cannot take effect is a flag the operator believes took effect."""
     with pytest.raises(InvalidArgument) as raised:
         OperatorConfig(
-            identity_jwt=True,
-            identity_jwt_public_key="/dev/null",
-            identity_jwt_algorithms=("RS256",),
-            identity_jwt_issuer="https://issuer.example/",
-            identity_jwt_audience="ctrlrun",
-            identity_jwt_token_type="at+jwt",
+            principal_header="x-approver",
+            user_header="x-approver-user",
+            identity_jwt_issuer="https://evil.example/",
+            identity_jwt_algorithms=("none",),
         )
+    assert "needs --identity-jwt" in str(raised.value)
+
+
+def test_T185_user_header_with_identity_jwt_is_refused():
+    """With --identity-jwt the human comes from --identity-jwt-user-claim, so this one cannot
+    take effect either. The gateway refuses the equivalent by name."""
+    with pytest.raises(InvalidArgument) as raised:
+        OperatorConfig(user_header="x-approver-user", **JWT_OK)
+    assert "--user-header" in str(raised.value)
+
+
+def test_T185_the_jwt_checks_survive_python_dash_O():
+    """The checks are `InvalidArgument`, never `assert`: `python -O` deletes an assert, and a
+    guard a runtime flag can delete is not a guard.
+
+    Run in a subprocess with -O, because the assertions the mutation would remove are the ones
+    this process is executing under.
+    """
+    import subprocess
+    import sys
+
+    script = "\n".join(
+        [
+            "from ctrlrun.gateway.operator import OperatorConfig",
+            "try:",
+            "    OperatorConfig(identity_jwt=True, identity_jwt_user_claim='email')",
+            "except Exception as exc:",
+            "    print(type(exc).__name__)",
+            "else:",
+            "    print('ACCEPTED')",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "InvalidArgument", result.stdout
+
+
+def test_T185_identity_jwt_without_a_user_claim_is_refused_at_startup():
+    settings = dict(JWT_OK)
+    del settings["identity_jwt_user_claim"]
+    with pytest.raises(InvalidArgument) as raised:
+        OperatorConfig(**settings)
     assert "--identity-jwt-user-claim" in str(raised.value)
 
 
@@ -489,6 +638,35 @@ def test_T185_the_header_provider_the_config_names_carries_the_user_header(contr
         )
     )
     assert resolved is not None and resolved.user == "alice"
+
+
+def test_T185_the_provider_is_told_the_prefixed_tool_name(server, control, identity):
+    """§3.3, §9.3. A provider is told what it is resolving a principal *for*, and the name it is
+    told is deliberately one no policy can match: `mcp.<alias>.<tool>` is the gateway's namespace
+    and names an action, `mcp-operator.<tool>` names none and never will.
+    """
+    _, request_id = _pending(control)
+    _call(server, "approve", {"request_id": request_id}, credential="alice")
+
+    assert identity.calls == ["mcp-operator.approve"]
+    assert not identity.calls[0].startswith("mcp.")
+    assert identity.calls[0] not in control.policy.actions
+
+
+def test_T185_a_write_tools_description_says_what_it_costs_the_approver():
+    """§4.6. The assistant renders this, and an approver who did not know their name was going
+    into the evidence log should learn it before they answer rather than after."""
+    from ctrlrun.gateway.operator import TOOLS
+
+    writes = [tool for tool in TOOLS if tool.writes]
+    assert {tool.name for tool in writes} == {"approve", "deny", "resolve"}
+    for tool in writes:
+        assert tool.description.startswith("WRITES."), tool.name
+        assert "authenticated human" in tool.description, tool.name
+        assert "name" in tool.description, tool.name
+    for tool in TOOLS:
+        if not tool.writes:
+            assert tool.description.startswith("Read-only."), tool.name
 
 
 # --- T186 — expiry, on both sides of the clock ------------------------------------------
@@ -634,27 +812,41 @@ def test_T188_resolve_records_the_reason_the_resolver_and_resolved_by(server, co
 
 def test_T189_the_operator_server_composes_nothing():
     """§1.1. `Control` is the only module that composes the others, so the property is a
-    property of this source file and is asserted against it."""
-    source = Path(__import__("ctrlrun.gateway.operator", fromlist=["x"]).__file__).read_text(
-        encoding="utf-8"
-    )
-    # Everything after the last `--- what this module may not do` marker is the assertion's
-    # own vocabulary, and would otherwise match itself.
-    code = source.split("FORBIDDEN")[0]
-    for forbidden in (
-        ".execute(",
-        ".resume(",
-        ".delegate(",
-        ".revoke(",
-        ".evaluate(",
-        ".reserve_effect(",
-        ".commit_effect(",
-        ".fail_effect(",
-        ".put_approval_request(",
-        ".take_approval(",
-        "resolve_principal",
+    property of this source file and is asserted against it.
+
+    **The whole file.** The first version split the source on a marker comment and checked only
+    what came before it, which excluded the last 195 lines — `build_operator_server`, `do_POST`,
+    `serve_operator_forever`, every line that actually handles a socket. An independent review
+    demonstrated it: a `Control.execute` inside `do_POST` passed. The forbidden vocabulary now
+    lives here and is assembled from pieces, so it cannot match the assertion's own source.
+    """
+    import ctrlrun.gateway.operator as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    for name in (
+        "execute",
+        "resume",
+        "delegate",
+        "revoke",
+        "evaluate",
+        "reserve_effect",
+        "commit_effect",
+        "fail_effect",
+        "put_approval_request",
+        "take_approval",
+        "hold_continuation",
+        "take_continuation",
     ):
-        assert forbidden not in code, forbidden
+        forbidden = "." + name + "("
+        assert forbidden not in source, forbidden
+    # `resolve_principal` is the seam an adapter may read (SPEC-v0.5 §9); this server resolves
+    # its own principal from headers and must not reach for it either.
+    assert "resolve" + "_principal" not in source
+
+    # The control: a name this module *does* use, spelled the same way, so a test that could
+    # never fail is visibly not what this is.
+    assert ".resolve_effect(" in source
+    assert ".grant_approval(" in source
 
 
 def test_T189_no_tool_proposes_an_action(server, control, store):
@@ -680,10 +872,20 @@ REFUSALS = [
     ("approve", {}, "alice", 200, -32602),
     ("approve", {"request_id": 7}, "alice", 200, -32602),
     ("deny", {"request_id": "apr_does_not_exist"}, "alice", 200, -41003),
-    ("resolve", {"effect_key": "refund:nope", "outcome": "committed", "reason": "x"},
-     "alice", 200, -41003),
-    ("resolve", {"effect_key": "refund:txn_amb", "outcome": "maybe", "reason": "x"},
-     "alice", 200, -32602),
+    (
+        "resolve",
+        {"effect_key": "refund:nope", "outcome": "committed", "reason": "x"},
+        "alice",
+        200,
+        -41003,
+    ),
+    (
+        "resolve",
+        {"effect_key": "refund:txn_amb", "outcome": "maybe", "reason": "x"},
+        "alice",
+        200,
+        -32602,
+    ),
     ("resolve", {"outcome": "committed", "reason": "x"}, "alice", 200, -32602),
     ("no_such_tool", {}, "alice", 200, -32602),
 ]
@@ -740,6 +942,113 @@ def test_T190_an_expired_credential_tells_the_log_more_than_the_client(control, 
     lines = [record.getMessage() for record in caplog.records]
     assert len(lines) == 1
     assert "alice" in lines[0] and "expired at" in lines[0]
+
+
+def test_T190_answering_a_lapsed_request_records_the_lapse_and_writes_nothing_else(
+    workspace, fake_clock
+):
+    """The one refusal that is *not* byte-identical, asserted with its own expected delta.
+
+    An independent review found this: §4.2 said every refusal leaves the store byte-identical,
+    and `check_answerable` moves a lapsed request `pending -> expired` and commits before it
+    refuses — *a lapsed approval is evidence, keep it, then refuse* (`v0.1 §4.1`). The kernel is
+    right and the specification was wrong. `ctrlrun approve` reaches the same transition through
+    the same call, so this server does not get a different rule; it gets a test.
+    """
+    from ctrlrun.approval import DEFAULT_APPROVAL_TTL
+
+    store = SQLiteStateStore(workspace / ".ctrlrun" / "state.db", clock=fake_clock)
+    control = Control(
+        Policy.from_file(workspace / "ctrlrun.yaml"),
+        store,
+        LocalApprovalProvider(store, clock=fake_clock),
+        clock=fake_clock,
+    )
+    server = OperatorServer(_config(), control, Recording(), clock=fake_clock)
+    _, request_id = _pending(control)
+    fake_clock.advance(DEFAULT_APPROVAL_TTL + timedelta(seconds=1))
+
+    events_before = len(store.events())
+    receipts_before = len(store.receipts())
+
+    document, status = _call(server, "approve", {"request_id": request_id}, credential="alice")
+
+    assert status == 200
+    assert _error(document)["code"] == -41003
+    # The one thing that moved, and nothing else.
+    record = store.get_approval(request_id)
+    assert record.status is ApprovalStatus.EXPIRED
+    assert record.approver is None
+    assert len(store.events()) == events_before
+    assert len(store.receipts()) == receipts_before
+    store.close()
+
+
+def test_T190_a_repeated_identity_header_is_refused_through_handle(server, control, store):
+    """`v0.3 §3.1`. A repeated header is a refusal, never a collapse — and the check has to be
+    in `handle`, because that is the surface §9.1 freezes and the one a deployment embeds.
+
+    A review found it only in the stdlib handler: an embedding behind another HTTP layer, which
+    is exactly what §2.1's "put a proxy in front of it" invites, inherited whatever that
+    framework's first-wins / last-wins / comma-join rule happened to be. Under an authority
+    model that choice picks the principal.
+    """
+    _, request_id = _pending(control)
+    before = _snapshot(store)
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "approve", "arguments": {"request_id": request_id}},
+        }
+    ).encode()
+    headers = _headers(Mcp_Name="approve")
+    headers["X-Approver"] = "approver-app"
+
+    response = server.handle(
+        body,
+        headers,
+        raw=[*headers.items(), ("X-Approver", "somebody-else")],
+    )
+
+    assert response.status == 403
+    document = json.loads(response.body)
+    assert _error(document)["code"] == -41007
+    assert "more than once" in _error(document)["message"]
+    assert store.get_approval(request_id).status is ApprovalStatus.PENDING
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize(
+    "declared,expected",
+    [("-1", 400), ("abc", 400), (str(1024 * 1024 + 1), 413)],
+)
+def test_T191_a_content_length_the_server_cannot_bound_is_refused(listening, declared, expected):
+    """§2. `-1` used to pass `length > max_body_bytes` and reach `rfile.read(-1)`, which reads
+    to EOF: the limit bounded the decision and not the allocation.
+
+    That matters here more than at the gateway, because every read tool on this server answers
+    without a credential — so any local process could exhaust the approval console at the moment
+    approvals need answering. Asserted at the socket, because the header is what is under test.
+    """
+    import http.client
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(listening)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+    connection.putrequest("POST", parsed.path, skip_accept_encoding=True)
+    connection.putheader("Content-Type", "application/json")
+    connection.putheader("MCP-Protocol-Version", CURRENT)
+    connection.putheader("Mcp-Method", "tools/list")
+    connection.putheader("Content-Length", declared)
+    connection.endheaders()
+    try:
+        connection.send(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+    except OSError:
+        pass  # the server may already have answered and closed
+    assert connection.getresponse().status == expected
+    connection.close()
 
 
 # --- T191 — over a real socket ------------------------------------------------------------
@@ -924,8 +1233,30 @@ def test_T193_inspect_action_returns_the_cli_document(server, control, workspace
     assert from_server == from_cli
 
 
+def test_T193_inspect_action_agrees_for_an_action_still_awaiting_a_human(
+    server, control, workspace
+):
+    """The shape the first version of this test could not have caught: no receipt, so the
+    `action_hash` comes from `ACTION_PROPOSED` and the approvals come from that.
+
+    A review pointed out that the extraction had moved the serializer and left the *choosing*
+    in two places — and the receipt-versus-`ACTION_PROPOSED` fallback is the subtle half. It is
+    one function now, and this asserts the two callers agree on the case that exercises it.
+    """
+    action, _ = _pending(control)
+
+    result = CliRunner().invoke(main, ["inspect", action.action_id, "--json"])
+    assert result.exit_code == 0, result.output
+    from_cli = json.loads(result.stdout)
+    assert from_cli["receipt"] is None
+    assert from_cli["approvals"], "the pending request is the only thing there is to show"
+
+    from_server = _structured(_call(server, "inspect_action", {"action_id": action.action_id})[0])
+    assert from_server == from_cli
+
+
 def test_T193_stats_returns_the_cli_document(server, control, workspace):
-    action, request_id = _pending(control)
+    _, request_id = _pending(control)
     _call(server, "deny", {"request_id": request_id}, credential="alice")
     control.execute(_action(control, "txn_2", amount=100), lambda: "re_2", "refund:txn_2")
 

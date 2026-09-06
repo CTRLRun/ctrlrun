@@ -50,6 +50,31 @@ not do is gate one, or be gated by one.
   `ctrlrun approve` can. `docs/SPEC-mcp-operator.md` §10 says so in the place a reader would
   otherwise assume otherwise; separation of duties is still not built.
 
+### What the independent review changed
+
+An authorization surface gets a review in a session that did not write it. Ten findings, all
+ten accepted. Four changed the contract; `docs/SPEC-mcp-operator.md` §9.5 has the table.
+
+- **The `--identity-jwt-*` validation was missing**, with three `assert`s in its place. A
+  server could start with an unpinned issuer, audience, algorithm or `typ` — and under
+  `python -O` the asserts vanish. An unpinned `typ` accepts an ID token, so an OIDC login
+  would have approved a payment. The gateway's `check_jwt_flags` is now shared rather than
+  copied, every check is an `InvalidArgument`, and one test runs under `-O`.
+- **"Every refusal leaves the store byte-identical" was false.** Answering a lapsed request
+  moves it `pending → expired` and commits before refusing — the kernel's own rule, *a lapsed
+  approval is evidence* — and the test table had omitted that row, so the claim was asserted
+  nowhere. The spec carves it out and the test asserts the delta.
+- **The composes-nothing test checked 81% of the file.** It split the source on a marker
+  comment; the excluded fifth was the part that handles the socket, and a `Control.execute`
+  inside `do_POST` passed it. It scans the whole file now.
+- **`::1` was accepted and could not bind.** `ThreadingHTTPServer` inherits `AF_INET`, so
+  `--listen ::1:8901` exited with a traceback while the test asserted only that the string had
+  been stored. The socket family follows the host, `[::1]` is accepted, and the test binds.
+
+Also: `--otel` was inert and is gone, a `Content-Length` of `-1` reached an unbounded read, the
+repeated-identity-header check lived only in the stdlib handler, the startup block omitted the
+store, and `serve_operator` leaked a connection under `--store-url`.
+
 ### Changed
 
 - `ctrlrun.cli.main` no longer defines `INSPECTION_SCHEMA`, `STATS_SCHEMA`, `_stats_document`

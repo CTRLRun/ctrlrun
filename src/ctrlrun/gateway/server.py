@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Final, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias
 
 from ..action import Action, Principal
 from ..control import Control
@@ -49,6 +49,10 @@ from ..identity import (
 from ..policy import OBSERVE
 from ..receipt import Receipt
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
+
+if TYPE_CHECKING:  # a type-only import; `operator` imports this module at run time
+    from .operator import OperatorConfig
+
 from .outcome import (
     GatewayOutcome,
     Observed,
@@ -231,51 +235,62 @@ class GatewayConfig:
             )
 
     def _check_jwt_flags(self) -> None:
-        """§8.2 — every `--identity-jwt-*` flag is accepted only with `--identity-jwt`.
+        """§8.2, shared with `ctrlrun mcp-operator` since `SPEC-mcp-operator.md` §3.1.
 
-        And when it *is* given, the four settings that have no safe default must be there:
-        the algorithms, the issuer, the audience and the token type. The provider refuses the
-        same things at construction; this refuses them before the extra is even imported, so
-        an operator who has not installed it still learns what they got wrong.
+        A copy of these checks in the second config would be a copy that drifts, and the half
+        that would have gone missing is the one that matters: an unpinned `typ` accepts an ID
+        token, which a browser session hands out freely.
         """
-        given = {
-            "--identity-jwt-jwks-url": self.identity_jwt_jwks_url is not None,
-            "--identity-jwt-public-key": self.identity_jwt_public_key is not None,
-            "--identity-jwt-secret-file": self.identity_jwt_secret_file is not None,
-            "--identity-jwt-algorithms": bool(self.identity_jwt_algorithms),
-            "--identity-jwt-issuer": self.identity_jwt_issuer is not None,
-            "--identity-jwt-audience": self.identity_jwt_audience is not None,
-            "--identity-jwt-token-type": self.identity_jwt_token_type is not None,
-            "--identity-jwt-user-claim": self.identity_jwt_user_claim is not None,
-            "--identity-jwt-claim": bool(self.identity_jwt_claims),
-            "--identity-jwt-header": self.identity_jwt_header != "authorization",
-            "--identity-jwt-agent-claim": self.identity_jwt_agent_claim != "sub",
-            "--identity-jwt-leeway": self.identity_jwt_leeway != 60.0,
-            "--identity-jwt-jwks-min-refresh": self.identity_jwt_jwks_min_refresh != 30.0,
-            "--identity-jwt-http-timeout": self.identity_jwt_http_timeout != 5.0,
-        }
-        if not self.identity_jwt:
-            stray = sorted(name for name, present in given.items() if present)
-            if stray:
-                raise InvalidArgument(
-                    f"{', '.join(stray)} needs --identity-jwt; a flag that cannot take effect "
-                    "is a flag the operator believes took effect (SPEC-v0.3 §8.2)"
-                )
-            return
-        required = (
-            "--identity-jwt-algorithms",
-            "--identity-jwt-issuer",
-            "--identity-jwt-audience",
-            "--identity-jwt-token-type",
-        )
-        missing = sorted(name for name in required if not given[name])
-        if missing:
+        check_jwt_flags(self)
+
+
+def check_jwt_flags(self: GatewayConfig | OperatorConfig) -> None:
+    """Every `--identity-jwt-*` flag is accepted only with `--identity-jwt` (SPEC-v0.3 §8.2).
+
+    And when it *is* given, the four settings that have no safe default must be there: the
+    algorithms, the issuer, the audience and the token type. The provider refuses the same
+    things at construction; this refuses them before the extra is even imported, so an operator
+    who has not installed it still learns what they got wrong — and, unlike the provider's own
+    checks, it is not an `assert`, so `python -O` cannot remove it.
+    """
+    given = {
+        "--identity-jwt-jwks-url": self.identity_jwt_jwks_url is not None,
+        "--identity-jwt-public-key": self.identity_jwt_public_key is not None,
+        "--identity-jwt-secret-file": self.identity_jwt_secret_file is not None,
+        "--identity-jwt-algorithms": bool(self.identity_jwt_algorithms),
+        "--identity-jwt-issuer": self.identity_jwt_issuer is not None,
+        "--identity-jwt-audience": self.identity_jwt_audience is not None,
+        "--identity-jwt-token-type": self.identity_jwt_token_type is not None,
+        "--identity-jwt-user-claim": self.identity_jwt_user_claim is not None,
+        "--identity-jwt-claim": bool(self.identity_jwt_claims),
+        "--identity-jwt-header": self.identity_jwt_header != "authorization",
+        "--identity-jwt-agent-claim": self.identity_jwt_agent_claim != "sub",
+        "--identity-jwt-leeway": self.identity_jwt_leeway != 60.0,
+        "--identity-jwt-jwks-min-refresh": self.identity_jwt_jwks_min_refresh != 30.0,
+        "--identity-jwt-http-timeout": self.identity_jwt_http_timeout != 5.0,
+    }
+    if not self.identity_jwt:
+        stray = sorted(name for name, present in given.items() if present)
+        if stray:
             raise InvalidArgument(
-                f"--identity-jwt needs {', '.join(missing)}. There is no default for any of "
-                "them: an unpinned algorithm, issuer or audience is a token from somewhere "
-                'else, and an unpinned type is an ID token (pass "" to mean "this issuer sets '
-                'no typ")'
+                f"{', '.join(stray)} needs --identity-jwt; a flag that cannot take effect "
+                "is a flag the operator believes took effect (SPEC-v0.3 §8.2)"
             )
+        return
+    required = (
+        "--identity-jwt-algorithms",
+        "--identity-jwt-issuer",
+        "--identity-jwt-audience",
+        "--identity-jwt-token-type",
+    )
+    missing = sorted(name for name in required if not given[name])
+    if missing:
+        raise InvalidArgument(
+            f"--identity-jwt needs {', '.join(missing)}. There is no default for any of "
+            "them: an unpinned algorithm, issuer or audience is a token from somewhere "
+            'else, and an unpinned type is an ID token (pass "" to mean "this issuer sets '
+            'no typ")'
+        )
 
 
 def identity_provider(config: GatewayConfig) -> IdentityProvider:
