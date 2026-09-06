@@ -40,6 +40,8 @@ jobs:
           # there is nothing to build and nothing to install for the analyser to see the code.
           build-mode: none
           queries: security-and-quality
+          # Which of that suite's queries this repository acts on, and why two of them are not.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:

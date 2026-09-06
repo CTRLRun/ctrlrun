@@ -153,7 +153,6 @@ def test_T123_the_version_is_read_from_the_installed_distribution(adapter):
 @pytest.mark.parametrize("adapter", all_adapters(), ids=lambda a: a.name)
 def test_T123_no_adapter_hard_codes_a_version(adapter):
     import inspect
-    import re
 
     source = inspect.getsource(type(adapter))
 
@@ -561,7 +560,6 @@ def test_the_results_directory_holds_a_run_and_the_table_rendered_from_it():
     """`results/` was empty on purpose until there was a run somebody had read. There is one
     now, and the Markdown beside it is rendered from the JSON and never written by hand -- so
     the assertion is that the two agree, not that a file exists."""
-    import json
 
     from framework_probe.results import to_markdown
 
@@ -580,7 +578,6 @@ def test_the_results_directory_holds_a_run_and_the_table_rendered_from_it():
 def test_the_published_run_is_what_the_readme_says_it_is():
     """The README's numbers and the results file must not drift apart. A README quoting a run
     that is no longer the one checked in is the shape of every stale finding."""
-    import json
 
     document = json.loads((PROBE_ROOT / "results" / "2026-09-05.json").read_text())
     by_cell = {(row["framework"], row["scenario"]): row for row in document["results"]}

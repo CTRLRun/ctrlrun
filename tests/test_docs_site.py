@@ -23,7 +23,6 @@ if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
 def _published() -> set[str]:
     """Every page path `docs.json` lists, so a Markdown document that is a site page is tested
     like one and a Markdown document that is not is left alone."""
-    import json
 
     found: set[str] = set()
 
@@ -89,7 +88,10 @@ def _body(page: Path) -> str:
     return _FRONTMATTER.sub("", page.read_text(encoding="utf-8"), count=1)
 
 
-_SCRIPT = re.compile(r"<script.*?</script>", re.S)
+# `re.I` because HTML tag names are case-insensitive: without it a `<SCRIPT>` block stays in
+# the text and its contents count against the page's prose budget, which is the one thing
+# this helper exists to prevent.
+_SCRIPT = re.compile(r"<script.*?</script>", re.S | re.I)
 
 
 def _prose(page: Path) -> str:
@@ -349,3 +351,23 @@ actions:
             if found and "reaches a decision" not in line:
                 wrong.append(f"{page.name}: {line.strip()[:90]!r}")
     assert wrong == [], wrong
+
+
+def test_the_prose_filter_strips_a_script_block_whatever_its_case(tmp_path: Path):
+    """`<SCRIPT>` is the same tag as `<script>`, and the word budget must not see either.
+
+    A case-sensitive filter leaves an upper-case block in the text, where a structured-data
+    payload -- which is markup for a search engine, not words a reader reads -- would be counted
+    against the page's budget and could push a page over it for a reason no author could see.
+    """
+    page = tmp_path / "page.mdx"
+    page.write_text(
+        '---\ntitle: t\n---\n\nvisible prose\n\n<SCRIPT type="application/ld+json">\n'
+        '{"@type": "SoftwareApplication", "hidden": "wordone wordtwo wordthree"}\n</SCRIPT>\n',
+        encoding="utf-8",
+    )
+
+    prose = _prose(page)
+
+    assert "visible prose" in prose
+    assert "wordone" not in prose, "an upper-case script block reached the word budget"

@@ -368,8 +368,6 @@ def test_T135b_the_adapter_reuses_the_sdks_primitive_and_reimplements_nothing():
     import ast
     import inspect
 
-    import ctrlrun_openai_agents
-
     source = inspect.getsource(ctrlrun_openai_agents)
     tree = ast.parse(source)
     called = {
