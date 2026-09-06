@@ -621,3 +621,45 @@ def _invented(request):
         now,
         now,
     )
+
+
+# --- An interrupt is the operator, not the adapter (SPEC-v0.1 §5.5) ------------------------
+
+
+class _InterruptsOnInvoke(Reference):
+    """A correct adapter whose framework is interrupted mid-run by the person running the kit."""
+
+    def _call(self, request):
+        raise KeyboardInterrupt("the operator pressed Ctrl-C")
+
+
+def test_a_keyboard_interrupt_leaves_the_kit_instead_of_becoming_a_verdict():
+    """SPEC-v0.1 §5.5's rule, applied to the kit that grades an adapter.
+
+    Every case caught `BaseException` and wrote a `failed` row naming the exception, so Ctrl-C
+    did not stop a run: each case in turn caught the interrupt, blamed the adapter, and the
+    report that came out was a conformance verdict nobody's code had earned. The store kit had
+    the same shape on a path that reached `passed`, which is the sharper half of the finding.
+
+    The breadth of the catch is not the defect and is not narrowed -- an adapter may raise
+    anything and the kit must grade it. Only what is not the adapter's leaves.
+    """
+    with pytest.raises(KeyboardInterrupt):
+        run(_InterruptsOnInvoke())
+
+
+def test_an_ordinary_exception_from_an_adapter_is_still_graded():
+    """The control, without which the test above is satisfied by a kit that grades nothing.
+
+    An adapter that raises a plain exception must still produce a report with failures in it,
+    not propagate.
+    """
+
+    class _Breaks(Reference):
+        def _call(self, request):
+            raise RuntimeError("this adapter is broken")
+
+    report = run(_Breaks())
+
+    assert any(suite.status is SuiteStatus.FAIL for suite in report.suites)
+    assert "this adapter is broken" in report.to_text()

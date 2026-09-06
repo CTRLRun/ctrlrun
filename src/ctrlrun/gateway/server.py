@@ -17,11 +17,11 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias
+from typing import Any, Final, Protocol, TypeAlias
 
 from ..action import Action, Principal
 from ..control import Control
@@ -49,10 +49,6 @@ from ..identity import (
 from ..policy import OBSERVE
 from ..receipt import Receipt
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
-
-if TYPE_CHECKING:  # a type-only import; `operator` imports this module at run time
-    from .operator import OperatorConfig
-
 from .outcome import (
     GatewayOutcome,
     Observed,
@@ -61,6 +57,15 @@ from .outcome import (
     UpstreamResult,
     UpstreamStatus,
     classify,
+)
+from .wire import (
+    _dump,
+    _header,
+    _json,
+    _Response,
+    check_jwt_flags,
+    json_rpc_error,
+    printable,
 )
 
 _LOG = logging.getLogger("ctrlrun.gateway")
@@ -244,55 +249,6 @@ class GatewayConfig:
         check_jwt_flags(self)
 
 
-def check_jwt_flags(self: GatewayConfig | OperatorConfig) -> None:
-    """Every `--identity-jwt-*` flag is accepted only with `--identity-jwt` (SPEC-v0.3 §8.2).
-
-    And when it *is* given, the four settings that have no safe default must be there: the
-    algorithms, the issuer, the audience and the token type. The provider refuses the same
-    things at construction; this refuses them before the extra is even imported, so an operator
-    who has not installed it still learns what they got wrong — and, unlike the provider's own
-    checks, it is not an `assert`, so `python -O` cannot remove it.
-    """
-    given = {
-        "--identity-jwt-jwks-url": self.identity_jwt_jwks_url is not None,
-        "--identity-jwt-public-key": self.identity_jwt_public_key is not None,
-        "--identity-jwt-secret-file": self.identity_jwt_secret_file is not None,
-        "--identity-jwt-algorithms": bool(self.identity_jwt_algorithms),
-        "--identity-jwt-issuer": self.identity_jwt_issuer is not None,
-        "--identity-jwt-audience": self.identity_jwt_audience is not None,
-        "--identity-jwt-token-type": self.identity_jwt_token_type is not None,
-        "--identity-jwt-user-claim": self.identity_jwt_user_claim is not None,
-        "--identity-jwt-claim": bool(self.identity_jwt_claims),
-        "--identity-jwt-header": self.identity_jwt_header != "authorization",
-        "--identity-jwt-agent-claim": self.identity_jwt_agent_claim != "sub",
-        "--identity-jwt-leeway": self.identity_jwt_leeway != 60.0,
-        "--identity-jwt-jwks-min-refresh": self.identity_jwt_jwks_min_refresh != 30.0,
-        "--identity-jwt-http-timeout": self.identity_jwt_http_timeout != 5.0,
-    }
-    if not self.identity_jwt:
-        stray = sorted(name for name, present in given.items() if present)
-        if stray:
-            raise InvalidArgument(
-                f"{', '.join(stray)} needs --identity-jwt; a flag that cannot take effect "
-                "is a flag the operator believes took effect (SPEC-v0.3 §8.2)"
-            )
-        return
-    required = (
-        "--identity-jwt-algorithms",
-        "--identity-jwt-issuer",
-        "--identity-jwt-audience",
-        "--identity-jwt-token-type",
-    )
-    missing = sorted(name for name in required if not given[name])
-    if missing:
-        raise InvalidArgument(
-            f"--identity-jwt needs {', '.join(missing)}. There is no default for any of "
-            "them: an unpinned algorithm, issuer or audience is a token from somewhere "
-            'else, and an unpinned type is an ID token (pass "" to mean "this issuer sets '
-            'no typ")'
-        )
-
-
 def identity_provider(config: GatewayConfig) -> IdentityProvider:
     """The provider this gateway's flags name (SPEC-v0.3 §8.2).
 
@@ -344,29 +300,6 @@ def identity_provider(config: GatewayConfig) -> IdentityProvider:
         # the fail-slow direction, in a value nothing documents.
         http_timeout=timedelta(seconds=config.identity_jwt_http_timeout),
     )
-
-
-@dataclass
-class _Response:
-    """What goes back to the client."""
-
-    status: int
-    body: bytes = b""
-    headers: Mapping[str, str] = field(default_factory=dict)
-
-
-def json_rpc_error(rpc_id: Any, code: int, token: str, message: str, **data: Any) -> dict[str, Any]:
-    """One JSON-RPC error object in §6.10's shape.
-
-    A refusal by CTRLRun is not an outcome of the tool; it is the statement that the tool did
-    not run. `isError: true` would be indistinguishable from the tool's own failure, and it
-    reaches the model as text — which is not where a policy denial belongs.
-    """
-    return {
-        "jsonrpc": "2.0",
-        "id": rpc_id,
-        "error": {"code": code, "message": message, "data": {"error": token, **data}},
-    }
 
 
 class Forwarder(Protocol):
@@ -1022,27 +955,12 @@ def _repeated_identity_header(
     return None
 
 
-def _header(headers: Mapping[str, str], name: str) -> str | None:
-    for key, value in headers.items():
-        if key.lower() == name.lower():
-            return value
-    return None
-
-
 def _request_id(body: bytes) -> JsonRpcId:
     try:
         document = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return None
     return document.get("id") if isinstance(document, dict) else None
-
-
-def _dump(document: Mapping[str, Any]) -> bytes:
-    return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
-
-
-def _json(status: int, document: Mapping[str, Any]) -> _Response:
-    return _Response(status, _dump(document), {"Content-Type": "application/json"})
 
 
 # --- the transport ----------------------------------------------------------------------
@@ -1183,7 +1101,9 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
                 self.wfile.write(response.body)
 
         def log_message(self, format: str, *args: object) -> None:
-            _LOG.debug("%s - %s", self.address_string(), format % args)
+            # Escaped, not interpolated raw: `format % args` is the client's request line, and
+            # a newline in it forges a whole record in a line-per-record log (`wire.printable`).
+            _LOG.debug("%s - %s", self.address_string(), printable(format % args))
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True

@@ -742,46 +742,49 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
     # guard -- and a review found two of them stale, one broken by the commit that added this
     # very check to the rows beside it. A guard that cannot see a whole class of reference is
     # attribution dressed as prevention.
-    reference = re.compile(r"`((?:[a-z_]+/)*[a-z_]+\.py):(\d+)`")
-    identifier = re.compile(r"`@?([A-Za-z_][\w.]*)")
-    # **`not_symbols` is the fix for a hole a review demonstrated**, and it is a subtraction
-    # rather than a cleverer regex because a lookahead does not help: `[\w.]*` is greedy, so
-    # `` `control.py:1036` `` yields the token `control.py` whatever follows it, and the
-    # `.split(".")[-1]` below turns that into `py`. **32 of 40 rows** carried the bare token
-    # `py`, so *any* line containing the substring "py" -- `copy`, `pyyaml`, `python` --
-    # satisfied them. A row was aimed at a line inside a string literal in a comment about
-    # redaction and this test stayed green, which is exactly the failure its docstring claims.
-    not_symbols = frozenset({"py", "md", "yaml", "yml", "json", "sql", "toml"})
+    import sys
 
+    sys.path.insert(0, str(REPO_ROOT / "tools" / "docs_audit"))
+    from claims import citations
+
+    # **One producer for "which symbol is this citation about".** `scripts/repoint-claims.py`
+    # writes these numbers and this checks them, and they used to answer that question
+    # separately: both collected the symbols of the whole *row*. So a row citing six commands
+    # had every reference re-pointed at one definition, and this guard accepted all six,
+    # because that line does define a symbol the row names. A row claiming to cite six
+    # commands cited one, six times, and the check said it was fine.
     stale = []
     checked = 0
     for row in text.splitlines():
-        found_refs = reference.findall(row)
-        if not found_refs:
-            continue
-        # A cell may name several symbols -- "Only `NotExecuted` maps to `FAILED`" -- and the
-        # cited line legitimately contains any one of them. Requiring the *nearest* one is how
-        # this test first failed against references that were in fact correct.
-        named = {name.split(".")[-1] for name in identifier.findall(row)} - not_symbols
-        if not named:
-            stale.append(f"{row.strip()[:60]!r} cites code and names no symbol")
-            continue
-        for filename, number in found_refs:
-            source = REPO_ROOT / "src" / "ctrlrun" / filename
+        for cited in citations(row):
+            if not cited.names:
+                stale.append(f"{cited.filename}:{cited.line} cites code and names no symbol")
+                continue
+            source = REPO_ROOT / "src" / "ctrlrun" / cited.filename
             if not source.exists():
                 continue
             lines = source.read_text(encoding="utf-8").splitlines()
-            index = int(number)
-            line = lines[index - 1] if 0 < index <= len(lines) else ""
+            line = lines[cited.line - 1] if 0 < cited.line <= len(lines) else ""
             checked += 1
-            # **Whole words, not substrings.** A definition would be the strict rule and it is
-            # too strict: four rows here legitimately cite a statement rather than a `def` --
-            # `effect_key TEXT PRIMARY KEY` inside a DDL string, the branch where only
-            # `NotExecuted` maps to `FAILED`. The residual is stated rather than implied: a
-            # named symbol appearing as a whole word *in prose* still satisfies this, which is
-            # far narrower than a substring and is not nothing.
-            if not any(re.search(rf"\b{re.escape(name)}\b", line) for name in named):
-                stale.append(f"{filename}:{index} is {line.strip()[:60]!r}, names {sorted(named)}")
+
+            # **Whole words, not substrings**, and this citation's own symbols first. A
+            # definition would be the strict rule and it is too strict: rows here legitimately
+            # cite a statement rather than a `def` -- `effect_key TEXT PRIMARY KEY` inside a
+            # DDL string, the branch where only `NotExecuted` maps to `FAILED`. The row's
+            # symbols are the documented fallback, because assigning each symbol to its nearest
+            # citation is a heuristic; a line matching neither is stale whichever way they were
+            # assigned, which is the case worth catching.
+            #
+            # The residual, stated: a named symbol appearing as a whole word *in prose* still
+            # satisfies this.
+            def names_on(line: str, names: tuple[str, ...]) -> bool:
+                return any(re.search(rf"\b{re.escape(name)}\b", line) for name in names)
+
+            if not names_on(line, cited.local) and not names_on(line, cited.names):
+                stale.append(
+                    f"{cited.filename}:{cited.line} is {line.strip()[:60]!r}, "
+                    f"names {list(cited.local) or list(cited.names)}"
+                )
 
     assert checked, "CLAIMS.md cites no code locations at all"
     assert stale == [], stale

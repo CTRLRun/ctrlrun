@@ -47,7 +47,14 @@ from ..receipt import Event, EventType, iso_timestamp
 from ..reporting import effect_document, inspection_for, since_boundary, stats_document
 from ..state import RESOLUTIONS, StateStore
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
-from .server import _header, _json, _Response, check_jwt_flags, json_rpc_error
+from .wire import (
+    _header,
+    _json,
+    _Response,
+    check_jwt_flags,
+    json_rpc_error,
+    printable,
+)
 
 _LOG = logging.getLogger("ctrlrun.mcp_operator")
 
@@ -1047,7 +1054,9 @@ def build_operator_server(server: OperatorServer) -> ThreadingHTTPServer:
                 self.wfile.write(response.body)
 
         def log_message(self, format: str, *args: object) -> None:
-            _LOG.debug("%s - %s", self.address_string(), format % args)
+            # Escaped, not interpolated raw: `format % args` is the client's request line, and
+            # a newline in it forges a whole record in a line-per-record log (`wire.printable`).
+            _LOG.debug("%s - %s", self.address_string(), printable(format % args))
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True

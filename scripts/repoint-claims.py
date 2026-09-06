@@ -32,47 +32,53 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = re.compile(r"`((?:[a-z_]+/)*[a-z_]+\.py):(\d+)`")
-#: A backtick-quoted identifier, and **not** one that is part of a `file.py:NNN` reference.
-#: The trailing lookahead is what keeps `py` out: an identifier ends at a backtick, a space, a
-#: bracket or a comma, never at a `:` followed by digits.
-IDENTIFIER = re.compile(r"`@?([A-Za-z_][\w.]*)(?!\.py:)")
-#: Extensions and other tokens a citation contributes that are never symbols.
-NOT_SYMBOLS = frozenset({"py", "md", "yaml", "yml", "json", "sql", "toml"})
+sys.path.insert(0, str(ROOT / "tools" / "docs_audit"))
 
-
-def named_symbols(row: str) -> set[str]:
-    """The symbols a row names, with the file extensions its own citations contribute removed."""
-    return {name.split(".")[-1] for name in IDENTIFIER.findall(row)} - NOT_SYMBOLS
+from claims import citations  # noqa: E402  — the path above is what makes it importable
 
 
 def main() -> int:
     claims = ROOT / "docs" / "CLAIMS.md"
-    text = claims.read_text(encoding="utf-8")
-    fixes: dict[str, str] = {}
+    rows = claims.read_text(encoding="utf-8").splitlines(keepends=True)
     unresolved: list[str] = []
+    repointed = 0
 
-    for row in text.splitlines():
-        refs = REFERENCE.findall(row)
-        if not refs:
-            continue
-        named = named_symbols(row)
-        if not named:
-            unresolved.append(f"{', '.join(f'{f}:{n}' for f, n in refs)} names no symbol at all")
-            continue
-        for filename, number in refs:
-            source = ROOT / "src" / "ctrlrun" / filename
+    for index, row in enumerate(rows):
+        edits: list[tuple[int, int, str]] = []
+        for cited in citations(row):
+            if not cited.names:
+                unresolved.append(f"{cited.filename}:{cited.line} names no symbol at all")
+                continue
+            source = ROOT / "src" / "ctrlrun" / cited.filename
             if not source.exists():
                 continue
             lines = source.read_text(encoding="utf-8").splitlines()
-            index = int(number)
-            if 0 < index <= len(lines) and _resolves(named, lines[index - 1]):
+            # **This citation's own symbols**, not the row's. A row citing six commands used to
+            # accept any of the six on the cited line, so five wrong numbers looked right.
+            owned = cited.local or cited.names
+            here = lines[cited.line - 1] if 0 < cited.line <= len(lines) else ""
+            # Two stages. `local` is the tightening -- a row citing six commands no longer
+            # accepts any of the six on any of the lines. `names` is the documented fallback,
+            # because the nearest-citation assignment is a heuristic and a row may legitimately
+            # write `only `NotExecuted` maps to `FAILED` -- `control.py:1036``, where the symbol
+            # that identifies the line sits between two citations. A line matching neither is
+            # stale whichever way the symbols were assigned, which is the case worth catching.
+            if _resolves(owned, here) or _resolves(cited.names, here):
                 continue
-            found = _definition_of(named, lines)
+            found = _definition_of(owned + cited.names, lines)
             if found is None:
-                unresolved.append(f"{filename}:{number} names {sorted(named)}")
+                unresolved.append(f"{cited.filename}:{cited.line} names {list(owned)}")
             else:
-                fixes[f"`{filename}:{number}`"] = f"`{filename}:{found}`"
+                edits.append((cited.start, cited.end, f"`{cited.filename}:{found}`"))
+        if edits:
+            # **Positional, right to left**, and never `str.replace`. Keying the rewrite on the
+            # citation's text and replacing every occurrence moved *correct* references too:
+            # `` `LEASE_EXPIRED` -- `effect.py:63`; ... `resolved_by` -- `effect.py:63` `` needs
+            # the second moved and the first left alone, and one global replace cannot do that.
+            for begin, finish, replacement in sorted(edits, reverse=True):
+                row = row[:begin] + replacement + row[finish:]
+            rows[index] = row
+            repointed += len(edits)
 
     if unresolved:
         # **Refuse before writing.** A partial re-point plus a non-zero exit leaves the table in
@@ -82,10 +88,8 @@ def main() -> int:
         print(f"re-pointed 0, unresolved {len(unresolved)} — nothing written", file=sys.stderr)
         return 1
 
-    for old, new in fixes.items():
-        text = text.replace(old, new)
-    claims.write_text(text, encoding="utf-8")
-    print(f"re-pointed {len(fixes)}, unresolved 0")
+    claims.write_text("".join(rows), encoding="utf-8")
+    print(f"re-pointed {repointed}, unresolved 0")
     return 0
 
 
@@ -97,7 +101,7 @@ def _patterns(name: str) -> tuple[str, ...]:
     )
 
 
-def _resolves(named: set[str], line: str) -> bool:
+def _resolves(named: tuple[str, ...], line: str) -> bool:
     """Does this line define, or at least *contain as a whole word*, one of `named`?
 
     **A definition would be the strict rule and it is too strict**, which is worth writing down
@@ -122,9 +126,14 @@ def _resolves(named: set[str], line: str) -> bool:
     return any(re.search(rf"\b{re.escape(name)}\b", line) for name in named)
 
 
-def _definition_of(named: set[str], lines: list[str]) -> int | None:
-    """Where one of `named` is *defined*, longest name first. Never a mention in prose."""
-    for name in sorted(named, key=len, reverse=True):
+def _definition_of(named: tuple[str, ...], lines: list[str]) -> int | None:
+    """Where one of `named` is *defined*, **nearest name first**. Never a mention in prose.
+
+    The order is the caller's, not this function's: `claims.citations` sorts by distance from
+    the citation. It used to be longest-name-first over the whole row's symbols, which is how
+    six references to six different commands were all re-pointed at one definition.
+    """
+    for name in named:
         for pattern in _patterns(name):
             for number, candidate in enumerate(lines, start=1):
                 if re.search(pattern, candidate):
