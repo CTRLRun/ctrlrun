@@ -1,0 +1,11 @@
+# The policy this example runs under. Unknown actions are denied; there is no default-allow.
+schema: ctrlrun.policy/v1
+
+actions:
+  # Merging into a release branch is the one this job is for. Nothing else is listed, and
+  # that is deliberate: `git.force_push` is absent, so it is denied for being unknown rather
+  # than because somebody remembered to forbid it. A list of what is permitted is a shorter
+  # document than a list of everything that is not.
+  github.merge_pull_request:
+    rules:
+      - decision: allow

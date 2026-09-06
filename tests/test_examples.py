@@ -40,7 +40,35 @@ SCENARIOS: dict[str, str] = {
 
 #: Directories under `examples/` that are not one of §1.1's failure scenarios: the sector
 #: templates, and item 8's ACS integration example (SPEC-v0.2 §9, `docs/ACS.md`).
-NOT_A_SCENARIO = ("policies", "acs", "authority", "cookbook", "__pycache__")
+NOT_A_SCENARIO = (
+    "policies",
+    "acs",
+    "authority",
+    "cookbook",
+    "without-an-agent",
+    "__pycache__",
+)
+
+#: The same failures with no agent, no model and no prompt anywhere in them: a task queue that
+#: retries, a webhook delivered twice, a merge job that goes looking for another way. They are
+#: not §1.1 scenarios and are deliberately not folded into `SCENARIOS`, because that dict is
+#: the guard on what the spec asked for. The value is the refusal each must print.
+WITHOUT_AN_AGENT: dict[str, str] = {
+    "retried-task": "effect may already have committed",
+    "redelivered-webhook": "has already committed; this is one effect",
+    "lost-merge": "the policy does not list git.force_push",
+}
+
+#: Where they live, relative to `examples/`.
+NO_AGENT_GROUP = "without-an-agent"
+
+#: What each script says when the refusal it exists to demonstrate did not happen. The
+#: positive control below asserts on these rather than on the exit code alone.
+NO_REFUSAL: dict[str, str] = {
+    "retried-task": "the queue was allowed to retry",
+    "redelivered-webhook": "the second delivery was permitted",
+    "lost-merge": "the retry reached the remote",
+}
 
 #: The nine sectors of SPEC-v0.2 §1.1.
 SECTORS = (
@@ -129,8 +157,16 @@ def _run(scenario: str, cwd: Path, no_network: Path) -> subprocess.CompletedProc
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(no_network), environment.get("PYTHONPATH", "")) if part
     )
+    return _run_script(EXAMPLES / scenario / "main.py", cwd, no_network)
+
+
+def _run_script(script: Path, cwd: Path, no_network: Path) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(no_network), environment.get("PYTHONPATH", "")) if part
+    )
     return subprocess.run(
-        [sys.executable, str(EXAMPLES / scenario / "main.py")],
+        [sys.executable, str(script)],
         cwd=cwd,
         env=environment,
         capture_output=True,
@@ -214,6 +250,97 @@ def test_T31_every_example_is_repeatable(scenario, tmp_path, no_network):
     assert first.returncode == 0, f"{scenario} failed on its first run:\n{first.stderr}"
     assert second.returncode == 0, f"{scenario} is not repeatable:\n{second.stderr}"
     assert SCENARIOS[scenario] in second.stdout
+
+
+# --- the same failures, with no agent in them ------------------------------------------
+
+
+def _no_agent(name: str) -> Path:
+    return EXAMPLES / NO_AGENT_GROUP / name / "main.py"
+
+
+def test_the_examples_without_an_agent_on_disk_are_the_ones_these_tests_run():
+    """An example nothing runs is an example that quietly stops working."""
+    found = sorted(
+        path.name
+        for path in (EXAMPLES / NO_AGENT_GROUP).iterdir()
+        if path.is_dir() and path.name != "__pycache__"
+    )
+    assert found == sorted(WITHOUT_AN_AGENT)
+
+
+@pytest.mark.parametrize("name", sorted(WITHOUT_AN_AGENT))
+def test_every_example_without_an_agent_exits_zero_and_prints_its_refusal(
+    name, tmp_path, no_network
+):
+    finished = _run_script(_no_agent(name), tmp_path, no_network)
+
+    assert finished.returncode == 0, f"{name} failed:\n{finished.stdout}\n{finished.stderr}"
+    assert "BLOCKED" in finished.stdout
+    assert WITHOUT_AN_AGENT[name] in finished.stdout
+
+
+@pytest.mark.parametrize("name", sorted(WITHOUT_AN_AGENT))
+def test_every_example_without_an_agent_keeps_its_state_under_its_own_directory(
+    name, tmp_path, no_network
+):
+    _run_script(_no_agent(name), tmp_path, no_network)
+
+    store = tmp_path / ".ctrlrun" / "examples" / NO_AGENT_GROUP / name / "state.db"
+    assert store.is_file()
+    written = {
+        path.relative_to(tmp_path).parts[0] for path in tmp_path.rglob("*") if path.is_file()
+    }
+    assert written == {".ctrlrun"}
+
+
+@pytest.mark.parametrize("name", sorted(WITHOUT_AN_AGENT))
+def test_every_example_without_an_agent_is_repeatable(name, tmp_path, no_network):
+    """A second run must refuse the same thing, not trip over its own first run's records."""
+    first = _run_script(_no_agent(name), tmp_path, no_network)
+    second = _run_script(_no_agent(name), tmp_path, no_network)
+
+    assert first.returncode == 0, f"{name} failed on its first run:\n{first.stderr}"
+    assert second.returncode == 0, f"{name} is not repeatable:\n{second.stderr}"
+    assert WITHOUT_AN_AGENT[name] in second.stdout
+
+
+@pytest.mark.parametrize("name", sorted(WITHOUT_AN_AGENT))
+def test_every_example_without_an_agent_fails_when_its_refusal_does_not_happen(
+    name, tmp_path, no_network
+):
+    """The positive control the mutation rule asks for.
+
+    A script that asserted a refusal by catching an exception and passing would keep printing
+    the reassuring line forever once the guard broke, so each has a branch that raises where
+    the refusal did not happen. This runs each against a `ctrlrun` whose `Control.execute`
+    calls the executor and returns, so no refusal is possible, and requires that the script
+    exits non-zero **naming that branch**.
+
+    Asserting only the exit code would be the weaker test that a first draft of this actually
+    was: with enforcement removed, `lost-merge`'s retry reached the fake remote and died on
+    the remote's own `ConnectionResetError`, which is a non-zero exit for a reason that has
+    nothing to do with the assertion the script makes. The sentinel is what separates the two.
+    """
+    permissive = tmp_path / "permissive"
+    permissive.mkdir()
+    (permissive / "sitecustomize.py").write_text(
+        "import ctrlrun.control\n"
+        "\n"
+        "def _execute(self, action, executor, *args, **kwargs):\n"
+        "    return executor()\n"
+        "\n"
+        "ctrlrun.control.Control.execute = _execute\n",
+        encoding="utf-8",
+    )
+    finished = _run_script(_no_agent(name), tmp_path, permissive)
+
+    assert finished.returncode != 0, (
+        f"{name} exited 0 with every refusal removed, so it asserts nothing:\n{finished.stdout}"
+    )
+    assert NO_REFUSAL[name] in finished.stderr, (
+        f"{name} failed for a reason other than its own assertion:\n{finished.stderr}"
+    )
 
 
 # --- T31: every template loads ---------------------------------------------------------
