@@ -69,6 +69,38 @@
       output.textContent = text;
     }
 
+    // The demo prints all five scenarios at once. Released a line at a time, as the README's
+    // recording does, a reader can follow each one. The text is what the demo printed and
+    // nothing else; the only thing added is time, and the colour on each refusal.
+    var LINE_MS = 380;
+    var REFUSED = "#f28b82";
+
+    function reveal(text) {
+      output.textContent = "";
+      var lines = text.split("\n");
+      return new Promise(function (resolve) {
+        var index = 0;
+        function next() {
+          if (index === lines.length) return resolve();
+          var line = lines[index++];
+          var node;
+          if (line.indexOf("BLOCKED") !== -1) {
+            node = document.createElement("span");
+            node.style.color = REFUSED;
+            node.style.fontWeight = "700";
+            node.textContent = line;
+          } else {
+            node = document.createTextNode(line);
+          }
+          output.appendChild(node);
+          output.appendChild(document.createTextNode("\n"));
+          output.scrollTop = output.scrollHeight;
+          window.setTimeout(next, line.trim() === "" ? 0 : LINE_MS);
+        }
+        next();
+      });
+    }
+
     async function boot() {
       say("Loading Python in this tab. The first run downloads about 10 MB from the Pyodide\nCDN and the ctrlrun wheel from PyPI; after that the browser caches them.");
       if (!window.loadPyodide) await load(PYODIDE + "pyodide.js");
@@ -87,7 +119,7 @@
       try {
         if (!pyodide) pyodide = await boot();
         say("Running the five scenarios…");
-        say(pyodide.runPython(PROGRAM));
+        await reveal(pyodide.runPython(PROGRAM));
         button.textContent = "Run it again";
       } catch (error) {
         say(

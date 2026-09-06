@@ -3,13 +3,13 @@
   "name": "CTRLRun",
   "theme": "mint",
   "colors": {
-    "primary": "#3b3f46",
-    "light": "#c9ccd3",
-    "dark": "#14161b"
+    "primary": "#B8730A",
+    "light": "#F5A623",
+    "dark": "#8A5606"
   },
   "logo": {
-    "light": "/images/wordmark.svg",
-    "dark": "/images/wordmark.svg",
+    "light": "/images/wordmark-light.svg",
+    "dark": "/images/wordmark-dark.svg",
     "href": "/"
   },
   "favicon": "/images/favicon.svg",

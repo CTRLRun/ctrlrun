@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/wordmark.svg" alt="CTRLRun" width="300">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg">
+    <img src="docs/assets/wordmark-light.svg" alt="CTRLRun" width="300">
+  </picture>
 </p>
 
 <p align="center">
@@ -18,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused. Remote refund calls: 1." width="720">
+  <img src="docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
 </p>
 
 <!-- generated from docs/capabilities.yaml (readme) — edit the YAML, never this table -->
@@ -39,10 +42,12 @@ pip install ctrlrun && ctrlrun demo
 ```
 
 Five ways an agent action goes wrong, and what stops each one, in process, in under a second,
-with no network and no external service. The animation above is the first scenario: the refund
-commits at the remote, the reply is lost, the agent retries, and the retry is refused —
-**`remote refund calls: 1`**, so the customer was refunded once and not twice. Nothing but a
-human resolving the effect moves it on.
+with no network and no external service. The animation above is the first two. In the first,
+the refund commits at the remote, the reply is lost, the agent retries, and the retry is
+refused — **`remote refund calls: 1`**, so the customer was refunded once and not twice, and
+nothing but a human resolving the effect moves it on. In the second, a human approves a €2,000
+refund, the agent executes €5,000 under that approval, and the approval matches nothing but the
+action the human saw.
 
 <details>
 <summary>The full transcript, byte for byte what the demo prints</summary>
