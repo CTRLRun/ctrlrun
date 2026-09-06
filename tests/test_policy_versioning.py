@@ -1585,7 +1585,13 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         "verify",
     ]
     #: Added after v0.6, each on its own version line and each in its own specification.
-    after_v0_6 = ["mcp-operator"]  # SPEC-mcp-operator.md §9.4
+    after_v0_6 = [
+        "mcp-operator",  # SPEC-mcp-operator.md §9.4
+        # SPEC-scan.md §9.4. It ships in the same release as the operator server and is no more
+        # a v0.6 feature than that one: §9.4's claim is about the surface *this milestone* grew,
+        # and a subcommand landing before the tag does not retroactively make it one.
+        "scan",
+    ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)
     assert not set(frozen_by_v0_6) & set(after_v0_6)

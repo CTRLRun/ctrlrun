@@ -1032,6 +1032,9 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # SPEC-mcp-operator.md §9.4. Not a kernel milestone: it gates no release and none
         # gates it, and it lands in whichever release comes next.
         "mcp-operator",
+        # SPEC-scan.md §9.4. The same shape and for the same reason: a subcommand that adds no
+        # table, column, event, error or policy key, on its own no version line.
+        "scan",
     }
 
 

@@ -162,6 +162,43 @@ place a reader would otherwise assume otherwise.
 
 Standards: none new.
 
+## `ctrlrun scan` ✅ shipped
+
+Not a kernel milestone, and listed here because the question it answers had no command.
+`ctrlrun scan` reads a Python tree and a policy document and reports the consequential call
+sites and policy entries CTRLRun is **not** covering — the gap between *installed* and *in the
+path*. `docs/SPEC-scan.md` is the contract; it was written first and its §8 tests were red
+before any of it existed.
+
+It gates no release and none gates it, and it lands in whichever release comes next. **It is
+not a v0.6 feature**, and lands before that tag no more than the operator server does:
+`SPEC-v0.6.md` §9.4's claim is about the surface *that milestone* grew, and a subcommand
+arriving before the tag does not retroactively make it one. `test_T177c` holds v0.6's list
+frozen and names anything added afterwards separately, which is where `scan` sits. Like the operator server it is a subcommand of the
+`ctrlrun` distribution and carries no version line of its own; unlike the operator server it
+adds no entry point at all, and `SPEC-scan.md` §9.2 states that as a rule rather than a fact
+about the first implementation, because the tempting version of this tool builds an action for
+each call site it finds and asks the policy what would happen to it — which would be a principal
+invented by a tool from a source file.
+
+The honest half is the load-bearing half: a scanner reports what it found where it looked, and
+a clean result is not a verdict. §4 enumerates what it misses by construction — dynamic
+dispatch, reachability, anything outside the tree, and a deployment whose protection is entirely
+the gateway — and requires that the report say so on every run, including the run with no
+findings. A number that improves when the vocabulary is shortened is a number that will be, so
+there is no score, no percentage and no badge (§10).
+
+Five sections of the specification carry a paragraph beginning *Found by*, and they are the
+record of what writing the tests and running the command changed about the design: the plural
+rule that separates `stripe.refunds.create` from `refunds_report`; `execute` dropped from the
+vocabulary, because `cursor.execute` was 90 of 208 findings against this repository's own
+`src/`; a policy action whose decorator supplies its own effect template no longer reported as
+missing one; a call on an expression matched rather than filed as undetermined, which took that
+list from 216 entries to 10; and `undetermined` removed from the finding kinds it was listed
+among and contradicted by.
+
+Standards: none new.
+
 ## v0.7 — Multi-agent
 
 - A2A integration: task-bound delegated authority with limits, expiry, and depth.

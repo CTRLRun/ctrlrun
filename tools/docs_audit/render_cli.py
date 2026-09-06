@@ -55,7 +55,7 @@ def render() -> str:
         "---",
         'title: "CLI reference"',
         "description: \"Every ctrlrun command and option, from the command's own help text: "
-        'init, demo, approve, deny, receipts, effects, resolve, inspect, stats, verify."',
+        'init, demo, approve, deny, receipts, effects, resolve, inspect, stats, scan, verify."',
         "---",
         "",
         "{/* " + MARKER + " */}",
