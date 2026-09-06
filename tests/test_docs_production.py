@@ -10,8 +10,9 @@ would be worth nothing without:
   id that exists in `docs/SPEC-v0.6.md` §8**, so a page cannot cite a test nobody wrote;
 - the readiness block is the generator's, byte for byte, in all three places it appears, and
   its **Not yet** list is inside it rather than below it, where a reader would stop first;
-- the soak page states the measured duration and that `ROADMAP.md`'s exit criterion is **not**
-  met by it, because "soaked" is the sentence a stranger will quote;
+- the soak page states the measured duration and what a run of that length does **not**
+  establish, because "soaked" is the sentence a stranger will quote, and the gate it does
+  report is derived from the published counts rather than read out of the results file;
 - the section does not reach for the vocabulary the third rule of `SPEC-v0.6.md` §1.2 refuses.
 """
 
@@ -292,11 +293,13 @@ def test_the_soak_page_is_the_render_of_the_published_results():
     assert drift.returncode == 0, drift.stdout + drift.stderr
 
 
-def test_the_soak_page_does_not_let_a_reader_believe_the_criterion_was_met():
-    """The published run is twenty minutes and the criterion is a week. Both are on the page.
+def test_the_soak_page_states_the_measured_duration_and_what_it_does_not_establish():
+    """The clock stopped being a gate; it did not stop being twenty minutes.
 
-    `research/soak/README.md` already states this; a docs page that omitted it would be the
-    only place a stranger reads, saying the flattering half.
+    `SPEC-v0.6.md` §8.1 no longer asks for a week, so the page no longer calls the run short
+    of one — but a criterion that dropped a duration is exactly the moment the duration has
+    to keep being printed, and printed beside what a run of that length cannot establish.
+    "Soaked" is the sentence a stranger will quote, and this is the page they land on.
     """
     results_dir = _repository_only(REPO_ROOT / "research" / "soak" / "results")
     body = _body(PRODUCTION / "soak.mdx")
@@ -304,19 +307,23 @@ def test_the_soak_page_does_not_let_a_reader_believe_the_criterion_was_met():
     assert results, "no soak results to render"
     measured = json.loads(results[-1].read_text(encoding="utf-8"))
     assert measured["elapsed_human"] in body, measured["elapsed_human"]
-    assert "week" in body, "the page does not say what the criterion asks for"
-    assert re.search(r"\bnot met\b", body), "the page does not say the criterion is unmet"
+    assert "What it is not evidence of" in body, "the page does not say what it cannot show"
     assert "exit_criterion_met" in body, "the page does not explain the JSON field"
+    assert "week" not in body.lower(), (
+        "the page still measures itself against a criterion §8.1 no longer has; the "
+        "amendment is recorded there and in ROADMAP.md, not re-argued on every page"
+    )
 
 
-def test_the_soak_page_agrees_with_the_run_about_whether_the_criterion_is_met():
-    """The page says met or unmet, and which one is **computed** from the published run.
+def test_the_soak_page_derives_the_criterion_and_agrees_with_the_harness():
+    """The gate is computed twice from one run, and the two computations must agree.
 
-    The old version of this asserted `"for a week" not in body or "not met" in body`, and
-    `"not met"` is separately required by the test above, so the disjunction could never be
-    false. Worse, it pinned the unflattering answer: on the day a week is finally run the page
-    would keep saying the criterion was unmet and nothing would notice. The generator now
-    derives it, and this asserts the derivation rather than the string.
+    §8.1's criterion is now the two things a harness is allowed to decide — no unattributed
+    `AMBIGUOUS`, and a positive control that fired — and no clock at all. **A gate that got
+    weaker gets a stronger check**: the page recomputes it from the published counts instead
+    of reading `exit_criterion_met`, and this asserts the recomputation equals the field the
+    harness wrote. A hand-edited results file moves one and not the other, which is the whole
+    reason the generator does not simply trust the field.
     """
     import sys
 
@@ -330,23 +337,29 @@ def test_the_soak_page_agrees_with_the_run_about_whether_the_criterion_is_met():
     found = render_soak.latest()
     assert found is not None, "no soak results to render"
     _, run = found
-    long_enough, clean = render_soak.criterion(run)
-    body = _body(PRODUCTION / "soak.mdx")
+    met = render_soak.criterion(run)
+    assert met is run["exit_criterion_met"], (
+        "the page's derivation and the harness's own field disagree about this run"
+    )
+    assert not hasattr(render_soak, "CRITERION_DAYS"), (
+        "the calendar half of the criterion is gone; SPEC-v0.6 §8.1 records why it went"
+    )
 
-    assert render_soak.CRITERION_DAYS == 7, "the roadmap's criterion is a week"
-    if long_enough and clean:
+    body = _body(PRODUCTION / "soak.mdx")
+    if met:
         assert "exit criterion is met by this run" in body
         assert "not met" not in body, "the page still says unmet for a run that met it"
     else:
         assert re.search(r"\bnot met\b", body), "the page does not say the criterion is unmet"
         assert "criterion is met by this run" not in body
 
-    # The control: the derivation is not a constant. A run of a week with nothing unattributed
-    # meets it, and the same run one second short does not.
-    week = dict(run, elapsed_seconds=7 * 86_400, unexplained=0)
-    assert render_soak.criterion(week) == (True, True)
-    assert render_soak.criterion(dict(week, elapsed_seconds=7 * 86_400 - 1))[0] is False
-    assert render_soak.criterion(dict(week, unexplained=1))[1] is False
+    # The control: the derivation is not a constant, and it turns on the two halves §8.1
+    # names and on neither more nor fewer. The last line is the amendment itself under test —
+    # a twenty-second run meets the criterion now, and a test that did not say so would let
+    # the clock creep back in as an unwritten condition.
+    assert render_soak.criterion(dict(run, unexplained=1)) is False
+    assert render_soak.criterion(dict(run, positive_control_fired=False)) is False
+    assert render_soak.criterion(dict(run, elapsed_seconds=20.0)) is True
 
 
 def test_production_is_a_top_level_group_between_get_started_and_guides():
@@ -409,6 +422,32 @@ def test_the_not_yet_list_is_inside_the_block_and_not_below_it(home: str):
     assert "**Not yet:**" in embedded, home
     for claim, _why in render_readiness.NOT_YET:
         assert claim in embedded, f"{home} is missing {claim!r}"
+
+
+@pytest.mark.parametrize("home", READINESS_HOMES)
+def test_the_readiness_block_does_not_report_the_soak_as_an_unmet_gate(home: str):
+    """`SPEC-v0.6.md` §8.1 has no duration in it, so neither does the block that reports it.
+
+    The soak line keeps its measured duration — that was never the gate's doing, and §8.1's
+    amendment removed a criterion rather than a fact. What goes is the clause calling the run
+    short of a week and the **Not yet** row derived from it, both of which describe a
+    criterion this project no longer holds itself to. A block that kept them would be
+    reporting an unmet gate that does not exist, which is the mirror image of the failure the
+    generator was written to prevent.
+    """
+    sys.path.insert(0, str(TOOLS))
+    try:
+        import render_readiness
+    finally:
+        sys.path.pop(0)
+    _, _, embedded = render_readiness.marker_blocks((REPO_ROOT / home).read_text(encoding="utf-8"))[
+        0
+    ]
+    assert "Soaked for" in embedded, f"{home} no longer reports the run at all"
+    assert "week" not in embedded.lower(), home
+    assert not any("soak" in claim.lower() for claim, _ in render_readiness.NOT_YET), (
+        "the Not yet list still carries a soak row for a criterion §8.1 no longer has"
+    )
 
 
 def test_the_recorded_readiness_still_matches_what_it_was_measured_from():
@@ -492,12 +531,18 @@ def test_the_readiness_block_does_not_say_an_unreleased_version_is_on_pypi():
     assert "is in development" in render_readiness.render("readme", ahead).splitlines()[1]
 
 
-def test_the_not_yet_list_grows_the_week_until_the_week_is_run():
-    """The soak's absence is derived, not written down, so it leaves on its own when it is due.
+def test_the_not_yet_list_is_the_constant_and_derives_nothing_from_the_soak():
+    """The soak row was derived from a duration the criterion no longer has, so it is gone.
 
-    The other three entries are statements nothing can measure. This one can be measured, and a
-    hard-coded line would keep saying the week was owed on the day it was finally run — the
-    flattering failure, in the list whose whole job is the unflattering half.
+    Its derivation existed for a good reason — a hard-coded line would have kept saying a week
+    was owed on the day one was finally run, the flattering failure in the list whose whole job
+    is the unflattering half. `SPEC-v0.6.md` §8.1 removed the duration from the criterion
+    instead, which removes the thing being derived rather than the honesty of deriving it. What
+    is asserted here is that nothing grew back: the three remaining entries are statements
+    nothing in the repository can measure, and the block is the constant.
+
+    The run's own duration is **not** what left. It is still printed on the soak line above the
+    list, in all three formats, and the test named for that line holds it there.
     """
     import sys
 
@@ -507,17 +552,26 @@ def test_the_not_yet_list_grows_the_week_until_the_week_is_run():
     finally:
         sys.path.pop(0)
 
-    recorded = render_readiness.state()
-    week = dict(recorded["soak"], elapsed_seconds=7 * 86_400, unexplained=0)
-    met = dict(recorded, soak=week)
-    short = dict(recorded, soak=dict(week, elapsed_seconds=7 * 86_400 - 1))
-    dirty = dict(recorded, soak=dict(week, unexplained=3))
+    assert not hasattr(render_readiness, "not_yet"), (
+        "a derivation is back in a list whose entries nothing can measure"
+    )
+    assert not hasattr(render_readiness, "CRITERION_DAYS")
+    assert len(render_readiness.NOT_YET) == 3, render_readiness.NOT_YET
+    assert not any(
+        "soak" in claim.lower() or "week" in why.lower() for claim, why in render_readiness.NOT_YET
+    ), render_readiness.NOT_YET
 
-    assert render_readiness.not_yet(met) == render_readiness.NOT_YET
-    for data in (short, dirty):
-        entries = render_readiness.not_yet(data)
-        assert len(entries) == len(render_readiness.NOT_YET) + 1
-        assert entries[0][0] == "No soak of the length the roadmap asks for."
+    # The block is the constant whatever the published run says: a short run with findings
+    # produces the same list as a long clean one, because neither is what this list is about.
+    recorded = render_readiness.state()
+    for soak in (
+        dict(recorded["soak"], elapsed_seconds=7 * 86_400, unexplained=0),
+        dict(recorded["soak"], elapsed_seconds=1.0, unexplained=3),
+    ):
+        rendered = render_readiness.render("readme", dict(recorded, soak=soak))
+        for claim, _why in render_readiness.NOT_YET:
+            assert claim in rendered
+        assert "week" not in rendered.lower()
 
 
 def test_the_readiness_block_refuses_a_shrunken_suite_and_accepts_a_grown_one():

@@ -4,11 +4,12 @@
     python research/soak/run.py --minutes 30 --postgres "$CTRLRUN_TEST_POSTGRES"
     python research/soak/run.py --minutes 5                      # SQLite, for a smoke run
 
-**The duration is measured and printed, never asserted.** `ROADMAP.md`'s exit criterion is a week
-with no unexplained `AMBIGUOUS`, and a run shorter than that does not meet it — the table says how
-long it actually ran and `exit_criterion_met` is about the ambiguity count, not the clock. A
-harness that reported "criterion met" after thirty minutes would be making the one claim §8.1
-says would be exactly as false as it looks.
+**The duration is measured and printed, never asserted.** `ROADMAP.md`'s exit criterion is a
+published run with no unexplained `AMBIGUOUS` and a positive control that fired, which is what
+`exit_criterion_met` reports; the clock is measured beside it and is not part of it. §8.1 records
+that the criterion once asked for a week of calendar time and no longer does, and why — but the
+harness's job was never to decide either way, and a table that graded its own duration would be
+making the one claim §8.1 says would be exactly as false as it looks.
 """
 
 from __future__ import annotations

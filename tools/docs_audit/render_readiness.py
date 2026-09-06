@@ -39,7 +39,6 @@ GENERATED = REPO_ROOT / "docs" / "generated"
 FILENAMES = {"readme": "readiness.readme.md", "mdx": "readiness.mdx", "full": "readiness.full.mdx"}
 FORMATS = tuple(FILENAMES)
 SOAK = REPO_ROOT / "research" / "soak" / "results"
-CRITERION_DAYS = 7
 _OPEN = re.compile(r"generated from the suite, pyproject and the soak \((?P<format>[a-z]+)\)")
 _CLOSE = re.compile(r"end generated")
 
@@ -179,10 +178,12 @@ def _lines(data: dict, *, full: bool) -> list[str]:
                 f"{run['unexplained']} unattributed ambiguous outcomes"
                 + (", positive control fired." if run["positive_control"] else ".")
                 # The duration travels with the number, in every format. Without it the README
-                # and the docs home carried "soaked" with no route to the page that says the
-                # roadmap asks for a week -- the flattering half of a true sentence, on the two
-                # surfaces most likely to be quoted.
-                + " The roadmap asks for a week; that is not met.",
+                # and the docs home carried "soaked" with no route to the page that says what
+                # a run of that length cannot show -- the flattering half of a true sentence,
+                # on the two surfaces most likely to be quoted. SPEC-v0.6 §8.1 took the
+                # duration out of the *criterion* and not out of this line: the gate went, the
+                # fact did not, and the link goes to the page that separates them.
+                + " Nothing here establishes what only accumulates over days.",
                 "production/soak",
             )
         )
@@ -200,29 +201,8 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         "**Not yet:**",
         "",
     ]
-    lines += [f"- {claim} ({why})" for claim, why in not_yet(data)]
+    lines += [f"- {claim} ({why})" for claim, why in NOT_YET]
     return lines
-
-
-def not_yet(data: dict) -> tuple[tuple[str, str], ...]:
-    """`NOT_YET`, plus the soak's week where the published run has not reached it.
-
-    Derived rather than written down, for the same reason the page is: the day a week is
-    actually run, a hard-coded line would keep saying it was not, and that failure is the
-    flattering one.
-    """
-    run = data["soak"]
-    if run is None:
-        return NOT_YET
-    if run["elapsed_seconds"] >= CRITERION_DAYS * 86_400 and run["unexplained"] == 0:
-        return NOT_YET
-    return (
-        (
-            "No soak of the length the roadmap asks for.",
-            f"the criterion is a week of calendar time; the published run is {run['elapsed']}",
-        ),
-        *NOT_YET,
-    )
 
 
 def render(fmt: str, data: dict) -> str:

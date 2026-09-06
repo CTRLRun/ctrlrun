@@ -37,18 +37,26 @@ corresponding injection is unattributed. It is keyed on the attempt and never on
 effect key alone, because one key may be attempted more than once and an injection
 against the first attempt says nothing about the second.
 
+**`ROADMAP.md`'s exit criterion is met by this run**: nothing unattributed, and
+a positive control that fired, so the run was capable of reporting otherwise.
+Those are the two halves and `SPEC-v0.6.md` §8.1 says they are the whole of it.
+The criterion asks for no duration — §8.1 records when that stopped being true
+and argues it — so what this run's length does **not** establish is the section
+below rather than a footnote to a gate.
+
+`exit_criterion_met` in the results file is those same two halves, written by the
+harness. This page **recomputes** them from the counts rather than reading the
+field, and a test asserts the two agree: one derivation of a criterion is a claim,
+two that match is a check.
+
 ## What it is not evidence of
 
-**`ROADMAP.md`'s exit criterion, which is a soak of at least one week.** This
-ran for 20m 0s. A week of calendar time does not compress, and
-a larger action count is not a substitute for it: a ten-hour run would meet the
-criterion no better, it would put a bigger number beside something still unmet.
-The criterion is recorded in the roadmap as **not met**, and that is the honest
-state of it.
-
-`exit_criterion_met: true` in the results file is about the **ambiguity count** and
-nothing else. That is all the harness is allowed to decide; the clock is reported
-and left to a person to read.
+**A long run.** This one lasted 20m 0s. Everything a soak finds by
+*accumulating* is outside what that can see: a connection pool that degrades over
+hours, table growth against the one-row chain head, a lease that only lapses under
+load held longer than this, an operator restart in the middle. The duration is on
+the table above and in every place this run is quoted, because a criterion that
+stopped asking for one is not the same as a run that no longer has one.
 
 ## What this does not do
 

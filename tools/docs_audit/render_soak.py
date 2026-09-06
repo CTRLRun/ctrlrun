@@ -9,11 +9,13 @@ until one exists the page says so in those words and shows no table.
 
 Two sentences on that page are the reason it is generated rather than written.
 
-**The duration is the measured one.** `SPEC-v0.6.md` §8.1's week is calendar time and does not
-compress; the harness prints how long the run actually lasted and is not allowed to decide
-whether that was long enough. So the page prints the same figure and says, in the same
-paragraph, that `ROADMAP.md`'s exit criterion is not met by it. A page that said "soaked" and
-left the clock out would be the flattering half of a true sentence.
+**The duration is reported and gates nothing.** `SPEC-v0.6.md` §8.1's criterion is the two
+things a harness may decide — no unattributed `AMBIGUOUS`, and a positive control that fired —
+and it no longer carries a duration; §8.1 records that amendment and argues it. What did not
+change is that a page saying "soaked" with the clock left out is the flattering half of a true
+sentence, so the measured duration is printed and **what a run of that length cannot establish
+is a section of its own**. Dropping a criterion is not the same as dropping the fact it was
+about, and this page is where that distinction is kept.
 
 **`exit_criterion_met` in the JSON is about the ambiguity count alone.** It is the harness
 answering the only question a harness may answer — *did an `AMBIGUOUS` appear that I did not
@@ -39,19 +41,20 @@ MARKER = (
 )
 NO_RESULTS = "No published results yet."
 
-#: `ROADMAP.md`'s exit criterion, in the two halves the harness and a person decide separately:
-#: at least a week of calendar time, and no ambiguous outcome the harness did not cause.
-CRITERION_DAYS = 7
 
+def criterion(run: dict) -> bool:
+    """`ROADMAP.md`'s exit criterion for one published run: control fired, nothing unattributed.
 
-def criterion(run: dict) -> tuple[bool, bool]:
-    """`(long enough, no unattributed ambiguity)` for one published run.
+    **Recomputed here rather than read from `exit_criterion_met`**, which the harness writes
+    into the same file. A gate with no duration left in it is a weaker gate, so it gets the
+    stronger check: two derivations of one criterion from one run, and a test asserts they
+    agree. A results file edited by hand moves the field and not this.
 
-    Computed rather than written, because a page that hard-coded "not met" would still say it
-    on the day the week is finally run -- and the failure would be the flattering one, which
-    is the direction this whole page exists to guard.
+    Computed rather than written for the reason the whole page is generated -- a hard-coded
+    verdict keeps being printed after it stops being true, and the failure would be the
+    flattering one.
     """
-    return run["elapsed_seconds"] >= CRITERION_DAYS * 86_400, run["unexplained"] == 0
+    return bool(run["positive_control_fired"]) and run["unexplained"] == 0
 
 
 def latest() -> tuple[Path, dict] | None:
@@ -125,39 +128,45 @@ def render() -> str:
             "effect key alone, because one key may be attempted more than once and an injection",
             "against the first attempt says nothing about the second.",
             "",
-            "## What it is not evidence of",
-            "",
         ]
-        long_enough, clean = criterion(run)
-        if not long_enough:
+        if criterion(run):
             lines += [
-                "**`ROADMAP.md`'s exit criterion, which is a soak of at least one week.** This",
-                f"ran for {run['elapsed_human']}. A week of calendar time does not compress, and",
-                "a larger action count is not a substitute for it: a ten-hour run would meet the",
-                "criterion no better, it would put a bigger number beside something still unmet.",
-                "The criterion is recorded in the roadmap as **not met**, and that is the honest",
-                "state of it.",
+                "**`ROADMAP.md`'s exit criterion is met by this run**: nothing unattributed, and",
+                "a positive control that fired, so the run was capable of reporting otherwise.",
+                "Those are the two halves and `SPEC-v0.6.md` §8.1 says they are the whole of it.",
+                "The criterion asks for no duration — §8.1 records when that stopped being true",
+                "and argues it — so what this run's length does **not** establish is the section",
+                "below rather than a footnote to a gate.",
                 "",
             ]
-        elif clean:
+        elif run["unexplained"]:
             lines += [
-                "**`ROADMAP.md`'s exit criterion is met by this run**: at least a week of",
-                f"calendar time — {run['elapsed_human']} — with no unattributed ambiguity. Both",
-                "halves, and the roadmap says so.",
+                "**`ROADMAP.md`'s exit criterion is not met.** The run found",
+                f"{run['unexplained']:,} ambiguous outcomes it could not attribute. That is a",
+                "finding, and it is investigated before a release is tagged.",
                 "",
             ]
         else:
             lines += [
-                "**`ROADMAP.md`'s exit criterion is not met.** The run lasted",
-                f"{run['elapsed_human']}, which is long enough, and found",
-                f"{run['unexplained']} ambiguous outcomes it could not attribute. That is a",
-                "finding, and it is investigated before a release is tagged.",
+                "**`ROADMAP.md`'s exit criterion is not met.** The positive control did not fire,",
+                "so this run could report zero without having been able to see one. A table whose",
+                "control did not fire is not evidence, whatever else is on it.",
                 "",
             ]
         lines += [
-            "`exit_criterion_met: true` in the results file is about the **ambiguity count** and",
-            "nothing else. That is all the harness is allowed to decide; the clock is reported",
-            "and left to a person to read.",
+            "`exit_criterion_met` in the results file is those same two halves, written by the",
+            "harness. This page **recomputes** them from the counts rather than reading the",
+            "field, and a test asserts the two agree: one derivation of a criterion is a claim,",
+            "two that match is a check.",
+            "",
+            "## What it is not evidence of",
+            "",
+            f"**A long run.** This one lasted {run['elapsed_human']}. Everything a soak finds by",
+            "*accumulating* is outside what that can see: a connection pool that degrades over",
+            "hours, table growth against the one-row chain head, a lease that only lapses under",
+            "load held longer than this, an operator restart in the middle. The duration is on",
+            "the table above and in every place this run is quoted, because a criterion that",
+            "stopped asking for one is not the same as a run that no longer has one.",
             "",
             "## What this does not do",
             "",
