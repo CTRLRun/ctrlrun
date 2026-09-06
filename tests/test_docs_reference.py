@@ -88,7 +88,6 @@ def test_every_rendered_api_signature_is_the_one_python_would_accept():
     is the check that would have caught it.
     """
     import inspect
-    import re
 
     import ctrlrun
 
@@ -283,7 +282,6 @@ def test_every_quoted_verify_transcript_is_one_verify_actually_prints():
     except the `policy` line, whose absolute path is machine-specific and is labelled as such
     on both pages.
     """
-    import re
     import subprocess
     import sys
     import tempfile
@@ -341,7 +339,6 @@ def test_every_api_page_says_how_to_import_the_thing_it_documents():
     `JWTIdentityProvider`, `AcsControlHook` and `serve` all raise `MissingDependency` without
     their extra, and no page said which.
     """
-    import re
 
     pages = sorted((DOCS / "reference" / "api").glob("*.mdx"))
     assert len(pages) > 50, len(pages)

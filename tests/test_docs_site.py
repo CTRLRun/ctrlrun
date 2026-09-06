@@ -23,7 +23,6 @@ if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
 def _published() -> set[str]:
     """Every page path `docs.json` lists, so a Markdown document that is a site page is tested
     like one and a Markdown document that is not is left alone."""
-    import json
 
     found: set[str] = set()
 
@@ -89,7 +88,16 @@ def _body(page: Path) -> str:
     return _FRONTMATTER.sub("", page.read_text(encoding="utf-8"), count=1)
 
 
-_SCRIPT = re.compile(r"<script.*?</script>", re.S)
+# The end tag is matched the way a browser's parser reads one, not the way it is usually typed.
+# Tag names are case-insensitive; whitespace is allowed around the slash and the name; and an
+# end tag carrying attribute-like text -- `</script bar>` -- still closes the element, because
+# the parser ignores what it finds there rather than refusing the tag. A filter that misses any
+# of those spellings leaves the block in the text, where a structured-data payload counts
+# against the page's prose budget, which is the one thing this helper exists to prevent.
+#
+# `\bscript\b` on both ends so that a tag merely beginning with those letters -- `<scriptish>`
+# -- neither opens nor closes a block.
+_SCRIPT = re.compile(r"<\s*script\b.*?<\s*/\s*script\b[^>]*>", re.S | re.I)
 
 
 def _prose(page: Path) -> str:
@@ -349,3 +357,47 @@ actions:
             if found and "reaches a decision" not in line:
                 wrong.append(f"{page.name}: {line.strip()[:90]!r}")
     assert wrong == [], wrong
+
+
+@pytest.mark.parametrize(
+    ("opening", "closing"),
+    [
+        ("<script", "</script>"),
+        ("<SCRIPT", "</SCRIPT>"),
+        ("<script", "</script >"),
+        ("<script", "</ script>"),
+        ("<script", "</SCRIPT\n>"),
+        ("<script", "</script bar>"),
+        ("< script", "</script\t\n bar>"),
+    ],
+    ids=[
+        "plain",
+        "upper-case",
+        "space-before-gt",
+        "space-after-slash",
+        "newline",
+        "attribute-like-text",
+        "space-in-start-tag-and-junk-in-end-tag",
+    ],
+)
+def test_the_prose_filter_strips_a_script_block_however_its_tags_are_written(
+    tmp_path: Path, opening: str, closing: str
+):
+    """Every spelling of the tags closes the same block, and the word budget must see none of it.
+
+    HTML tag names are case-insensitive and an end tag may carry whitespace before its `>`. A
+    filter that misses a spelling leaves the block in the text, where a structured-data payload
+    -- markup for a search engine, not words a reader reads -- is counted against the page's
+    budget and can push a page over it for a reason no author could see.
+    """
+    page = tmp_path / "page.mdx"
+    page.write_text(
+        f'---\ntitle: t\n---\n\nvisible prose\n\n{opening} type="application/ld+json">\n'
+        f'{{"@type": "SoftwareApplication", "hidden": "wordone wordtwo"}}\n{closing}\n',
+        encoding="utf-8",
+    )
+
+    prose = _prose(page)
+
+    assert "visible prose" in prose
+    assert "wordone" not in prose, f"{opening} ... {closing} reached the word budget"

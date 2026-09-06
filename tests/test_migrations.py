@@ -441,7 +441,6 @@ def test_T149b_the_recording_is_inside_the_migration_transaction(tmp_path, monke
     `_apply`: a first attempt at this test built its own copy of the logic and therefore proved
     nothing about the code -- the mutation stayed green.
     """
-    import sqlite3
 
     import ctrlrun.migrations as migrations
 
@@ -480,7 +479,6 @@ def test_T149c_a_failed_migration_leaves_no_transaction_open():
     residual is real -- the next writer meets `database is locked` -- so this opens that window
     on purpose rather than reading past it.
     """
-    import sqlite3
 
     import ctrlrun.migrations as migrations
 
@@ -529,7 +527,6 @@ def test_T149d_concurrent_opens_all_succeed(tmp_path, shape):
     handler does not cover -- which `_enable_wal` fixes by treating another process winning that
     race as the success it is. Measured before: 38 of 60 and 5-of-6-per-trial. After: 120 of 120.
     """
-    import sqlite3
 
     import ctrlrun.migrations as migrations
 
