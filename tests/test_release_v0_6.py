@@ -84,8 +84,8 @@ def _load(name: str) -> set[str]:
 #: list this way, and this half of it is.
 DISCLAIMS: dict[str, tuple[str, ...]] = {
     "README.md": (
-        "it by `seq`. **This detects alteration, and alteration is not authorship: receipts are not signed",  # noqa: E501
-        "and the chain is no evidence of who wrote one.** Nor is it tamper-proof — it does not survive an",  # noqa: E501
+        "- The receipt chain detects alteration, and alteration is not authorship. Receipts are not",  # noqa: E501
+        "signed, the chain is no evidence of who wrote one, and it is not tamper-proof: it does not",  # noqa: E501
     ),
     "CHANGELOG.md": (
         '- **`docs/ROADMAP.md`\'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the',  # noqa: E501

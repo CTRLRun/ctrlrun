@@ -636,8 +636,8 @@ def test_T139_the_adapter_section_says_when_you_do_not_need_one_up_front():
     """
     text = _readme()
 
-    assert "## Using it inside an agent framework" in text
-    section = text.split("## Using it inside an agent framework", 1)[1]
+    assert "## Three ways to use it" in text
+    section = text.split("## Three ways to use it", 1)[1]
     section = section.split("\n## ", 1)[0]
     opening = section.strip().split("\n\n", 1)[0]
 
@@ -652,7 +652,7 @@ def test_T139_the_adapter_section_names_prevention_and_attribution():
     """§7 item 4 makes this the sentence a security reviewer reads first, so the README carries
     it too rather than leaving it to each adapter's own page."""
     text = _readme()
-    section = text.split("## Using it inside an agent framework", 1)[1].split("\n## ", 1)[0]
+    section = text.split("## Three ways to use it", 1)[1].split("\n## ", 1)[0]
 
     assert "prevention" in section and "attribution" in section
     assert "ctrlrun-langgraph" in section and "ctrlrun-openai-agents" in section

@@ -395,7 +395,7 @@ def test_the_job_summary_carries_the_not_applicable_rows_in_full():
 
 def _readme_verify_section() -> str:
     readme = _repository_file(README)
-    section = readme.split("## Does it hold in *your* setup?")[1]
+    section = readme.split("## Prove it holds in your setup")[1]
     return section.split("\n## ")[0]
 
 
