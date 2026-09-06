@@ -120,6 +120,16 @@ that is not gone is what you wanted. Query the warehouse for `r_103`, then
 `ctrlrun resolve purge:r_103 --committed` or `--failed`, and let the agent's next attempt
 follow from that.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/data-deletion-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A CRM-update agent](/cookbook/crm-update-agent).

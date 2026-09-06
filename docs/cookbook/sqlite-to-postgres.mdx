@@ -103,6 +103,16 @@ treats it as unknown and re-reads the row to find out which; only if the re-read
 refuse to proceed. Your executor's lost replies are handled as before. Resolve them with
 `ctrlrun resolve --store-url …` from any host.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/sqlite-to-postgres
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Run on Postgres](/guides/run-on-postgres): the schema, the grants, failover.

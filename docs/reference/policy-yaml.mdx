@@ -117,6 +117,12 @@ actions:
 
 ## What a version adds
 
+**Declare the lowest version that has every key you use.** `v2` for `effect:`, `v3` for `mode:` or
+`authority:`, `v4` for `controls` or `data`. A newer number changes nothing until one of its keys
+appears in the file, so a `ctrlrun.policy/v2` document on this site is not behind; it uses no key
+that `v3` or `v4` added. What a version buys is the refusal in the third column: the key an older
+reader would have silently misread is one it refuses instead.
+
 | Schema | Adds | An older reader would |
 |---|---|---|
 | `ctrlrun.policy/v1` | `schema`, `actions`, `decision`, `rules`, `when` | |

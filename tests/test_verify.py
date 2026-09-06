@@ -121,17 +121,34 @@ def test_T100_the_authority_example_passes_every_non_authority_guarantee():
     assert report.exit_code == 0
 
 
-def test_T100_a_v1_document_with_no_templates_and_no_grants():
-    """`ctrlrun.example.yaml`: G1, G2, G6 and G10 applicable and passing, the rest N/A."""
+def test_T100_the_starter_policy_exercises_every_non_authority_guarantee():
+    """`ctrlrun.example.yaml`, what `ctrlrun init` writes: a v2 document with an `effect:` on the
+    refund and on the namespace delete, so G3, G4 and G5 are exercised rather than reported not
+    applicable. Only G8 and G9 are N/A, the two that need a grant, because the starter has none.
+    """
     report = run(EXAMPLE_POLICY)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G6", "G10", "G11"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G10", "G11"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
     assert results["G1"].action == "k8s.delete_namespace"
     assert results["G10"].action == "customer.read"
-    for gid in ("G3", "G4", "G5"):
-        assert results[gid].status is Status.NOT_APPLICABLE
+    for gid in ("G8", "G9"):
+        assert results[gid].status is Status.NOT_APPLICABLE, gid
+    assert report.exit_code == 0
+
+
+def test_T100_a_v1_document_with_no_templates_and_no_grants():
+    """`examples/policies/payments.yaml`: G1, G2, G6 and G10 applicable and passing, the rest
+    N/A. This was the starter's row until the starter grew templates; the v1 template keeps
+    the shape a first-run report has when nothing declares an effect."""
+    report = run(V1_PAYMENTS)
+    results = _by_id(report)
+
+    for gid in ("G1", "G2", "G6", "G7", "G10", "G11"):
+        assert results[gid].status is Status.PASS, (gid, results[gid].reason)
+    for gid in ("G3", "G4", "G5", "G8", "G9"):
+        assert results[gid].status is Status.NOT_APPLICABLE, gid
     assert report.exit_code == 0
 
 

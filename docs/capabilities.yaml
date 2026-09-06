@@ -35,7 +35,7 @@ capabilities:
 
   - id: one-effect-once
     name: One effect, once
-    description: One logical effect executes once, across threads, processes and hosts.
+    description: One logical effect happens at most once, across threads, processes and hosts.
     guarantee: true
     ways_in:
       decorator: true
@@ -43,7 +43,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: concepts/effect-keys
-    claim: One logical effect executes once, across threads, processes and hosts.
+    claim: One logical effect happens at most once, across threads, processes and hosts.
 
   - id: ambiguous-outcomes
     name: Unknown is not failed

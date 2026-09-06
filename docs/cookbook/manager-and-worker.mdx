@@ -177,6 +177,16 @@ A scale call that timed out may have applied. Read the deployment's replica coun
 `ctrlrun resolve scale:prod-eu:checkout:6 --committed` or `--failed`. A worker whose grant has
 since been revoked cannot retry either way; the resolution is the manager's or a human's.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/manager-and-worker
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A payout agent with maker/checker](/cookbook/payout-maker-checker).

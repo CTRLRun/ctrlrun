@@ -7,7 +7,13 @@ Each recipe is a situation an agent is put in, across money, infrastructure, per
 records and communications, and shows the policy, the code against a stand-in remote, what the
 agent sees when it is refused or asked, the receipt, and what to do when an effect's outcome is
 unknown. Every runnable block runs offline in this repository's CI, and every recipe with code
-is also a directory under `examples/cookbook/` extracted from its page.
+is also a directory under `examples/cookbook/` extracted from its page. To run one instead of
+reading it:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/refund-agent
+pip install ctrlrun && python main.py
+```
 
 ## Money
 

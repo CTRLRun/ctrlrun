@@ -52,18 +52,19 @@ OBSERVE_BANNER: Final = "OBSERVE MODE — nothing is enforced"
 
 #: `ctrlrun init` writes this. It is `ctrlrun.example.yaml` in the repository, and
 #: `test_the_shipped_example_policy_is_the_one_in_the_repository` keeps the two identical.
-EXAMPLE_POLICY: Final = """# ctrlrun.yaml — action-level autonomy policy (v0.1)
+EXAMPLE_POLICY: Final = """# ctrlrun.yaml — how much autonomy each action gets.
 # Unknown actions are DENIED. There is no default-allow. List what is safe.
-schema: ctrlrun.policy/v1
+schema: ctrlrun.policy/v2
 
 actions:
-  # Reads: autonomous. Declare no effect key on these in code.
+  # Reads: autonomous. Declare no effect on these; nothing to reserve.
   customer.read:
     decision: allow
   invoice.read:
     decision: allow
 
-  # External communication: autonomous in v0.1 (allow_with_log arrives later).
+  # External communication: autonomous here. Add a rule on the recipient's domain
+  # before an agent can reach anyone outside the building.
   email.send:
     decision: allow
 
@@ -71,7 +72,9 @@ actions:
   # Amounts are integer minor units (cents). Floats are rejected.
   # Bound both ends: `amount_lte` alone lets a negative amount through, and a refund of
   # a negative amount is a charge. An upper bound is not a range.
+  # `effect` names the consequence, so the same refund from two workers runs once.
   stripe.refund:
+    effect: "refund:{payment_id}"
     rules:
       - when: { amount_gte: 0, amount_lte: 50000 }      # €0.00 to €500.00
         decision: allow
@@ -83,8 +86,9 @@ actions:
   iam.grant_admin:
     decision: deny
 
-  # Destructive infrastructure: human every time.
+  # Destructive infrastructure: a human every time, and one delete per namespace.
   k8s.delete_namespace:
+    effect: "namespace:{cluster}:{name}"
     decision: approve
 """
 

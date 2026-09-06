@@ -186,17 +186,30 @@ def _render_readme(capabilities: Sequence[Capability]) -> str:
 
 
 def _render_mdx(capabilities: Sequence[Capability]) -> str:
-    lines = [
-        "{/* " + _OPEN_COMMENT.format(format="mdx", what="grid") + " */}",
-        "<Columns cols={2}>",
-    ]
-    for entry in capabilities:
-        lines.append(f'  <Card title="{_attribute(entry.name)}" href="/{entry.page}">')
-        lines.append(f"    {entry.description} Since {entry.since}.")
-        lines.append("  </Card>")
-    lines.append("</Columns>")
+    """The six guarantees as cards a reader sees; everything else folded under one accordion.
+
+    A front door with twenty-six cards is an inventory, and a stranger reads none of it. The
+    six that are guarantees are what the README matrix shows; the rest stay one click away."""
+    lines = ["{/* " + _OPEN_COMMENT.format(format="mdx", what="grid") + " */}"]
+    guarantees = [entry for entry in capabilities if entry.guarantee]
+    others = [entry for entry in capabilities if not entry.guarantee]
+    lines.extend(_mdx_cards(guarantees, indent="  "))
+    lines.append(f'<Accordion title="Everything else it does ({len(others)} more)">')
+    lines.extend(_mdx_cards(others, indent="    "))
+    lines.append("</Accordion>")
     lines.append("{/* end generated */}")
     return "\n".join(lines) + "\n"
+
+
+def _mdx_cards(entries: Sequence[Capability], *, indent: str) -> list[str]:
+    outer = indent[:-2]
+    lines = [f"{outer}<Columns cols={{2}}>"]
+    for entry in entries:
+        lines.append(f'{indent}<Card title="{_attribute(entry.name)}" href="/{entry.page}">')
+        lines.append(f"{indent}  {entry.description} Since {entry.since}.")
+        lines.append(f"{indent}</Card>")
+    lines.append(f"{outer}</Columns>")
+    return lines
 
 
 def _render_text(capabilities: Sequence[Capability]) -> str:

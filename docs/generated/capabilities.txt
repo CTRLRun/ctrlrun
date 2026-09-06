@@ -1,6 +1,6 @@
 generated from docs/capabilities.yaml (text) — edit the YAML, never this list
 - Approval binding: An approval is bound to the exact action; a mutated or replayed one is refused.
-- One effect, once: One logical effect executes once, across threads, processes and hosts.
+- One effect, once: One logical effect happens at most once, across threads, processes and hosts.
 - Unknown is not failed: An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry.
 - Fail closed: An unknown action, a missing policy or a missing principal is denied.
 - Authority and delegation: With authority on, every principal needs a grant, and delegation cannot widen one.

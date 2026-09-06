@@ -158,6 +158,16 @@ runs `ctrlrun resolve restart:prod-eu:checkout --committed` or `--failed`. For a
 in-band error means it did nothing, set `mcp: {not_executed_on_error: true}` on the action and
 such errors become `FAILED` rather than unknown.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/protect-an-mcp-server
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [The gateway in five minutes](/mcp/gateway-in-5-minutes): the production commands and the full code table.

@@ -120,6 +120,16 @@ then `ctrlrun resolve grant:ana@example.com:editor --committed` or `--failed`. G
 twice is usually idempotent at the provider, but the receipt should say what happened, not what
 was assumed.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/iam-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A credential-rotation agent](/cookbook/credential-rotation-agent).

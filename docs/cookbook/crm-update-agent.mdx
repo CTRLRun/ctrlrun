@@ -136,6 +136,16 @@ crm:c_1:phone:8 --committed`; if not, `--failed`. For a merge whose reply was lo
 which record still exists before resolving: a merge is the one update here that cannot be
 undone by another update.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/crm-update-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A data-deletion agent under a retention rule](/cookbook/data-deletion-agent).

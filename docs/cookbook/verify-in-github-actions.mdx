@@ -104,6 +104,16 @@ blind retry is refused. Your store is never opened, so nothing here can leave a 
 ambiguous. An `AMBIGUOUS` in your own store is the agent's, and the
 [resolve recipe](/cookbook/resolve-an-ambiguous-effect) is for it.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/verify-in-github-actions
+pip install ctrlrun && bash run.sh
+```
+
 ## Next
 
 - [Verify in CI](/guides/verify-in-ci): inputs, outputs and publishing the badge.
