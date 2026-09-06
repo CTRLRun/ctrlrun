@@ -1,15 +1,16 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg">
-    <img src="docs/assets/wordmark-light.svg" alt="CTRLRun" width="300">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/wordmark-light.svg" alt="CTRLRun" width="300">
   </picture>
 </p>
 
 <p align="center">
   <strong>The last check before an AI agent does something it can't undo.</strong><br>
   Autonomy belongs to the action, not the agent.<br>
-  Every consequential action happens once, exactly as approved, or not at all — and leaves a receipt.<br>
+  A consequential action happens at most once, exactly as approved, and leaves a receipt — and when the outcome is unknown, CTRLRun says so instead of guessing.<br>
   <br>
+  A Python library that sits between the decision to act and the call that acts.<br>
   Runs in production on a single file, or on Postgres across hosts. Apache-2.0.
 </p>
 
@@ -26,7 +27,7 @@
 <!-- end generated -->
 
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
+  <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
 </p>
 
 ## The refund that happened twice
@@ -153,6 +154,28 @@ Every protected call, whichever way it arrives, goes through the same six steps:
 6. **Record.** A portable JSON receipt: who, what, decision, approval, effect key, outcome, and
    the hash of the policy that decided it, chained to the receipt before it.
 
+## New in 0.6: the guarantees stop depending on one process
+
+Every guarantee before this release was a guarantee about one process holding one SQLite file.
+`BEGIN IMMEDIATE` is a whole-database write lock on a local file; take the file away, put the
+store on another host, and *one effect, once* has to be re-earned by a different mechanism.
+
+- **Postgres** — `pip install "ctrlrun[postgres]"`, one URL. The same `StateStore` protocol,
+  extended by nothing, graded by the suite written for SQLite rather than one written for it.
+- **Schema migrations**, automatic at open and forward-only, with no flag that opens a database
+  un-migrated. An older binary against a newer schema refuses immediately.
+- **Recovery after a crash** — what a restarted worker may conclude, and what nothing sweeps.
+- **Receipt integrity** — each receipt carries the hash of the one before it, so an edit, a
+  deletion from the middle or a reordering is detected and named by `seq`. It detects
+  **alteration**, which is not authorship: receipts are not signed.
+- **Policy versioning** — every receipt records the policy that decided it, so a receipt from six
+  months ago says what the rules were rather than what they are now.
+- **A store conformance suite**, so a second backend is graded rather than described.
+
+[`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) has the entry, including the two subcommands that
+ride along in this release without being part of the milestone: `ctrlrun scan` and
+`ctrlrun mcp-operator`.
+
 ## Three ways to use it
 
 **You probably do not need an adapter.** `@protect` covers anything running in this process:
@@ -224,7 +247,7 @@ actions:
     decision: allow
 ```
 
-Everything but `tools/call` is relayed untouched. [`docs/mcp/overview.mdx`](docs/mcp/overview.mdx)
+Everything but `tools/call` is relayed untouched. [`ctrlrun.dev/mcp/overview`](https://ctrlrun.dev/mcp/overview)
 is the MCP section of the documentation: the gateway, this documentation as an MCP server, and
 what is planned. A lost response over the wire blocks the
 retry exactly as it does in process, and the gateway prints, on the line that starts it, every
@@ -240,8 +263,8 @@ makes. There is never a second place to say yes.
 
 | | reuses | binding |
 |---|---|---|
-| [`ctrlrun-langgraph`](adapters/langgraph/README.md) | `interrupt()` and the checkpointer | **prevention** — the resumption carries the arguments and core re-checks them against the hash |
-| [`ctrlrun-openai-agents`](adapters/openai-agents/README.md) | the SDK's tool-approval interruption | **attribution** — the SDK records *that* a call was approved, not what its arguments were |
+| [`ctrlrun-langgraph`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/langgraph/README.md) | `interrupt()` and the checkpointer | **prevention** — the resumption carries the arguments and core re-checks them against the hash |
+| [`ctrlrun-openai-agents`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/openai-agents/README.md) | the SDK's tool-approval interruption | **attribution** — the SDK records *that* a call was approved, not what its arguments were |
 
 ```console
 $ pip install ctrlrun-langgraph
@@ -251,7 +274,7 @@ You build the `Control` with your policy, store, identity provider and authority
 hand it over: an adapter never constructs one and never supplies a principal. Adapters ship on
 their own version line, `adapters-langgraph-1.0` and never `0.6.1`, because an adapter breaks
 when its framework makes a breaking release, which is not a kernel event.
-[`docs/adapters.md`](docs/adapters.md) has the three ways in and how to write one for a
+[`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the three ways in and how to write one for a
 framework not listed here.
 
 ## Write down what the agent may do
@@ -319,9 +342,9 @@ separately, authority first, and combine as the **stricter of the two**. A princ
 if it is provably a subset of its parent on every dimension, at creation and again at every
 evaluation, omitting a dimension the parent constrains is rejected rather than inherited, and
 `ctrlrun revoke` cuts a chain of any depth with one write.
-[`docs/authority.md`](docs/authority.md) has it in plain language.
+[`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) has it in plain language.
 
-The nine files under [`examples/policies/`](examples/policies/) are starting points for
+The nine files under [`examples/policies/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/policies) are starting points for
 payments, devops, HR, legal, security and others. Adapt them; none is a drop-in.
 
 **Roll it out with `mode: observe` first.** One top-level line runs every real decision against
@@ -389,10 +412,10 @@ G11  an altered receipt is detected   PASS  invoice.read
 
 The badge at the top of this page means the **declared guarantees pass**: every guarantee this
 configuration can exercise was exercised, and none failed. It does not mean secure, safe,
-compliant, certified or audited, and [`docs/verify.md`](docs/verify.md#what-the-badge-means)
+compliant, certified or audited, and [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
 says on the same screen what verify cannot see: your executors, your `reconcile` hooks, where
 you put the decorator, your deployment, and whether your policy is the right policy. There is a
-[GitHub Action](docs/verify.md#in-ci):
+[GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#in-ci):
 
 ```yaml
       - uses: CTRLRun/ctrlrun@main
@@ -415,8 +438,8 @@ The six guarantees, and which of the three ways in carries each:
 | **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
 <!-- end generated -->
 
-**It guarantees**, with a test behind every line in [`docs/CLAIMS.md`](docs/CLAIMS.md), and
-[`docs/how-this-is-built.md`](docs/how-this-is-built.md) says how those tests came to exist:
+**It guarantees**, with a test behind every line in [`docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/CLAIMS.md), and
+[`docs/how-this-is-built.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/how-this-is-built.md) says how those tests came to exist:
 
 - An approval is bound to the exact action a human saw, is used once, expires, and is refused
   for a mutated or replayed action.
@@ -451,13 +474,22 @@ The six guarantees, and which of the three ways in carries each:
   opens a database un-migrated. An older binary against a newer schema refuses immediately.
 - Releases carry PyPI provenance attestations from GitHub Actions: trusted publishing, no API
   token anywhere, and an attestation on every distribution naming the workflow that built it.
-- `ctrlrun approve`, `deny`, `resolve`, `inspect`, `receipts` and `stats` work from the shell
-  against any store, and `WebhookApprovalProvider` sends an approval request to a webhook, such
-  as Slack, and takes the answer back through the same grant calls. `pip install "ctrlrun[otel]"`
-  exports one OpenTelemetry span per action, one span event per step, and argument values stay
-  out of it unless you ask for them. Receipts in a `ctrlrun.policy/v4` document can cite the
-  `controls:` an action satisfies, and a rule can condition on the `data:` labels present in an
-  action's arguments.
+- `ctrlrun approve`, `deny`, `resolve`, `inspect`, `receipts`, `effects` and `stats` work from
+  the shell against any store, and `ctrlrun mcp-operator` exposes those same read and write
+  commands over MCP, so the person who has to answer an approval can answer it from the
+  assistant they are already talking to. It authenticates who answered and records it; it does
+  not check that they were entitled to.
+- `ctrlrun scan` reads a Python tree and a policy document and reports the consequential call
+  sites and policy entries CTRLRun is **not** covering — the gap between *installed* and *in the
+  path*. It reports what it found where it looked, says on every run what it misses by
+  construction, and has no score, no percentage and no badge: a number that improves when the
+  vocabulary is shortened is a number that will be.
+- `WebhookApprovalProvider` sends an approval request to a webhook, such as Slack, and takes the
+  answer back through the same grant calls. `pip install "ctrlrun[otel]"` exports one
+  OpenTelemetry span per action, one span event per step, and argument values stay out of it
+  unless you ask for them. Receipts in a `ctrlrun.policy/v4` document can cite the `controls:` an
+  action satisfies, and a rule can condition on the `data:` labels present in an action's
+  arguments.
 
 **It can't**, and does not claim to:
 
@@ -468,14 +500,19 @@ The six guarantees, and which of the three ways in carries each:
 - The receipt chain detects alteration, and alteration is not authorship. Receipts are not
   signed, the chain is no evidence of who wrote one, and it is not tamper-proof: it does not
   survive an administrator who can rewrite every row including the chain head, and erasing the
-  end of the log costs two statements. [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) states
+  end of the log costs two statements. [`docs/THREAT_MODEL.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/THREAT_MODEL.md) states
   what remains open.
 - `ctrlrun verify` cannot see your executors. An executor that raises `NotExecuted` after the
   remote acted turns the one retryable exception into a licence to act twice, and nothing here
   can check that for you.
+- **CTRLRun does not detect prompt injection**, and nothing here reads the agent's instructions
+  to decide whether they were poisoned. What the table above claims is narrower and is the part
+  that holds: an injected instruction still has to get past a grant the agent does not hold, an
+  amount that needs a human, and an approval bound to the recipient the human saw. That is
+  containment of the consequence, not detection of the cause.
 - It does not host models, plan, prompt, retrieve, route, remember or orchestrate. It is not a
   guardrail library, an IAM system, a workflow engine or a compliance product, and it makes no
-  claim about any standard: [`docs/OWASP-AGENTIC-TOP10.md`](docs/OWASP-AGENTIC-TOP10.md) is a
+  claim about any standard: [`docs/OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/OWASP-AGENTIC-TOP10.md) is a
   reading of somebody else's taxonomy against the guarantees, and names the four entries it
   does not address.
 
@@ -492,7 +529,7 @@ SQLite. Choose by how many machines write, not by how serious you are.
 
 <!-- generated from the suite, pyproject and the soak (readme) — run the generator -->
 - **Version 0.6.0 is in development**; [PyPI](https://pypi.org/project/ctrlrun/) has 0.5.0. Python 3.11 and later.
-- **4,152 tests**, every version specified before it was written and every requirement mutation-tested.
+- **4,154 tests**, every version specified before it was written and every requirement mutation-tested.
 - **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
 - **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/production/soak).
@@ -524,12 +561,12 @@ cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no ins
 | MCP | [Overview](https://ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/mcp/gateway-in-5-minutes) |
 | Every key, flag and error | [Reference](https://ctrlrun.dev/reference/policy-yaml) |
 | Compared with other things | [Compare](https://ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://ctrlrun.dev/faq) |
-| Security | [Threat model](https://ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](SECURITY.md) |
+| Security | [Threat model](https://ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](https://github.com/CTRLRun/ctrlrun/blob/main/SECURITY.md) |
 | How this is built, and what is not done | [How this is built](https://ctrlrun.dev/how-this-is-built) |
-| Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](docs/CLAIMS.md) |
-| The contract, per version | [`docs/SPEC-v0.1.md`](docs/SPEC-v0.1.md) · [v0.2](docs/SPEC-v0.2.md) · [v0.3](docs/SPEC-v0.3.md) · [v0.4](docs/SPEC-v0.4.md) · [v0.5](docs/SPEC-v0.5.md) · [v0.6](docs/SPEC-v0.6.md) |
-| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
-| Changelog and roadmap | [`CHANGELOG.md`](CHANGELOG.md), [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/CLAIMS.md) |
+| The contract, per version | [`docs/SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md) · [v0.2](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) · [v0.3](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) · [v0.4](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.4.md) · [v0.5](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.5.md) · [v0.6](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.6.md) |
+| Contributing | [`CONTRIBUTING.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CODE_OF_CONDUCT.md) |
+| Changelog and roadmap | [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md), [`docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ROADMAP.md) |
 
 ## License
 

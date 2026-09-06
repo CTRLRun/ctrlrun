@@ -613,6 +613,50 @@ def test_no_credential_file_is_tracked():
     assert offending == [], offending
 
 
+# --- The README is the PyPI page, so nothing in it is relative -------------------------------
+
+
+def test_the_readme_carries_no_relative_link_and_no_relative_image():
+    """`pyproject.toml` makes `README.md` the PyPI long description, and PyPI is not GitHub.
+
+    PyPI resolves a relative URL against `https://pypi.org/project/ctrlrun/`, so `docs/x.md`
+    404s there and a relative `<img src>` renders as a broken image. Both are correct on
+    GitHub, which is exactly how this got in: v0.5.0's README linked absolutely throughout and
+    carried no images, and the rewrite that gave v0.6 a wordmark, a demo GIF and twenty-three
+    relative links was green on every check this repository had. The README is the one document
+    published to a second site under a different base URL, and it is the only one this applies
+    to.
+
+    **It costs no link coverage.** `tools/docs_audit/links.py` treats
+    `https://github.com/CTRLRun/ctrlrun/blob/<ref>/<path>` as an internal link wearing an
+    absolute URL and resolves it against the checkout, so a dead target still fails there.
+    """
+    text = _readme()
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    targets += re.findall(r'(?:href|src|srcset)="([^"]+)"', text)
+    assert targets, "the README has no links at all, which means this is matching nothing"
+
+    relative = sorted(
+        {
+            target
+            for target in targets
+            if not target.startswith(("https://", "http://", "mailto:", "#"))
+        }
+    )
+    assert relative == [], (
+        "these render as 404s and broken images on PyPI; use "
+        f"https://github.com/CTRLRun/ctrlrun/blob/main/<path> or a ctrlrun.dev URL: {relative}"
+    )
+
+
+def test_the_relative_link_check_would_see_one():
+    """The negative test above proves nothing unless a relative link would actually fail it."""
+    text = "![logo](docs/assets/logo.svg) and [docs](docs/CLAIMS.md) and [ok](https://x.test)"
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    relative = [t for t in targets if not t.startswith(("https://", "http://", "mailto:", "#"))]
+    assert relative == ["docs/assets/logo.svg", "docs/CLAIMS.md"]
+
+
 # --- T139: the README's adapter section, and `docs/adapters.md` -----------------------------
 
 
