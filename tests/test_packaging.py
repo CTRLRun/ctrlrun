@@ -452,7 +452,6 @@ def test_every_test_docs_claims_cites_exists():
     renamed, the row keeps the old one, and the table reads as evidence while pointing at
     nothing. This is cheap and it is the only thing standing between the two.
     """
-    import re
 
     claims = REPO_ROOT / "docs" / "CLAIMS.md"
     if not claims.exists():  # pragma: no cover - not a checkout
@@ -556,7 +555,6 @@ def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
     file, so there is no configuration in which both halves go unchecked: in a checkout this
     loop runs, and in an sdist the other test is what proves the directory should be missing.
     """
-    import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -670,7 +668,6 @@ NEGATORS = ("not ", "no ", "never", "cannot", "n't", "without")
 
 def _claims(text: str) -> list[str]:
     """Sentences using a claim word **affirmatively**."""
-    import re
 
     offending = []
     for sentence in re.split(r"(?<=[.!?])\s+|\n\n", text):
@@ -730,7 +727,6 @@ def test_the_claims_table_line_numbers_point_at_what_they_name():
     be resolved mechanically. A drifted line for a reference with no symbol is not caught here,
     which is stated rather than left to be assumed.
     """
-    import re
 
     claims = REPO_ROOT / "docs" / "CLAIMS.md"
     if not claims.exists():  # pragma: no cover - not a checkout
@@ -803,7 +799,6 @@ def test_every_documented_install_names_a_distribution_this_repository_builds():
     fact and `.github/workflows/publish.yml` is what makes it true; saying otherwise would be
     the kind of loosely-true assertion this suite keeps refusing.
     """
-    import tomllib
 
     root = REPO_ROOT
     with (root / "pyproject.toml").open("rb") as handle:

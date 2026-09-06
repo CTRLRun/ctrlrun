@@ -6,15 +6,28 @@ build-backend = "setuptools.build_meta"
 name = "ctrlrun"
 version = "0.6.0"
 description = "The execution safety layer for AI agents."
+# Mirrors the repository's GitHub topics, so PyPI search and GitHub search agree.
 keywords = [
+    "agent-control-standard",
+    "agent-security",
+    "agentic-ai",
     "ai-agents",
-    "mcp",
+    "ai-safety",
+    "audit-log",
+    "exactly-once",
     "human-in-the-loop",
-    "idempotency",
-    "agent-safety",
     "langgraph",
+    "llm",
+    "llm-security",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
     "openai-agents",
+    "opentelemetry",
+    "owasp",
+    "policy-engine",
     "python",
+    "tool-calling",
 ]
 readme = "README.md"
 requires-python = ">=3.11"

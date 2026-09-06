@@ -413,7 +413,6 @@ def test_the_readme_quotes_the_real_verify_output():
     that lies. The version line is normalised: it moves at every release, and the README is
     not the place that number is kept honest — `pyproject.toml` is.
     """
-    import re
 
     report = run(AUTHORITY_PAYMENTS)
     printed = {
@@ -552,7 +551,6 @@ def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
     broken script passes — which it did, until the line was added. A negative test proves
     nothing unless the thing it forbids would otherwise happen.
     """
-    import json
     import subprocess
 
     script = _publish_script()
@@ -650,7 +648,6 @@ def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
 
 def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
     """A push per green build, for a file nobody edited, is noise in the history."""
-    import json
     import subprocess
 
     script = _publish_script()
