@@ -1,4 +1,7 @@
-# How this is built
+---
+title: "How this is built"
+description: "Specification first, every requirement mutation-tested, independent review, every claim mapped to a test, and what has not been done yet."
+---
 
 CTRLRun is built specification-first, every requirement in it is mutation-tested, anything
 that touches authorization is reviewed by a session that did not write it, and every sentence

@@ -1,4 +1,7 @@
-# CTRLRun and the Agent Control Standard
+---
+title: "The Agent Control Standard"
+description: "What was read, what maps onto CTRLRun's guarantees, where the standard is silent, and how the adapter is built."
+---
 
 What was read, what maps, what does not, and how the adapter is built.
 

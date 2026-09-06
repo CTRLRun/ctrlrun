@@ -110,14 +110,20 @@ else on this site describes the current release.
 
 The sequence this page runs was verified under Node against the same Pyodide build on
 **2026-09-06**: Pyodide 314.0.6, Python 3.14.2, SQLite 3.39.0, `ctrlrun` 0.5.0 from PyPI, all
-five scenarios. The harness is committed as
-[`docs/assets/verify-browser-demo.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-demo.mjs)
-and you can run it yourself:
+five scenarios. Two harnesses are committed, and you can run both:
 
 ```bash
-npm install pyodide
-node docs/assets/verify-browser-demo.mjs
+npm install pyodide jsdom
+node docs/assets/verify-browser-demo.mjs    # Python, the wheel, and the five scenarios
+node docs/assets/verify-browser-wiring.mjs  # this page's button, against a real DOM
 ```
+
+[`verify-browser-demo.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-demo.mjs)
+is the one that proved the demo runs.
+[`verify-browser-wiring.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-wiring.mjs)
+is the one that proves the button on this page gets wired: this site is a single-page
+application, and the first version of the script looked for its container before the page had
+rendered it, so the button did nothing.
 
 ## If it does not run here
 

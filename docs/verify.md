@@ -1,4 +1,7 @@
-# `ctrlrun verify`
+---
+title: "ctrlrun verify"
+description: "Running the guarantee catalogue against your own configuration: the report, the N/A rule, the badge, and what verify cannot see."
+---
 
 Everything CTRLRun guarantees is proven by this repository's tests against this repository's
 configurations. That is the right place to start and the wrong place to stop, because the thing

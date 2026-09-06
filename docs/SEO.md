@@ -98,6 +98,18 @@ are set once in `docs.json` under `seo.metatags`.
 | `reference/exit-codes` | ctrlrun verify exit code | Every `ctrlrun` command exits 0 when it did what it was asked, 1 when CTRLRun refused, 2 on a usage error. |
 | `reference/receipt-and-event-schemas` | ctrlrun receipt json schema | A receipt is one executed action; an event is one step on the way. |
 | `reference/api/index` | ctrlrun Control · ctrlrun protect decorator | Every frozen public name of the package and its extras, one page each. |
+| `architecture/specifications` | ctrlrun specification | Every version of CTRLRun was a specification before it was code. |
+| `ARCHITECTURE` | ctrlrun architecture | The boundary CTRLRun owns, and the six steps every protected call takes. |
+| `THREAT_MODEL` | ctrlrun threat model | What CTRLRun defends against, and what it deliberately does not. |
+| `how-this-is-built` | is ctrlrun trustworthy · how ctrlrun is tested | Specification first, every requirement mutation-tested, every claim mapped to a test. |
+| `verify` | ctrlrun verify guarantees badge | Running the guarantee catalogue against your own configuration. |
+| `adapters` | ctrlrun adapter langgraph openai | The three ways in, and when you do not need an adapter. |
+| `authority` | ctrlrun authority delegation grants | Grants, containment and the omission rule, in plain language. |
+| `postgres` | ctrlrun postgres store | Connection strings, what to grant, migrations, and failover. |
+| `CLAIMS` | ctrlrun claims tests | Every README sentence mapped to the code and the test that proves it. |
+| `ROADMAP` | ctrlrun roadmap v1.0 | What each version asked and answered, and what is not on the list. |
+| `ACS` | agent control standard ctrlrun | What was read, what maps, and where the standard is silent. |
+| `OWASP-AGENTIC-TOP10` | OWASP agentic top 10 mapping | A reading of somebody else's taxonomy against the guarantees CTRLRun tests. |
 
 ## The words that appear once
 

@@ -14,7 +14,7 @@ For Cursor, in `mcp.json`:
 ```json
 {
   "mcpServers": {
-    "ctrlrun-docs": { "url": "https://ctrlrun.mintlify.app/mcp" }
+    "ctrlrun-docs": { "url": "https://docs.ctrlrun.dev/mcp" }
   }
 }
 ```
@@ -24,14 +24,13 @@ For VS Code and other clients that take a `servers` block:
 ```json
 {
   "servers": {
-    "ctrlrun-docs": { "type": "http", "url": "https://ctrlrun.mintlify.app/mcp" }
+    "ctrlrun-docs": { "type": "http", "url": "https://docs.ctrlrun.dev/mcp" }
   }
 }
 ```
 
 Both shapes are the ones Mintlify's documentation gives for a hosted docs server (read
-2026-09-06). The URL is the site's; when this documentation moves to its own domain the path
-stays `/mcp` and the host changes, and this page is updated with it.
+2026-09-06). The path is always `/mcp` on whatever host serves this site.
 
 ## Three questions it can now answer
 
