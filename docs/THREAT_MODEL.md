@@ -1,4 +1,7 @@
-# Threat Model
+---
+title: "Threat model"
+description: "What CTRLRun defends against, what it deliberately does not, and the fail-closed rules that follow from both."
+---
 
 CTRLRun sits in the execution path of consequential actions. This document states what it defends against, what it explicitly does not, and the fail-closed rules that follow. It covers v0.1, v0.2 and v0.3, and grows with the roadmap.
 

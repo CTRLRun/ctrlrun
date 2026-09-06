@@ -1,4 +1,7 @@
-# Adapters
+---
+title: "Adapters"
+description: "The three ways in, when you do not need an adapter, what an adapter is allowed to do, and how to write one for a framework not listed."
+---
 
 ## You probably do not need one
 

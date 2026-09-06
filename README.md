@@ -459,18 +459,22 @@ refund, delete, deploy, grant, revoke, approve, submit, purchase or cancel**, yo
 
 ## Documentation
 
+**[docs.ctrlrun.dev](https://docs.ctrlrun.dev)** is the documentation: concepts, guides, a
+cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no install.
+
 | Section | Where |
 |---|---|
-| Why, and how it is shaped | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| Adapters, and the three ways in | [`docs/adapters.md`](docs/adapters.md) |
-| Authority and delegation, in plain language | [`docs/authority.md`](docs/authority.md) |
-| Running the store on Postgres | [`docs/postgres.md`](docs/postgres.md) |
-| `ctrlrun verify`, the guarantees, and what the badge means | [`docs/verify.md`](docs/verify.md) |
-| Security: threat model, disclosure, how this is built | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`SECURITY.md`](SECURITY.md), [`docs/how-this-is-built.md`](docs/how-this-is-built.md) |
-| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
-| Standards, read against the guarantees | [`docs/OWASP-AGENTIC-TOP10.md`](docs/OWASP-AGENTIC-TOP10.md), [`docs/ACS.md`](docs/ACS.md) |
-| Specifications, v0.1 to v0.6 | [`docs/SPEC-v0.1.md`](docs/SPEC-v0.1.md) · [v0.2](docs/SPEC-v0.2.md) · [v0.3](docs/SPEC-v0.3.md) · [v0.4](docs/SPEC-v0.4.md) · [v0.5](docs/SPEC-v0.5.md) · [v0.6](docs/SPEC-v0.6.md) |
+| Start here | [Why](https://docs.ctrlrun.dev/why) · [60-second quickstart](https://docs.ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://docs.ctrlrun.dev/try-it) |
+| The ideas | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) |
+| Doing something | [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
+| MCP | [Overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
+| Every key, flag and error | [Reference](https://docs.ctrlrun.dev/reference/policy-yaml) |
+| Compared with other things | [Compare](https://docs.ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://docs.ctrlrun.dev/faq) |
+| Security | [Threat model](https://docs.ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://docs.ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](SECURITY.md) |
+| How this is built, and what is not done | [How this is built](https://docs.ctrlrun.dev/how-this-is-built) |
 | Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](docs/CLAIMS.md) |
+| The contract, per version | [`docs/SPEC-v0.1.md`](docs/SPEC-v0.1.md) · [v0.2](docs/SPEC-v0.2.md) · [v0.3](docs/SPEC-v0.3.md) · [v0.4](docs/SPEC-v0.4.md) · [v0.5](docs/SPEC-v0.5.md) · [v0.6](docs/SPEC-v0.6.md) |
+| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
 | Changelog and roadmap | [`CHANGELOG.md`](CHANGELOG.md), [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 
 ## License

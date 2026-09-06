@@ -39,7 +39,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/CTRLRun/ctrlrun"
 Repository = "https://github.com/CTRLRun/ctrlrun"
-Documentation = "https://github.com/CTRLRun/ctrlrun/tree/main/docs"
+Documentation = "https://docs.ctrlrun.dev"
 Changelog = "https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md"
 Issues = "https://github.com/CTRLRun/ctrlrun/issues"
 

@@ -19,7 +19,56 @@ DOCS = REPO_ROOT / "docs"
 if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)
 
-PAGES = sorted(path for path in DOCS.rglob("*.mdx") if "generated" not in path.parts)
+
+def _published() -> set[str]:
+    """Every page path `docs.json` lists, so a Markdown document that is a site page is tested
+    like one and a Markdown document that is not is left alone."""
+    import json
+
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        # Only the strings inside a `pages` array are page paths. A group's own label is a
+        # string too, and on a case-insensitive filesystem the label "Architecture" resolved
+        # to ARCHITECTURE.md and was tested as a page that does not exist.
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key == "pages":
+                    found.update(item for item in value if isinstance(item, str))
+                walk(value)
+
+    walk(json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))["navigation"])
+    return found
+
+
+#: Site pages: the MDX ones, and the Markdown documents `docs.json` publishes. The second half
+#: was missing until the deployed site showed a filename title above each document's own H1 --
+#: eighteen pages no test looked at, because the glob said `*.mdx`.
+PAGES = sorted(
+    [path for path in DOCS.rglob("*.mdx") if "generated" not in path.parts]
+    + [DOCS / f"{slug}.md" for slug in sorted(_published()) if (DOCS / f"{slug}.md").exists()]
+)
+
+#: Long-form documents that predate the site and are read the way a specification is. The word
+#: budget is for pages written to be read in one sitting.
+LONG_FORM = frozenset(
+    {
+        "ARCHITECTURE",
+        "THREAT_MODEL",
+        "CLAIMS",
+        "ROADMAP",
+        "verify",
+        "postgres",
+        "adapters",
+        "authority",
+        "ACS",
+        "OWASP-AGENTIC-TOP10",
+        "how-this-is-built",
+    }
+)
 CONCEPTS = sorted((DOCS / "concepts").glob("*.mdx"))
 WORD_BUDGET = 900
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
@@ -82,6 +131,8 @@ def test_every_page_has_a_title_and_a_description(page: Path):
 
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_ends_with_next_links(page: Path):
+    if page.suffix == ".md":
+        return  # a document read on GitHub too ends where its own text ends
     body = _body(page).rstrip()
     assert "## Next" in body, page.name
     tail = body.split("## Next", 1)[1]
@@ -90,6 +141,8 @@ def test_every_page_ends_with_next_links(page: Path):
 
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_links_to_why_and_to_get_started_or_is_one_of_them(page: Path):
+    if page.suffix == ".md":
+        return  # same reason: read on GitHub too, where a site path resolves to nothing
     slug = page.relative_to(DOCS).with_suffix("").as_posix()
     text = _body(page)
     if slug != "why":
@@ -107,7 +160,7 @@ def test_every_page_is_in_the_navigation(page: Path):
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_but_a_reference_page_fits_the_word_budget(page: Path):
     slug = page.relative_to(DOCS).with_suffix("").as_posix()
-    if slug.startswith("reference/") or slug == "index":
+    if slug.startswith("reference/") or slug == "index" or slug in LONG_FORM:
         return
     words = len(_prose(page).split())
     assert words <= WORD_BUDGET, f"{page.name}: {words} words of prose, budget {WORD_BUDGET}"

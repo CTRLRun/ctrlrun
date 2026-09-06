@@ -54,14 +54,14 @@
     });
   }
 
-  ready(function () {
+  function wire() {
     var container = document.getElementById(CONTAINER);
     if (!container || container.dataset.wired === "yes") return;
-    container.dataset.wired = "yes";
 
     var button = container.querySelector("button");
     var output = container.querySelector("pre");
     if (!button || !output) return;
+    container.dataset.wired = "yes";
 
     var pyodide = null;
 
@@ -103,5 +103,19 @@
     }
 
     button.addEventListener("click", run);
-  });
+  }
+
+  // The site is a single-page app and this script runs once, when the page becomes
+  // interactive: on a first load that can be before React has painted the container, and on a
+  // navigation from another page the script does not run again at all. Both were true on the
+  // deployed site, where the button did nothing. So wiring is attempted now and again on every
+  // DOM change; `wire` is a `getElementById` and a flag check when there is nothing to do, and
+  // the flag lives on the element, so a container React mounts afresh is wired afresh.
+  ready(wire);
+  if (window.MutationObserver) {
+    new MutationObserver(wire).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
 })();

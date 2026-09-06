@@ -1,4 +1,7 @@
-# The OWASP Top 10 for Agentic Applications, read against CTRLRun's guarantees
+---
+title: "OWASP Top 10 for Agentic Applications"
+description: "A reading of somebody else's taxonomy against the guarantees CTRLRun tests, naming the four entries it does not address."
+---
 
 This is a **reading** of somebody else's taxonomy against the guarantees CTRLRun tests. It is
 not a compliance claim, a conformance claim, a certification, or a statement that CTRLRun

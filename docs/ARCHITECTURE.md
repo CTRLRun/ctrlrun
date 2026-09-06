@@ -1,4 +1,7 @@
-# CTRLRun Architecture (v0.1 kernel)
+---
+title: "Architecture"
+description: "The boundary CTRLRun owns, the six steps every protected call takes, the data model, and the key design decisions with their trade-offs."
+---
 
 Context: agent frameworks model work as `model → tool call → response`. That is fine for reads. For writes it is missing the semantics every serious system has around consequential operations: authorization bound to the exact operation, identity of the effect (not the request), atomic reservation, and an honest distinction between *failed* and *unknown*. CTRLRun adds those semantics around the dangerous part and nothing else.
 

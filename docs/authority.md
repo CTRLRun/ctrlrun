@@ -1,4 +1,7 @@
-# Authority: who is acting, and what are they entitled to?
+---
+title: "Authority and delegation"
+description: "Grants, containment and the omission rule in plain language: who may propose an action, and how a delegated grant can only narrow."
+---
 
 Until v0.3, a CTRLRun policy could see the action and nothing else. It answered *how much
 autonomy does this action have* — run it, ask a human, refuse it — and the principal was

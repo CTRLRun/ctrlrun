@@ -1,4 +1,7 @@
-# Claims
+---
+title: "Claims"
+description: "Every sentence of the README mapped to the code that implements it and the test that proves it, re-derived at every release."
+---
 
 Every sentence of the README that asserts something about the shipped code, mapped to the code
 that implements it and the test that proves it.

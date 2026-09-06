@@ -1,4 +1,7 @@
-# Roadmap
+---
+title: "Roadmap"
+description: "What each version asked and answered, from the v0.1 kernel to v1.0, and what is deliberately not on the list."
+---
 
 Dependency-first: every layer depends on the one below being correct. Milestones ship when their tests pass, not on dates. Nothing below v0.1 is in scope for code today.
 

@@ -7,3 +7,7 @@ SEO.md
 capabilities.yaml
 generated/
 assets/
+# The six specifications are the implementers' contract, not user documentation: 111,000
+# words written for somebody building against the kernel, and they stay public on GitHub.
+# docs/architecture/specifications.mdx links to each one.
+SPEC-v*.md

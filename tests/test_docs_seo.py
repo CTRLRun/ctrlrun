@@ -18,7 +18,9 @@ DOCS = REPO_ROOT / "docs"
 if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)
 
-PAGES = sorted(path for path in DOCS.rglob("*.mdx") if "generated" not in path.parts)
+import test_docs_site  # noqa: E402 - one definition of "a site page", not two
+
+PAGES = test_docs_site.PAGES
 TITLE_LIMIT = 60
 DESCRIPTION_LIMIT = 155
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)

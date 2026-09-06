@@ -1,4 +1,7 @@
-# Postgres
+---
+title: "Running on Postgres"
+description: "Connection strings, what to grant, migrations at open, what happens on failover, and what the store does not do for you."
+---
 
 `PostgresStateStore` puts the state store on a database instead of a local file. It implements
 the same `StateStore` protocol as `SQLiteStateStore`, frozen in `SPEC-v0.1.md` §5.3, and extends

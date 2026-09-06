@@ -233,12 +233,13 @@
         ]
       },
       {
-        "tab": "Architecture and specifications",
+        "tab": "Architecture",
         "groups": [
           {
             "group": "Architecture",
             "pages": [
-              "ARCHITECTURE"
+              "ARCHITECTURE",
+              "architecture/specifications"
             ]
           },
           {
@@ -249,17 +250,6 @@
               "security/disclosure",
               "THREAT_MODEL",
               "how-this-is-built"
-            ]
-          },
-          {
-            "group": "Specifications",
-            "pages": [
-              "SPEC-v0.1",
-              "SPEC-v0.2",
-              "SPEC-v0.3",
-              "SPEC-v0.4",
-              "SPEC-v0.5",
-              "SPEC-v0.6"
             ]
           },
           {
@@ -289,7 +279,9 @@
       "og:site_name": "CTRLRun",
       "og:image": "/images/social-preview.png",
       "twitter:card": "summary_large_image",
-      "twitter:image": "/images/social-preview.png"
+      "twitter:image": "/images/social-preview.png",
+      "og:url": "https://docs.ctrlrun.dev",
+      "canonical": "https://docs.ctrlrun.dev"
     },
     "indexing": "navigable"
   },

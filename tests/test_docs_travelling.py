@@ -77,6 +77,16 @@ def test_the_script_does_not_load_sqlite3_as_a_package():
     assert "sqlite3" in HARNESS, "the harness no longer proves sqlite3 is there"
 
 
+def test_the_script_wires_itself_after_the_page_renders():
+    """The site is a single-page app: the script runs once, before React paints the container,
+    and not again on a client-side navigation. Wiring only on DOMContentLoaded left the button
+    dead on the deployed site, so the script watches the DOM as well.
+    `docs/assets/verify-browser-wiring.mjs` proves both halves against a real DOM."""
+    assert "MutationObserver" in SCRIPT
+    assert "subtree: true" in SCRIPT
+    assert (DOCS / "assets" / "verify-browser-wiring.mjs").exists()
+
+
 def test_the_page_tells_a_reader_what_to_do_when_it_does_not_run():
     """A page that can fail in somebody's browser owes them the command that always works.
 
