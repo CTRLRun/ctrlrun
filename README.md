@@ -18,8 +18,8 @@
   <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/v/ctrlrun?color=B8730A&label=pypi" alt="PyPI"></a>
   <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/pyversions/ctrlrun?color=B8730A" alt="Python versions"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://docs.ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
-  <a href="https://docs.ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
+  <a href="https://ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=B8730A" alt="License"></a>
 </p>
@@ -480,7 +480,7 @@ SQLite. Choose by how many machines write, not by how serious you are.
 - **3,941 tests**, every version specified before it was written and every requirement mutation-tested.
 - **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. The roadmap asks for a week; that is not met. [What it does not establish](https://docs.ctrlrun.dev/production/soak).
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. The roadmap asks for a week; that is not met. [What it does not establish](https://ctrlrun.dev/production/soak).
 - **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
 - **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
 
@@ -492,26 +492,26 @@ SQLite. Choose by how many machines write, not by how serious you are.
 - No sector packs. (the policy templates are starting points, not a product)
 <!-- end generated -->
 
-[docs.ctrlrun.dev/production/index](https://docs.ctrlrun.dev/production/index) is the whole section:
+[ctrlrun.dev/production/index](https://ctrlrun.dev/production/index) is the whole section:
 choosing a store, what reservation does under a lost `COMMIT`, migrations, recovery after a
 crash, the receipt chain, the soak, and what to watch once it is running.
 
 ## Documentation
 
-**[docs.ctrlrun.dev](https://docs.ctrlrun.dev)** is the documentation: concepts, guides, a
+**[ctrlrun.dev](https://ctrlrun.dev)** is the documentation: concepts, guides, a
 cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no install.
 
 | Section | Where |
 |---|---|
-| Start here | [Why](https://docs.ctrlrun.dev/why) · [60-second quickstart](https://docs.ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://docs.ctrlrun.dev/try-it) |
-| The ideas | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) |
-| Doing something | [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
-| Running it for real | [Production](https://docs.ctrlrun.dev/production/index) · [Postgres](https://docs.ctrlrun.dev/production/postgres) · [Recovery](https://docs.ctrlrun.dev/production/recovery) · [Operations](https://docs.ctrlrun.dev/production/operations) |
-| MCP | [Overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
-| Every key, flag and error | [Reference](https://docs.ctrlrun.dev/reference/policy-yaml) |
-| Compared with other things | [Compare](https://docs.ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://docs.ctrlrun.dev/faq) |
-| Security | [Threat model](https://docs.ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://docs.ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](SECURITY.md) |
-| How this is built, and what is not done | [How this is built](https://docs.ctrlrun.dev/how-this-is-built) |
+| Start here | [Why](https://ctrlrun.dev/why) · [60-second quickstart](https://ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/try-it) |
+| The ideas | [Concepts](https://ctrlrun.dev/concepts/outcomes-and-ambiguous) |
+| Doing something | [Guides](https://ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/cookbook/index) |
+| Running it for real | [Production](https://ctrlrun.dev/production/index) · [Postgres](https://ctrlrun.dev/production/postgres) · [Recovery](https://ctrlrun.dev/production/recovery) · [Operations](https://ctrlrun.dev/production/operations) |
+| MCP | [Overview](https://ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/mcp/gateway-in-5-minutes) |
+| Every key, flag and error | [Reference](https://ctrlrun.dev/reference/policy-yaml) |
+| Compared with other things | [Compare](https://ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://ctrlrun.dev/faq) |
+| Security | [Threat model](https://ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](SECURITY.md) |
+| How this is built, and what is not done | [How this is built](https://ctrlrun.dev/how-this-is-built) |
 | Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](docs/CLAIMS.md) |
 | The contract, per version | [`docs/SPEC-v0.1.md`](docs/SPEC-v0.1.md) · [v0.2](docs/SPEC-v0.2.md) · [v0.3](docs/SPEC-v0.3.md) · [v0.4](docs/SPEC-v0.4.md) · [v0.5](docs/SPEC-v0.5.md) · [v0.6](docs/SPEC-v0.6.md) |
 | Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
