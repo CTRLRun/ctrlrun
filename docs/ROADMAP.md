@@ -147,6 +147,21 @@ Released individually as `packs/<sector>/`, each when its own review is clean. A
 
 Standards: none of its own. The sector rule above applies in full.
 
+## The operator MCP server ✅ shipped
+
+Not a kernel milestone, and listed here because a reader will look for it. `ctrlrun mcp-operator`
+exposes the operator's read and write commands as MCP tools, so the person who has to answer an
+approval can answer it from their own assistant. It gates no kernel release and none gates it,
+and it lands in whichever release comes next — it is a subcommand of the `ctrlrun` distribution,
+so unlike an adapter it carries no version line of its own. `docs/SPEC-mcp-operator.md` is the
+contract and `docs/SPEC-v0.3.md` §4.3.1 carries its two entry-point rows.
+
+It authenticates *who* answered and records it. It does not check that they were entitled to —
+that is separation of duties, which is still not built, and the specification says so in the
+place a reader would otherwise assume otherwise.
+
+Standards: none new.
+
 ## v0.7 — Multi-agent
 
 - A2A integration: task-bound delegated authority with limits, expiry, and depth.

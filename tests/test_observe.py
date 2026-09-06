@@ -45,7 +45,7 @@ from ctrlrun import (
     protect,
 )
 from ctrlrun.authority import Authority, grant_from_yaml
-from ctrlrun.cli.main import OBSERVE_BANNER, STATS_SCHEMA, main
+from ctrlrun.cli.main import OBSERVE_BANNER, main
 from ctrlrun.errors import AuthorityEscalation
 from ctrlrun.policy import ENFORCE, OBSERVE
 from ctrlrun.receipt import (
@@ -56,6 +56,7 @@ from ctrlrun.receipt import (
     Receipt,
     ReceiptResult,
 )
+from ctrlrun.reporting import STATS_SCHEMA
 
 V3 = "schema: ctrlrun.policy/v3\n"
 

@@ -151,13 +151,14 @@ one, and the page says in the same paragraph that the roadmap's exit criterion i
 
 ## MCP
 
-Three things are true today and one is planned, and the pages say exactly that. Added by
-session 3b.
+Four things are true today and the pages say exactly that. Added by session 3b; the fourth
+row landed with `docs/SPEC-mcp-operator.md`, which is when it stopped being planned.
 
 | Path | Purpose | Query |
 |---|---|---|
-| `mcp/overview` | CTRLRun works with MCP in three ways: enforcement (the gateway in front of any MCP server), learning (this site is an MCP server), discovery (the registries, once listed). A fourth, an operator server for approvers, is labelled PLANNED with the roadmap link and never described in the present tense. | *MCP gateway* · *MCP server human approval* |
+| `mcp/overview` | CTRLRun works with MCP in four ways: enforcement (the gateway in front of any MCP server), answering (the operator server, for approvers), learning (this site is an MCP server), discovery (the registries, once listed). | *MCP gateway* · *MCP server human approval* |
 | `mcp/gateway-in-5-minutes` | For a reader who already runs an MCP server: before/after, the two commands, what the agent sees on deny and on approval-required, the supported revisions, the principal-flag choice and its security note. | *protect MCP server* · *MCP tool call approval gateway* |
+| `mcp/approve-from-your-assistant` | For the person who answers approvals rather than the one who deploys: what `ctrlrun mcp-operator` is, the two flags, a client configuration, a real transcript ending in the receipt that names the approver, and the five things it will not do. | *approve MCP tool call from an assistant* · *MCP human approval server* |
 | `mcp/use-the-docs-from-your-editor` | The exact configuration for this site's MCP server, three questions an assistant can then answer, a screenshot spec. | *ctrlrun mcp docs* |
 
 ## Concepts

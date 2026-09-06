@@ -1566,23 +1566,29 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
     """
     from ctrlrun.cli import main as cli
 
-    assert sorted(cli.main.commands) == sorted(
-        [
-            "approve",
-            "delegate",
-            "demo",
-            "deny",
-            "effects",
-            "gateway",
-            "init",
-            "inspect",
-            "receipts",
-            "resolve",
-            "revoke",
-            "stats",
-            "verify",
-        ]
-    )
+    #: What the CLI offered when v0.6 shipped. §9.4's claim is about *this milestone*, so the
+    #: list stays frozen at what v0.6 saw and anything added afterwards is named separately
+    #: below -- otherwise a later addition would silently rewrite v0.6's central claim.
+    frozen_by_v0_6 = [
+        "approve",
+        "delegate",
+        "demo",
+        "deny",
+        "effects",
+        "gateway",
+        "init",
+        "inspect",
+        "receipts",
+        "resolve",
+        "revoke",
+        "stats",
+        "verify",
+    ]
+    #: Added after v0.6, each on its own version line and each in its own specification.
+    after_v0_6 = ["mcp-operator"]  # SPEC-mcp-operator.md §9.4
+
+    assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)
+    assert not set(frozen_by_v0_6) & set(after_v0_6)
 
 
 def test_T177d_an_expired_lease_is_displayed_as_expired_and_the_display_transitions_nothing(

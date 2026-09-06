@@ -22,19 +22,20 @@ Options:
   --help     Show this message and exit.
 
 Commands:
-  approve   Grant a pending approval request.
-  delegate  Create a delegated grant beneath an existing one.
-  demo      Run the five scenarios, in process, with no network.
-  deny      Refuse a pending approval request.
-  effects   Show the logical effects this store knows about.
-  gateway   Front an MCP server, applying this directory's policy to every...
-  init      Write a starter ctrlrun.yaml and create .ctrlrun/.
-  inspect   Show one action's whole history: proposal, decision, approval,...
-  receipts  Show the receipts this store holds.
-  resolve   Say what actually happened to an effect with an unknown outcome.
-  revoke    Revoke a delegation, and with it every delegation beneath it.
-  stats     Count what this store's receipts say, from the local store and...
-  verify    Run the declared guarantees against this configuration...
+  approve       Grant a pending approval request.
+  delegate      Create a delegated grant beneath an existing one.
+  demo          Run the five scenarios, in process, with no network.
+  deny          Refuse a pending approval request.
+  effects       Show the logical effects this store knows about.
+  gateway       Front an MCP server, applying this directory's policy to...
+  init          Write a starter ctrlrun.yaml and create .ctrlrun/.
+  inspect       Show one action's whole history: proposal, decision,...
+  mcp-operator  Answer approvals from an MCP client, over loopback...
+  receipts      Show the receipts this store holds.
+  resolve       Say what actually happened to an effect with an unknown...
+  revoke        Revoke a delegation, and with it every delegation beneath it.
+  stats         Count what this store's receipts say, from the local store...
+  verify        Run the declared guarantees against this configuration...
 ```
 
 ## ctrlrun init
@@ -241,6 +242,64 @@ Usage: ctrlrun revoke [OPTIONS] DELEGATION_ID
 Options:
   --by TEXT  Who revoked it.  [default: cli:local]
   --help     Show this message and exit.
+```
+
+## ctrlrun mcp-operator
+
+```text
+Usage: ctrlrun mcp-operator [OPTIONS]
+
+  Answer approvals from an MCP client, over loopback (SPEC-mcp-operator.md).
+
+  There is no --principal and no --allow-remote, and both absences are load-
+  bearing: a static principal cannot attribute an answer to a person (§3.1), and
+  a server whose read tools answer without a credential must not be the one that
+  opens a port (§2.1).
+
+Options:
+  --listen TEXT                   HOST:PORT.  [default: 127.0.0.1:8901]
+  --path TEXT                     The MCP endpoint path.  [default: /mcp]
+  --principal-header TEXT         Take the approver's agent from this header,
+                                  set by a proxy that authenticates them.
+  --user-header TEXT              Take the approver's name from this header.
+                                  Required with --principal-header (SPEC-mcp-
+                                  operator §3.2).
+  --environment TEXT              The deployment this console reads. Default:
+                                  $CTRLRUN_ENVIRONMENT, else the policy
+                                  document, else production (SPEC-v0.3 §2.5).
+  --max-body-bytes INTEGER        [default: 1048576]
+  --allow-origin TEXT             Repeatable.
+  --authority FILE                Load the authority: section from a separate
+                                  YAML document (SPEC-v0.3 §8.3).
+  --identity-jwt                  Verify a bearer JWT (ctrlrun[identity]).
+  --identity-jwt-jwks-url TEXT    Fetch keys from this JWKS (HTTPS).
+  --identity-jwt-public-key FILE  A PEM public key file.
+  --identity-jwt-secret-file FILE
+                                  Read the HS* shared secret from here. Never a
+                                  flag value.
+  --identity-jwt-algorithms TEXT  Repeatable, required. There is no default and
+                                  no wildcard.
+  --identity-jwt-issuer TEXT      Matched exactly. Required.
+  --identity-jwt-audience TEXT    Matched by membership. Required.
+  --identity-jwt-token-type TEXT  Required. The token's typ, e.g. at+jwt. Pass
+                                  "" for "this issuer sets no typ".
+  --identity-jwt-header TEXT      [default: authorization]
+  --identity-jwt-agent-claim TEXT
+                                  [default: sub]
+  --identity-jwt-user-claim TEXT  Which claim names the human. Required with
+                                  --identity-jwt (SPEC-mcp-operator §3.2).
+  --identity-jwt-claim TEXT       Repeatable: which verified claims reach the
+                                  receipt. An allow-list.
+  --identity-jwt-leeway FLOAT     [default: 60.0]
+  --identity-jwt-jwks-min-refresh FLOAT
+                                  [default: 30.0]
+  --identity-jwt-http-timeout FLOAT
+                                  [default: 5.0]
+  --store-url TEXT                The store to open. Default:
+                                  $CTRLRUN_STORE_URL, else the SQLite database
+                                  beside the policy (.ctrlrun/state.db, or
+                                  wherever $CTRLRUN_STATE points).
+  --help                          Show this message and exit.
 ```
 
 ## ctrlrun gateway

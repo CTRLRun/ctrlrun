@@ -1029,6 +1029,9 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # SPEC-v0.3 §6.4, §6.5 — build-list item 4.
         "stats",
         "verify",
+        # SPEC-mcp-operator.md §9.4. Not a kernel milestone: it gates no release and none
+        # gates it, and it lands in whichever release comes next.
+        "mcp-operator",
     }
 
 
