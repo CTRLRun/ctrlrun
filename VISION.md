@@ -1,6 +1,6 @@
 # VISION.md
 
-> **This is not a build spec.** Nothing in this document is implemented, and nothing in it may be implemented before the v0.3 milestone. It exists so the long-term shape is written down once and stops leaking into READMEs, schemas, and PRs. Do not derive tasks from this file.
+> **This is not a build spec, and it is not the state of the code.** It was written before v0.1 shipped, so that the long-term shape is written down once and stops leaking into READMEs, schemas, and PRs. What has actually shipped is in [`docs/ROADMAP.md`](docs/ROADMAP.md) and in each version's `docs/SPEC-v0.x.md`; where a section below has since been built, a *Status* line says which version built it and where it differs from the sketch. Everything without one is still a sketch, and nothing here is a commitment. Do not derive tasks from this file.
 
 ---
 
@@ -73,7 +73,7 @@ The hard center, which must remain true however the ecosystem evolves: **exact i
 | Oversight | Approval workflows: roles, M-of-N, sequential, escalation, separation of duties, break-glass |
 | Evidence | Receipts, event ledger, verification, exports (OTel, SIEM) |
 
-## 5. Candidate models (not built; expect them to change on contact with users)
+## 5. Candidate models (sketched before they were built; expect the rest to change on contact with users)
 
 **Authority grant**
 ```yaml
@@ -86,15 +86,27 @@ expires_at: 2026-10-01T18:00:00Z
 ```
 Delegation attenuates, never amplifies: `child ⊆ parent`. Human €100k → finance agent €25k → support agent €2k. A request beyond the chain → DENY, "authority escalation".
 
+*Status: built in v0.3 (`docs/SPEC-v0.3.md`), and `ctrlrun demo`'s fifth scenario is this chain. Subjects address `agent` and `user`, never a claim; omission never means unlimited; authority is opt-in and then fail-closed.*
+
 **Resource / data scope** — permission over *which* records, not just *which* tool: assigned cases only, permitted data categories, purpose, expiry. This is what makes healthcare, legal, and government workable.
+
+*Status: resource patterns shipped with v0.3; the data-scope primitive is v0.6 (`docs/SPEC-v0.6.md`).*
 
 **Consequence taxonomy (candidate)** — OBSERVE · COMMUNICATE · DATA_ACCESS · DATA_DISCLOSURE · DATA_MUTATION · FINANCIAL_EFFECT · PRIVILEGE_CHANGE · ELIGIBILITY_EFFECT · LEGAL_EFFECT · OPERATIONAL_EFFECT · SAFETY_CRITICAL_EFFECT · DESTRUCTIVE_EFFECT. Enables defaults per class. Twelve is probably too many; users will tell us.
 
+*Status: not built, and on every milestone's do-not-build list so far. A policy names actions, not classes.*
+
 **Control registry** — a named organizational reason for a restriction (owner, applies-to consequence, required decision, approver role, version). Receipts reference it, so an auditor can trace *requirement → policy → action → enforcement → oversight → execution → evidence*.
+
+*Status: v0.6, as the kernel-side object a sector pack configures.*
 
 **Recovery** — declarative per-action `on_ambiguous: reconcile` / `on_failure: compensate`. CTRLRun coordinates safety semantics; it never becomes the workflow scheduler. Integrate with Temporal-class runtimes; don't recreate them.
 
+*Status: reconciliation shipped in v0.2 as a hook that resolves an `AMBIGUOUS` effect, and `ctrlrun resolve` is the human path. Compensation and sagas are not built and are on the do-not-build list.*
+
 **Verify** — `ctrlrun verify` runs deterministic adversarial scenarios against a real configuration and reports per-guarantee pass/fail with counterexamples. Badge means "declared guarantees pass", never "secure".
+
+*Status: built in v0.4 (`docs/SPEC-v0.4.md`, `docs/verify.md`). One thing the sketch did not have: a guarantee the configuration cannot exercise reports `not_applicable` with a reason, and not applicable is not a pass.*
 
 ## 6. Standards posture
 
@@ -102,7 +114,7 @@ Align, don't invent: OWASP ACS, MCP, A2A, OAuth, OpenTelemetry, and NIST agent i
 
 ## 7. Sector packs (templates, not engines)
 
-**Templates (v0.2).** A starting-point `ctrlrun.yaml` per sector, written against v0.1 primitives only: devops (prod deploy, DB mutation, deletion) · payments (refund authority, limits) · e-commerce (orders, cancellations, price changes) · insurance (claim authority, payout limits, eligibility) · healthcare (PHI disclosure, data scope, case assignment) · legal (privileged documents, external disclosure, filing/settlement authority) · security (grant/revoke, credentials, isolation) · government (benefits, records, permits) · hr (offers, terminations, compensation changes). Each says on its face that it is a starting point to be adapted, not a configuration to adopt.
+**Templates (shipped in v0.2, `examples/policies/`).** A starting-point `ctrlrun.yaml` per sector, written against v0.1 primitives only: devops (prod deploy, DB mutation, deletion) · payments (refund authority, limits) · e-commerce (orders, cancellations, price changes) · insurance (claim authority, payout limits, eligibility) · healthcare (PHI disclosure, data scope, case assignment) · legal (privileged documents, external disclosure, filing/settlement authority) · security (grant/revoke, credentials, isolation) · government (benefits, records, permits) · hr (offers, terminations, compensation changes). Each says on its face that it is a starting point to be adapted, not a configuration to adopt.
 
 **Full depth (a content track, after v0.6).** The same nine sectors, each with a control registry, approver roles, data scope, consequence defaults, and worked examples. It waits on v0.6 because that is where the control registry and data-scope primitives land, and a pack should be configuration rather than code; it waits on nothing else. Packs are released individually as `packs/<sector>/` under their own version tags — `packs-payments-1.0` and so on — never sharing a version with the kernel, never gating a kernel release and never gated by one. Kernel versions ship correctness; content ships on its own cadence.
 
