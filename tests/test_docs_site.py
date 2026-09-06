@@ -88,12 +88,16 @@ def _body(page: Path) -> str:
     return _FRONTMATTER.sub("", page.read_text(encoding="utf-8"), count=1)
 
 
-# Tag names are case-insensitive and an end tag may carry whitespace before its `>`, so
-# `</SCRIPT >` closes a block exactly as `</script>` does. A filter that misses either leaves the
-# block in the text, where a structured-data payload counts against the page's prose budget --
-# the one thing this helper exists to prevent. `\bscript` rather than `script` so that a tag
-# merely starting with those letters is not treated as the start of one.
-_SCRIPT = re.compile(r"<\s*script\b.*?<\s*/\s*script\s*>", re.S | re.I)
+# The end tag is matched the way a browser's parser reads one, not the way it is usually typed.
+# Tag names are case-insensitive; whitespace is allowed around the slash and the name; and an
+# end tag carrying attribute-like text -- `</script bar>` -- still closes the element, because
+# the parser ignores what it finds there rather than refusing the tag. A filter that misses any
+# of those spellings leaves the block in the text, where a structured-data payload counts
+# against the page's prose budget, which is the one thing this helper exists to prevent.
+#
+# `\bscript\b` on both ends so that a tag merely beginning with those letters -- `<scriptish>`
+# -- neither opens nor closes a block.
+_SCRIPT = re.compile(r"<\s*script\b.*?<\s*/\s*script\b[^>]*>", re.S | re.I)
 
 
 def _prose(page: Path) -> str:
@@ -363,8 +367,18 @@ actions:
         ("<script", "</script >"),
         ("<script", "</ script>"),
         ("<script", "</SCRIPT\n>"),
+        ("<script", "</script bar>"),
+        ("< script", "</script\t\n bar>"),
     ],
-    ids=["plain", "upper-case", "space-before-gt", "space-after-slash", "newline"],
+    ids=[
+        "plain",
+        "upper-case",
+        "space-before-gt",
+        "space-after-slash",
+        "newline",
+        "attribute-like-text",
+        "space-in-start-tag-and-junk-in-end-tag",
+    ],
 )
 def test_the_prose_filter_strips_a_script_block_however_its_tags_are_written(
     tmp_path: Path, opening: str, closing: str
