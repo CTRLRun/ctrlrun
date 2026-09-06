@@ -117,7 +117,7 @@ def test_the_definitional_words_appear_where_the_plan_says():
         assert word in text, f"{slug} does not carry {word!r}"
 
 
-SITE = "https://docs.ctrlrun.dev"
+SITE = "https://ctrlrun.dev"
 
 
 def test_the_site_declares_its_social_image_and_indexing():
