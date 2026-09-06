@@ -29,22 +29,24 @@
   <img src="docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
 </p>
 
-<!-- generated from docs/capabilities.yaml (readme) — edit the YAML, never this table -->
-| Guarantee | `@protect` | Gateway | Adapter |
-|---|---|---|---|
-| **Approval binding** — An approval is bound to the exact action; a mutated or replayed one is refused. | yes | yes | prevention or attribution, per adapter |
-| **One effect, once** — One logical effect executes once, across threads, processes and hosts. | yes | yes | yes |
-| **Unknown is not failed** — An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. | yes | yes | yes |
-| **Fail closed** — An unknown action, a missing policy or a missing principal is denied. | yes | yes | yes |
-| **Authority and delegation** — With authority on, every principal needs a grant, and delegation cannot widen one. | yes | yes | yes |
-| **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
-<!-- end generated -->
+## The refund that happened twice
 
-## What `ctrlrun demo` shows
+An agent refunds €500. The call reaches the provider and commits. The reply is lost on the way
+back, so the agent sees an error — and does what every retrying client does. The customer is
+refunded twice, and nothing in the stack noticed.
+
+The bug is not the retry. It is that the agent had no way to tell *this failed* from *I do not
+know what happened*. Retry libraries, agent frameworks and tool loops collapse those two into
+one, and a write that may already have committed is retried as though it certainly had not.
+
+CTRLRun does not collapse them. A lost reply is `AMBIGUOUS`, never `FAILED`, and a retry against
+an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says what happened.
 
 ```bash
 pip install ctrlrun && ctrlrun demo
 ```
+
+## What `ctrlrun demo` shows
 
 Five ways an agent action goes wrong, and what stops each one, in process, in under a second,
 with no network and no external service. The animation above is the first two. In the first,
@@ -399,6 +401,19 @@ you put the decorator, your deployment, and whether your policy is the right pol
 ```
 
 ## What it guarantees, and what it can't
+
+The six guarantees, and which of the three ways in carries each:
+
+<!-- generated from docs/capabilities.yaml (readme) — edit the YAML, never this table -->
+| Guarantee | `@protect` | Gateway | Adapter |
+|---|---|---|---|
+| **Approval binding** — An approval is bound to the exact action; a mutated or replayed one is refused. | yes | yes | prevention or attribution, per adapter |
+| **One effect, once** — One logical effect executes once, across threads, processes and hosts. | yes | yes | yes |
+| **Unknown is not failed** — An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. | yes | yes | yes |
+| **Fail closed** — An unknown action, a missing policy or a missing principal is denied. | yes | yes | yes |
+| **Authority and delegation** — With authority on, every principal needs a grant, and delegation cannot widen one. | yes | yes | yes |
+| **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
+<!-- end generated -->
 
 **It guarantees**, with a test behind every line in [`docs/CLAIMS.md`](docs/CLAIMS.md), and
 [`docs/how-this-is-built.md`](docs/how-this-is-built.md) says how those tests came to exist:
