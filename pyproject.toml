@@ -49,7 +49,7 @@ ctrlrun = "ctrlrun.cli.main:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "mypy>=2.3",
+    "mypy>=2.3.1",
     "ruff>=0.16",
     # SPEC-v0.4 §4.3 - T115 validates `ctrlrun verify --junit` against the checked-in
     # `tests/data/junit-10.xsd`. JUnit XML has no normative schema, so the schema is a
