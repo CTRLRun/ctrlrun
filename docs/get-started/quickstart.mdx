@@ -1,0 +1,180 @@
+---
+title: "60-second quickstart"
+description: "Protect one function end to end: write a policy, decorate the call, watch a small refund run, a large one wait for a human, an approval bind to the exact action, and read the receipt."
+---
+
+In sixty seconds you will write a policy, protect a refund function, run one refund
+autonomously, have a second one wait for a human, approve it from the shell, watch a mutated
+call refused, and read the receipts. Every block on this page runs offline against a fake remote,
+and the outputs shown are from a real run.
+
+<Steps>
+  <Step title="Write the policy">
+    In an empty directory, save this as `ctrlrun.yaml`. Amounts are integer minor units: cents,
+    not euros. Both ends of every band are bound, because an upper bound alone lets a negative
+    amount through, and a refund of a negative amount is a charge.
+
+    ```yaml runnable
+    schema: ctrlrun.policy/v2
+
+    actions:
+      stripe.refund:
+        effect: "refund:{payment_id}"
+        rules:
+          - when: { amount_gte: 0, amount_lte: 50000 }      # up to €500.00: autonomous
+            decision: allow
+          - when: { amount_gte: 0, amount_lte: 500000 }     # up to €5,000.00: a human
+            decision: approve
+          - decision: deny
+    ```
+
+    Anything not listed here is denied. There is no default-allow.
+  </Step>
+
+  <Step title="Protect the function">
+    Save this as `agent.py`. The decorator names the action and the effect key; the context names
+    who is acting. `stripe` here is a stand-in that records calls instead of making them.
+
+    ```python runnable file=agent.py
+    import sys
+
+    import ctrlrun
+
+
+    class FakeStripe:
+        calls: list[tuple[str, int]] = []
+
+        def refund(self, payment_id: str, amount: int) -> dict:
+            self.calls.append((payment_id, amount))
+            return {"id": f"re_{payment_id}", "amount": amount, "status": "succeeded"}
+
+
+    stripe = FakeStripe()
+
+
+    @ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
+    def refund(payment_id: str, amount: int) -> dict:
+        return stripe.refund(payment_id, amount)
+
+
+    if __name__ == "__main__":
+        with ctrlrun.context(agent="refund-agent"):
+            print("€100 refund:", refund(payment_id="txn_1", amount=10000)["status"])
+            try:
+                refund(payment_id="txn_2", amount=200000)
+            except ctrlrun.ApprovalRequired as pending:
+                print("€2,000 refund: a human decides:", pending.request_id)
+                with open("request_id.txt", "w") as handle:
+                    handle.write(pending.request_id)
+            else:
+                sys.exit("the €2,000 refund ran without a human; the policy is not in force")
+    ```
+
+    Run it once with `python agent.py`:
+
+    ```text
+    €100 refund: succeeded
+    €2,000 refund: a human decides: apr_12b3d3175a95151b1a647df11727b999
+    ```
+  </Step>
+
+  <Step title="Approve it from the shell">
+    The request id is what `ctrlrun approve` takes. The approval is bound to the hash of the
+    exact action a human would see: `stripe.refund`, `txn_2`, €2,000, `refund-agent`.
+
+    ```bash runnable
+    ctrlrun approve "$(cat request_id.txt)"
+    ```
+
+    ```text
+    granted apr_12b3d3175a95151b1a647df11727b999 for sha256:e8702b48316cdd7fd64d120fb2f41fc430d594c8e5c1999e9fa23765a161193c
+    expires 2026-09-06T07:21:18.331Z
+    ```
+
+    The grant names the hash it authorizes and when it lapses. Ids and hashes are generated per
+    run; yours differ.
+  </Step>
+
+  <Step title="Present the approval, and try to abuse it">
+    Save this as `approved.py`. The first call presents the approval for the action it was granted
+    for and runs. The second presents the same approval for a different amount, which matches
+    nothing: the approval was bound to €2,000 and has already been spent.
+
+    ```python runnable file=approved.py
+    import sys
+
+    import ctrlrun
+
+    from agent import refund, stripe
+
+    request_id = open("request_id.txt").read().strip()
+
+    with ctrlrun.context(agent="refund-agent"), ctrlrun.with_approval(request_id):
+        print("€2,000 with approval:", refund(payment_id="txn_2", amount=200000)["status"])
+        try:
+            refund(payment_id="txn_2", amount=500000)
+        except ctrlrun.ApprovalMismatch as refused:
+            print("€5,000 with the same approval: refused,", refused)
+        else:
+            sys.exit("a mutated action ran on a spent approval; that is the bug this exists to stop")
+
+    print("remote refund calls:", len(stripe.calls))
+    ```
+
+    Run it with `python approved.py`:
+
+    ```text
+    €2,000 with approval: succeeded
+    €5,000 with the same approval: refused, approval apr_12b3d3175a95151b1a647df11727b999 authorizes sha256:e8702b48316cdd7fd64d120fb2f41fc430d594c8e5c1999e9fa23765a161193c, not sha256:641673c5e55775713bd90669ad09a2beafb10ee0a89e9a8573c5172abd4a1204
+    remote refund calls: 1
+    ```
+
+    One call reached the fake remote in this process, the approved €2,000. The €5,000 never did.
+  </Step>
+
+  <Step title="Read the receipts">
+    ```bash runnable
+    ctrlrun receipts --last 3
+    ```
+
+    ```text
+    2026-09-06T07:06:18.331Z  ctr_f1f91aa263e46240b37d5fa593733e25  stripe.refund  allow/committed    refund:txn_1  refund-agent
+    2026-09-06T07:06:18.476Z  ctr_5f3ab5aa31cc3d7194b2340747e3d16e  stripe.refund  approve/committed  refund:txn_2  refund-agent
+    2026-09-06T07:06:18.477Z  ctr_b9cb46cffd7de190777ea5fd14ef839f  stripe.refund  approve/blocked    refund:txn_2  refund-agent
+    ```
+
+    Three receipts: the €100 refund that ran on its own, the €2,000 refund that ran on the
+    approval, and the €5,000 attempt, blocked.
+
+    Every executed action has one: who, what, the decision, the approval it used, the effect key,
+    the outcome, and the hash of the policy that decided it. `ctrlrun inspect <action_id>` shows
+    one action's whole history. Both are in `.ctrlrun/receipts.jsonl` and `.ctrlrun/events.jsonl`
+    as one JSON object per line.
+  </Step>
+</Steps>
+
+## What you just saw
+
+- **Per-action policy.** €100 ran, €2,000 waited, €5,000 would have been denied outright.
+- **Approval binding.** The approval matched the exact action it was granted for and nothing else.
+- **Effect keys.** `refund:txn_2` was reserved when the approved call ran; a second worker
+  presenting the same key would have been refused.
+- **Receipts.** Everything above is in the evidence log, in order.
+
+What you did not see is a lost reply. That is the case CTRLRun exists for, and
+[Outcomes and AMBIGUOUS](/concepts/outcomes-and-ambiguous) is where to read it next.
+
+## If it didn't work
+
+- `denied: no principal is available`: the call ran outside `ctrlrun.context(...)`. Every
+  protected call needs a principal, and a missing one is denied.
+- `PolicyError: ... could not be read`: there is no `ctrlrun.yaml` in the working directory.
+  `ctrlrun init` writes a starter.
+- `ActionDenied ... unknown_action`: the action name in the decorator does not match a key under
+  `actions:`. Unknown actions are denied.
+
+## Next
+
+- [Three ways in](/get-started/three-ways-in): decorator, gateway, adapter.
+- [Effect keys](/concepts/effect-keys): what the `effect=` template names, and why it is not a request id.
+- [Why](/why).

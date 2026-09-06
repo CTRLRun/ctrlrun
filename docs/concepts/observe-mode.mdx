@@ -1,0 +1,70 @@
+---
+title: "Observe mode"
+description: "mode: observe runs every real decision against real traffic and records what enforcement would have blocked, without blocking anything, so ctrlrun stats can show the cost of enforcing before you enforce. It executes; it is not a dry run."
+---
+
+Observe mode is one top-level line, `mode: observe`, that makes CTRLRun evaluate every action
+exactly as it would in enforce mode, execute it regardless, and record on the receipt what would
+have been blocked and why. It is how a rollout measures before it enforces. It is not a dry run:
+the executor runs and effects land at remotes.
+
+```yaml runnable
+schema: ctrlrun.policy/v3
+mode: observe
+
+actions:
+  email.send:
+    effect: "email:{message_id}"
+    rules:
+      - when: { to_domain_eq: "example.com" }
+        decision: allow
+      - decision: approve
+```
+
+`mode:` is refused anywhere but the top level, so a file cannot observe one action and enforce
+another; a deployment is in one mode.
+
+## What it records
+
+Every receipt carries `would_have`: the decision enforce mode would have reached and, where it
+would have refused, the first reason, in the order enforce mode checks them, because enforce
+mode stops at the first. A duplicate effect is recorded as one and still runs. After a week:
+
+```console
+$ ctrlrun stats --since 7d
+observed actions            1,284
+would have been blocked        37
+  approval_required            29
+  policy_denied                 6
+  duplicate_effect              2
+```
+
+The numbers are counted from `would_have.blocked_reason` and nothing else, from the local store,
+with no network.
+
+## What it never does
+
+Observe mode asks no human. An `approve` decision is recorded as *would have required approval*
+and the action runs; a real approval request is never written, because a counterfactual is not a
+place to spend a real grant. An adapter's pre-invocation predicate must answer "no approval
+needed" in observe mode for the same reason: a framework that will not invoke a declined tool
+would otherwise let a human's *no* stop an action observe mode promises to run.
+
+## The guarantee it supports
+
+None directly; observe mode is the way to reach the guarantees safely. What it preserves is the
+evidence: every observed action leaves a receipt in the same shape as an enforced one, with the
+counterfactual attached.
+
+## What it does not do
+
+It does not relax a check in enforce mode, and there is no per-action or per-principal observe.
+It does not stop an effect that would have been refused, which is the point and the risk: run it
+on traffic you would run unprotected today, read `ctrlrun stats`, then switch the line to
+`enforce`.
+
+## Next
+
+- [Roll out observe, then enforce](/guides/observe-to-enforce).
+- [Fail closed](/concepts/fail-closed): what enforce mode refuses.
+- [Get started](/get-started/quickstart) · [Why](/why).

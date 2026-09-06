@@ -1,0 +1,175 @@
+---
+title: "CTRLRun"
+sidebarTitle: "Home"
+description: "The execution safety layer for AI agents. Every consequential action happens once, exactly as approved, or not at all, and leaves a receipt."
+mode: "wide"
+---
+
+# The last check before an AI agent does something it can't undo.
+
+Autonomy belongs to the action, not the agent. Every consequential action happens once, exactly
+as approved, or not at all — and leaves a receipt.
+
+CTRLRun is a Python library that sits between an agent's decision to act and the call that acts.
+It binds a human's approval to the exact action they saw, executes one logical effect at most
+once across processes and hosts, treats an unknown outcome as unknown rather than failed, denies
+anything it cannot decide, and records what happened.
+
+```bash
+pip install ctrlrun && ctrlrun demo
+```
+
+## What the demo shows
+
+Five ways an agent action goes wrong, and what stops each one, in under a second with no network.
+The first scenario is the one that explains the product: a refund commits at the remote, the
+reply is lost, the agent retries, and the retry is refused. The customer was refunded once.
+
+```console
+$ ctrlrun demo
+CTRLRun demo — five ways an agent action goes wrong, and what stops it.
+Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, above that are denied.
+
+1. Duplicate effect after a lost response
+
+   refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS
+   agent retries the same refund
+   ✗ BLOCKED — effect may already have committed; blind retry refused
+   remote refund calls: 1
+   only a human moves it on:  ctrlrun resolve refund:txn_1 --committed|--failed
+```
+
+The other four are approval mutation, two agents racing for one effect, approval replay, and an
+agent trying to act outside what was delegated to it. [Try it in your browser](/try-it) runs
+the same demo without an install, or read the full transcript in the
+[repository README](https://github.com/CTRLRun/ctrlrun#what-ctrlrun-demo-shows).
+
+## What it does
+
+{/* generated from docs/capabilities.yaml (mdx) — edit the YAML, never this grid */}
+<Columns cols={2}>
+  <Card title="Approval binding" href="/concepts/approval-binding">
+    An approval is bound to the exact action; a mutated or replayed one is refused. Since v0.1.
+  </Card>
+  <Card title="One effect, once" href="/concepts/effect-keys">
+    One logical effect executes once, across threads, processes and hosts. Since v0.1.
+  </Card>
+  <Card title="Unknown is not failed" href="/concepts/outcomes-and-ambiguous">
+    An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. Since v0.1.
+  </Card>
+  <Card title="Fail closed" href="/concepts/fail-closed">
+    An unknown action, a missing policy or a missing principal is denied. Since v0.1.
+  </Card>
+  <Card title="Authority and delegation" href="/concepts/authority-and-delegation">
+    With authority on, every principal needs a grant, and delegation cannot widen one. Since v0.3.
+  </Card>
+  <Card title="Receipts" href="/concepts/receipts-and-evidence">
+    Every executed action leaves a portable JSON receipt of who, what and outcome. Since v0.1.
+  </Card>
+  <Card title="Per-action policy" href="/reference/policy-yaml">
+    One YAML file decides allow, approve or deny per action and argument. Since v0.1.
+  </Card>
+  <Card title="Operator CLI" href="/reference/cli">
+    Approve, deny, resolve, inspect and count from the shell, against any store. Since v0.1.
+  </Card>
+  <Card title="MCP gateway" href="/guides/gateway-in-front-of-mcp">
+    Every guarantee in front of an MCP tool server, with no agent changes. Since v0.2.
+  </Card>
+  <Card title="Reconciliation" href="/guides/reconcile-automatically">
+    A reconcile hook asks the remote what happened and resolves an AMBIGUOUS effect. Since v0.2.
+  </Card>
+  <Card title="Webhook approvals" href="/guides/approvals-in-slack">
+    Approval requests go to a webhook, such as Slack, and the answer comes back. Since v0.2.
+  </Card>
+  <Card title="OpenTelemetry export" href="/guides/export-to-opentelemetry">
+    One span per action, one span event per step; argument values are opt-in. Since v0.2.
+  </Card>
+  <Card title="Consumed identity" href="/concepts/authority-and-delegation">
+    A principal comes from a verified header or JWT; CTRLRun issues nothing. Since v0.3.
+  </Card>
+  <Card title="Runtime delegation" href="/concepts/authority-and-delegation">
+    A principal narrows its own grant at runtime; one revocation cuts the chain. Since v0.3.
+  </Card>
+  <Card title="Observe mode" href="/concepts/observe-mode">
+    Records what enforcement would have blocked, blocks nothing, and counts it. Since v0.3.
+  </Card>
+  <Card title="Verify" href="/guides/verify-in-ci">
+    Runs the guarantee catalogue against your policy and store; N/A is not a pass. Since v0.4.
+  </Card>
+  <Card title="The verified badge" href="/verify/get-the-badge">
+    A GitHub Action and a badge that means the declared guarantees pass. Since v0.4.
+  </Card>
+  <Card title="Framework adapters" href="/get-started/three-ways-in">
+    An approval routed through the framework's own interrupt; never a second path. Since v0.5.
+  </Card>
+  <Card title="Postgres store" href="/guides/run-on-postgres">
+    The same store on Postgres, graded by the suite written for SQLite. Since v0.6.
+  </Card>
+  <Card title="Versioned schema" href="/guides/run-on-postgres">
+    Migrations run at open, forward only, and an unknown schema is refused. Since v0.6.
+  </Card>
+  <Card title="Recovery on restart" href="/guides/resolve-an-ambiguous-effect">
+    A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it. Since v0.6.
+  </Card>
+  <Card title="Receipt chain" href="/security/receipt-chain">
+    Each receipt carries the hash of the one before; alteration is detected and named. Since v0.6.
+  </Card>
+  <Card title="Policy versioning" href="/concepts/receipts-and-evidence">
+    Every receipt names the policy hash and version that decided it. Since v0.6.
+  </Card>
+  <Card title="Control registry" href="/reference/policy-yaml">
+    Name the house controls an action satisfies, and receipts cite them. Since v0.6.
+  </Card>
+  <Card title="Data scope" href="/reference/policy-yaml">
+    Label arguments by data class and condition a rule on the labels present. Since v0.6.
+  </Card>
+</Columns>
+{/* end generated */}
+
+## Three ways in
+
+| You have | Use | Needs |
+|---|---|---|
+| Python in this process: a raw model call, a LangChain tool, a hand-rolled loop, a cron job | the `@protect` decorator | nothing beyond `pip install ctrlrun` |
+| Tools behind an MCP server, in any language | the gateway, `ctrlrun gateway` | `pip install "ctrlrun[gateway]"` |
+| A framework with its own approval interrupt, and a place where humans already answer | an adapter | the framework to have a human-in-the-loop primitive |
+
+Most readers need the decorator. An adapter buys exactly one thing, routing an approval through
+the framework's own interrupt, and a framework with no such primitive does not need one.
+[Choosing between them](/get-started/choosing) has the decision table.
+
+## Start here
+
+<Columns cols={3}>
+  <Card title="60-second quickstart" icon="play" href="/get-started/quickstart">
+    Protect one function end to end and read the receipt.
+  </Card>
+  <Card title="Why" icon="book-open" href="/why">
+    The five principles, in 700 words. The page people link to.
+  </Card>
+  <Card title="Outcomes and AMBIGUOUS" icon="circle-help" href="/concepts/outcomes-and-ambiguous">
+    The idea that explains the product: a timeout is not a failure.
+  </Card>
+</Columns>
+
+## Ask your coding tool
+
+This site is an MCP server. Add it to Cursor or any MCP client that takes an `mcpServers`
+entry, and the assistant answers from these pages rather than from memory:
+
+```json
+{
+  "mcpServers": {
+    "ctrlrun-docs": { "type": "http", "url": "https://ctrlrun.mintlify.app/mcp" }
+  }
+}
+```
+
+The server exposes one tool, a search across this documentation. When the site moves to its own
+domain the URL moves with it; the current one is always in this block.
+
+## Next
+
+- [Why](/why): what CTRLRun believes and why.
+- [Install](/get-started/install): what `pip install ctrlrun` puts on your machine, and what it does not.
+- [How this is built](/how-this-is-built): the discipline behind the guarantees.

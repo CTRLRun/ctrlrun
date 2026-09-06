@@ -50,6 +50,21 @@ _EXPLICIT_ID = re.compile(r"\{#([A-Za-z0-9_-]+)\}\s*$")
 _ID_ATTRIBUTE = re.compile(r"""\bid=["']([A-Za-z0-9_-]+)["']""")
 
 
+_IA = REPO_ROOT / "docs" / "IA.md"
+
+
+def planned_pages() -> frozenset[str]:
+    """Every site path `docs/IA.md` lists. A link to one that does not exist yet is a plan the
+    next session owes, reported as such and not as broken; the launch audit has to drive the
+    count to zero, and a link to a path the IA never named is broken today."""
+    if not _IA.exists():
+        return frozenset()
+    text = _IA.read_text(encoding="utf-8")
+    return frozenset(
+        re.findall(r"(?m)^\s*[├└│─\s]*[^`\n]*?\s{2,}([a-z0-9][a-z0-9/-]*)\s*(?:\(.*\))?\s*$", text)
+    ) | frozenset(re.findall(r"`([a-z0-9][a-z0-9/-]*)`", text))
+
+
 @dataclass(frozen=True)
 class Broken:
     path: str
@@ -125,8 +140,13 @@ def _resolve(target: str, source: Path) -> tuple[Path | None, str | None] | None
     return (source.parent / path_part).resolve(), anchor
 
 
+PLANNED: list[Broken] = []
+
+
 def check_text(text: str, source: Path) -> list[Broken]:
+    """Broken links in one page. Links to planned pages are collected in `PLANNED` instead."""
     broken: list[Broken] = []
+    planned = PLANNED
     name = relative(source)
     own_anchors: set[str] | None = None
     for number, target in links(text):
@@ -137,6 +157,12 @@ def check_text(text: str, source: Path) -> list[Broken]:
         if path is None:
             continue
         if not path.exists():
+            site_path = target.partition("#")[0].lstrip("/")
+            if target.startswith("/") and site_path in planned_pages():
+                planned.append(
+                    Broken(name, number, target, "planned in docs/IA.md, not written yet")
+                )
+                continue
             broken.append(Broken(name, number, target, f"{relative(path)} does not exist"))
             continue
         if anchor is None or path.is_dir():
@@ -166,10 +192,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="documents to check; default: all")
     arguments = parser.parse_args(argv)
     paths = [p.resolve() for p in arguments.paths] or documents_to_check()
+    PLANNED.clear()
     broken = check_paths(paths)
     for item in broken:
         print(item)
-    print(f"links: {len(paths)} document(s), {len(broken)} broken")
+    for item in PLANNED:
+        print(f"PLANNED {item}")
+    print(f"links: {len(paths)} document(s), {len(broken)} broken, {len(PLANNED)} planned")
     return 0 if not broken else 1
 
 

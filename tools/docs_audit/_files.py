@@ -118,6 +118,7 @@ def fences(text: str, path: Path) -> Iterator[Fence]:
             index += 1
             continue
         fence = opened.group("fence")
+        indent = len(opened.group("indent"))
         info = opened.group("info").strip().split()
         language = info[0].lower() if info else ""
         tokens = tuple(info[1:])
@@ -128,10 +129,17 @@ def fences(text: str, path: Path) -> Iterator[Fence]:
             stripped = lines[index].strip()
             if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
                 break
-            body.append(lines[index])
+            body.append(_dedent(lines[index], indent))
             index += 1
         yield Fence(path, start + 1, language, tokens, "\n".join(body) + "\n")
         index += 1
+
+
+def _dedent(line: str, indent: int) -> str:
+    """Strip up to `indent` leading spaces: a fence opened inside a list item or a component
+    is indented, and CommonMark removes that indentation from its content lines."""
+    removable = len(line) - len(line.lstrip(" "))
+    return line[min(removable, indent) :]
 
 
 def outside_fences(text: str) -> Iterator[tuple[int, str]]:
