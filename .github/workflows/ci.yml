@@ -236,6 +236,48 @@ jobs:
           assert skipped == 0, f"{skipped} adapter tests skipped; the frameworks did not install"
           PY
 
+  # The documentation audit (docs/STYLE.md). Four checks, one job of their own so a docs PR
+  # gets a docs answer:
+  #
+  #   - the rendered capability tables match docs/capabilities.yaml -- a hard failure, and
+  #     also a test in `tests/test_docs_audit.py`, because a hand-edited table is the drift
+  #     this generator exists to make impossible;
+  #   - runnable snippets, the forbidden-words lint and the link check.
+  #
+  # The last three carry `continue-on-error: true` for now. They were wired in against the
+  # documentation as it stood, and the findings they raised on that day are the baseline the
+  # writing sessions clear. Each flag comes off the moment its check passes on `main`, one
+  # step at a time, and never all three together on trust -- a red step that is allowed to be
+  # red is documentation, not a guard, and the point of the flag is to be temporary.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Rendered capability tables match docs/capabilities.yaml
+        run: python tools/docs_audit/render_capabilities.py --check
+
+      - name: Runnable snippets execute offline
+        continue-on-error: true
+        run: python tools/docs_audit/snippets.py
+
+      - name: Forbidden words
+        continue-on-error: true
+        run: python tools/docs_audit/lint.py
+
+      - name: Internal links and anchors resolve
+        continue-on-error: true
+        run: python tools/docs_audit/links.py
+
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being
   # true. This job runs them against an installed wheel, the way a new user meets them.

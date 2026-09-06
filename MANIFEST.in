@@ -12,6 +12,13 @@ include CHANGELOG.md
 include SECURITY.md
 include VISION.md
 recursive-include docs *.md
+# The documentation audit reads these: `docs/capabilities.yaml` is the source the capability
+# tables are rendered from and `docs/generated/` holds the renders, and
+# `tests/test_docs_audit.py` compares the two. `tools/docs_audit/` is the generator and the
+# three checks, imported by that test, so an sdist that ran its tests without them would be
+# the same failure as shipping tests without their data.
+recursive-include docs *.yaml *.mdx *.txt
+recursive-include tools *.py *.txt
 recursive-include tests *.py
 # SPEC-v0.4 §4.3 — T115 validates `--junit` against a checked-in schema, and reads the README
 # beside it for the schema's provenance and licence. A test that ships without its data is a

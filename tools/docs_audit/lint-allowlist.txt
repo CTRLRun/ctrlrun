@@ -1,0 +1,56 @@
+# The forbidden-words lint's allowlist. Read by tools/docs_audit/lint.py.
+#
+#   exclude <glob>            the lint does not read files matching the glob
+#   allow <glob> <regex>      a line matching the regex, in a file matching the glob, is
+#                             permitted whatever words it contains
+#
+# Every entry carries its reason. An `allow` line is for a sentence that uses a forbidden
+# word to say what CTRLRun is *not* — a negation — and never for a sentence that makes the
+# claim. The regex is deliberately narrow: it names the negating phrase, not the word.
+#
+# Two documents are exempt by the rule itself and are not listed here:
+# docs/OWASP-AGENTIC-TOP10.md and docs/THREAT_MODEL.md, which exist to list what is not
+# covered. The lint hard-codes them (EXEMPT_BY_RULE) so that this file cannot un-exempt them
+# by accident or exempt a third by analogy.
+
+# --- files the lint does not read ---------------------------------------------------------
+
+# The specifications are the historical record of each version and are not rewritten for the
+# docs site. They name sector packs as out of scope, standards as things not claimed, and
+# `transaction` in its database sense; a reader is sent to them from Architecture only.
+exclude docs/SPEC-*.md
+
+# The roadmap says what later versions may add, including a version line for sector packs
+# that does not exist yet. A roadmap that could not name future work would not be one.
+exclude docs/ROADMAP.md
+
+# The style sheet and the information architecture name the forbidden words in order to
+# forbid them, and name the sections (Compare) whose titles carry a competitor's phrase.
+exclude docs/STYLE.md
+exclude docs/IA.md
+
+# --- sentences that negate a claim ---------------------------------------------------------
+
+# README and docs/CLAIMS.md: the verify badge's meaning is stated by listing the words it
+# does not mean.
+allow * does not mean secure, safe, compliant, certified or audited
+
+# docs/verify.md says the same thing as a rule about which words never appear.
+allow docs/verify.md do not appear as
+
+# "It is not a guardrail library, an IAM system, a workflow engine, or a compliance product."
+allow README.md It is not a .* compliance product
+
+# Adapter READMEs and docs/adapters.md: the conformance kit is named and then denied as a claim.
+allow * not a compliance claim
+allow * not\*\* a certification
+allow * no adapter describes itself as "conformant"
+
+# docs/CLAIMS.md: the list of claims the README deliberately does not make.
+allow docs/CLAIMS.md Nothing about compliance, conformance or alignment
+
+# docs/ACS.md reads somebody else's standard. "A conformant Guardian" is the standard's own
+# term for one of its roles, and the second line says what a mapping would be if it claimed
+# more than it can show.
+allow docs/ACS.md A conformant Guardian
+allow docs/ACS.md a compliance claim with nothing behind it
