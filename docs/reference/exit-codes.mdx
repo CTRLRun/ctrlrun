@@ -32,6 +32,18 @@ Not applicable never changes the code by itself, and zero applicable guarantees 
 (`--only`) writes no badge. The GitHub Action fails the job on any code but 0 and carries the
 code through as an output.
 
+## `ctrlrun scan`
+
+| Code | Meaning |
+|---|---|
+| `0` | the scan ran and found nothing of any kind |
+| `1` | it found a finding, a suppressed finding, or a call whose name it could not resolve |
+| `2` | it could not run: the path is not a directory, it holds no Python file, the policy will not load |
+
+A file that will not parse is exit `1` and not `2` — the scan ran, and the file is a finding. A
+suppressed finding keeps the code at `1`, because annotating a finding does not change the code
+it points at, and there is no flag that turns `1` into `0`.
+
 ## `ctrlrun gateway`
 
 The gateway runs until it is stopped. It exits 2 before listening when its configuration is

@@ -17,8 +17,10 @@ nothing about what an action *is*. So it gates no kernel release and none gates 
 in whichever release comes next — the argument `SPEC-mcp-operator.md` makes for a subcommand,
 including the part about carrying no version line of its own.
 
-**Status: proposed.** This document exists so the design can be argued before any of it is
-written. The acceptance tests in §8 are written first and are expected to be red.
+**Status: implemented.** The document was written first and its §8 tests were red before any
+of it existed. Five sections carry a paragraph beginning *Found by* — each is a defect the
+implementation or a run against this repository's own trees found in the design, corrected here
+rather than worked around in the code.
 
 ## 1. Scope
 
@@ -110,10 +112,27 @@ The consequence vocabulary is a list of verbs, shipped in the distribution and p
 any segment of the target path: `create_refund` matches `refund`, `delete_namespace` matches
 `delete`, `deleted_at` does not match `delete`.
 
+A verb matches in one of two shapes, and they are separate because one rule cannot tell apart
+the two things a plural means:
+
+- **A whole segment** matches a verb or its plural. `stripe.refunds.create` is a resource
+  namespace and a refund is what it creates.
+- **A word inside a compound segment** matches the verb in the singular only. `create_refund` is
+  a refund; `refunds_report` is a noun phrase about refunds and moves no money.
+
+**Found by writing the tests.** A single rule made these two indistinguishable — both contain
+the word `refunds` — and whichever way it fell, one of the Stripe SDK's own call shape and every
+reporting function beside it was wrong.
+
 The initial list is the README's own sentence, which is the list this project already stands
 behind: **send · pay · refund · delete · deploy · grant · revoke · approve · submit · purchase
 · cancel**, plus **charge · transfer · payout · merge · push · terminate · destroy · drop ·
-truncate · rotate · issue · disable · remove · publish · execute**.
+truncate · rotate · issue · disable · remove · publish**.
+
+**`execute` was in the first draft and is not in the list.** `cursor.execute` appears in every
+project that touches a database, and a verb that matches thousands of lines buries the ones that
+matter: measured against this repository's own `src/`, it was 90 of 208 findings. Found by
+running the command.
 
 `--vocabulary <file>` replaces the list with the operator's own, one verb per line. Replacing
 it is not relaxing a check: scan has no check to relax, and the report names the vocabulary in
@@ -137,9 +156,16 @@ as protection would be the most dangerous false negative this tool could ship.
 
 ### 3.4 `action_without_effect`
 
-A policy action with a `decision:` of `allow` or `approve` and no `effect:` template. The
-gateway already prints this on the line that starts it (`v0.2 §6.7`); scan says it statically,
-for the decorator path too, and for a policy nobody has started a gateway with.
+A policy action with a `decision:` of `allow` or `approve`, no `effect:` template, **and no
+`@protect(..., effect=…)` in the tree that declares it**. The gateway already prints this on the
+line that starts it (`v0.2 §6.7`); scan says it statically, and for a policy nobody has started a
+gateway with.
+
+**Found by running the command.** The policy half alone flagged `examples/double-refund`, whose
+decorator passes `effect="refund:{payment_id}"`. The policy's `effect:` is what the *gateway*
+reads, because a tool call has no decorator to carry one; a decorated call site carries its own.
+A finding that teaches a reader to add a key they already have is worse than no finding, and
+T207 is the case.
 
 ### 3.5 `protected_action_not_in_policy`
 
@@ -169,9 +195,19 @@ Scan misses, by construction:
 
 ### 4.1 Calls with no target path
 
-`getattr(client, name)()`, `handlers[key]()`, `eval`, a call through a variable assigned in
-another module. These are **counted and reported as `undetermined`**, with their locations. They
-are not silently dropped, and they are not findings either: scan does not know what they call.
+`getattr(client, name)()`, `handlers[key]()`, a call through a subscript. These are **counted
+and reported as `undetermined`**, with their locations. They are not silently dropped, and they
+are not findings either: scan does not know what they call.
+
+A call on an expression is **not** in this category. `hashlib.sha256(text).hexdigest()` and
+`"\n".join(parts)` name the method being called even though the receiver is not a name, so they
+are matched against the vocabulary like any other call, and a finding says the target was
+reached on an expression. `.delete()` on an expression is still a delete.
+
+**Found by running the command.** Treating every unresolved receiver as undetermined produced
+216 entries against this repository's own `src/`, of which **two** were the dynamic dispatch the
+category exists for. A list that long is a list nobody reads, which makes it the same failure as
+not printing one. T208 is the case.
 
 ### 4.2 Reachability
 
@@ -232,7 +268,7 @@ the one nobody reads.
 | Code | When |
 |---|---|
 | `0` | The scan ran and found nothing of any kind |
-| `1` | The scan ran and found at least one finding, of any kind, including a suppressed one |
+| `1` | The scan ran and found at least one finding, a suppression, or an undetermined call. A suppressed finding does not move the code, and an undetermined call is a place scan could not look; neither is a clean result |
 | `2` | The scan could not run: the path does not exist, the policy will not load, `--vocabulary` names a file that is not readable |
 
 A file that will not parse is **not** exit `2` — the scan ran. It is a finding, and §7 says so.
@@ -330,7 +366,19 @@ raise on any use. The scan completes. Asserts §9.2 — that this is not an entr
 
 ### T206 — `import ctrlrun` does not import `ctrlrun.scan`
 
-The subprocess assertion T30, T92, T125b and T134 already make, extended by one module name.
+The subprocess assertion T30, T92, T125b and T134 already make, extended by one module name. It
+asserts the module **exists** first: `find_spec` returning `None` would otherwise make it pass on
+a tree where `ctrlrun.scan` was never written.
+
+### T207 — A decorator that supplies the effect is not a missing effect
+
+A policy listing `stripe.refund` with no `effect:` and a tree whose `@protect` passes one
+produces no `action_without_effect`. Asserts §3.4's second paragraph.
+
+### T208 — A call on an expression is a finding, not an undetermined call
+
+`factory(key).delete_account(1)` is an `unprotected_call` whose detail says the receiver was an
+expression; `handlers[key]()` is undetermined. Asserts §4.1's second and third paragraphs.
 
 ## 9. Public API and CLI additions (frozen)
 
@@ -342,13 +390,20 @@ The subprocess assertion T30, T92, T125b and T134 already make, extended by one 
 #   ctrlrun.scan.ScanReport
 #   ctrlrun.scan.Finding
 #   ctrlrun.scan.FindingKind          unprotected_call | protected_action_not_in_policy
-#                                     | action_without_effect | unparseable | undetermined
+#                                     | action_without_effect | unparseable
+#   ctrlrun.scan.UndeterminedCall     not a FindingKind -- see below
+#   ctrlrun.scan.ScanError            the scan could not run at all (§6, exit 2)
 #   ctrlrun.scan.Suppression
 #   ctrlrun.scan.VOCABULARY
 #   ctrlrun.scan.SCAN_SCHEMA          "ctrlrun.scan/v1"
 #   ctrlrun.scan.report_lines(...)    -> list[str]       the human rendering
 #   ctrlrun.scan.report_document(...) -> dict            the JSON rendering
 ```
+
+**`undetermined` is not a `FindingKind`.** The first draft of §9.1 listed it as one and §4.1
+said in the same document that these are not findings, which T198 and T204 then contradicted
+each other about. It is its own list on the report and its own array in the document. Found by
+writing the tests.
 
 `ctrlrun/scan.py` sits **above** `control.py`, beside `verify/` and `cli/`, on `v0.4 §1`'s
 argument: it composes nothing and the kernel does not import it. It is core and stdlib —
@@ -403,7 +458,9 @@ Each of these is excluded for a reason, not merely absent:
 
 - The vocabulary in §3.2 is a first list and will be wrong in both directions. It is versioned
   with the distribution, and a change to it is a change a release note names.
-- The false-positive rate is unmeasured. Until it is measured against real trees, §4.5's
-  sentence is doing the work.
+- The false-positive rate is unmeasured against anything but this repository, where the first
+  run reported 208 findings and 216 undetermined calls across 44 files and two corrections took
+  those to 77 and 10. A library is not an agent, so even 77 is not a number to read as risk.
+  Until it is measured against real application trees, §4.5's sentence is doing the work.
 - A scan of a project that uses the gateway exclusively reads as a project with no protection
   (§4.4). The report says so; that is mitigation, not a fix.

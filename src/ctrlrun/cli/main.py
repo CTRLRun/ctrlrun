@@ -1269,5 +1269,95 @@ def _effect_line(record: EffectRecord) -> str:
     return line
 
 
+@main.command()
+@click.option(
+    "--path",
+    "root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="The tree to read. Defaults to the working directory.",
+)
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="The policy to read. Defaults to ctrlrun.yaml beside the tree, if there is one.",
+)
+@click.option(
+    "--exclude",
+    "excludes",
+    multiple=True,
+    help="A glob, relative to the tree, not to read. Repeatable.",
+)
+@click.option(
+    "--vocabulary",
+    "vocabulary_path",
+    is_flag=False,
+    flag_value="",
+    default=None,
+    help="A file of verbs, one per line, replacing the built-in list. With no value, print "
+    "the list in force and exit.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one ctrlrun.scan/v1 document.")
+def scan(
+    root: Path | None,
+    policy_path: Path | None,
+    excludes: tuple[str, ...],
+    vocabulary_path: str | None,
+    as_json: bool,
+) -> None:
+    """Report the consequential call sites and policy entries nothing is covering.
+
+    Reads Python source and a policy document as text. It never imports the tree, never
+    builds an action, never resolves a principal and never opens a store (SPEC-scan §2.1,
+    §9.2).
+
+    It is a finder and not a proof. Every run prints what it could not look at, and a clean
+    scan means nothing was found where it looked.
+
+    Exit codes: 0 nothing was found; 1 something was, including a suppressed finding or a
+    call whose name could not be resolved; 2 the scan could not run.
+    """
+    # Imported here, not at module scope: scan is an operator's tool and not part of the
+    # action path, and `import ctrlrun` must not reach it (SPEC-scan §9.1, T206).
+    import json as json_module
+
+    from ..scan import VOCABULARY, ScanError, report_document, report_lines
+    from ..scan import scan as run_scan
+
+    if vocabulary_path == "":
+        for verb in VOCABULARY:
+            click.echo(verb)
+        return
+
+    words: list[str] | None = None
+    if vocabulary_path is not None:
+        try:
+            words = [
+                line.strip()
+                for line in Path(vocabulary_path).read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+        except OSError as unreadable:
+            click.echo(f"ctrlrun scan: {unreadable}", err=True)
+            raise SystemExit(2) from unreadable
+
+    try:
+        report = run_scan(path=root, policy=policy_path, exclude=excludes, vocabulary=words)
+    except ScanError as refused:
+        click.echo(f"ctrlrun scan: {refused}", err=True)
+        raise SystemExit(2) from refused
+
+    if as_json:
+        click.echo(json_module.dumps(report_document(report), indent=2))
+    else:
+        for line in report_lines(report):
+            click.echo(line)
+
+    if report.exit_code:
+        raise SystemExit(report.exit_code)
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()

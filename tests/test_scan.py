@@ -318,6 +318,68 @@ def test_T204_the_human_output_and_the_json_come_from_one_producer(tmp_path):
         assert str(finding.get("target") or finding.get("name") or finding["file"]) in lines
 
 
+# --- T207-T208: found by running it -----------------------------------------------------
+
+
+def test_T207_a_decorator_that_supplies_the_effect_is_not_a_missing_effect(tmp_path):
+    """§3.4. The policy's `effect:` is the gateway's; a decorator carries its own.
+
+    Reporting the policy alone flagged `examples/double-refund`, whose decorator passes
+    `effect="refund:{payment_id}"` — a finding that would have taught a reader to add a key
+    they already had. Found by running the command against this repository's own examples.
+    """
+    policy = tmp_path / "ctrlrun.yaml"
+    policy.write_text(
+        "schema: ctrlrun.policy/v1\n\nactions:\n  stripe.refund:\n    rules:\n"
+        "      - decision: allow\n",
+        encoding="utf-8",
+    )
+    _tree(
+        tmp_path,
+        {
+            "app.py": """
+            import ctrlrun
+
+            @ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
+            def refund(payment_id):
+                return stripe.refunds.create(payment_id)
+            """,
+        },
+    )
+
+    report = _scan().scan(path=tmp_path, policy=policy)
+
+    assert _kinds(report, "action_without_effect") == []
+    assert report.exit_code == 0
+
+
+def test_T208_a_call_on_an_expression_is_a_finding_and_not_undetermined(tmp_path):
+    """§4.1. Undetermined is for a callee with no name at all, not for an unnamed receiver.
+
+    Treating every unresolved base as undetermined produced 216 entries against this
+    repository's own `src/`, of which two were the dynamic dispatch the category exists for —
+    `hashlib.sha256(text).hexdigest()` and `"\\n".join(parts)` filled the rest. A list that
+    long is a list nobody reads, and `.delete()` on an expression is still a delete.
+    """
+    _tree(
+        tmp_path,
+        {
+            "chained.py": """
+            def run(factory, key, handlers):
+                factory(key).delete_account(1)
+                handlers[key]()
+            """,
+        },
+    )
+
+    report = _scan().scan(path=tmp_path)
+
+    found = _kinds(report, "unprotected_call")
+    assert [finding.target for finding in found] == ["delete_account"]
+    assert found[0].detail == "called on an expression, not a name"
+    assert [call.line for call in report.undetermined] == [3]
+
+
 # --- T205-T206: it is not an entry point, and it is not imported ------------------------
 
 
