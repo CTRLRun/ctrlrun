@@ -48,6 +48,14 @@
             ]
           },
           {
+            "group": "MCP",
+            "pages": [
+              "mcp/overview",
+              "mcp/gateway-in-5-minutes",
+              "mcp/use-the-docs-from-your-editor"
+            ]
+          },
+          {
             "group": "Concepts",
             "pages": [
               "concepts/action-and-hash",

@@ -236,6 +236,14 @@ def test_a_claim_word_anywhere_is_flagged():
     assert {f.rule.id for f in found} == {"sector", "pack", "hipaa"}
 
 
+def test_a_planned_thing_may_be_named_only_on_a_page_that_says_planned():
+    """The operator MCP server does not exist. A page that carries the PLANNED label may name
+    it; any other page naming it is describing something that is not there."""
+    assert lint.lint_text("Use the operator MCP server to approve.\n", "x.mdx", _empty()) != []
+    assert lint.lint_text("PLANNED: an operator MCP server.\n", "x.mdx", _empty()) == []
+    assert lint.lint_text("Run ctrlrun mcp-operator now.\n", "x.mdx", _empty()) != []
+
+
 def test_a_word_inside_a_code_fence_is_not_linted():
     text = "```yaml\n# sector: finance\n```\n"
 

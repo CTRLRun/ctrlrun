@@ -212,7 +212,9 @@ actions:
     decision: allow
 ```
 
-Everything but `tools/call` is relayed untouched. A lost response over the wire blocks the
+Everything but `tools/call` is relayed untouched. [`docs/mcp/overview.mdx`](docs/mcp/overview.mdx)
+is the MCP section of the documentation: the gateway, this documentation as an MCP server, and
+what is planned. A lost response over the wire blocks the
 retry exactly as it does in process, and the gateway prints, on the line that starts it, every
 action in your policy that has no `effect:` template, because a write with no effect key is
 exactly the configuration this exists to prevent.
