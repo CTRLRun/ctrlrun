@@ -1,0 +1,339 @@
+# What 0.6 does — the single source the README table, the docs home grid and the PyPI text
+# are rendered from. Edit this file; never a rendered copy.
+#
+#   python tools/docs_audit/render_capabilities.py --write     # refresh docs/generated/
+#   python tools/docs_audit/render_capabilities.py --check     # what CI runs
+#
+# One entry per capability. Fields:
+#
+#   id           kebab-case, unique
+#   name         what a reader would call it
+#   description  one sentence, at most 15 words, no exclamation mark
+#   guarantee    true for exactly six entries — the six rows of the README matrix, one per
+#                group of the verify catalogue (G1–G2, G3–G4, G5+G10, G6–G7, G8–G9, G11)
+#   ways_in      decorator / gateway / adapter: true, false, or a short note for a qualified yes
+#   since        the version that shipped it, v0.1 … v0.6
+#   page         the docs-site path that owns it (docs/IA.md), without extension
+#   claim        the exact quoted text of the docs/CLAIMS.md row that proves it, or null with a
+#                claim_note saying which session adds the sentence and its row
+#
+# Entries are rendered in this order. The six guarantees come first because the README
+# matrix is the first table a stranger reads.
+
+capabilities:
+  - id: approval-binding
+    name: Approval binding
+    description: An approval is bound to the exact action; a mutated or replayed one is refused.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: prevention or attribution, per adapter
+    since: v0.1
+    page: concepts/approval-binding
+    claim: binds approvals to the exact action
+
+  - id: one-effect-once
+    name: One effect, once
+    description: One logical effect executes once, across threads, processes and hosts.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: concepts/effect-keys
+    claim: blocks duplicate execution attempts for the same logical effect
+
+  - id: ambiguous-outcomes
+    name: Unknown is not failed
+    description: An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: concepts/outcomes-and-ambiguous
+    claim: stops blind retries when an execution outcome is uncertain
+
+  - id: fail-closed
+    name: Fail closed
+    description: An unknown action, a missing policy or a missing principal is denied.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: concepts/fail-closed
+    claim: null
+    claim_note: >-
+      The README says "Unknown actions are denied. CTRLRun fails closed." with no CLAIMS.md row.
+      Session 1 rewrites the sentence and adds the row (G6, G7).
+
+  - id: authority-containment
+    name: Authority and delegation
+    description: With authority on, every principal needs a grant, and delegation cannot widen one.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.3
+    page: concepts/authority-and-delegation
+    claim: provably a subset of its parent on every dimension, at creation and again at every evaluation
+
+  - id: receipts
+    name: Receipts
+    description: Every executed action leaves a portable JSON receipt of who, what and outcome.
+    guarantee: true
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: concepts/receipts-and-evidence
+    claim: records what actually happened
+
+  - id: per-action-policy
+    name: Per-action policy
+    description: One YAML file decides allow, approve or deny per action and argument.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: reference/policy-yaml
+    claim: what an agent can do autonomously, what requires human approval, and what is blocked
+
+  - id: operator-cli
+    name: Operator CLI
+    description: Approve, deny, resolve, inspect and count from the shell, against any store.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.1
+    page: reference/cli
+    claim: null
+    claim_note: >-
+      The README quotes `ctrlrun resolve` and `ctrlrun stats` inside other rows and has no
+      sentence about the CLI as a whole. Session 1 adds one and its row.
+
+  - id: mcp-gateway
+    name: MCP gateway
+    description: Every guarantee in front of an MCP tool server, with no agent changes.
+    guarantee: false
+    ways_in:
+      decorator: false
+      gateway: true
+      adapter: false
+    since: v0.2
+    page: guides/gateway-in-front-of-mcp
+    claim: No agent changes
+
+  - id: reconciliation
+    name: Reconciliation
+    description: A reconcile hook asks the remote what happened and resolves an AMBIGUOUS effect.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: false
+      adapter: true
+    since: v0.2
+    page: guides/reconcile-automatically
+    claim: the only thing besides a human permitted to move a record out of `AMBIGUOUS`
+
+  - id: webhook-approvals
+    name: Webhook approvals
+    description: Approval requests go to a webhook, such as Slack, and the answer comes back.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: false
+    since: v0.2
+    page: guides/approvals-in-slack
+    claim: null
+    claim_note: >-
+      The README does not mention `WebhookApprovalProvider`. Session 1 adds the sentence and
+      its row; session 3's guide is where it is shown working.
+
+  - id: otel-export
+    name: OpenTelemetry export
+    description: One span per action, one span event per step; argument values are opt-in.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.2
+    page: guides/export-to-opentelemetry
+    claim: one OpenTelemetry span per action, one span event per step
+
+  - id: identity
+    name: Consumed identity
+    description: A principal comes from a verified header or JWT; CTRLRun issues nothing.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.3
+    page: concepts/authority-and-delegation
+    claim: CTRLRun issues no credential and defines no identity format
+
+  - id: delegation
+    name: Runtime delegation
+    description: A principal narrows its own grant at runtime; one revocation cuts the chain.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.3
+    page: concepts/authority-and-delegation
+    claim: "`ctrlrun revoke` cuts a chain of any depth with one write"
+
+  - id: observe-mode
+    name: Observe mode
+    description: Records what enforcement would have blocked, blocks nothing, and counts it.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.3
+    page: concepts/observe-mode
+    claim: "`mode: observe` … records what *would* have been blocked, without blocking anything"
+
+  - id: verify
+    name: Verify
+    description: Runs the guarantee catalogue against your policy and store; N/A is not a pass.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.4
+    page: guides/verify-in-ci
+    claim: Not applicable is not a pass
+
+  - id: verify-badge
+    name: The verified badge
+    description: A GitHub Action and a badge that means the declared guarantees pass.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.4
+    page: verify/get-the-badge
+    claim: The badge means the **declared guarantees pass**
+
+  - id: framework-adapters
+    name: Framework adapters
+    description: An approval routed through the framework's own interrupt; never a second path.
+    guarantee: false
+    ways_in:
+      decorator: false
+      gateway: false
+      adapter: true
+    since: v0.5
+    page: get-started/three-ways-in
+    claim: the adapter reuses it and reimplements nothing
+
+  - id: postgres
+    name: Postgres store
+    description: The same store on Postgres, graded by the suite written for SQLite.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: guides/run-on-postgres
+    claim: Same `StateStore` protocol, extended by nothing
+
+  - id: migrations
+    name: Versioned schema
+    description: Migrations run at open, forward only, and an unknown schema is refused.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: guides/run-on-postgres
+    claim: migrations are automatic at open, forward-only
+
+  - id: recovery
+    name: Recovery on restart
+    description: A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: guides/resolve-an-ambiguous-effect
+    claim: null
+    claim_note: >-
+      The README has no sentence on recovery on restart (SPEC-v0.6 §5). Session 1 adds one
+      and its row.
+
+  - id: receipt-chain
+    name: Receipt chain
+    description: Each receipt carries the hash of the one before; alteration is detected and named.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: security/receipt-chain
+    claim: Each receipt carries the hash of the one before it
+
+  - id: policy-versioning
+    name: Policy versioning
+    description: Every receipt names the policy hash and version that decided it.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: concepts/receipts-and-evidence
+    claim: Every receipt records which policy decided it
+
+  - id: control-registry
+    name: Control registry
+    description: Name the house controls an action satisfies, and receipts cite them.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: reference/policy-yaml
+    claim: null
+    claim_note: >-
+      The README has no sentence on `controls:` (SPEC-v0.6 §7.3). Session 1 adds one and its
+      row, in words that describe a registry and never a pack.
+
+  - id: data-scope
+    name: Data scope
+    description: Label arguments by data class and condition a rule on the labels present.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: reference/policy-yaml
+    claim: null
+    claim_note: >-
+      The README has no sentence on `data:` (SPEC-v0.6 §7.4). Session 1 adds one and its row.
