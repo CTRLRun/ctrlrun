@@ -75,7 +75,7 @@ guarantees pass.
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@v4
-          - uses: CTRLRun/ctrlrun@main
+          - uses: CTRLRun/ctrlrun@v0.6.0
             with:
               policy: ctrlrun.yaml
     ```
@@ -96,7 +96,10 @@ guarantees pass.
     | `badge-path` | `verify-badge.json` | where the Shields endpoint JSON goes |
 
     Outputs: `passed`, `failed`, `applicable`, `not-applicable`, `badge-message`, `report-path`.
-    Pin the action to a release tag or a commit rather than `@main` once you rely on it.
+    The ref pins the action's steps and **not** the package they install: `install` is
+    unpinned by default, so `@v0.6.0` still takes whatever PyPI serves on the day. Pin both —
+    `install: ctrlrun==0.6.0` — where the run has to be reproducible, and pin the action by
+    commit rather than by tag where the ref has to be immovable.
   </Step>
 
   <Step title="Publish the badge, if you want it">

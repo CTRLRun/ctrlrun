@@ -437,10 +437,14 @@ you put the decorator, your deployment, and whether your policy is the right pol
 [GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#in-ci):
 
 ```yaml
-      - uses: CTRLRun/ctrlrun@main
+      - uses: CTRLRun/ctrlrun@v0.6.0
         with:
           policy: ctrlrun.yaml
 ```
+
+The ref pins the action's steps and **not** the package they install: `install` defaults to
+`ctrlrun`, which is whatever PyPI has that day. Add `install: ctrlrun==0.6.0` to pin the tool
+as well as the workflow.
 
 ## What it guarantees, and what it can't
 

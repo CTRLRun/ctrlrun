@@ -47,12 +47,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: CTRLRun/ctrlrun@main
+      - uses: CTRLRun/ctrlrun@v0.6.0
         with:
           policy: ctrlrun.yaml
 ```
 
-Pin `CTRLRun/ctrlrun` to a release tag once you rely on it.
+The ref pins the action's steps and not the package they install: `install` defaults to
+`ctrlrun`, unpinned, so the job takes whatever PyPI serves that day. Add
+`install: ctrlrun==0.6.0` to pin the tool too, and pin `CTRLRun/ctrlrun` by commit rather than
+by tag where you want a ref nobody can move.
 
 ## What the agent sees
 
