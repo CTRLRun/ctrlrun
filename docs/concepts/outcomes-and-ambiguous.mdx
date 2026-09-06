@@ -1,6 +1,6 @@
 ---
 title: "Outcomes and AMBIGUOUS"
-description: "An executed action ends COMMITTED, FAILED or AMBIGUOUS. Only NotExecuted, raised by the executor, means FAILED; a timeout, a lost reply and every unexpected exception mean AMBIGUOUS, and an AMBIGUOUS effect blocks a blind retry until a human or a reconcile hook says what happened."
+description: "An executed action ends COMMITTED, FAILED or AMBIGUOUS. Only NotExecuted, raised by the executor, means FAILED."
 ---
 
 An outcome is what CTRLRun knows about the consequence after the executor returns or raises,

@@ -65,7 +65,8 @@ def render_schemas() -> str:
     lines = [
         "---",
         'title: "Receipt and event schemas"',
-        'description: "Every field of a CTRLRun receipt (ctrlrun.receipt/v3) and of an event, and every event type, rendered from the dataclasses that write them."',
+        'description: "Every field of a CTRLRun receipt and of an event, and every event '
+        'type, rendered from the dataclasses that write them."',
         "---",
         "",
         "{/* " + MARKER + " */}",
@@ -142,7 +143,8 @@ def render_errors() -> str:
     lines = [
         "---",
         'title: "Errors"',
-        'description: "The closed set of CTRLRun exceptions: ActionDenied, ApprovalRequired, ApprovalMismatch, DuplicateEffect, AmbiguousEffect, NotExecuted and the rest, each with its base class and when it is raised."',
+        'description: "The closed set of CTRLRun exceptions, each with its base class and '
+        'when it is raised: ActionDenied, ApprovalRequired, DuplicateEffect and the rest."',
         "---",
         "",
         "{/* " + MARKER + " */}",

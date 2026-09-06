@@ -1,0 +1,68 @@
+---
+title: "What verify guarantees"
+description: "The eleven guarantees ctrlrun verify runs against your own policy and store, what each one exercises, what not applicable means and why it is never a pass."
+---
+
+`ctrlrun verify` runs eleven guarantees against the configuration in front of it, in a scratch
+store, with fake executors and no network. Each is a failure scenario from the kernel's own
+acceptance tests, replayed against your policy, your grants and your store backend. What it
+reports is what your configuration can exercise, and what it cannot, with the reason.
+
+## The eleven
+
+| | Guarantee | What it exercises |
+|---|---|---|
+| G1 | mutated approval refused | an approval granted for one action, presented for another |
+| G2 | replayed approval refused | the same approval presented twice |
+| G3 | duplicate effect refused | the same effect key reserved twice |
+| G4 | one winner under concurrency | eight OS processes racing for one effect key |
+| G5 | ambiguous blocks a blind retry | a lost reply, then a retry |
+| G6 | unknown action refused | an action the policy does not list |
+| G7 | no principal refused | a call with no principal |
+| G8 | expired authority refused | a grant past its `expires_at` |
+| G9 | delegation cannot escalate | a child grant wider than its parent, on each of six dimensions |
+| G10 | unknown exception is ambiguous | an executor that raises something unexpected |
+| G11 | an altered receipt is detected | a receipt edited in the store |
+
+G1 and G2 need an `approve` rule. G3, G4 and G5 need an `effect:` template. G8 and G9 need an
+`authority:` section. A configuration without them cannot exercise those guarantees, and verify
+says so.
+
+## Not applicable is not a pass
+
+A guarantee this configuration cannot exercise is reported `N/A` with the reason, excluded from
+the denominator, and listed separately: `6/6 (5 not applicable)`, never `11/11`. There is no
+flag that folds one into the count, and zero applicable guarantees exits 2, because `0/0`
+reported as success is the same false green as `8/8` with five N/As.
+
+The reason is always a statement about your document, not about the tool: *no action declares
+an `effect:` template*, *no authority section*. That is what makes an N/A actionable: it tells
+you what to add if you want the guarantee checked.
+
+## What the badge means
+
+The badge means the **declared guarantees pass**: every guarantee this configuration can
+exercise was exercised, and none failed. It does not mean secure, safe, compliant, certified or
+audited. A partial run with `--only` writes no badge at all.
+
+## What verify cannot see
+
+- **Your executors.** It never calls the function behind `@protect` and never imports the module
+  it lives in. An executor that raises `NotExecuted` after the remote acted is invisible to it,
+  and that is the most dangerous integration bug available.
+- **Your `reconcile` hooks.** Same reason.
+- **Where you put the decorator.** A consequential call with no decorator is not an action.
+- **Whether your policy is the right policy.** It checks that the kernel does what it says under
+  your configuration, not that your configuration expresses your intent.
+
+## Running it
+
+`ctrlrun verify` locally, the GitHub Action in CI, `--json` and `--junit` for machines, and
+`--store-url` to run against Postgres. Verify has no flag that relaxes a check: the moment one
+existed, the thing verified would not be the thing that ships.
+
+## Next
+
+- [Verify in CI](/guides/verify-in-ci) · [Get the badge](/verify/get-the-badge).
+- [The verify page](/verify): the operator's reference, in full.
+- [Get started](/get-started/quickstart) · [Why](/why).

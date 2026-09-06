@@ -112,6 +112,22 @@
               "cookbook/verify-in-github-actions"
             ],
             "expanded": false
+          },
+          {
+            "group": "Compare",
+            "pages": [
+              "compare/framework-hitl",
+              "compare/guardrail-libraries",
+              "compare/governance-toolkits",
+              "compare/durable-workflows",
+              "compare/idempotency-keys"
+            ]
+          },
+          {
+            "group": "FAQ",
+            "pages": [
+              "faq"
+            ]
           }
         ]
       },
@@ -214,7 +230,15 @@
           {
             "group": "Architecture",
             "pages": [
-              "ARCHITECTURE",
+              "ARCHITECTURE"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/verify-guarantees",
+              "security/receipt-chain",
+              "security/disclosure",
               "THREAT_MODEL",
               "how-this-is-built"
             ]
