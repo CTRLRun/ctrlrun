@@ -22,7 +22,7 @@ proved, and updates itself.
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@v4
-          - uses: CTRLRun/ctrlrun@main
+          - uses: CTRLRun/ctrlrun@v0.6.0
             id: verify
             with:
               policy: ctrlrun.yaml
@@ -31,7 +31,10 @@ proved, and updates itself.
 
     The action installs `ctrlrun`, runs it against your policy in a scratch store with no
     network, renders the job summary and the badge JSON from that one report, and fails the job
-    if a guarantee failed. Pin the action to a release tag once you rely on it.
+    if a guarantee failed.
+
+    The ref pins the action's steps and not the package they install: `install` defaults to
+    `ctrlrun`, unpinned. Add `install: ctrlrun==0.6.0` where you want the run reproducible.
   </Step>
 
   <Step title="Publish the badge JSON">
