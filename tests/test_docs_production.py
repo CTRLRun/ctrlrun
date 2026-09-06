@@ -34,6 +34,36 @@ if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)
 
 PAGES = sorted(PRODUCTION.glob("*.mdx"))
+
+#: Paths this repository has and a **distribution deliberately does not**. `MANIFEST.in` prunes
+#: `.github`, and `T181` asserts that no `research/` path is in the wheel or the sdist — so their
+#: absence inside an sdist is the packaging rule working, not a deletion.
+REPOSITORY_ONLY = (
+    REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    REPO_ROOT / "research" / "soak" / "results",
+)
+
+
+def _repository_only(path: Path) -> Path:
+    """A path that exists in a checkout and not in a distribution, or a skip saying why.
+
+    **The skip is guarded so it cannot hide a deletion.** If one of these paths is missing and
+    another is present, we are in a checkout with a file removed, and that is a failure — which
+    is the whole risk of skipping on a missing file. Only when *every* repository-only path is
+    absent together is this the sdist job, running the suite from inside a distribution that
+    carries `docs/` and `tests/` and neither of these.
+    """
+    if path.exists():
+        return path
+    present = [candidate for candidate in REPOSITORY_ONLY if candidate.exists()]
+    names = [str(item.relative_to(REPO_ROOT)) for item in present]
+    assert not present, (
+        f"{path.relative_to(REPO_ROOT)} is missing from a tree that still has {names}; "
+        "that is a deletion, not an sdist"
+    )
+    pytest.skip(f"{path.relative_to(REPO_ROOT)} is not in a distribution, by design")
+
+
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.S)
 _FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 
@@ -251,6 +281,7 @@ def test_the_two_rows_of_the_lost_commit_are_not_merged():
 
 def test_the_soak_page_is_the_render_of_the_published_results():
     """No hand-written number, and the duration is the measured one."""
+    _repository_only(REPO_ROOT / "research" / "soak" / "results")
     drift = subprocess.run(
         [sys.executable, str(TOOLS / "render_soak.py"), "--check"],
         cwd=REPO_ROOT,
@@ -267,8 +298,9 @@ def test_the_soak_page_does_not_let_a_reader_believe_the_criterion_was_met():
     `research/soak/README.md` already states this; a docs page that omitted it would be the
     only place a stranger reads, saying the flattering half.
     """
+    results_dir = _repository_only(REPO_ROOT / "research" / "soak" / "results")
     body = _body(PRODUCTION / "soak.mdx")
-    results = sorted((REPO_ROOT / "research" / "soak" / "results").glob("*.json"))
+    results = sorted(results_dir.glob("*.json"))
     assert results, "no soak results to render"
     measured = json.loads(results[-1].read_text(encoding="utf-8"))
     assert measured["elapsed_human"] in body, measured["elapsed_human"]
@@ -288,6 +320,7 @@ def test_the_soak_page_agrees_with_the_run_about_whether_the_criterion_is_met():
     """
     import sys
 
+    _repository_only(REPO_ROOT / "research" / "soak" / "results")
     sys.path.insert(0, str(TOOLS))
     try:
         import render_soak
@@ -406,6 +439,11 @@ def test_the_recorded_readiness_still_matches_what_it_was_measured_from():
         assert recorded["version"] == tomllib.load(handle)["project"]["version"]
     assert recorded["guarantees"] == len(GUARANTEES)
 
+    if not (REPO_ROOT / "research" / "soak" / "results").exists():
+        # In a distribution the results are pruned, so `soak()` reports none — which says
+        # nothing about whether the recorded figures drifted. The version and the guarantee
+        # count above are checked either way.
+        _repository_only(REPO_ROOT / "research" / "soak" / "results")
     published = render_readiness.soak()
     if published is None:
         assert recorded["soak"] is None
@@ -499,9 +537,8 @@ def test_ci_publishes_the_test_count_badge_after_the_suite_has_passed():
     """
     import yaml
 
-    workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    )
+    ci = _repository_only(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    workflow = yaml.safe_load(ci.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["check"]["steps"]
     ran = [i for i, step in enumerate(steps) if "./scripts/check.sh" in str(step.get("run", ""))]
     wrote = [
