@@ -80,7 +80,16 @@ RULES: tuple[Rule, ...] = (
     _rule("trusted-by", r"\btrusted by\b", "everywhere", "no social proof that does not exist"),
     _rule("testimonial", r"\btestimonials?\b", "everywhere", "no social proof"),
     _rule("excited", r"\bwe(?:'re| are) excited\b", "everywhere", "docs/STYLE.md"),
+    _rule(
+        "operator-mcp-server",
+        r"\boperator MCP server\b|\bmcp-operator\b",
+        "planned-only",
+        "does not exist yet; only a page carrying the PLANNED label may name it",
+    ),
 )
+
+#: The label a page must carry, verbatim, before a `planned-only` rule lets it name the thing.
+PLANNED_LABEL = "PLANNED"
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _FRONTMATTER_HEADLINE = re.compile(
@@ -148,6 +157,7 @@ def lint_text(text: str, path: str, allowlist: Allowlist) -> list[Finding]:
     findings: list[Finding] = []
     lines = list(outside_fences(text))
     in_frontmatter = False
+    carries_planned = PLANNED_LABEL in text
     for position, (number, line) in enumerate(lines):
         window = " ".join(text for _, text in lines[max(position - 1, 0) : position + 2])
         if number == 1 and line.strip() == "---":
@@ -161,6 +171,8 @@ def lint_text(text: str, path: str, allowlist: Allowlist) -> list[Finding]:
         )
         for rule in RULES:
             if rule.scope == "headline" and not headline:
+                continue
+            if rule.scope == "planned-only" and carries_planned:
                 continue
             if not rule.pattern.search(line):
                 continue

@@ -38,6 +38,10 @@ Get started
   ├─ 60-second quickstart              get-started/quickstart
   ├─ Three ways in                     get-started/three-ways-in
   └─ Choosing between them             get-started/choosing
+MCP
+  ├─ Overview                          mcp/overview
+  ├─ The gateway in five minutes       mcp/gateway-in-5-minutes
+  └─ Use the docs from your editor     mcp/use-the-docs-from-your-editor
 Concepts
   ├─ Action and hash                   concepts/action-and-hash
   ├─ Decisions                         concepts/decisions
@@ -107,6 +111,17 @@ Get the badge                          verify/get-the-badge         (session 5b)
 | `get-started/quickstart` | Protect one function end to end in sixty seconds, with the real output: a policy, a decorator, a refused mutation, a receipt. | *ctrlrun quickstart* · *protect an AI agent action python* |
 | `get-started/three-ways-in` | Decorator, gateway, adapter: what each covers and what each needs. The negative sentence: most readers need the decorator and should not look for an adapter. | *ctrlrun langgraph* · *ctrlrun mcp* · *do I need an adapter* |
 | `get-started/choosing` | The decision table: in-process Python → decorator; tools behind MCP → gateway; a framework with its own approval UI → adapter. What you do not need for the single-host case: a server, a database, a dashboard. | *ctrlrun decorator vs gateway* |
+
+## MCP
+
+Three things are true today and one is planned, and the pages say exactly that. Added by
+session 3b.
+
+| Path | Purpose | Query |
+|---|---|---|
+| `mcp/overview` | CTRLRun works with MCP in three ways: enforcement (the gateway in front of any MCP server), learning (this site is an MCP server), discovery (the registries, once listed). A fourth, an operator server for approvers, is labelled PLANNED with the roadmap link and never described in the present tense. | *MCP gateway* · *MCP server human approval* |
+| `mcp/gateway-in-5-minutes` | For a reader who already runs an MCP server: before/after, the two commands, what the agent sees on deny and on approval-required, the supported revisions, the principal-flag choice and its security note. | *protect MCP server* · *MCP tool call approval gateway* |
+| `mcp/use-the-docs-from-your-editor` | The exact configuration for this site's MCP server, three questions an assistant can then answer, a screenshot spec. | *ctrlrun mcp docs* |
 
 ## Concepts
 
