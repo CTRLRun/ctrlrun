@@ -43,6 +43,13 @@ IN_PROGRESS_EFFECT: Final = "in_progress"
 
 #: SPEC-v0.2 §2 — the three things a `reconcile` hook may say about a logical effect.
 ReconcileOutcome = Literal["committed", "not_executed", "unknown"]
+"""What a `reconcile` hook may answer about an effect key (SPEC-v0.2 §2).
+
+`"committed"` moves the record to `COMMITTED` and a retry is then refused as a duplicate;
+`"not_executed"` moves it to `FAILED` and a retry is permitted; `"unknown"` leaves it
+`AMBIGUOUS`. A hook moves a record only in the direction its answer points, and is the only
+thing besides a human permitted to move one out of `AMBIGUOUS`.
+"""
 
 RECONCILED_COMMITTED: Final = "committed"
 RECONCILED_NOT_EXECUTED: Final = "not_executed"

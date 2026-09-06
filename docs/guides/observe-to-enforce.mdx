@@ -1,0 +1,139 @@
+---
+title: "Roll out observe, then enforce"
+description: "Put mode: observe at the top of the policy, run real traffic for a week, read ctrlrun stats to see what enforcement would have blocked and why, fix the policy, then switch the line to enforce."
+---
+
+Start with `mode: observe`: every action is decided exactly as enforce mode would decide it,
+executes regardless, and records what would have been blocked. After a week `ctrlrun stats`
+tells you what enforcing will cost, in refusals and in approval requests, before a single
+refund waits for a human. Then change one line.
+
+**Prerequisites:** a policy for the actions your agent already performs, and the decorator or
+the gateway in front of them. The blocks below simulate a week in a few calls.
+
+<Steps>
+  <Step title="Observe">
+    ```yaml runnable
+    schema: ctrlrun.policy/v3
+    mode: observe
+
+    actions:
+      crm.update_record:
+        effect: "crm:{record_id}:{field}"
+        decision: allow
+      email.send:
+        effect: "email:{message_id}"
+        rules:
+          - when: { to_domain_eq: "example.com" }
+            decision: allow
+          - decision: approve
+      stripe.refund:
+        effect: "refund:{payment_id}"
+        rules:
+          - when: { amount_gte: 0, amount_lte: 50000 }
+            decision: allow
+          - when: { amount_gte: 0, amount_lte: 500000 }
+            decision: approve
+          - decision: deny
+    ```
+
+    ```python runnable
+    import ctrlrun
+
+    sent: list[str] = []
+
+
+    @ctrlrun.protect("crm.update_record", effect="crm:{record_id}:{field}")
+    def update(record_id: str, field: str, value: str) -> str:
+        return "updated"
+
+
+    @ctrlrun.protect("email.send", effect="email:{message_id}")
+    def send(message_id: str, to_domain: str) -> str:
+        sent.append(message_id)
+        return "sent"
+
+
+    @ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
+    def refund(payment_id: str, amount: int) -> str:
+        return "refunded"
+
+
+    with ctrlrun.context(agent="support-agent"):
+        update(record_id="c_1", field="phone", value="+353 1 555 0100")
+        send(message_id="m_1", to_domain="example.com")
+        send(message_id="m_2", to_domain="gmail.com")          # would have needed a human
+        refund(payment_id="txn_1", amount=10000)
+        refund(payment_id="txn_2", amount=250000)               # would have needed a human
+        refund(payment_id="txn_3", amount=900000)               # would have been denied
+        refund(payment_id="txn_1", amount=10000)                # would have been a duplicate
+
+    print("emails actually sent:", len(sent))
+    ```
+
+    ```text
+    emails actually sent: 2
+    ```
+
+    Both emails went out, including the one to `gmail.com`. Observe mode is not a dry run: it
+    executes, and it asks no human. What it adds is the counterfactual on every receipt.
+  </Step>
+
+  <Step title="Read the numbers">
+    ```bash runnable
+    ctrlrun stats
+    ```
+
+    ```text
+    observed actions              7
+    would have been blocked       4
+      approval_required           2
+      policy_denied               1
+      duplicate_effect            1
+    ```
+
+    Counted from the local store and nothing else: no network, no upload. `--since 7d` narrows
+    the window and `--json` gives the same numbers to a script.
+  </Step>
+
+  <Step title="Fix the policy, not the count">
+    Each `approval_required` is a real approval request you will field once you enforce. If the
+    rate is wrong, the band is wrong: raise the autonomous limit for the action, or add a rule
+    for the case that dominates. Each `policy_denied` is an action your agent performs today
+    that will stop; decide whether that is the point. `duplicate_effect` is a retry loop you
+    did not know about.
+  </Step>
+
+  <Step title="Enforce">
+    Change the line, redeploy, and the same receipts now carry refusals instead of
+    counterfactuals:
+
+    ```yaml
+    mode: enforce
+    ```
+
+    Nothing else changes: same policy, same store, same evidence format. Every `would_have`
+    becomes a `BLOCKED` receipt or an approval request, and `ctrlrun stats` reports less and says
+    so.
+  </Step>
+</Steps>
+
+## What observe mode will not do
+
+It will not stop an action the policy would deny, and it will not ask a human. Run it on
+traffic you would run unprotected today. It is one line for the whole deployment; there is no
+per-action observe. An adapter's pre-invocation predicate answers "no approval needed" in observe
+mode, for the same reason: a human's no must not stop what observe mode promises to run.
+
+## If it didn't work
+
+- `PolicyError: mode is refused anywhere but the top level`: `mode:` is inside an action entry.
+- `ctrlrun stats` shows `enforce mode reports less`: the store was written in enforce mode; there
+  are refusals to count, not counterfactuals.
+- A receipt has no `would_have`: it was written before `mode: observe` was in force.
+
+## Next
+
+- [Observe mode](/concepts/observe-mode).
+- [Fail closed](/concepts/fail-closed): what enforce mode refuses.
+- [Get started](/get-started/quickstart) · [Why](/why).
