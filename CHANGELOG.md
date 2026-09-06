@@ -7,7 +7,35 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased]
+## [0.6.0] - unreleased — Durable runtime
+
+**Not tagged.** `docs/ROADMAP.md`'s v0.6 exit criterion is a soak of at least one week with no
+unexplained `AMBIGUOUS`, and a week of calendar time has not passed. The harness, its definition
+of *unexplained*, its positive control and the run it did do are all here and published;
+`research/soak/README.md` carries the duration actually measured. This entry stays dated
+`unreleased` rather than being given a date the criterion has not earned.
+
+v0.5 asked *can somebody else implement this?* v0.6 asks: **does it still hold when the process
+dies, the host goes away, and the database is somewhere else?**
+
+Every guarantee shipped so far was a guarantee about one process holding one SQLite file.
+`BEGIN IMMEDIATE` is a whole-database write lock on a local file; take the file away, put the
+store on another host, and E1 — *at most one caller per effect key* — has to be re-earned with a
+different mechanism. That is the milestone.
+
+**The suite was written before the backend it grades.** `ctrlrun.conformance.store` runs this
+repository's own acceptance tests — the cases of `v0.1 §7`, `v0.2 §10` and `v0.3 §10` that are
+statements about `StateStore` rather than about `Control` — against any backend, and it landed
+two items before Postgres existed. A backend measured against a suite written for it has marked
+its own homework. The ordering paid for itself on the first three runs, which found three real
+bugs in the Postgres store before a single test in its own file existed.
+
+**And the distinction that made it tractable: the store is reconcilable by re-reading; the remote
+is not.** A Postgres transaction is atomic, so an ambiguous *store write* has exactly one truth
+and the store can go and look at it. An ambiguous *remote effect* has no such move, which is why
+`AMBIGUOUS` is terminal there. Two ambiguities, one word, different remedies — and an
+implementation that collapsed them would look correct while either refusing work one query could
+have recovered or retrying work nothing can.
 
 ### Added
 
@@ -23,9 +51,142 @@ any change to one appears here.
 - **`SchemaMismatch`**, exported from `ctrlrun`. Raised at open when a store meets a database it
   does not recognise. Its own type because *"your database is from the future"* and *"your lease
   is negative"* have entirely different remedies.
+- **`PostgresStateStore`** — `ctrlrun[postgres]`, lazily imported (v0.6 item 3). The frozen
+  `v0.1 §5.3` protocol, extended by **nothing**, with `UNIQUE(effect_key)` plus
+  `INSERT … ON CONFLICT DO NOTHING` under `READ COMMITTED` where SQLite had `BEGIN IMMEDIATE`.
+  The guarantee is the unique index and not the isolation level, which the store does not set.
+  Every later transition is a compare-and-set with **the row count checked**. It passes item 1's
+  suite 23/23, with no N/A. `import ctrlrun` imports no `psycopg` module.
+
+  The decisions did not move: `plan_reservation`, `plan_lease_extension`, `check_consumable` and
+  `check_answerable` stay pure functions, and all three backends decide with them and then only
+  write — so `v0.1 §5.4`'s retry table has one implementation rather than three, and a backend
+  cannot drift into permitting something SQLite refuses.
+- **`--store-url` accepts a `postgresql://` URL**, and is now on every command that reads or
+  resolves the operator's own store — `receipts`, `effects`, `inspect`, `resolve`, `approve`,
+  `deny` — reading `CTRLRUN_STORE_URL`. CTRLRun's own `?ctrlrun_schema=` parameter selects the
+  schema and is peeled off before the URL reaches the driver.
+
+  **It creates nothing and migrates nothing.** A review found the first version doing both: a
+  `ctrlrun effects` against an empty schema printed "no effects yet", exited 0 and left eight
+  tables behind, and against a database one migration short, a `ctrlrun receipts` applied it.
+  On the milestone that first shares a store across hosts, that is one reader altering a table
+  every other process is still running against. A schema that is missing, behind or ahead is now
+  refused with an instruction.
+- **`ctrlrun receipts --control ID`** — shows only the receipts citing that control. A **filter
+  and not a lookup**: it does not consult the policy, so an id no document defines matches
+  nothing rather than erroring, which is the right answer for a reader running against a store
+  whose policy has since changed. A dangling *citation* is still a load error, in the place that
+  can see the registry.
+- **`ctrlrun receipts --verify-chain`** — reads the chain in the operator's own store and reports
+  every break by `seq` and by name: `content_altered`, `hash_missing`, `link_broken`, `missing`,
+  `head_mismatch`, `unchained`. Six names rather than one boolean, because *"receipt 41 was
+  edited"* and *"the last nine were deleted"* are different incidents.
+- **Receipts carry `seq`, `prev_hash` and `hash`** (v0.6 item 6). One chain per store — not one
+  per effect key, which would not detect the deletion of every receipt for one key, and not one
+  per process, which is not a chain. `seq` is **inside** the hashed content, so two adjacent
+  receipts swapped with their `seq` values change both documents; `hash` is a column, because a
+  document cannot contain its own hash. `put_receipt` takes the head row's lock **first** and
+  advances it in the same transaction.
+- **`policy_hash`, `policy_version` and `controls` on every receipt** (v0.6 item 7). A receipt
+  from six months ago says what the rules were, not what they are now. `policy_hash` is over the
+  **parsed decision inputs** — schema, actions and rules in document order, `mode`, `environment`,
+  the authority grants — and not the file's bytes, so a comment or a reordering of keys does not
+  change it. `version:` is a free string the operator chooses, recorded and **never
+  authoritative**: two documents sharing a `version:` and differing in content are two different
+  policies, and the hash is what says so.
+- **`ctrlrun.policy.PolicyControl`** — a registry entry: an id, a title, and an optional
+  `source`. Named `PolicyControl` and not `Control`, because a second `Control` in a package
+  whose central object is `Control` is a collision every call site would have to disambiguate,
+  and one this milestone would have frozen for a long time.
+- **`ctrlrun.policy/v4`**, with three new top-level keys and a closed key set, so a typo is still
+  a load error:
+  - **`controls:`** — a registry of ids, each with a `title` and an optional `source`. An action
+    cites some, a rule may narrow or add, and the receipt carries the union of the action's and
+    the **matched rule's** in registry order. **CTRLRun does not interpret a control**: `source:`
+    is a string the operator wrote and the registry records and never enforces. It maps to no
+    standard, and citing one is not a claim about it.
+  - **`data:`** — an action declares which of its arguments carry which class of data.
+    `data_scope` is the set of labels present in **the arguments actually supplied**, not the
+    whole declared map: an action that carries no PHI is not a PHI action because some other call
+    of it would be. `data_scope_in: [phi]` reuses the membership `_in` already expresses and adds
+    no operator, deliberately — `_OPERATORS` is shared with authority `constraints:`, so an
+    operator added here would become available to grants.
+  - **`version:`** — see above.
+- **`resolved_by` on every effect record** (v0.6 item 5). Out of `AMBIGUOUS` there are exactly
+  two authorities — a human and a reconcile hook — and the record now says which one acted.
+  `ctrlrun effects` prints it, and prints `executing (lease expired)` for a lease that lapsed and
+  was never contended, because nothing sweeps and the state alone hid it.
+- **`research/soak/`** (v0.6 item 8) — a soak harness, outside `src/` and packaged nowhere, on
+  `research/framework-probe/`'s precedent. It defines *unexplained* **before** the run starts —
+  an `AMBIGUOUS` caused by an injected failure is explained, one with no corresponding injection
+  is not — records every injection **before** causing it, and carries a positive control that
+  runs in its own store: a deliberately unrecorded ambiguity that the table must report. A soak
+  with no unexplained `AMBIGUOUS` is a result; a soak whose harness could not have detected one
+  is not.
+- **`docs/postgres.md`** — the operator's page: connection strings, what to grant, what happens
+  on failover, the one row every receipt write serializes on, and what the store does **not** do
+  for you.
+
+### Changed
+
+- **Observe mode no longer spends a presented approval, and that is a change to shipped v0.3
+  behaviour.** `_observe_secure` routed a presented approval through the same consuming path
+  enforce mode uses, so an operator evaluating a policy in observe mode was silently burning
+  their humans' single-use answers on actions observe mode was never going to gate. It now
+  **checks** the grant — with the same pure predicate every store applies, so the refusals it
+  records are the ones enforce mode would have raised — and writes nothing.
+
+  The **reservation is still taken**, and the asymmetry is deliberate: in observe mode the action
+  genuinely executes, so the effect record has to exist or the duplicate refusal has nothing to
+  refuse with. Observe mode suppresses CTRLRun's *decisions*; it does not suppress the record of
+  an effect that really happened. The `APPROVAL_CONSUMED` event on that path is **gone rather
+  than renamed** — v0.6 adds no event type, and an event naming a write that did not happen is
+  worse than no event.
+- **A denial now names the approval that was presented**, on the `ACTION_DENIED` event and on the
+  receipt. Where a policy denies an action a human had already approved, the approval stays
+  `granted` and unspent — that is deliberate, and `SPEC-v0.6.md` §7.2.1 argues it — but nothing
+  previously connected the live grant to the refusal it met.
+- **`data_scope` is now refused as an argument name**, at every place an argument is named: a
+  `data:` key, an `effect:` or `resource:` template placeholder, and a `@protect`-ed function's
+  parameter. §7.4 said it always was; no such check existed. A document or a decorated function
+  using that name stops loading, with the reason.
+- **`data_scope_eq:` and `data_scope_neq:` compare the set and not its order.** The derived value
+  is sorted, and list equality is order-sensitive, so `data_scope_eq: [phi, internal]` silently
+  never matched while `[internal, phi]` did — an operator writing the labels in their own
+  declaration order got a rule that never fired, and where that rule was the `deny` or the
+  `approve`, that is fail-open. Narrowed to derived subjects: an ordinary list argument still
+  means *that exact list*.
+- **`policy_hash` covers what §7.1 said it covered.** Four things were missing and each is now
+  in: an authority document loaded separately from the policy (the gateway's shape, and
+  `verify --authority`'s — two deployments with different grants produced byte-identical
+  provenance on every receipt); an action's `data:` labels; per-action and per-rule `controls:`
+  citations; and the `controls:` registry itself, whose titles are what a receipt's control ids
+  *mean*. The **effective** environment is hashed rather than the document's, since
+  `$CTRLRUN_ENVIRONMENT` and `Control(environment=...)` outrank it.
+- **A control's citations are recorded in registry order**, not in the order the action and the
+  matched rule cite them, so two receipts citing the same set list it the same way whichever
+  rule matched.
+- **A relaxed policy now closes the approval it made unnecessary, and this is a change to shipped
+  behaviour.** A policy relaxed between a human granting an approval and an agent presenting it
+  left that approval `granted` for its full TTL, bound to a hash a later edit could make
+  `APPROVE`-requiring again — a live bearer token for an action a human already answered, and
+  `v0.1 §4.1` calls a request id a bearer token in as many words. The approval is now spent, in a
+  write of its own **after** the reservation, so that an allowed action's success never depends on
+  the approval store.
+- **Every entry point re-checks the policy in force at execution**, and the receipt says which
+  policy that was. Where the policy changed between a grant and its consumption, `SPEC-v0.6.md`
+  §7.2's table decides by observation: a policy that now denies leaves the approval granted (the
+  action is refused on the policy axis, and spending the approval would destroy the evidence a
+  human answered); a policy that now allows invalidates rather than consumes it.
 
 ### Fixed
 
+- **A store failure closing an unneeded approval no longer refuses the action.** Where a policy
+  had been relaxed to `allow`, a locked database or a dropped connection while closing the
+  now-unnecessary approval propagated to the caller — **after** the effect was reserved and
+  **before** execution began. No receipt was written at all, and the effect key was left
+  `RESERVED` until its lease lapsed: an ambiguity manufactured by the *permissive* decision path.
 - **Concurrent store opens no longer fail.** Switching a database to WAL takes a brief exclusive
   lock that SQLite's busy handler does not cover, and `busy_timeout` was being set *after* the
   switch — so simultaneous opens raced and lost. It was survivable while opening a store was a
@@ -52,8 +213,6 @@ any change to one appears here.
   database with no `continuations` and no `delegations` table. `docs/SPEC-v0.6.md` §9.6.1 records
   all twenty-one with where each landed.
 
-### Changed
-
 - **`docs/ROADMAP.md`'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the
   slash was the problem.** A chain detects **alteration**; a signature proves **origin**, and
   proving origin brings key generation, rotation and revocation with it — which is issuing, and
@@ -61,9 +220,11 @@ any change to one appears here.
   Corrected in the same commit as the specification, on the rule `SPEC-v0.4.md` §9.4 set.
 - **`docs/THREAT_MODEL.md`'s "Receipts are not signed; a database admin can alter history
   (v0.6)"** promised something v0.6 does not deliver. Rewritten to say which half v0.6 closes —
-  the partial tamper: an `UPDATE` on one row, a `DELETE` from the middle, a reordering, a
-  truncation — and which half it does not: authorship, an adversary who can rewrite every row
-  including the chain head, and the question of whether every action wrote a receipt at all.
+  the partial tamper: an `UPDATE` on one row, a `DELETE` from the middle, a reordering — and
+  which half it does not: **truncation at the end**, authorship, an adversary who can rewrite
+  every row including the chain head, and the question of whether every action wrote a receipt
+  at all. Two drafts of that line claimed truncation, and a review measured it: deleting a
+  suffix and rewinding the head is two statements, undetected.
 
 ## [0.5.0] - 2026-09-05 — Adapter contract
 
@@ -993,7 +1154,7 @@ until it gets one, which is the point.
 - Requires Python ≥ 3.11. Runtime dependencies are `pyyaml` and `click`.
 - Single-host only: reservation is atomic across processes on one machine via SQLite.
   Multi-host needs the Postgres store planned for v0.6.
-- Receipts are not signed. A database administrator can alter history (v0.6).
+- Receipts are not signed. A database administrator can alter history. **This line read "(v0.6)" until v0.6 was built, and that was a promise v0.6 does not keep**: v0.6 adds a hash chain, which detects alteration and is not evidence of authorship, and it does not stop an administrator who can rewrite every row including the chain head. Signing is out of scope (`SPEC-v0.6.md` §11).
 - Approver identity is free text and is not authenticated (v0.3).
 - Generated ids (`act_`, `apr_`, `ctr_`) are 128 bits. An approval id is not a bearer token
   in v0.1 — consuming one needs write access to the store — but it becomes one with the
@@ -1004,7 +1165,8 @@ until it gets one, which is the point.
 - Policy conditions address an action's arguments only. Scoping a rule by environment,
   resource or principal arrives with the authority model in v0.3.
 
-[Unreleased]: https://github.com/CTRLRun/ctrlrun/compare/v0.4.0...HEAD
+[0.6.0]: https://github.com/CTRLRun/ctrlrun/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.5.0
 [0.4.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.4.0
 [0.2.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CTRLRun/ctrlrun/releases/tag/v0.1.0

@@ -256,6 +256,55 @@ and not a kernel event. Each states its supported kernel range and framework ran
 [`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the
 three ways in, and how to write one for a framework not listed here.
 
+## More than one host
+
+Everything above holds for one process holding one SQLite file. `BEGIN IMMEDIATE` is a write
+lock on a local file — take the file away, put the store on a database, and the promise has to be
+earned again with a different mechanism.
+
+```console
+$ pip install "ctrlrun[postgres]"
+```
+
+```python
+from ctrlrun.postgres import PostgresStateStore
+
+store = PostgresStateStore("postgresql://ctrlrun@db.internal/ctrlrun", schema="ctrlrun")
+```
+
+Same `StateStore` protocol, extended by nothing. The exclusion that stops two agents issuing the
+same refund is a unique index on the effect key and compare-and-set updates whose row counts are
+checked; every case of the acceptance suite that is a statement about the store runs against both
+backends, from the same file, and the suite was written before this backend existed.
+
+**A lost connection during `COMMIT` is the case worth naming.** Postgres very often did commit,
+so nobody knows — that is `AMBIGUOUS`, never `FAILED`, and the store re-reads the row to find out
+which. An agent that read it as `FAILED` and retried is the exact failure this library exists to
+prevent, arriving through the storage layer.
+
+**The schema is versioned and migrations are automatic at open**, forward-only, with no flag that
+opens a database un-migrated. A store refuses a database it does not recognise in **both**
+directions: a newer binary migrates, and an older binary against a newer schema refuses
+immediately rather than reading columns it does not understand.
+
+**Each receipt carries the hash of the one before it.** An edit to receipt 41, a deletion from the
+middle, a reordering — each is detected and named, and `ctrlrun receipts --verify-chain` reports
+it by `seq`. **This detects alteration, and alteration is not authorship: receipts are not signed
+and the chain is no evidence of who wrote one.** Nor is it tamper-proof — it does not survive an
+administrator who can rewrite every row including the chain head, and erasing the end of the log
+costs two statements, because the head lives in the same database as the receipts.
+[`docs/THREAT_MODEL.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/THREAT_MODEL.md) states
+what remains open.
+
+**Every receipt records which policy decided it** — the policy's declared `version:` and a hash of
+its canonical content — so a receipt from six months ago says what the rules were, rather than
+what they are now. Where a policy changes between a human approving and an agent executing, the
+approval is re-checked against the policy in force at execution.
+
+[`docs/postgres.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/postgres.md) is the
+operator's page: connection strings, what to grant, what happens on failover, and what the store
+does not do for you.
+
 ## Two more things
 
 **Resolving an unknown outcome without a human.** `@protect(..., reconcile=...)` takes a
@@ -337,6 +386,10 @@ CTRLRun cannot guarantee exactly-once execution against external systems it does
 | [`docs/SPEC-v0.2.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) | The v0.2 delta: gateway, sinks, reconciliation, webhooks |
 | [`docs/SPEC-v0.3.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) | The v0.3 delta: identity, authority, delegation, observe mode |
 | [`docs/SPEC-v0.4.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.4.md) | The v0.4 delta: the guarantee catalogue, the scenario engine, the badge |
+| [`docs/SPEC-v0.5.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.5.md) | The v0.5 delta: the adapter contract and the conformance kit |
+| [`docs/SPEC-v0.6.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.6.md) | The v0.6 delta: Postgres, migrations, recovery, the receipt chain, policy versioning |
+| [`docs/postgres.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/postgres.md) | Running the store on Postgres: grants, failover, and what it does not do for you |
+| [`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) | The three ways in, when you do **not** need an adapter, and how to write one |
 | [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md) | `ctrlrun verify`, the guarantees, the N/A rule, and what the badge means |
 | [`docs/OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/OWASP-AGENTIC-TOP10.md) | A reading of the OWASP Top 10 for Agentic Applications against the guarantees |
 | [`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) | Grants, delegation and the omission rule, in plain language |
