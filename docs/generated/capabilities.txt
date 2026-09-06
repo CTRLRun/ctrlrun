@@ -17,6 +17,7 @@ generated from docs/capabilities.yaml (text) — edit the YAML, never this list
 - Verify: Runs the guarantee catalogue against your policy and store; N/A is not a pass.
 - The verified badge: A GitHub Action and a badge that means the declared guarantees pass.
 - Framework adapters: An approval routed through the framework's own interrupt; never a second path.
+- Runs on one host or many: SQLite on one host, Postgres across hosts, the same guarantees either way.
 - Postgres store: The same store on Postgres, graded by the suite written for SQLite.
 - Versioned schema: Migrations run at open, forward only, and an unknown schema is refused.
 - Recovery on restart: A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it.

@@ -1,0 +1,74 @@
+---
+title: "Operations"
+description: "What to watch once it is running: unknown outcomes, approvals nobody answered, the chain check, and what to back up."
+---
+
+Watch one number and you will catch almost everything: **how many effects are sitting in an
+unknown outcome that nobody has answered.** Each one is a real-world action whose result nobody
+knows, and each needs a person or a reconcile hook. Nothing frees them on its own.
+
+```bash
+ctrlrun effects --state ambiguous          # the queue that matters
+ctrlrun inspect <action-id>                # one action's whole history
+ctrlrun receipts --verify-chain            # after a restore, or any direct write
+ctrlrun stats                              # what the receipts say
+```
+
+## What to watch, and what to do about it
+
+| Signal | Where it comes from | What it means |
+|---|---|---|
+| Effects in an unknown outcome | `ctrlrun effects --state ambiguous` | somebody must say what happened. This is the page-a-human number |
+| `executing (lease expired)` | `ctrlrun effects` | a holder went away and nobody has contended the key since. Not yet a problem, and not self-healing |
+| An approval granted long ago and never consumed | `ctrlrun inspect <action-id>` | a human answered and the agent never came back. There is no command that lists these: an action still awaiting one has no receipt, and `ctrlrun stats` counts receipts |
+| A chain break, by name | `ctrlrun receipts --verify-chain` | see [receipt integrity](/production/receipt-integrity) |
+| A `WARNING` on the `ctrlrun.postgres` logger with a `branch` attribute | your logs | a `COMMIT` was lost and the re-read decided what to do. The attribute says which branch ran, including the two that end in a refusal |
+| The store raising rather than deciding | your exception handler | the database is unreachable. Work stops; it is never quietly permitted |
+
+Set the alert on the first row and the last. The middle rows are for the dashboard.
+
+## Getting it somewhere you can see it
+
+Every executed action leaves a portable JSON receipt, and receipts are the export. With
+`pip install "ctrlrun[otel]"` you get one OpenTelemetry span per action and one span event per
+step, and argument values stay out of it unless you ask for them. There is no CTRLRun dashboard
+and there will not be one.
+
+## Routine
+
+- **Back up the store.** It holds every in-flight effect key, every approval and the receipt
+  chain. Restoring a database from before an action ran is how a duplicate execution becomes
+  possible again.
+- **Verify the chain after a restore**, and after any maintenance that wrote to the database
+  directly.
+- **Take the backup before the first new process starts** on a deploy, because migrations run at
+  open and there is [no way back](/production/migrations).
+- **Size the lease to your slowest executor**, not to your average one. It defaults to five
+  minutes and is meant to be raised. A lease shorter than the work it covers turns healthy slow
+  actions into unknown outcomes.
+- **A reporting role still needs `CREATE` on the schema.** Opening the store migrates it, so a
+  read-only role cannot run `--verify-chain` — it is refused before a receipt is read, naming
+  the missing privilege. Read-only is for your own queries against the tables, not for the CLI.
+
+## What this does not do
+
+- **There is nothing to run.** No agent, no sidecar, no scheduler. Every command above is a
+  one-shot read of the store.
+- **It does not retry for you.** A proven non-execution leaves the key retryable — the next
+  attempt is admitted rather than refused — and nothing performs that attempt but your code.
+  Every other outcome refuses one.
+- **It does not resolve unknown outcomes for you.** A person or a reconcile hook does, and only
+  where the hook's answer points.
+- **It is not an audit product.** Receipts are evidence you can export; what you do with them is
+  outside this project.
+
+**Verified by** `T160` and `T177d` — an expired lease frees nothing, and displaying it changes
+nothing — `T161` for the two authorities that can move an unknown outcome and what each is
+recorded as, and `T177c` for the CLI surface these commands come from, asserted against the
+command list so a new one cannot appear unnoticed.
+
+## Next
+
+- [Recovery after a crash](/production/recovery): why nothing sweeps.
+- [Reconcile automatically](/guides/reconcile-automatically): the hook that answers without a person.
+- [Get started](/get-started/quickstart) · [Why](/why).

@@ -73,10 +73,21 @@ def test_the_faq_structured_data_matches_the_page():
 
     assert document["@type"] == "FAQPage"
     questions = [entry["name"] for entry in document["mainEntity"]]
-    assert len(questions) == 12, f"{len(questions)} questions in the structured data"
-
     on_page = re.findall(r'<Accordion title="([^"]+)">', text)
-    assert len(on_page) == 12, f"{len(on_page)} accordions on the page"
+
+    # Fourteen since the Production section added the two questions it provokes. The count is
+    # pinned rather than derived so that dropping an accordion and leaving its markup behind --
+    # which is how structured data comes to answer something the reader cannot see -- fails
+    # here instead of shipping.
+    assert len(questions) == 14, f"{len(questions)} questions in the structured data"
+    assert len(on_page) == 14, f"{len(on_page)} accordions on the page"
+
+    # The two lists are the same questions in the same order and not the same strings: an
+    # accordion is read with the page around it and says "Is it production-ready?", while a
+    # search result carries the question alone and has to name the product. What must not
+    # happen is a question in the markup that the reader cannot find on the page, so the counts
+    # are pinned and every answer must be non-empty.
+    assert len(set(questions)) == 14, "the structured data asks the same question twice"
     for entry in document["mainEntity"]:
         assert entry["acceptedAnswer"]["text"].strip(), entry["name"]
 

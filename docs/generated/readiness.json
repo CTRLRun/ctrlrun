@@ -1,0 +1,13 @@
+{
+  "guarantees": 11,
+  "soak": {
+    "actions": 889735,
+    "backend": "postgres",
+    "elapsed": "20m 0s",
+    "elapsed_seconds": 1200.004,
+    "positive_control": true,
+    "unexplained": 0
+  },
+  "tests": 3939,
+  "version": "0.6.0"
+}

@@ -237,6 +237,18 @@ capabilities:
     page: get-started/three-ways-in
     claim: There is never a second place to say yes
 
+  - id: durable-runtime
+    name: Runs on one host or many
+    description: SQLite on one host, Postgres across hosts, the same guarantees either way.
+    guarantee: false
+    ways_in:
+      decorator: true
+      gateway: true
+      adapter: true
+    since: v0.6
+    page: production/index
+    claim: Runs in production on a single file, or on Postgres across hosts
+
   - id: postgres
     name: Postgres store
     description: The same store on Postgres, graded by the suite written for SQLite.
@@ -246,7 +258,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: guides/run-on-postgres
+    page: production/postgres
     claim: Same `StateStore` protocol, extended by nothing
 
   - id: migrations
@@ -258,7 +270,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: guides/run-on-postgres
+    page: production/migrations
     claim: migrations are automatic at open, forward-only
 
   - id: recovery
@@ -270,7 +282,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: guides/resolve-an-ambiguous-effect
+    page: production/recovery
     claim: A crashed worker's effect stays `AMBIGUOUS` until a human runs `ctrlrun resolve` or a `reconcile` hook asks the remote what happened
 
   - id: receipt-chain

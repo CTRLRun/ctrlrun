@@ -1,0 +1,76 @@
+---
+title: "Receipt integrity in practice"
+description: "Run ctrlrun receipts --verify-chain, read the six names it can report, and know what each one means about your store and what to do next."
+---
+
+Each receipt carries the hash of the one before it, so an edit, a deletion from the middle or a
+reordering is detected and **named**. Run the check against your own store:
+
+```bash
+ctrlrun receipts --verify-chain
+```
+
+It reports **every** break by `seq` and by name, plus how many rows predate the chain — *receipt
+41 was edited* and *the last nine were deleted* are different incidents and you need both. Put it
+in the job that already runs after a restore, and after any maintenance that wrote to the
+database directly.
+
+## The six names
+
+| Name | What it means | What to do |
+|---|---|---|
+| `content_altered` | receipt *n* no longer hashes to its stored hash | the row was edited; the stored hash says what it was, the row says what it is now |
+| `hash_missing` | receipt *n* has a position and no stored hash | the hash column was cleared; nothing can be compared, and this is a failure rather than a skip |
+| `link_broken` | receipt *n*'s link does not match what *n-1* hashes to | a neighbour changed, or two rows were reordered |
+| `missing` | a gap in `seq` | a receipt was deleted from the middle |
+| `head_mismatch` | the stored head does not match the last receipt | the end of the log was truncated |
+| `unchained` | `seq` is empty — written before the chain existed | migrate-era rows; counted and reported, never counted as a pass |
+
+`hash_missing` exists because of one statement. An `UPDATE` with no `WHERE` clearing the hash
+column destroyed every independent copy of every hash, and an earlier reader **skipped** the
+comparison it could no longer make and called the chain intact. A check that cannot be evaluated
+is not a check that passed.
+
+`unchained` is never a pass either. Rows from before the chain have no position, so they are read
+separately and reported with their count, and the summary says how many of how many were
+verified. Folding them into a green count would be the same false green in a new costume.
+
+**So a database migrated from before v0.6 makes this command exit non-zero, permanently.** That
+is the honest answer and not a bug: those receipts were written before there was anything to
+verify them against, and nothing can make them verifiable after the fact. Before you put the
+command in a scheduled job, run it once and read the unchained count, so you are choosing what to
+do about those rows rather than discovering them at three in the morning.
+
+## When a receipt cannot be written
+
+If the receipt insert itself fails, the exception reaches you and nothing swallows it. The effect
+record is already committed, so a retry of that key is refused as a duplicate rather than executed
+twice; the head is unadvanced and there is no gap in `seq`. You get an action that ran, an
+exception you must handle, and a log with no hole in it.
+
+## What this does not do
+
+- **It does not tell you who wrote a receipt.** Alteration is not authorship, it does not survive
+  an administrator who can rewrite every row including the head, and it vouches for nothing that
+  was never recorded. [The receipt chain](/security/receipt-chain) is where those limits are
+  argued and [the threat model](/THREAT_MODEL) says what stays open; this page is what to run and
+  what to do with the answer.
+- **It does not tell you a break was malicious.** A restore from backup, a hand-run `UPDATE` and
+  a retention job all produce the same names. The report says what changed, not why.
+- **`ctrlrun verify` does not read your store.** `G11` runs against a scratch store verify itself
+  created, because a verification tool with a side effect on the thing it verifies is refused.
+  `--verify-chain` is the one that reads yours.
+
+**Verified by** `T164` — six tamper cases, each asserted on the **name** and the `seq` and not
+merely on "invalid", the reordering case included — `T165` for the positive control without which
+every one of those rows would pass against a detector that always says broken, `T167` for
+truncation caught by the head and only by the head, `T168` for the unchained rows that are never
+a pass, and `T170` for the failed receipt write that raises and leaves no gap. `G11` in `ctrlrun
+verify` runs the same detection against a scratch store, with the unaltered chain as its
+control.
+
+## Next
+
+- [The receipt chain](/security/receipt-chain): what it proves, and what it does not.
+- [Operations](/production/operations): where this check belongs in a schedule.
+- [Get started](/get-started/quickstart) · [Why](/why).

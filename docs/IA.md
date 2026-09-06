@@ -38,6 +38,16 @@ Get started
   ├─ 60-second quickstart              get-started/quickstart
   ├─ Three ways in                     get-started/three-ways-in
   └─ Choosing between them             get-started/choosing
+Production
+  ├─ Run it in production               production/index
+  ├─ SQLite or Postgres                 production/postgres
+  ├─ How reservation works              production/how-reservation-works
+  ├─ Migrations and schema versions     production/migrations
+  ├─ Recovery after a crash             production/recovery
+  ├─ Receipt integrity in practice      production/receipt-integrity
+  ├─ The soak                           production/soak
+  ├─ Operations                         production/operations
+  └─ Running on Postgres (reference)    postgres
 MCP
   ├─ Overview                          mcp/overview
   ├─ The gateway in five minutes       mcp/gateway-in-5-minutes
@@ -111,6 +121,33 @@ Get the badge                          verify/get-the-badge
 | `get-started/quickstart` | Protect one function end to end in sixty seconds, with the real output: a policy, a decorator, a refused mutation, a receipt. | *ctrlrun quickstart* · *protect an AI agent action python* |
 | `get-started/three-ways-in` | Decorator, gateway, adapter: what each covers and what each needs. The negative sentence: most readers need the decorator and should not look for an adapter. | *ctrlrun langgraph* · *ctrlrun mcp* · *do I need an adapter* |
 | `get-started/choosing` | The decision table: in-process Python → decorator; tools behind MCP → gateway; a framework with its own approval UI → adapter. What you do not need for the single-host case: a server, a database, a dashboard. | *ctrlrun decorator vs gateway* |
+
+## Production
+
+The question a stranger asks after the demo convinces them, and the one the rest of this site
+answered only in pieces: **can I run this for real, and what happens when the parts that fail,
+fail?** It sits third, above MCP and Concepts, because a reader deciding whether to adopt asks
+it before they ask what an effect key is.
+
+**The first line of the section is load-bearing.** SQLite is the default and is production-grade
+on one host; Postgres is for many hosts. Written in that order, because a reader with one host
+must not be told they are not really in production.
+
+`production/soak` is a **render** of `research/soak/results/*.json` and is never hand-edited, on
+`study/does-your-framework-double-execute`'s precedent: the duration on the page is the measured
+one, and the page says in the same paragraph that the roadmap's exit criterion is not met by it.
+
+| Path | Purpose | Query |
+|---|---|---|
+| `production/index` | The section's front door: which store and why, what this section answers, the generated readiness block with its **Not yet** list, and the four things the store holds. | *is ctrlrun production ready* |
+| `production/postgres` | The choice, in one table: SQLite until a second host writes, Postgres after. What changes (a URL and a schema) and what does not (everything else). | *ctrlrun sqlite vs postgres* |
+| `production/how-reservation-works` | One winner per effect key, and the two rows nobody merges: an exception before `COMMIT` is a failed write to retry; one during it is unknown and is re-read. | *lost commit ambiguous* · *exactly once database* |
+| `production/migrations` | Five shapes, three of them a refusal; nothing half-applies; the backward direction that corrupts; what a rolling deploy can and cannot do. | *ctrlrun schema migration* |
+| `production/recovery` | A restarted process repairs nothing and cannot know the holder is dead. Nothing sweeps; an expired lease is a refusal, not a reclaim. | *agent crashed mid action* |
+| `production/receipt-integrity` | The runbook: run `--verify-chain`, read the six names, know what each means. `security/receipt-chain` keeps *what it proves*; this page is *what to do*. | *verify receipt chain* |
+| `production/soak` | Generated. One published run: how long, how many actions, how many unattributed ambiguous outcomes, and what it is not evidence of. | *ctrlrun soak test* |
+| `production/operations` | What to watch, what to page on, what to back up, and the fact that there is nothing to run. | *ctrlrun monitoring* |
+| `postgres` | The operational reference that already existed: connection strings, grants, pooling, failover, the throughput ceiling. Moved here from Architecture, because this is where a reader looks for it. | *ctrlrun postgres connection* |
 
 ## MCP
 

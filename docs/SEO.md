@@ -33,6 +33,14 @@ are set once in `docs.json` under `seo.metatags`.
 | `get-started/quickstart` | protect an AI agent action python · ctrlrun quickstart | In sixty seconds you will write a policy, protect a refund function, and watch a mutated approval be refused. |
 | `get-started/three-ways-in` | do I need a ctrlrun adapter · ctrlrun langgraph | There are three ways to put CTRLRun in front of a consequential action, and only one of them is an adapter. |
 | `get-started/choosing` | ctrlrun decorator vs gateway | In-process Python takes the decorator, tools behind MCP take the gateway, and a framework with its own approval UI takes an adapter. |
+| `production/index` | is ctrlrun production ready | SQLite is the default and is production-grade on one host; Postgres is for many hosts. |
+| `production/postgres` | ctrlrun sqlite vs postgres | Choose by how many machines write to the store, not by how serious you are. |
+| `production/how-reservation-works` | lost commit ambiguous outcome | An exception before COMMIT is a failed write to retry; one during COMMIT is unknown and is re-read. |
+| `production/migrations` | ctrlrun schema migration | Migrations run at open, forward only, with no flag that opens a database un-migrated. |
+| `production/recovery` | agent crashed mid action | A restarted process repairs nothing and cannot know the holder is dead. |
+| `production/receipt-integrity` | verify receipt chain | Run ctrlrun receipts --verify-chain and read the six names it can report. |
+| `production/soak` | ctrlrun soak test results | One published run, its measured duration, and the exit criterion it does not meet. |
+| `production/operations` | ctrlrun monitoring | Watch how many effects are sitting in an unknown outcome that nobody has answered. |
 | `mcp/overview` | MCP gateway human approval | CTRLRun works with MCP in three ways. |
 | `mcp/gateway-in-5-minutes` | protect MCP server · MCP tool call approval | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
 | `mcp/use-the-docs-from-your-editor` | ctrlrun docs mcp server | This documentation is an MCP server, hosted with the site. |

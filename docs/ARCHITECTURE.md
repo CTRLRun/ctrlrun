@@ -5,7 +5,7 @@ description: "The boundary CTRLRun owns, the six steps every protected call take
 
 Context: agent frameworks model work as `model → tool call → response`. That is fine for reads. For writes it is missing the semantics every serious system has around consequential operations: authorization bound to the exact operation, identity of the effect (not the request), atomic reservation, and an honest distinction between *failed* and *unknown*. CTRLRun adds those semantics around the dangerous part and nothing else.
 
-The contract is in [`SPEC-v0.1.md`](SPEC-v0.1.md). This document explains the shape and the reasoning.
+The contract is in [`SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md). This document explains the shape and the reasoning.
 
 ## 1. The boundary CTRLRun owns
 

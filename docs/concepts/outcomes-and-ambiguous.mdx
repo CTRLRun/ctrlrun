@@ -74,7 +74,9 @@ remote refund calls: 1
 Exactly two things move a record out of `AMBIGUOUS`, and both have to say which way:
 
 - **A human**, with `ctrlrun resolve refund:txn_1 --committed` or `--failed`, after asking the
-  remote. The receipt records who resolved it.
+  remote. The **effect record** keeps `cli:local` in `resolved_by`, and an `EFFECT_RESOLVED`
+  event carries the same string. No receipt changes: a receipt is written when the action ends,
+  a resolution happens afterwards, and editing one would be an alteration the chain reports.
 - **A reconcile hook**, `@protect(..., reconcile=...)`, a function that asks the remote what
   happened to an effect key and answers committed, not executed, or unknown. It moves the
   record only in the direction its answer points, and an answer of unknown leaves it where it

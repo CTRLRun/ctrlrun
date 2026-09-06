@@ -145,10 +145,12 @@ carries two tables rather than one.
 A Postgres transaction is atomic, so an ambiguous **store write** has exactly one truth and the
 store can go and look at it. On a lost `COMMIT` the store re-reads the row:
 
-- it carries our `action_id` **and matches the row we attempted to write** → the commit landed,
-  and we hold the reservation;
-- the row is absent → the commit did not land, and the insert is re-issued;
-- the row is another caller's → we are blocked, which is the correct answer and not an error.
+- it matches, **in every column the store was about to write**, the row we attempted → the
+  commit landed, and we hold the reservation. Not a match on `action_id`: that names an attempt
+  and is caller-supplyable, so a match on it alone is satisfied by another process's live
+  reservation, and that is a double execution;
+- the row is absent → the commit did not land, and the insert is re-issued, once;
+- anything else → it goes back through `plan_reservation` and the store obeys what that says.
 
 **Only if the re-read itself fails** does the store refuse to let execution proceed, writing no
 effect state at all. Fail closed: the remote is not called, so there is nothing to be ambiguous
@@ -158,9 +160,10 @@ An ambiguous **remote effect** has no such move. Nothing you can read settles wh
 landed, which is why `AMBIGUOUS` is a terminal state there and why a blind retry against that key
 is refused until a human or a reconciliation hook answers.
 
-Which branch ran is logged on the `ctrlrun.postgres` logger at `INFO`, by name — `A1_OURS`,
-`A1_REINSERT`, `A1_REFUSE`, `A2_LANDED`, `A2_REISSUE`, `A2_REFUSE`. Turn that logger on before
-you need it.
+Which branch ran is logged on the `ctrlrun.postgres` logger at `WARNING`, with a `branch`
+attribute drawn from a closed set — `a1.row1.ours`, `a1.row2.reinsert`, `a1.row3.refuse`,
+`a2.row1.landed`, `a2.row2.reissue`, `a2.row3.refuse`. Those are the values in the log; the
+Python constants that carry them are spelled differently, so grep for the value.
 
 ### Failover
 
@@ -230,8 +233,10 @@ What that means in practice:
 - Two schemas in one database have two head rows and do not contend. Sharding by schema works and
   gives you two chains to verify rather than one.
 
-The soak in `research/soak/` measures this; its published table carries the actions-per-second it
-saw and against what.
+The soak in `research/soak/` is not a measurement of this. It publishes a duration and an action
+count, on one host with four threads against a database on the same machine, and it names no
+throughput figure on purpose — [what it does not establish](/production/soak) says why. Size this
+against your own hardware.
 
 ## Verifying the chain
 
@@ -276,8 +281,8 @@ them is true:
   `delegations` and `continuations` grow without bound. Deciding what may be deleted is a
   retention policy and this library does not have one; note that deleting receipts from the middle
   or the end of the chain is detected as a break by design, so a retention job needs to be written
-  with that in mind and `ctrlrun inspect --verify-chain` needs to be told where a legitimate
-  boundary is.
+  with that in mind, and `ctrlrun receipts --verify-chain` will report the boundary as a break
+  because it cannot know the deletion was deliberate.
 - **It does not create the schema, the database, the user or the grants.**
 - **It does not pool, discover a primary, retry a failed connection, or fail over.**
 - **It does not sweep expired leases**, and nothing runs in the background at all.

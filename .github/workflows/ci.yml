@@ -78,6 +78,20 @@ jobs:
           CTRLRUN_REQUIRE_RELEASE_FIXTURES: "1"
         run: ./scripts/check.sh
 
+      # The badge is written **after** `check.sh`, and the order is the whole claim: a count
+      # produced before the run would be the size of a suite that might be red. It is uploaded
+      # from one matrix leg only — two would race for the same artifact name — and published by
+      # the `badge` job, which runs on a push to `main` and on nothing else.
+      - name: The test-count badge
+        if: matrix.python-version == '3.11'
+        run: python tools/docs_audit/render_badges.py --write-count tests-badge.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.python-version == '3.11'
+        with:
+          name: ctrlrun-tests-badge
+          path: tests-badge.json
+
   # SPEC-v0.4 §5, T118. The composite action, run against this repository's own
   # configurations, with `install: .` so it dogfoods the checkout rather than the last
   # release. Two runs, because the second is the one that matters: the N/A path has to be
@@ -143,7 +157,7 @@ jobs:
   #     rather than regenerated. §5.1's rule holds across the job boundary: the badge, the job
   #     summary and the uploaded report all come from one verify run.
   badge:
-    needs: verify
+    needs: [verify, check]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -154,6 +168,11 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ctrlrun-verify-authority
+          path: badge
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ctrlrun-tests-badge
           path: badge
 
       - name: Publish to the badges branch
@@ -176,9 +195,12 @@ jobs:
           # Nothing to clear: `git switch` replaces the working tree with the target's, and
           # `--orphan` starts from an empty one. The downloaded artifact is untracked, so it
           # survives either path - which is the only file that must.
+          test -s badge/tests-badge.json
+          tests=$(python -c 'import json;print(json.load(open("badge/tests-badge.json"))["message"])')
           cp badge/verify-badge.json verify-badge.json
-          git add -f verify-badge.json
-          git commit -m "verify: $message" || { echo "badge unchanged"; exit 0; }
+          cp badge/tests-badge.json tests-badge.json
+          git add -f verify-badge.json tests-badge.json
+          git commit -m "verify: $message; tests: $tests" || { echo "badges unchanged"; exit 0; }
           git push origin badges
 
   # SPEC-v0.5 §6, T135/T135b/T137. Both adapter test modules are module-level
@@ -283,6 +305,15 @@ jobs:
 
       - name: The framework-probe page is the render of the published results
         run: python tools/docs_audit/render_probe.py --check
+
+      - name: The soak page is the render of the published results
+        run: python tools/docs_audit/render_soak.py --check
+
+      - name: The readiness block is the same in all three places
+        run: python tools/docs_audit/render_readiness.py --check
+
+      - name: The badge row matches the generator
+        run: python tools/docs_audit/render_badges.py --check
 
       - name: Runnable snippets execute offline
         continue-on-error: true

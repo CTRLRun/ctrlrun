@@ -497,10 +497,18 @@ def test_the_badge_job_publishes_the_badge_the_verify_job_produced():
     ]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert badge["needs"] == "verify"
+    # Two upstreams since the test-count badge joined it: the verify run that produced the
+    # guarantee badge, and the `check` job whose suite the count is the size of. Both are
+    # downloaded rather than regenerated, for the same reason -- a number this job computed
+    # itself would be a number no run stands behind.
+    assert set(badge["needs"]) == {"verify", "check"}
     assert downloads, "the badge job regenerates the badge instead of downloading it"
-    assert downloads[0]["with"]["name"] == "ctrlrun-verify-authority"
+    assert {step["with"]["name"] for step in downloads} == {
+        "ctrlrun-verify-authority",
+        "ctrlrun-tests-badge",
+    }
     assert "ctrlrun verify" not in script
+    assert "pytest" not in script and "render_badges" not in script
     assert "git push origin badges" in script
 
 
@@ -591,6 +599,13 @@ def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
             json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": message}),
             encoding="utf-8",
         )
+        # The second artifact, from the `check` job. The script refuses without it rather than
+        # publishing half a row, so a test that wrote only the first would be exercising the
+        # refusal and not the publish.
+        (work / "badge" / "tests-badge.json").write_text(
+            json.dumps({"schemaVersion": 1, "label": "tests", "message": "3,900"}),
+            encoding="utf-8",
+        )
         return subprocess.run(
             ["bash", "-c", script], cwd=work, capture_output=True, text=True, check=False
         )
@@ -619,7 +634,9 @@ def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
         text=True,
         check=True,
     )
-    assert listing.stdout.split() == ["verify-badge.json"], listing.stdout
+    assert sorted(listing.stdout.split()) == ["tests-badge.json", "verify-badge.json"], (
+        listing.stdout
+    )
 
     published = subprocess.run(
         ["git", "show", "badges:verify-badge.json"],
@@ -670,6 +687,10 @@ def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
             json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": "verified 9/9"}),
             encoding="utf-8",
         )
+        (work / "badge" / "tests-badge.json").write_text(
+            json.dumps({"schemaVersion": 1, "label": "tests", "message": "3,900"}),
+            encoding="utf-8",
+        )
         return subprocess.run(
             ["bash", "-c", script], cwd=work, capture_output=True, text=True, check=False
         )
@@ -678,7 +699,7 @@ def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
     unchanged = publish(2)
 
     assert unchanged.returncode == 0, f"{unchanged.stdout}\n{unchanged.stderr}"
-    assert "badge unchanged" in unchanged.stdout
+    assert "badges unchanged" in unchanged.stdout
     log = subprocess.run(
         ["git", "log", "--oneline", "badges"],
         cwd=remote,
