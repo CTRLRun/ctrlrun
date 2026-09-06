@@ -16,6 +16,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The README is the PyPI page as well as the GitHub one, so its assets are absolute; see
+#: `test_the_readme_carries_no_relative_link_and_no_relative_image`.
+RAW = "https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/"
 ASSETS = REPO_ROOT / "docs" / "assets"
 README = REPO_ROOT / "README.md"
 
@@ -45,7 +49,9 @@ def test_the_tape_writes_the_gif_the_readme_embeds():
     readme = README.read_text(encoding="utf-8")
 
     assert "Output docs/assets/demo.gif" in tape
-    assert 'src="docs/assets/demo.gif"' in readme
+    # Absolute, because the README is also the PyPI long description and PyPI resolves a
+    # relative src against pypi.org. The file still has to be the one the tape writes.
+    assert 'src="' + RAW + 'docs/assets/demo.gif"' in readme
 
 
 def test_the_recording_ends_on_the_line_that_matters():
@@ -82,8 +88,8 @@ def test_the_wordmark_ships_for_both_themes_and_the_readme_uses_both():
         site = (REPO_ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
         assert site == (ASSETS / name).read_text(encoding="utf-8"), f"docs/images/{name} drifted"
     head = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
-    assert 'srcset="docs/assets/wordmark-dark.svg"' in head
-    assert 'src="docs/assets/wordmark-light.svg"' in head
+    assert 'srcset="' + RAW + 'docs/assets/wordmark-dark.svg"' in head
+    assert 'src="' + RAW + 'docs/assets/wordmark-light.svg"' in head
 
 
 @pytest.mark.authority
@@ -144,9 +150,12 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     assert "The last check before an AI agent does something it can't undo." in head
     assert "Autonomy belongs to the action, not the agent." in head
     assert (
-        "Every consequential action happens once, exactly as approved, or not at all — and "
-        "leaves a receipt." in head
+        "A consequential action happens at most once, exactly as approved, and leaves a "
+        "receipt — and when the outcome is unknown, CTRLRun says so instead of guessing." in head
     )
+    # The category noun, which the hero went without until 0.6: a reader had to reverse-engineer
+    # what CTRLRun *is* from three slogans. `docs/index.mdx` carried it and the README did not.
+    assert "A Python library that sits between the decision to act and the call that acts." in head
     for badge in (
         "pypi/v/ctrlrun",
         "pypi/pyversions/ctrlrun",

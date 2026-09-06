@@ -63,8 +63,15 @@ failure into an unknown one.
 for — `T155b` for a landed commit seen as landed and `T155e` for the update the store re-issues
 when it was not, `T155c` for the identity check that is not a match on the action id, `T156` for
 the failed re-read that writes nothing, and `T157`
-and `T158` for one winner across two hosts and a `kill -9` mid-transaction. `G4` in `ctrlrun
+and `T158` for one winner under contention and a `kill -9` mid-transaction. `G4` in `ctrlrun
 verify` contends real OS processes on your store's backend, in a scratch store of its own.
+
+**What those two actually ran, because the file says so and this page should too.** `T157` and
+`T158` are **separate OS processes against one Postgres**, with the connection broken by a proxy
+the tests own. They are **not two machines**. Separate processes give separate connections, no
+shared memory and no shared file locks — which is what `BEGIN IMMEDIATE` was silently relying on
+and what a second host removes — so the reservation guarantee is exercised. A **network partition
+between two hosts** is not, and this project claims it nowhere.
 
 ## Next
 

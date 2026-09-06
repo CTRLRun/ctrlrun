@@ -92,6 +92,10 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
     "README.md": (
         "- The receipt chain detects alteration, and alteration is not authorship. Receipts are not",  # noqa: E501
         "signed, the chain is no evidence of who wrote one, and it is not tamper-proof: it does not",  # noqa: E501
+        # The "New in 0.6" section, which says what the release added and therefore has to say
+        # what the chain is not in the same breath -- a release note listing "receipt integrity"
+        # with the disclaimer left downpage is the half-sentence §6.4 exists to stop.
+        "  **alteration**, which is not authorship: receipts are not signed.",
     ),
     "CHANGELOG.md": (
         '- **`docs/ROADMAP.md`\'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the',  # noqa: E501

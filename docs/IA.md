@@ -12,7 +12,7 @@ answer. Later sessions write the pages; this file is what they write against, an
 | Principle | Autonomy belongs to the action, not the agent. | Second sentence everywhere; the line people quote |
 | Category | The execution safety layer for AI agents. | GitHub About, PyPI summary, site `<title>`, directory listings |
 | Opener (long-form only) | Everyone is rushing to ship AI agents without thinking about consequences. | First line of Why and of launch posts; never a heading |
-| Promise | Every consequential action happens once, exactly as approved, or not at all — and leaves a receipt. | Hero subline, README paragraph 2 |
+| Promise | A consequential action happens at most once, exactly as approved, and leaves a receipt — and when the outcome is unknown, CTRLRun says so instead of guessing. | Hero subline, README paragraph 2 |
 | Hook (posts) | Agents can retry. The real world can't. | Social, talk titles; not the README header |
 
 The rules every page is held to are in `docs/STYLE.md`. The tools that hold them are in

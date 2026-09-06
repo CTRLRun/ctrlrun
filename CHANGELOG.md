@@ -7,81 +7,6 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased] - unreleased — The operator MCP server
-
-Not a kernel milestone and not part of v0.6's claims, which is why it sits above that entry
-rather than inside it: v0.6 says *the surface did not grow*, and it did not — this grew it,
-afterwards, under its own specification. `docs/SPEC-mcp-operator.md` is the contract.
-
-It is a subcommand of the `ctrlrun` distribution and not a separate one, so unlike an adapter
-it carries no version line of its own: it lands in whatever release comes next. What it does
-not do is gate one, or be gated by one.
-
-### Added
-
-- **`ctrlrun mcp-operator`** — an MCP server exposing the operator's own commands as tools, so
-  the person who has to answer an approval can answer it from the assistant they are already
-  talking to. Read tools `list_pending_approvals`, `inspect_action`, `receipts`, `effects` and
-  `stats`; write tools `approve`, `deny` and `resolve`. Ships in `ctrlrun[gateway]`, imports
-  nothing from an extra, and `import ctrlrun` imports none of it (T192).
-- **`ctrlrun.reporting`** — core and stdlib. The `ctrlrun.inspection/v2` and `ctrlrun.stats/v1`
-  document builders, moved out of `ctrlrun/cli/main.py` unchanged so that the CLI and the
-  operator server have **one producer each**. T193 asserts the two agree by equality rather
-  than by shape, which is the only version of that claim worth having.
-- Two entry-point rows in `docs/SPEC-v0.3.md` §4.3.1, written before the code, as that section
-  requires of every new way in.
-- Two JSON-RPC codes in `v0.2 §6.10`'s reserved `-410xx` range: `-41013 ctrlrun.not_a_human`
-  and `-41014 ctrlrun.principal_expired`, neither reachable from the gateway.
-
-### What it deliberately does not do
-
-- **It is not a second approval path.** `approve` and `deny` are the two store calls
-  `ctrlrun approve` and `ctrlrun deny` make, against the same record, with the same hash
-  binding, single use and expiry. There is one approval record and one place its state changes.
-- **It cannot make an agent act.** No tool proposes, executes or resumes; no `Control` method
-  but `store`, `policy` and `environment` is referenced, and T189 asserts that against the
-  source rather than against behaviour.
-- **It has no `--allow-remote` and no `--principal`.** Its read tools answer without a
-  credential, so it binds loopback and there is no flag that changes that; and a static
-  principal would attribute every approval to one name whoever gave it. Both absences are
-  asserted by name (T183, T185), so adding either fails a test rather than a review.
-- **It does not authorize the approver, only authenticate them.** Any human whose credential
-  the provider verifies can answer any pending request, exactly as any human who can run
-  `ctrlrun approve` can. `docs/SPEC-mcp-operator.md` §10 says so in the place a reader would
-  otherwise assume otherwise; separation of duties is still not built.
-
-### What the independent review changed
-
-An authorization surface gets a review in a session that did not write it. Ten findings, all
-ten accepted. Four changed the contract; `docs/SPEC-mcp-operator.md` §9.5 has the table.
-
-- **The `--identity-jwt-*` validation was missing**, with three `assert`s in its place. A
-  server could start with an unpinned issuer, audience, algorithm or `typ` — and under
-  `python -O` the asserts vanish. An unpinned `typ` accepts an ID token, so an OIDC login
-  would have approved a payment. The gateway's `check_jwt_flags` is now shared rather than
-  copied, every check is an `InvalidArgument`, and one test runs under `-O`.
-- **"Every refusal leaves the store byte-identical" was false.** Answering a lapsed request
-  moves it `pending → expired` and commits before refusing — the kernel's own rule, *a lapsed
-  approval is evidence* — and the test table had omitted that row, so the claim was asserted
-  nowhere. The spec carves it out and the test asserts the delta.
-- **The composes-nothing test checked 81% of the file.** It split the source on a marker
-  comment; the excluded fifth was the part that handles the socket, and a `Control.execute`
-  inside `do_POST` passed it. It scans the whole file now.
-- **`::1` was accepted and could not bind.** `ThreadingHTTPServer` inherits `AF_INET`, so
-  `--listen ::1:8901` exited with a traceback while the test asserted only that the string had
-  been stored. The socket family follows the host, `[::1]` is accepted, and the test binds.
-
-Also: `--otel` was inert and is gone, a `Content-Length` of `-1` reached an unbounded read, the
-repeated-identity-header check lived only in the stdlib handler, the startup block omitted the
-store, and `serve_operator` leaked a connection under `--store-url`.
-
-### Changed
-
-- `ctrlrun.cli.main` no longer defines `INSPECTION_SCHEMA`, `STATS_SCHEMA`, `_stats_document`
-  or `_since`; they are `ctrlrun.reporting`'s. `ctrlrun inspect --json` and `ctrlrun stats
-  --json` emit byte-identical documents to before, and a `--since` that does not parse is
-  still a usage error with exit code 2.
-
 ## [0.6.0] - unreleased — Durable runtime
 
 **The soak criterion was amended on 2026-09-07, and it was amended downwards.** It read *a soak
@@ -312,6 +237,114 @@ have recovered or retrying work nothing can.
   every row including the chain head, and the question of whether every action wrote a receipt
   at all. Two drafts of that line claimed truncation, and a review measured it: deleting a
   suffix and rewinding the head is two statements, undetected.
+
+### Shipped in this release, and not part of the v0.6 milestone
+
+**Two subcommands landed after v0.6's code was complete, and ride along in this release.** They
+are recorded under their own heading rather than mixed into the milestone, because v0.6's claim
+is that *the surface did not grow* — and it did not. These grew it, afterwards, each under its
+own specification, and neither gated the release nor was gated by it. Both are subcommands of
+the `ctrlrun` distribution rather than separate ones, so unlike an adapter neither carries a
+version line of its own.
+
+#### `ctrlrun scan` — the command that says what is **not** covered
+
+`docs/SPEC-scan.md` is the contract; it was written first and its §8 tests were red before any
+of it existed. `scan` reads a Python tree and a policy document and reports the consequential
+call sites and policy entries CTRLRun is not covering — the gap between *installed* and *in the
+path*, which until now had no command.
+
+- **The honest half is the load-bearing half.** A scanner reports what it found where it
+  looked, and a clean result is not a verdict. §4 enumerates what it misses by construction —
+  dynamic dispatch, reachability, anything outside the tree, and a deployment whose protection
+  is entirely the gateway — and the report says so on **every** run, including the run with no
+  findings.
+- **There is no score, no percentage and no badge** (§10). A number that improves when the
+  vocabulary is shortened is a number that will be.
+- **It adds no entry point at all** (§9.2), stated as a rule rather than as a fact about the
+  first implementation: the tempting version of this tool builds an `Action` for each call site
+  and asks the policy what would happen to it, which would be a principal invented by a tool
+  from a source file.
+- Exit codes: `0` nothing found, `1` a finding or a call whose name could not be resolved, `2`
+  the scan could not run.
+
+Five sections of the specification carry a paragraph beginning *Found by*, recording what
+writing the tests changed about the design: the plural rule separating `stripe.refunds.create`
+from `refunds_report`; `execute` dropped from the vocabulary, because `cursor.execute` was 90 of
+208 findings against this repository's own `src/`; a policy action whose decorator supplies its
+own effect template no longer reported as missing one; a call on an expression matched rather
+than filed as undetermined, which took that list from 216 entries to 10; and `undetermined`
+removed from the finding kinds it was listed among and contradicted by.
+
+#### `ctrlrun mcp-operator` — answer an approval from the assistant you already use
+
+`docs/SPEC-mcp-operator.md` is the contract. It authenticates *who* answered and records it; it
+does not check that they were entitled to, which is separation of duties and is still not built.
+
+**Added**
+
+- **`ctrlrun mcp-operator`** — an MCP server exposing the operator's own commands as tools, so
+  the person who has to answer an approval can answer it from the assistant they are already
+  talking to. Read tools `list_pending_approvals`, `inspect_action`, `receipts`, `effects` and
+  `stats`; write tools `approve`, `deny` and `resolve`. Ships in `ctrlrun[gateway]`, imports
+  nothing from an extra, and `import ctrlrun` imports none of it (T192).
+- **`ctrlrun.reporting`** — core and stdlib. The `ctrlrun.inspection/v2` and `ctrlrun.stats/v1`
+  document builders, moved out of `ctrlrun/cli/main.py` unchanged so that the CLI and the
+  operator server have **one producer each**. T193 asserts the two agree by equality rather
+  than by shape, which is the only version of that claim worth having.
+- Two entry-point rows in `docs/SPEC-v0.3.md` §4.3.1, written before the code, as that section
+  requires of every new way in.
+- Two JSON-RPC codes in `v0.2 §6.10`'s reserved `-410xx` range: `-41013 ctrlrun.not_a_human`
+  and `-41014 ctrlrun.principal_expired`, neither reachable from the gateway.
+
+**What it deliberately does not do**
+
+- **It is not a second approval path.** `approve` and `deny` are the two store calls
+  `ctrlrun approve` and `ctrlrun deny` make, against the same record, with the same hash
+  binding, single use and expiry. There is one approval record and one place its state changes.
+- **It cannot make an agent act.** No tool proposes, executes or resumes; no `Control` method
+  but `store`, `policy` and `environment` is referenced, and T189 asserts that against the
+  source rather than against behaviour.
+- **It has no `--allow-remote` and no `--principal`.** Its read tools answer without a
+  credential, so it binds loopback and there is no flag that changes that; and a static
+  principal would attribute every approval to one name whoever gave it. Both absences are
+  asserted by name (T183, T185), so adding either fails a test rather than a review.
+- **It does not authorize the approver, only authenticate them.** Any human whose credential
+  the provider verifies can answer any pending request, exactly as any human who can run
+  `ctrlrun approve` can. `docs/SPEC-mcp-operator.md` §10 says so in the place a reader would
+  otherwise assume otherwise; separation of duties is still not built.
+
+**What the independent review changed**
+
+An authorization surface gets a review in a session that did not write it. Ten findings, all
+ten accepted. Four changed the contract; `docs/SPEC-mcp-operator.md` §9.5 has the table.
+
+- **The `--identity-jwt-*` validation was missing**, with three `assert`s in its place. A
+  server could start with an unpinned issuer, audience, algorithm or `typ` — and under
+  `python -O` the asserts vanish. An unpinned `typ` accepts an ID token, so an OIDC login
+  would have approved a payment. The gateway's `check_jwt_flags` is now shared rather than
+  copied, every check is an `InvalidArgument`, and one test runs under `-O`.
+- **"Every refusal leaves the store byte-identical" was false.** Answering a lapsed request
+  moves it `pending → expired` and commits before refusing — the kernel's own rule, *a lapsed
+  approval is evidence* — and the test table had omitted that row, so the claim was asserted
+  nowhere. The spec carves it out and the test asserts the delta.
+- **The composes-nothing test checked 81% of the file.** It split the source on a marker
+  comment; the excluded fifth was the part that handles the socket, and a `Control.execute`
+  inside `do_POST` passed it. It scans the whole file now.
+- **`::1` was accepted and could not bind.** `ThreadingHTTPServer` inherits `AF_INET`, so
+  `--listen ::1:8901` exited with a traceback while the test asserted only that the string had
+  been stored. The socket family follows the host, `[::1]` is accepted, and the test binds.
+
+Also: `--otel` was inert and is gone, a `Content-Length` of `-1` reached an unbounded read, the
+repeated-identity-header check lived only in the stdlib handler, the startup block omitted the
+store, and `serve_operator` leaked a connection under `--store-url`.
+
+**Changed**
+
+- `ctrlrun.cli.main` no longer defines `INSPECTION_SCHEMA`, `STATS_SCHEMA`, `_stats_document`
+  or `_since`; they are `ctrlrun.reporting`'s. `ctrlrun inspect --json` and `ctrlrun stats
+  --json` emit byte-identical documents to before, and a `--since` that does not parse is
+  still a usage error with exit code 2.
 
 ## [0.5.0] - 2026-09-05 — Adapter contract
 
