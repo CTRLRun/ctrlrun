@@ -1,0 +1,7 @@
+CTRLRun demo — five ways an agent action goes wrong, and what stops it.
+Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, above that are denied.
+1. Duplicate effect after a lost response
+   refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS
+   agent retries the same refund
+   ✗ BLOCKED — effect may already have committed; blind retry refused
+   remote refund calls: 1

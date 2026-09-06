@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="120" viewBox="0 0 600 120" role="img" aria-label="CTRLRun">
+  <rect x="8" y="14" width="92" height="92" rx="18" fill="none" stroke="#7a7f88" stroke-width="8"/>
+  <path d="M34 40 L66 60 L34 80 Z" fill="#7a7f88"/>
+  <text x="122" y="84" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="72" font-weight="700" letter-spacing="-1" fill="#7a7f88">CTRL<tspan font-weight="400">Run</tspan></text>
+</svg>

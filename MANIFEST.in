@@ -19,6 +19,8 @@ recursive-include docs *.md
 # the same failure as shipping tests without their data.
 recursive-include docs *.yaml *.mdx *.txt
 recursive-include tools *.py *.txt
+# The README's header assets, and the sources they are rendered from.
+recursive-include docs/assets *.svg *.png *.gif *.tape *.sh *.txt
 recursive-include tests *.py
 # SPEC-v0.4 §4.3 — T115 validates `--junit` against a checked-in schema, and reads the README
 # beside it for the schema's provenance and licence. A test that ships without its data is a

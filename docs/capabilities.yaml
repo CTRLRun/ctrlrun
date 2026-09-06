@@ -31,7 +31,7 @@ capabilities:
       adapter: prevention or attribution, per adapter
     since: v0.1
     page: concepts/approval-binding
-    claim: binds approvals to the exact action
+    claim: An approval is bound to the exact action; a mutated or replayed one is refused.
 
   - id: one-effect-once
     name: One effect, once
@@ -43,7 +43,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: concepts/effect-keys
-    claim: blocks duplicate execution attempts for the same logical effect
+    claim: One logical effect executes once, across threads, processes and hosts.
 
   - id: ambiguous-outcomes
     name: Unknown is not failed
@@ -55,7 +55,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: concepts/outcomes-and-ambiguous
-    claim: stops blind retries when an execution outcome is uncertain
+    claim: An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry.
 
   - id: fail-closed
     name: Fail closed
@@ -67,10 +67,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: concepts/fail-closed
-    claim: null
-    claim_note: >-
-      The README says "Unknown actions are denied. CTRLRun fails closed." with no CLAIMS.md row.
-      Session 1 rewrites the sentence and adds the row (G6, G7).
+    claim: An unknown action, a missing policy or a missing principal is denied.
 
   - id: authority-containment
     name: Authority and delegation
@@ -94,7 +91,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: concepts/receipts-and-evidence
-    claim: records what actually happened
+    claim: Every executed action leaves a portable JSON receipt
 
   - id: per-action-policy
     name: Per-action policy
@@ -106,7 +103,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: reference/policy-yaml
-    claim: what an agent can do autonomously, what requires human approval, and what is blocked
+    claim: cheap to undo is autonomous, anything that leaves the building needs a human, money is by amount with both ends bound
 
   - id: operator-cli
     name: Operator CLI
@@ -118,10 +115,7 @@ capabilities:
       adapter: true
     since: v0.1
     page: reference/cli
-    claim: null
-    claim_note: >-
-      The README quotes `ctrlrun resolve` and `ctrlrun stats` inside other rows and has no
-      sentence about the CLI as a whole. Session 1 adds one and its row.
+    claim: "`ctrlrun approve`, `deny`, `resolve`, `inspect`, `receipts` and `stats` work from the shell against any store"
 
   - id: mcp-gateway
     name: MCP gateway
@@ -157,10 +151,7 @@ capabilities:
       adapter: false
     since: v0.2
     page: guides/approvals-in-slack
-    claim: null
-    claim_note: >-
-      The README does not mention `WebhookApprovalProvider`. Session 1 adds the sentence and
-      its row; session 3's guide is where it is shown working.
+    claim: "`WebhookApprovalProvider` sends an approval request to a webhook, such as Slack, and takes the answer back through the same grant calls"
 
   - id: otel-export
     name: OpenTelemetry export
@@ -232,7 +223,7 @@ capabilities:
       adapter: true
     since: v0.4
     page: verify/get-the-badge
-    claim: The badge means the **declared guarantees pass**
+    claim: means the **declared guarantees pass**
 
   - id: framework-adapters
     name: Framework adapters
@@ -244,7 +235,7 @@ capabilities:
       adapter: true
     since: v0.5
     page: get-started/three-ways-in
-    claim: the adapter reuses it and reimplements nothing
+    claim: There is never a second place to say yes
 
   - id: postgres
     name: Postgres store
@@ -280,10 +271,7 @@ capabilities:
       adapter: true
     since: v0.6
     page: guides/resolve-an-ambiguous-effect
-    claim: null
-    claim_note: >-
-      The README has no sentence on recovery on restart (SPEC-v0.6 §5). Session 1 adds one
-      and its row.
+    claim: A crashed worker's effect stays `AMBIGUOUS` until a human runs `ctrlrun resolve` or a `reconcile` hook asks the remote what happened
 
   - id: receipt-chain
     name: Receipt chain
@@ -307,7 +295,7 @@ capabilities:
       adapter: true
     since: v0.6
     page: concepts/receipts-and-evidence
-    claim: Every receipt records which policy decided it
+    claim: every receipt records which policy decided it
 
   - id: control-registry
     name: Control registry
@@ -319,10 +307,7 @@ capabilities:
       adapter: true
     since: v0.6
     page: reference/policy-yaml
-    claim: null
-    claim_note: >-
-      The README has no sentence on `controls:` (SPEC-v0.6 §7.3). Session 1 adds one and its
-      row, in words that describe a registry and never a pack.
+    claim: Receipts in a `ctrlrun.policy/v4` document can cite the `controls:` an action satisfies
 
   - id: data-scope
     name: Data scope
@@ -334,6 +319,4 @@ capabilities:
       adapter: true
     since: v0.6
     page: reference/policy-yaml
-    claim: null
-    claim_note: >-
-      The README has no sentence on `data:` (SPEC-v0.6 §7.4). Session 1 adds one and its row.
+    claim: a rule can condition on the `data:` labels present in an action's arguments
