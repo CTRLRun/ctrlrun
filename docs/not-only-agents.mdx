@@ -1,0 +1,83 @@
+---
+title: "Not only agents"
+sidebarTitle: "Not only agents"
+description: "The double-execution failure is older than agents: a task queue that retries, a webhook delivered twice, a merge job that lost its reply. Same kernel, no model anywhere in it."
+---
+
+Every page on this site says *agent*, and the failure underneath them does not require one. A
+retry that repeats a write whose outcome nobody knows is a bug in ordinary software, and it was
+a bug in ordinary software for twenty years before anything called itself an agent. If you run
+a task queue, a webhook handler or a cron job that moves money, sends mail or deletes records,
+this is your problem too, and CTRLRun does not ask whether a model was involved.
+
+Three examples in the repository have no model, no prompt and no framework in them.
+
+## A task queue that retries
+
+A billing worker charges an invoice. The processor commits the charge and the reply is lost, so
+the task raises — and the queue does exactly what it is configured to do. Celery's `max_retries`,
+RQ, Sidekiq, `tenacity`, a Temporal activity, a Lambda whose failed invocation is re-delivered:
+each of them re-runs the task when it raises, and none of them can tell *nothing happened* from
+*I do not know what happened*. The customer is charged twice by a system working as designed.
+
+```bash
+python examples/without-an-agent/retried-task/main.py
+```
+
+CTRLRun records the outcome as `AMBIGUOUS` rather than failed, and the second and third attempts
+are refused before they reach the processor.
+[`retried-task/main.py`](https://github.com/CTRLRun/ctrlrun/blob/main/examples/without-an-agent/retried-task/main.py).
+
+## A webhook delivered twice
+
+At-least-once delivery is a promise about the minimum. Stripe, GitHub, Shopify, Slack and every
+queue behind them will re-deliver an event whose acknowledgement they did not see, and the
+handler runs a second time with the same payload. An `Idempotency-Key` the handler generates
+does not help: the second delivery is a different process, and it generates the key again.
+
+What is needed is a name for the consequence that both deliveries compute identically — an
+[effect key](/concepts/effect-keys) — and one atomic reservation of it.
+
+```bash
+python examples/without-an-agent/redelivered-webhook/main.py
+```
+
+[`redelivered-webhook/main.py`](https://github.com/CTRLRun/ctrlrun/blob/main/examples/without-an-agent/redelivered-webhook/main.py).
+
+## A merge job that lost its reply
+
+A merge queue merges a pull request. GitHub merges it, the connection drops before the response,
+and the job concludes the merge failed. It retries, and then it reaches for another way to the
+same end: force-push the branch. The retry is refused because the effect may already have
+committed. The force push is refused because the policy does not list it, and an action a policy
+does not list is denied rather than allowed.
+
+```bash
+python examples/without-an-agent/lost-merge/main.py
+```
+
+[`lost-merge/main.py`](https://github.com/CTRLRun/ctrlrun/blob/main/examples/without-an-agent/lost-merge/main.py).
+
+## What an agent actually changes
+
+Two things, and neither is the retry. An agent chooses the arguments, so an approval that is not
+bound to the exact arguments a person saw approves something nobody read — which is why
+[approval binding](/concepts/approval-binding) exists. And an agent that fails at one route will
+try another, which is the second half of the merge example: the defence that matters there is
+not a better retry, it is a policy that is a list of what is permitted.
+
+Everything else on this page is the same code path either way.
+
+## What you need when there is no agent
+
+Less than the rest of the site suggests. No identity provider, no authority document, no
+approvals: a worker is not a principal anyone delegates to. What you need is `@protect` on the
+function that acts, an effect key that names the consequence, and a policy listing the actions
+that may run. Two of the six guarantees do the work — one effect executes once, and an unknown
+outcome is never a failure — and the other four are there when you want them.
+
+## Next
+
+- [Outcomes and AMBIGUOUS](/concepts/outcomes-and-ambiguous): why a timeout is not a failure.
+- [Effect keys](/concepts/effect-keys) · [Compare: idempotency keys](/compare/idempotency-keys).
+- [Get started](/get-started/quickstart) · [Why](/why).
