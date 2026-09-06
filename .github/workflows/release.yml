@@ -1,0 +1,120 @@
+name: Release
+
+# A GitHub Release for every kernel tag, with the tag's CHANGELOG entry as the body and the
+# distributions it built attached. `publish.yml` puts the same distributions on PyPI; this
+# workflow is what a visitor to the repository sees under Releases, and an empty Releases
+# section beside five tags on PyPI reads as a project that does not release.
+#
+# Runs on every `v*` tag from now on, and by hand for the tags that predate it:
+#
+#     gh workflow run release.yml -f tag=v0.5.0
+#
+# Idempotent: a tag that already has a Release is left alone rather than overwritten.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing kernel tag, e.g. v0.5.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the Release and upload its assets; nothing else here writes
+    steps:
+      - name: Which tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "workflow_dispatch" ]; then tag="$INPUT_TAG"; else tag="$REF_NAME"; fi
+          case "$tag" in
+            v[0-9]*) : ;;
+            *) echo "::error::$tag is not a kernel tag (v*)"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Already released
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already has a Release; leaving it alone"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: steps.existing.outputs.exists == 'false'
+        with:
+          python-version: "3.11"
+
+      - name: Build the distributions at the tag
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # The entry for `X.Y.Z` in the CHANGELOG *as it stood at the tag*. A pre-release tag
+      # (0.1.0a1, 0.3.0rc1) falls back to its release's entry, since the CHANGELOG is kept per
+      # release and not per candidate. No entry is a failure, not an empty body.
+      - name: The CHANGELOG entry
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+          version = os.environ["VERSION"]
+          release = re.sub(r"(a|b|rc|\.dev)\d+$", "", version)
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          for candidate in (version, release):
+              pattern = re.compile(rf"^## \[{re.escape(candidate)}\][^\n]*\n(.*?)(?=^## \[|\Z)", re.M | re.S)
+              found = pattern.search(text)
+              if found:
+                  body = found.group(1).strip() + "\n"
+                  Path("release-notes.md").write_text(body, encoding="utf-8")
+                  print(f"CHANGELOG entry for {candidate}: {len(body.splitlines())} lines")
+                  break
+          else:
+              print(f"::error::CHANGELOG.md has no entry for {version} or {release}")
+              sys.exit(1)
+          PY
+
+      - name: Create the Release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -eu
+          flags=""
+          case "$VERSION" in *a[0-9]*|*b[0-9]*|*rc[0-9]*|*.dev[0-9]*) flags="--prerelease" ;; esac
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "ctrlrun $VERSION" \
+            --notes-file release-notes.md \
+            $flags

@@ -13,6 +13,7 @@
   <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/pyversions/ctrlrun?color=444" alt="Python versions"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
   <a href="LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=444" alt="License"></a>
 </p>
 
@@ -387,7 +388,8 @@ you put the decorator, your deployment, and whether your policy is the right pol
 
 ## What it guarantees, and what it can't
 
-**It guarantees**, with a test behind every line in [`docs/CLAIMS.md`](docs/CLAIMS.md):
+**It guarantees**, with a test behind every line in [`docs/CLAIMS.md`](docs/CLAIMS.md), and
+[`docs/how-this-is-built.md`](docs/how-this-is-built.md) says how those tests came to exist:
 
 - An approval is bound to the exact action a human saw, is used once, expires, and is refused
   for a mutated or replayed action.
@@ -420,6 +422,8 @@ you put the decorator, your deployment, and whether your policy is the right pol
   `seq`.
 - The schema is versioned and migrations are automatic at open, forward-only, with no flag that
   opens a database un-migrated. An older binary against a newer schema refuses immediately.
+- Releases carry PyPI provenance attestations from GitHub Actions: trusted publishing, no API
+  token anywhere, and an attestation on every distribution naming the workflow that built it.
 - `ctrlrun approve`, `deny`, `resolve`, `inspect`, `receipts` and `stats` work from the shell
   against any store, and `WebhookApprovalProvider` sends an approval request to a webhook, such
   as Slack, and takes the answer back through the same grant calls. `pip install "ctrlrun[otel]"`
@@ -460,7 +464,8 @@ refund, delete, deploy, grant, revoke, approve, submit, purchase or cancel**, yo
 | Authority and delegation, in plain language | [`docs/authority.md`](docs/authority.md) |
 | Running the store on Postgres | [`docs/postgres.md`](docs/postgres.md) |
 | `ctrlrun verify`, the guarantees, and what the badge means | [`docs/verify.md`](docs/verify.md) |
-| Security: threat model, disclosure | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`SECURITY.md`](SECURITY.md) |
+| Security: threat model, disclosure, how this is built | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`SECURITY.md`](SECURITY.md), [`docs/how-this-is-built.md`](docs/how-this-is-built.md) |
+| Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
 | Standards, read against the guarantees | [`docs/OWASP-AGENTIC-TOP10.md`](docs/OWASP-AGENTIC-TOP10.md), [`docs/ACS.md`](docs/ACS.md) |
 | Specifications, v0.1 to v0.6 | [`docs/SPEC-v0.1.md`](docs/SPEC-v0.1.md) · [v0.2](docs/SPEC-v0.2.md) · [v0.3](docs/SPEC-v0.3.md) · [v0.4](docs/SPEC-v0.4.md) · [v0.5](docs/SPEC-v0.5.md) · [v0.6](docs/SPEC-v0.6.md) |
 | Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](docs/CLAIMS.md) |

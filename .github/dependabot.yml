@@ -1,0 +1,15 @@
+# Every action is pinned to a commit SHA (with its version in a comment), so an update is a
+# pull request that CI runs, not a tag somebody moved. Dependabot keeps the SHAs current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    # The kernel depends on pyyaml and click and nothing else; what Dependabot will mostly
+    # move here are the dev, gateway, identity, otel and postgres extras' floors.
+    open-pull-requests-limit: 5

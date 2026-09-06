@@ -1,0 +1,44 @@
+name: An AMBIGUOUS effect I don't understand
+description: An effect is stuck at AMBIGUOUS, or became AMBIGUOUS when you expected COMMITTED or FAILED.
+labels: [ambiguous]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `AMBIGUOUS` means nobody knows whether the remote acted, and CTRLRun refuses to guess. Most of the time that is the library doing its job: a timeout, a lost reply, a worker that died mid-call, or a lost connection during a store `COMMIT` all land here on purpose. This template is for the case where the events do not explain why, or where you believe the outcome was knowable.
+
+        To move the record on: ask the remote what happened, then `ctrlrun resolve <effect_key> --committed` or `--failed`. A `reconcile` hook does the same automatically. Nothing else does.
+  - type: input
+    id: version
+    attributes:
+      label: Version and store
+      placeholder: ctrlrun, version 0.6.0 · postgres
+    validations:
+      required: true
+  - type: input
+    id: effect
+    attributes:
+      label: The effect key
+      placeholder: refund:txn_1
+    validations:
+      required: true
+  - type: textarea
+    id: events
+    attributes:
+      label: The events for this effect
+      description: "`ctrlrun inspect <action_id> --json`, or the lines from `.ctrlrun/events.jsonl` that name this effect key. The `reason` on the `EFFECT_AMBIGUOUS` event is the sentence that matters."
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: executor
+    attributes:
+      label: What the executor did
+      description: What the function behind `@protect` (or the tool behind the gateway) does, and what it raised or returned. If it raised `NotExecuted` after the remote had acted, say so; that is the one integration bug verify cannot see.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and why
+      description: If you believe the outcome was knowable at the time, say what CTRLRun could have observed that it did not.

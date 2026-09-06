@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: If you use CTRLRun in research, cite it as below.
+type: software
+title: "The last check before an AI agent does something it can't undo."
+abstract: >-
+  CTRLRun is the execution safety layer for AI agents: a Python library that binds a human's
+  approval to the exact action they saw, executes one logical effect at most once across
+  processes and hosts, treats an unknown outcome as unknown rather than failed, fails closed,
+  and leaves a portable receipt for every action.
+authors:
+  - family-names: Ghoshal
+    given-names: Arpan
+    email: contact@arpanghoshal.com
+version: 0.6.0
+repository-code: https://github.com/CTRLRun/ctrlrun
+url: https://github.com/CTRLRun/ctrlrun
+license: Apache-2.0
+keywords:
+  - ai-agents
+  - human-in-the-loop
+  - idempotency
+  - agent-safety
+  - mcp
