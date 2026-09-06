@@ -216,7 +216,8 @@ def render() -> dict[str, str]:
     lines = [
         "---",
         'title: "Python API"',
-        'description: "Every frozen public name of the ctrlrun package and its extras, one page each, rendered from the docstrings: Control, protect, context, with_approval, Policy, Authority, the stores, the providers, the errors."',
+        'description: "Every frozen public name of the ctrlrun package and its extras, one '
+        'page each, rendered from the docstrings."',
         "---",
         "",
         "{/* " + MARKER + " */}",

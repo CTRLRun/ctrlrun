@@ -54,3 +54,10 @@ allow docs/CLAIMS.md Nothing about compliance, conformance or alignment
 # more than it can show.
 allow docs/ACS.md A conformant Guardian
 allow docs/ACS.md a compliance claim with nothing behind it
+
+# The Compare pages name the other thing they are compared with, in the heading of the section
+# that says what it is good at. That is the page's whole job, and the fixed copy permits a
+# category name where it is accurate; what it still forbids is CTRLRun describing *itself* that
+# way, which the body of each page does the opposite of.
+allow docs/compare/guardrail-libraries.mdx guardrail
+allow docs/compare/governance-toolkits.mdx oversight toolkits

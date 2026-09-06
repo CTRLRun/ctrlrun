@@ -40,9 +40,16 @@ def _body(page: Path) -> str:
     return _FRONTMATTER.sub("", page.read_text(encoding="utf-8"), count=1)
 
 
+_SCRIPT = re.compile(r"<script.*?</script>", re.S)
+
+
 def _prose(page: Path) -> str:
-    """The page with code blocks, JSX tags and frontmatter removed."""
-    text = _FENCE.sub("", _body(page))
+    """The page with code blocks, structured data, JSX tags and frontmatter removed.
+
+    A `<script type="application/ld+json">` block is markup for a search engine, not words a
+    reader reads, so it does not count against the page's budget.
+    """
+    text = _SCRIPT.sub("", _FENCE.sub("", _body(page)))
     return re.sub(r"<[^>]+>", "", text)
 
 
