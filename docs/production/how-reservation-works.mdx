@@ -32,10 +32,11 @@ it rolled the transaction back, which is the closest a database gets to your exe
 
 ## What the re-read looks for
 
-It is an identity check on the whole row, never a match on the action id. Two attempts can share
-an id — the id names an attempt, and a caller that rebuilt the same action after a restart has
-the same one — so *"a record carrying our id"* is satisfied by **another process's live
-reservation**, and concluding you hold the key there is a double execution.
+It is an identity check on the whole row, never a match on the action id. Two attempts *can*
+share an id: it names an attempt rather than a process, and it is caller-supplyable — a caller
+that rebuilds an action with the id it saved has handed the store two attempts wearing one name.
+So *"a record carrying our id"* is satisfied by **another process's live reservation**, and
+concluding you hold the key there is a double execution.
 
 - Finds the row you were about to write, column for column: the commit landed, proceed.
 - Finds nothing: it did not land, retry the insert once.
@@ -59,10 +60,11 @@ failure into an unknown one.
   `SELECT … FOR UPDATE` were each rejected, and the reasons are in the specification.
 
 **Verified by** `T155` — the connection is killed during `COMMIT` on purpose rather than raced
-for — `T155b` for the re-issued update on commit and on fail, `T155c` for the identity check that
-is not a match on the action id, `T156` for the failed re-read that writes nothing, and `T157`
+for — `T155b` for a landed commit seen as landed and `T155e` for the update the store re-issues
+when it was not, `T155c` for the identity check that is not a match on the action id, `T156` for
+the failed re-read that writes nothing, and `T157`
 and `T158` for one winner across two hosts and a `kill -9` mid-transaction. `G4` in `ctrlrun
-verify` contends real processes against your own store.
+verify` contends real OS processes on your store's backend, in a scratch store of its own.
 
 ## Next
 

@@ -1,9 +1,9 @@
 """Render the badge row, and write the one badge this repository produces itself.
 
 A stranger reads the badges before the first sentence, so the row is a claim like any other and
-is generated rather than typed. One list, two renders: the README's centred HTML and the plain
-Markdown the docs site uses. A badge added in one place and forgotten in the other is the
-drift this removes.
+is generated rather than typed. One list, one render — the README's centred HTML — because that
+is the only place a badge row appears; a second format with no consumer would be a generated
+artifact nobody reads, and an independent review is what noticed the first version shipping one.
 
     python tools/docs_audit/render_badges.py readme     # print one render
     python tools/docs_audit/render_badges.py --write    # refresh docs/generated/
@@ -14,12 +14,14 @@ this repository's own, published to the orphan `badges` branch by a job that run
 push to `main`:
 
 - `verify-badge.json`, written by the composite action from a real `ctrlrun verify` run;
-- `tests-badge.json`, written by `--write-count` **after** the suite has passed, so the number
-  is the size of a suite that went green and not of one that merely collected.
+- `tests-badge.json`, written by `--write-count` **after** `scripts/check.sh` has passed, so no
+  number is published for a run whose suite was red.
 
-`--write-count` is what CI calls. It counts what `pytest` collects, which equals what it ran
-because the step is ordered after the run; the badge says a count and never says "passing",
-because a count is what was measured.
+`--write-count` is what CI calls, and what it counts is what `pytest` **collects**. That is not
+the same as what passed: the suite skips a handful of tests on a machine without a framework
+installed, and a collected count includes them. So the badge is labelled `tests` and carries a
+count, never "passing" — a count is what was measured, and the ordering is what makes it a count
+of a suite that went green rather than of one that might not have.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from _files import REPO_ROOT, documents, relative
 from render_readiness import collected
 
 GENERATED = REPO_ROOT / "docs" / "generated"
-FILENAMES = {"readme": "badges.readme.md", "mdx": "badges.mdx"}
+FILENAMES = {"readme": "badges.readme.md"}
 FORMATS = tuple(FILENAMES)
 BADGES_BRANCH = "https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges"
 _OPEN = re.compile(r"generated from tools/docs_audit/render_badges\.py \((?P<format>[a-z]+)\)")
@@ -110,16 +112,9 @@ def _readme() -> list[str]:
     return lines
 
 
-def _mdx() -> list[str]:
-    return [" ".join(f"[![{b.alt}]({b.image})]({b.href})" for b in BADGES)]
-
-
 def render(fmt: str) -> str:
-    body = _readme() if fmt == "readme" else _mdx()
     comment = f"generated from tools/docs_audit/render_badges.py ({fmt}) — edit the list, not this"
-    if fmt == "readme":
-        return "\n".join([f"<!-- {comment} -->", *body, "<!-- end generated -->"]) + "\n"
-    return "\n".join(["{/* " + comment + " */}", *body, "{/* end generated */}"]) + "\n"
+    return "\n".join([f"<!-- {comment} -->", *_readme(), "<!-- end generated -->"]) + "\n"
 
 
 def marker_blocks(text: str) -> list[tuple[int, str, str]]:

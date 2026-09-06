@@ -38,7 +38,20 @@ MARKER = (
     "publish a run, do not edit this page"
 )
 NO_RESULTS = "No published results yet."
+
+#: `ROADMAP.md`'s exit criterion, in the two halves the harness and a person decide separately:
+#: at least a week of calendar time, and no ambiguous outcome the harness did not cause.
 CRITERION_DAYS = 7
+
+
+def criterion(run: dict) -> tuple[bool, bool]:
+    """`(long enough, no unattributed ambiguity)` for one published run.
+
+    Computed rather than written, because a page that hard-coded "not met" would still say it
+    on the day the week is finally run -- and the failure would be the flattering one, which
+    is the direction this whole page exists to guard.
+    """
+    return run["elapsed_seconds"] >= CRITERION_DAYS * 86_400, run["unexplained"] == 0
 
 
 def latest() -> tuple[Path, dict] | None:
@@ -114,12 +127,34 @@ def render() -> str:
             "",
             "## What it is not evidence of",
             "",
-            "**`ROADMAP.md`'s exit criterion, which is a soak of at least one week.** This ran",
-            f"for {run['elapsed_human']}. A week of calendar time does not compress, and a larger",
-            "action count is not a substitute for it: a ten-hour run would meet the criterion no",
-            "better, it would put a bigger number beside something still unmet. The criterion is",
-            "recorded in the roadmap as **not met**, and that is the honest state of it.",
-            "",
+        ]
+        long_enough, clean = criterion(run)
+        if not long_enough:
+            lines += [
+                "**`ROADMAP.md`'s exit criterion, which is a soak of at least one week.** This",
+                f"ran for {run['elapsed_human']}. A week of calendar time does not compress, and",
+                "a larger action count is not a substitute for it: a ten-hour run would meet the",
+                "criterion no better, it would put a bigger number beside something still unmet.",
+                "The criterion is recorded in the roadmap as **not met**, and that is the honest",
+                "state of it.",
+                "",
+            ]
+        elif clean:
+            lines += [
+                "**`ROADMAP.md`'s exit criterion is met by this run**: at least a week of",
+                f"calendar time — {run['elapsed_human']} — with no unattributed ambiguity. Both",
+                "halves, and the roadmap says so.",
+                "",
+            ]
+        else:
+            lines += [
+                "**`ROADMAP.md`'s exit criterion is not met.** The run lasted",
+                f"{run['elapsed_human']}, which is long enough, and found",
+                f"{run['unexplained']} ambiguous outcomes it could not attribute. That is a",
+                "finding, and it is investigated before a release is tagged.",
+                "",
+            ]
+        lines += [
             "`exit_criterion_met: true` in the results file is about the **ambiguity count** and",
             "nothing else. That is all the harness is allowed to decide; the clock is reported",
             "and left to a person to read.",
@@ -128,10 +163,11 @@ def render() -> str:
             "",
             "- **It is not a load test.** The throughput is a by-product, nothing here is tuned",
             "  for it, and no number on this page is a performance claim.",
-            "- **It does not size the receipt chain.** Most of these actions are denied or",
-            "  refused by policy before a receipt is written, so the run says little about the",
-            "  one-row head every receipt write serializes on. [Postgres](/postgres) describes",
-            "  that ceiling; this run does not measure it.",
+            "- **It is not a throughput figure you can plan against.** A policy denial writes a",
+            "  receipt like any other outcome, so nearly every attempt above went through the",
+            "  one-row chain head — but on one host, with four threads, against a database on",
+            "  the same machine. [Postgres](/postgres) describes that ceiling; this run does not",
+            "  size it for your hardware.",
             "- **It does not exercise a partition or a second host.** That is the cross-host",
             "  suite, and [how reservation works](/production/how-reservation-works) says which",
             "  of those were actually run.",
@@ -141,16 +177,24 @@ def render() -> str:
             "## Run it yourself",
             "",
             "```bash",
-            'python research/soak/run.py --minutes 20 --postgres "$CTRLRUN_STORE_URL" --out soak.json',
+            "python research/soak/run.py --minutes "
+            f"{max(1, round(run['elapsed_seconds'] / 60))}"
+            ' --postgres "$CTRLRUN_STORE_URL" --out soak.json',
             "```",
             "",
-            "Four worker threads, one store each, into a schema created for the run and dropped",
-            "after it. The injection mix is 70% clean, 10% executor timeout, 10% unknown",
-            "exception, 8% `NotExecuted`, and 2% a lease short enough to lapse mid-execution.",
+            "Worker threads share one schema, created for the run and dropped after it, and each",
+            "attempt is drawn from a fixed injection mix — mostly clean, the rest a timeout, an",
+            "unknown exception, a stated non-execution, or a lease short enough to lapse",
+            "mid-execution. The mix and the thread count live in the harness rather than here,",
+            "because a page that restated them would be a second copy nothing compares against:",
+            "[`research/soak/README.md`]"
+            "(https://github.com/CTRLRun/ctrlrun/blob/main/research/soak/README.md) has both.",
             "",
-            "**Verified by** `T178` — the harness detects an injected `AMBIGUOUS`, which is the",
-            "positive control this whole page rests on. See also `T160` for what an expired lease",
-            "does and does not free.",
+            "**Verified by** the soak harness's own suite: an injected ambiguity is explained,",
+            "one with no injection is a finding, an injection against another attempt explains",
+            "nothing, and the control cause never explains anything — four tests, and the fourth",
+            "is what stops the control from absorbing a real finding. `T160` covers what an",
+            "expired lease does and does not free.",
             "",
         ]
     lines += [

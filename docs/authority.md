@@ -12,7 +12,7 @@ propose a €50,000 refund at all?" are different, and a system that can only as
 eventually answer the second by accident.
 
 Authority is the second axis. This page is the model in plain language; the contract is
-[`SPEC-v0.3.md`](SPEC-v0.3.md) §4 and §5.
+[`SPEC-v0.3.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) §4 and §5.
 
 ---
 
@@ -177,7 +177,7 @@ by naming a grant is not evidence. The ids travel in `data.grant_id` and
 ## Try it
 
 - `ctrlrun demo`, scenario 5 — the chain, the escalation, and the refusal, in process.
-- [`examples/authority-escalation/`](../examples/authority-escalation/) — the same story as a
+- [`examples/authority-escalation/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/authority-escalation) — the same story as a
   standalone script, including the delegation that is refused at *creation*.
-- [`examples/authority/`](../examples/authority/) — a payments chain and a DevOps chain, as
+- [`examples/authority/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/authority) — a payments chain and a DevOps chain, as
   complete documents to read rather than run.

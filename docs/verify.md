@@ -345,7 +345,7 @@ A partial run (`--only`) and a run that exited 2 or 3 write **no badge at all**.
 
 ## Related
 
-- [`SPEC-v0.4.md`](SPEC-v0.4.md) — the contract this implements, guarantee by guarantee.
+- [`SPEC-v0.4.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.4.md) — the contract this implements, guarantee by guarantee.
 - [`OWASP-AGENTIC-TOP10.md`](OWASP-AGENTIC-TOP10.md) — a reading of somebody else's taxonomy
   against these guarantees, with the entries CTRLRun does not address listed by name.
 - [`THREAT_MODEL.md`](THREAT_MODEL.md) — what fail-closed means here, and what is out of scope.

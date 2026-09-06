@@ -28,15 +28,16 @@ need. `test_the_first_line_of_the_section_says_which_store_and_why` asserts the 
 
 {/* generated from the suite, pyproject and the soak (full) — run the generator */}
 - **Version 0.6.0**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
-- **3,936 tests**, every version specified before it was written and every requirement mutation-tested. [Read more](/how-this-is-built).
-- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy and your store. [Read more](/security/verify-guarantees).
+- **3,939 tests**, every version specified before it was written and every requirement mutation-tested. [Read more](/how-this-is-built).
+- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates. [Read more](/security/verify-guarantees).
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite. [Read more](/production/postgres).
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. [Read more](/production/soak).
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. The roadmap asks for a week; that is not met. [Read more](/production/soak).
 - **Each receipt carries the hash of the one before it**, so an alteration is detected and named. [Read more](/production/receipt-integrity).
 - **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
 
 **Not yet:**
 
+- No soak of the length the roadmap asks for. (the criterion is a week of calendar time; the published run is 20m 0s)
 - No external security audit. (planned for v0.8 or v0.9)
 - No third-party review of the kernel. (every review so far was run inside this project)
 - No sector packs. (the policy templates are starting points, not a product)
@@ -45,19 +46,25 @@ need. `test_the_first_line_of_the_section_says_which_store_and_why` asserts the 
 ## The shape of a deployment
 
 ```
-your process ──► @protect / gateway ──► policy + authority ──► reservation ──► executor
-                                                                    │
-                                                             the store: a file,
-                                                             or Postgres, shared
-                                                                    │
-                                                          effects · approvals ·
-                                                          receipts · events
+your process ──► @protect / gateway ──► principal ──► authority ──► policy ──► approval
+                                                                                  │
+                                                              reservation ◄────────┘
+                                                                   │
+                                                                executor
+                                                                   │
+                          the store: a file, or Postgres, shared across hosts
+                          effects · continuations · approvals · delegations
+                          receipts · receipt_chain · events · schema_version
 ```
 
-The store is the only shared state, and it holds four things: which effect keys are in flight,
-which approvals were granted and consumed, the receipt chain, and the event log. Everything else
-is in your process and dies with it. That is why the questions in this section are all questions
-about the store.
+Authority and policy are evaluated independently and authority runs first, so a denial there
+never leaves an approval request behind.
+
+The store is the only shared state, and it holds eight tables: the effect keys in flight and the
+continuations holding some of them open, the approvals granted and consumed, the delegations that
+say who may act, the receipt chain and its head, the event log, and the schema version. Everything
+else is in your process and dies with it. That is why the questions in this section are all
+questions about the store.
 
 ## What this does not do
 
@@ -71,9 +78,10 @@ about the store.
 - **It is not a dashboard.** Receipts are portable JSON; `ctrlrun effects`, `inspect`, `receipts`
   and `stats` are the interface, and an OpenTelemetry exporter is the extra.
 
-**Verified by** `T141` and `T154` — both shipped stores pass the same store conformance suite,
-case for case — and by `ctrlrun verify`, which grades `G1` through `G11` against **your** policy
-and **your** store rather than against ours.
+**Verified by** `T141` and `T154` — the three shipped stores run the same store conformance
+suite, every case a pass or a named not-applicable — and by `ctrlrun verify`, which grades `G1`
+through `G11` against **your** policy, on **your** store's backend, in a scratch store it creates
+and destroys. It never opens the store you run on.
 
 ## Next
 

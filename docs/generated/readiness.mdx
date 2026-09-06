@@ -1,14 +1,15 @@
 {/* generated from the suite, pyproject and the soak (mdx) — run the generator */}
 - **Version 0.6.0**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
-- **3,936 tests**, every version specified before it was written and every requirement mutation-tested.
-- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy and your store.
+- **3,939 tests**, every version specified before it was written and every requirement mutation-tested.
+- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired.
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. The roadmap asks for a week; that is not met. [What it does not establish](https://docs.ctrlrun.dev/production/soak).
 - **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
 - **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
 
 **Not yet:**
 
+- No soak of the length the roadmap asks for. (the criterion is a week of calendar time; the published run is 20m 0s)
 - No external security audit. (planned for v0.8 or v0.9)
 - No third-party review of the kernel. (every review so far was run inside this project)
 - No sector packs. (the policy templates are starting points, not a product)

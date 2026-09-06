@@ -19,8 +19,12 @@ Let *known* be the migration ids your binary ships, and *applied* be what the da
 | An id the binary does not know — an older binary, a newer database | **refused at open**, naming the unknown id, your version, and the version that wrote it |
 | Missing one it knows **and** carrying one it does not | **refused**, naming both sides |
 
-The five are exhaustive and the store classifies into exactly one. Anything it cannot place is
-refused, not opened: a sixth shape nobody thought of is a database nobody has reasoned about.
+Those five are the shapes a database that already records a schema version can be in, and they
+are exhaustive: the store classifies into exactly one, and anything it cannot place is refused
+rather than opened. Three more sit in front of them. An **empty** database is migrated to head.
+A database with **CTRLRun's tables and no version record** — anything from before v0.6 — is
+adopted, given the record it never had, and migrated; that is the case an upgrade actually meets.
+A database with **foreign tables and no effects table** is refused, naming what it found.
 
 **The fourth row is the direction that gets forgotten and the one that corrupts.** A binary that
 reads a table it half understands does not fail. It succeeds, with the columns it knows, silently
@@ -59,8 +63,10 @@ before the first new process starts.
   it.** A test searches the CLI, the constructor and the environment for one.
 - **A migration is not a data repair.** It moves the schema forward and preserves every row; it
   does not correct rows that were already wrong.
-- **It does not migrate a database that is not CTRLRun's.** A database with foreign tables and no
-  effects table is refused, naming what it found.
+- **A read command does not migrate a shared store.** `ctrlrun receipts`, `effects` and
+  `inspect` against a `postgresql://` URL refuse unless the schema is already at head, naming
+  what to do instead. One operator reading evidence must not apply a migration to a database
+  every other host is still running against.
 
 **Verified by** `T147` — a database built by the previous release's **own code**, migrated, and
 every row compared by content rather than counted — `T148` for the refusal that names both

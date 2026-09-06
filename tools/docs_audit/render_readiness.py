@@ -39,6 +39,7 @@ GENERATED = REPO_ROOT / "docs" / "generated"
 FILENAMES = {"readme": "readiness.readme.md", "mdx": "readiness.mdx", "full": "readiness.full.mdx"}
 FORMATS = tuple(FILENAMES)
 SOAK = REPO_ROOT / "research" / "soak" / "results"
+CRITERION_DAYS = 7
 _OPEN = re.compile(r"generated from the suite, pyproject and the soak \((?P<format>[a-z]+)\)")
 _CLOSE = re.compile(r"end generated")
 
@@ -93,6 +94,7 @@ def measure() -> dict:
         if run is None
         else {
             "elapsed": run["elapsed_human"],
+            "elapsed_seconds": run["elapsed_seconds"],
             "backend": run["backend"].split(" ")[0],
             "actions": run["actions"],
             "unexplained": run["unexplained"],
@@ -113,7 +115,17 @@ def _lines(data: dict, *, full: bool) -> list[str]:
     link = "https://pypi.org/project/ctrlrun/"
 
     def where(text: str, page: str) -> str:
-        return f"{text} [Read more](/{page})." if full else text
+        """`full` adds a Read-more link; the other formats carry the sentence alone.
+
+        The soak line is the exception and links in every format: on the README and the docs
+        home it is the one bullet a reader could quote as a stronger claim than it is, so the
+        route to the page that qualifies it travels with it.
+        """
+        if full:
+            return f"{text} [Read more](/{page})."
+        if page == "production/soak":
+            return f"{text} [What it does not establish](https://docs.ctrlrun.dev/{page})."
+        return text
 
     lines = [
         f"- **Version {version}**, on [PyPI]({link}), Python 3.11 and later.",
@@ -124,7 +136,7 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         ),
         where(
             f"- **{guarantees} guarantees you can check in your own setup**, with `ctrlrun verify` "
-            "against your policy and your store.",
+            "against your policy, on your store's backend, in a scratch store it creates.",
             "security/verify-guarantees",
         ),
         where(
@@ -138,7 +150,12 @@ def _lines(data: dict, *, full: bool) -> list[str]:
             where(
                 f"- **Soaked for {run['elapsed']} on {run['backend']}**: {run['actions']:,} actions, "
                 f"{run['unexplained']} unattributed ambiguous outcomes"
-                + (", positive control fired." if run["positive_control"] else "."),
+                + (", positive control fired." if run["positive_control"] else ".")
+                # The duration travels with the number, in every format. Without it the README
+                # and the docs home carried "soaked" with no route to the page that says the
+                # roadmap asks for a week -- the flattering half of a true sentence, on the two
+                # surfaces most likely to be quoted.
+                + " The roadmap asks for a week; that is not met.",
                 "production/soak",
             )
         )
@@ -156,8 +173,29 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         "**Not yet:**",
         "",
     ]
-    lines += [f"- {claim} ({why})" for claim, why in NOT_YET]
+    lines += [f"- {claim} ({why})" for claim, why in not_yet(data)]
     return lines
+
+
+def not_yet(data: dict) -> tuple[tuple[str, str], ...]:
+    """`NOT_YET`, plus the soak's week where the published run has not reached it.
+
+    Derived rather than written down, for the same reason the page is: the day a week is
+    actually run, a hard-coded line would keep saying it was not, and that failure is the
+    flattering one.
+    """
+    run = data["soak"]
+    if run is None:
+        return NOT_YET
+    if run["elapsed_seconds"] >= CRITERION_DAYS * 86_400 and run["unexplained"] == 0:
+        return NOT_YET
+    return (
+        (
+            "No soak of the length the roadmap asks for.",
+            f"the criterion is a week of calendar time; the published run is {run['elapsed']}",
+        ),
+        *NOT_YET,
+    )
 
 
 def render(fmt: str, data: dict) -> str:

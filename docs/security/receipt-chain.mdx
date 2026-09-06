@@ -16,10 +16,12 @@ chain: 41 receipts
 seq 17: content altered
 ```
 
-Six named breaks: content altered at a `seq`, a broken link between two, a gap where a `seq` is
-missing, a duplicate `seq`, a head that does not match the last receipt, and an unchained
-receipt where the chain expected one. Each names the `seq` so a reader can go and look at that
-row rather than being told the log is bad.
+Six named breaks: `content_altered` where a receipt no longer hashes to its stored hash,
+`hash_missing` where the stored hash is gone and nothing can be compared, `link_broken` between
+two, `missing` where there is a gap, `head_mismatch` where the head does not match the last
+receipt, and `unchained` for a receipt written before the chain existed. Each names the `seq`,
+so a reader can go and look at that row rather than being told the log is bad, and
+[Receipt integrity](/production/receipt-integrity) says what to do about each.
 
 ## What it does not prove
 
@@ -44,16 +46,21 @@ reconciled.
 ## Where it is checked
 
 - `ctrlrun receipts --verify-chain`, on either store backend, including through `--store-url`.
-- `ctrlrun verify`'s G11, *an altered receipt is detected*, against your own configuration.
+- `ctrlrun verify`'s G11, *an altered receipt is detected* — against a scratch store verify
+  creates on your backend, never against the store you run on.
 - On Postgres, `put_receipt` takes the head row's lock first, so concurrent writers cannot
   interleave into a chain that then fails to verify.
 
 ## What to do with it
 
-Run `--verify-chain` where you already run integrity checks, and treat a break as an incident
-about the store rather than about CTRLRun: the chain is the alarm, not the lock. If you need
-evidence of origin rather than of integrity, sign or anchor the receipts outside the database
-yourself; they are portable JSON, one object per line, for exactly that reason.
+Treat a break as an incident about the store rather than about CTRLRun: the chain is the alarm,
+not the lock. If you need evidence of origin rather than of integrity, sign or anchor the
+receipts outside the database yourself; they are portable JSON, one object per line, for exactly
+that reason.
+
+[Receipt integrity in practice](/production/receipt-integrity) is the runbook: when to run the
+check, what each of the six names means for your store, and what an unchained count does to a
+scheduled job.
 
 ## Next
 

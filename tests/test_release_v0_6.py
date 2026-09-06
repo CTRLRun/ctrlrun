@@ -43,6 +43,12 @@ SCANNED = (
     "CHANGELOG.md",
     "docs/postgres.md",
     "docs/THREAT_MODEL.md",
+    # Added with the Production section, by the independent review that noticed the gap. This
+    # page is now the site's principal statement of §1.2's third rule -- it says what the chain
+    # detects, what it does not survive, and that alteration is not authorship -- and it was in
+    # neither this scan nor the section's own narrower one. If `docs/postgres.md` earned a place
+    # here for carrying one disclaiming sentence, a page carrying three has a stronger claim.
+    "docs/production/receipt-integrity.mdx",
 )
 
 
@@ -97,6 +103,9 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
     ),
     "docs/postgres.md": (
         "Receipts are not signed, alteration is not authorship, and the chain is not tamper-proof",
+    ),
+    "docs/production/receipt-integrity.mdx": (
+        "- **It does not tell you who wrote a receipt.** Alteration is not authorship, it does not survive",  # noqa: E501
     ),
     "docs/THREAT_MODEL.md": (
         "- Receipts are not signed, and they are not signed after v0.6 either. v0.6 adds a **hash chain** (`SPEC-v0.6.md` §6): each receipt carries the hash of the one before it, with `seq` inside the hashed content, so a partial tamper is detected and named — an `UPDATE` on one row, a `DELETE` from the middle, a reordering. What that closes is **alteration that keeps the receipts after it**: changing what receipt *n* says while leaving the rest in place costs a rewrite of all of them plus the head, rather than one statement. **Not a truncation at the end, and not an append.** Two earlier versions of this line claimed the first; a review measured both at **two statements, undetected** — delete the rows and rewind the head, or insert a well-formed row and advance it. The head is a row in the same database as the receipts, so it raises the cost of *forgetting* and not the cost of erasing; an anchor outside the database is what would close that, and v0.6 has none. What it does **not** close is authorship, and it does not close a database admin who can rewrite every row including the chain head: such an adversary recomputes the chain and it verifies. The malicious-administrator line above is unchanged; v0.6 narrows it rather than removing it. Nor does the chain prove that every action wrote a receipt — a receipt whose write failed leaves no gap in `seq` and is invisible to the chain by construction; the events log is where that is reconciled.",  # noqa: E501

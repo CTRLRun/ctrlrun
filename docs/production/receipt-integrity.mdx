@@ -10,9 +10,10 @@ reordering is detected and **named**. Run the check against your own store:
 ctrlrun receipts --verify-chain
 ```
 
-It reports the first break by `seq` and by name, plus how many rows predate the chain. Put it in
-the job that already runs after a restore, and after any maintenance that touched the database
-directly.
+It reports **every** break by `seq` and by name, plus how many rows predate the chain — *receipt
+41 was edited* and *the last nine were deleted* are different incidents and you need both. Put it
+in the job that already runs after a restore, and after any maintenance that wrote to the
+database directly.
 
 ## The six names
 
@@ -34,6 +35,12 @@ is not a check that passed.
 separately and reported with their count, and the summary says how many of how many were
 verified. Folding them into a green count would be the same false green in a new costume.
 
+**So a database migrated from before v0.6 makes this command exit non-zero, permanently.** That
+is the honest answer and not a bug: those receipts were written before there was anything to
+verify them against, and nothing can make them verifiable after the fact. Before you put the
+command in a scheduled job, run it once and read the unchained count, so you are choosing what to
+do about those rows rather than discovering them at three in the morning.
+
 ## When a receipt cannot be written
 
 If the receipt insert itself fails, the exception reaches you and nothing swallows it. The effect
@@ -43,23 +50,24 @@ exception you must handle, and a log with no hole in it.
 
 ## What this does not do
 
-- **It does not tell you who wrote a receipt.** Alteration is not authorship. The chain detects a
-  change; it says nothing about who made it.
-- **It does not survive an administrator with write access to every row.** Somebody who can
-  rewrite the chain head can erase the end of the log in two statements. [The threat
-  model](/THREAT_MODEL) states what remains open.
-- **It does not cover what is outside a receipt.** A decision nobody recorded is not a decision
-  the chain can vouch for.
+- **It does not tell you who wrote a receipt.** Alteration is not authorship, it does not survive
+  an administrator who can rewrite every row including the head, and it vouches for nothing that
+  was never recorded. [The receipt chain](/security/receipt-chain) is where those limits are
+  argued and [the threat model](/THREAT_MODEL) says what stays open; this page is what to run and
+  what to do with the answer.
+- **It does not tell you a break was malicious.** A restore from backup, a hand-run `UPDATE` and
+  a retention job all produce the same names. The report says what changed, not why.
 - **`ctrlrun verify` does not read your store.** `G11` runs against a scratch store verify itself
   created, because a verification tool with a side effect on the thing it verifies is refused.
   `--verify-chain` is the one that reads yours.
 
 **Verified by** `T164` — six tamper cases, each asserted on the **name** and the `seq` and not
-merely on "invalid" — `T165` for the positive control without which every one of those rows would
-pass against a detector that always says broken, `T166` for the reordering that `seq` inside the
-hashed content is what catches, `T167` for truncation caught by the head and only by the head,
-`T168` for the unchained rows that are never a pass, `T169` for `G11` and its control, and `T170`
-for the failed receipt write that raises and leaves no gap.
+merely on "invalid", the reordering case included — `T165` for the positive control without which
+every one of those rows would pass against a detector that always says broken, `T167` for
+truncation caught by the head and only by the head, `T168` for the unchained rows that are never
+a pass, and `T170` for the failed receipt write that raises and leaves no gap. `G11` in `ctrlrun
+verify` runs the same detection against a scratch store, with the unaltered chain as its
+control.
 
 ## Next
 
