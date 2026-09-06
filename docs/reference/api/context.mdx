@@ -8,7 +8,12 @@ description: "Bind the principal for calls made inside the block."
 `ctrlrun.context` — function, defined at `src/ctrlrun/control.py:140`
 
 ```python
-def context(agent: str, user: str | None) -> Iterator[None]
+from ctrlrun import context
+```
+
+
+```python
+def context(agent: str, user: str | None = None) -> Iterator[None]
 ```
 
 Bind the principal for calls made inside the block.

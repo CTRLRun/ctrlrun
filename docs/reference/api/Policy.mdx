@@ -8,8 +8,13 @@ description: "Action-level autonomy policy: which actions may run, and under whi
 `ctrlrun.Policy` — class, defined at `src/ctrlrun/policy.py:525`
 
 ```python
-class Policy()
-    def __init__(actions: Mapping[str, _ActionPolicy], source: str, schema: str, environment: str | None, mode: Literal['observe', 'enforce'], version: str | None, controls: Mapping[str, PolicyControl], _canonical: Mapping[str, Any])
+from ctrlrun import Policy
+```
+
+
+```python
+class Policy
+    def __init__(actions: Mapping[str, _ActionPolicy], source: str, schema: str = POLICY_SCHEMA, environment: str | None = None, mode: Literal['observe', 'enforce'] = ENFORCE, version: str | None = None, controls: Mapping[str, PolicyControl] = dict(), _canonical: Mapping[str, Any] = dict())
 ```
 
 Action-level autonomy policy: which actions may run, and under which conditions.

@@ -8,8 +8,13 @@ description: "A human's answer, and who gave it (SPEC-v0.5 §2.2, §3.4)."
 `ctrlrun.ApprovalAnswer` — class, defined at `src/ctrlrun/adapter.py:157`
 
 ```python
-class ApprovalAnswer()
-    def __init__(granted: bool, approver: str, approved_arguments: Mapping[str, Any] | None)
+from ctrlrun import ApprovalAnswer
+```
+
+
+```python
+class ApprovalAnswer
+    def __init__(granted: bool, approver: str, approved_arguments: Mapping[str, Any] | None = None)
 ```
 
 A human's answer, and who gave it (SPEC-v0.5 §2.2, §3.4).
@@ -23,7 +28,7 @@ so no document may describe this field as *who* approved.
 `approved_arguments` are the arguments the answer was given against, as the adapter
 recovered them from its framework's own record of it. Required where the interrupt declares
 `carries_approved_arguments`; `None` only where it does not. **Never a copy of
-`PendingApproval.arguments`**: handing back what you were just given makes every comparison
+`PendingApproval.arguments`**: handing back exactly what you were given makes every comparison
 trivially pass, which is manufacturing the check.
 
 ## Next

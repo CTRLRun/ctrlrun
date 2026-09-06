@@ -115,7 +115,8 @@ below runs offline; the deploy tool is a stand-in that records calls.
     ctrlrun effects
     ```
 
-    Every call has a receipt, refused ones included, and every effect key has a state. The
+    Every call that reaches a decision has a receipt, denied ones included, and every effect
+    key has a state. A call waiting on a human has an approval request and no receipt yet. The
     pending approvals are what `ctrlrun approve <request id>` answers; the
     [quickstart](/get-started/quickstart) walks through presenting one.
   </Step>

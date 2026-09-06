@@ -4,7 +4,7 @@ description: "An agent operates a Kubernetes cluster: a rollout restart runs on 
 ---
 
 An on-call agent operates a cluster from incident tickets. Restarting a deployment is cheap to
-undo and should just happen; applying a manifest to production should wait for a person;
+undo and should run without asking; applying a manifest to production should wait for a person;
 deleting a namespace is not something an agent does, whatever the ticket says.
 
 ## The policy
@@ -113,7 +113,7 @@ kubectl calls: 2
 ctrlrun receipts --last 5
 ```
 
-The `delete_namespace` receipt is `deny/blocked` with no effect key: the action has none,
+The `delete_namespace` receipt is `deny/denied` with no effect key: the action has none,
 because it never runs. The duplicate restart is `allow/blocked` on `restart:prod-eu:checkout`.
 
 ## When an AMBIGUOUS appears

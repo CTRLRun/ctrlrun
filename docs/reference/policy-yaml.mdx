@@ -89,9 +89,12 @@ other numeric operand are integers: `float` is refused everywhere in CTRLRun.
 Bound both ends of a numeric band. `amount_lte: 50000` alone matches a negative amount, and a
 refund of a negative amount is a charge.
 
-**Reserved subjects.** `agent`, `user`, `claims`, `issuer` and `expires_at` name the principal
-and are refused as condition subjects at load, in a document of every schema version: the
-policy cannot see who is asking. `data_scope` is the one derived subject: it is the set of
+**Reserved subjects.** Ten names are refused as condition subjects at load, in a document of
+every schema version. Five are the principal — `agent`, `user`, `claims`, `issuer`,
+`expires_at` — because the policy cannot see who is asking. Five more name the action itself
+rather than an argument of it: `action_id`, `environment`, `principal`, `resource` and
+`data_scope`. So `when: { resource_eq: "payment:1" }` is a load error, not a rule that never
+matches. `data_scope` is the one derived subject: it is the set of
 labels the supplied arguments carry, `data_scope_in: [phi]` means the set intersects the list,
 and `data_scope_eq` / `data_scope_neq` compare the whole set. `data_scope` may not be an
 argument's name, an effect placeholder, or a protected function's parameter.

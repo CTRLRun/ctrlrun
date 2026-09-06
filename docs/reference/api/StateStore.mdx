@@ -8,7 +8,39 @@ description: "Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, eff
 `ctrlrun.StateStore` — class, defined at `src/ctrlrun/state.py:350`
 
 ```python
+from ctrlrun import StateStore
+```
+
+
+```python
 class StateStore(ApprovalStore, Protocol)
+    def reserve_effect(effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE) -> Reservation
+    def consume_approval_and_reserve(approval_id: str, action_hash: str, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE) -> tuple[Approval, Reservation]
+    def begin_execution(effect_key: str, action_id: str) -> None
+    def commit_effect(effect_key: str, action_id: str, result: Any) -> None
+    def fail_effect(effect_key: str, action_id: str, error: str) -> None
+    def mark_ambiguous(effect_key: str, action_id: str, error: str) -> None
+    def resolve_effect(effect_key: str, state: EffectState, resolver: str) -> EffectRecord
+    def get_effect(effect_key: str) -> EffectRecord | None
+    def list_effects(state: EffectState | None = None) -> tuple[EffectRecord, ...]
+    def extend_lease(effect_key: str, action_id: str, until: datetime) -> None
+    def find_granted_approval(action_hash: str) -> Approval | None
+    def find_denied_request(action_hash: str) -> ApprovalRequest | None
+    def hold_continuation(action: Action, effect_key: str, continuation: str, until: datetime) -> int
+    def take_continuation(continuation: str) -> HeldContinuation
+    def continuation_rounds(effect_key: str) -> int
+    def approvals_for(action_hash: str) -> tuple[ApprovalRecord, ...]
+    def put_delegation(record: DelegationRecord) -> None
+    def get_delegation(delegation_id: str) -> DelegationRecord | None
+    def delegations_for(parent_id: str) -> tuple[DelegationRecord, ...]
+    def delegations(*, include_revoked: bool = False) -> tuple[DelegationRecord, ...]
+    def revoke_delegation(delegation_id: str, *, by: str | None, at: datetime) -> bool
+    def append_event(event: Event) -> Event
+    def put_receipt(receipt: Receipt) -> Receipt
+    def chain_head() -> tuple[int, str] | None
+    def events() -> tuple[Event, ...]
+    def receipts() -> tuple[Receipt, ...]
+    def close() -> None
 ```
 
 Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence.

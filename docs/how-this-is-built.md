@@ -39,7 +39,7 @@ The numbers that are recorded:
 | v0.5 | An independent review of the adapter contract found five defects that would each have produced an insecure or unimplementable adapter. Three further reviews and a third adapter written against the contract alone found five authorization defects in one reference adapter before it shipped, all of the same shape | `CHANGELOG.md`, 0.5.0; `docs/adapters.md`, the fourteen questions |
 | v0.6 | An independent review of the store work found twenty-one defects, four of them blockers, three of which were invisible from the diff and visible only from the shipped code | `CHANGELOG.md`, 0.6.0 |
 
-The suite today is 1,625 test functions, 2,442 cases with parametrisation, run on two Python
+The suite today is 1,704 test functions, 3,944 cases with parametrisation, run on two Python
 versions, against SQLite and Postgres, with the adapter suites run against real installations
 of both frameworks and asserted not to have skipped.
 

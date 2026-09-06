@@ -8,7 +8,12 @@ description: "Does this call need a human? For a framework that asks before it i
 `ctrlrun.needs_approval` — function, defined at `src/ctrlrun/adapter.py:408`
 
 ```python
-def needs_approval(control: Control, action: str, arguments: Mapping[str, Any], resource: str | None) -> bool
+from ctrlrun import needs_approval
+```
+
+
+```python
+def needs_approval(control: Control, action: str, arguments: Mapping[str, Any], *, resource: str | None = None) -> bool
 ```
 
 Does this call need a human? For a framework that asks before it invokes (SPEC-v0.5 §3.5).

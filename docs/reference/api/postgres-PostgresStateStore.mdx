@@ -8,8 +8,15 @@ description: "Approvals, effects and evidence in a Postgres schema (SPEC-v0.6 §
 `ctrlrun.postgres.PostgresStateStore` — class, defined at `src/ctrlrun/postgres.py:218`
 
 ```python
-class PostgresStateStore()
-    def __init__(url: str, clock: Callable[[], datetime], schema: str)
+from ctrlrun.postgres import PostgresStateStore
+```
+
+Needs the `postgres` extra: `pip install "ctrlrun[postgres]"`. Importing it without that raises `MissingDependency` carrying the install command.
+
+
+```python
+class PostgresStateStore
+    def __init__(url: str, *, clock: Callable[[], datetime] = _utc_now, schema: str = 'public')
 ```
 
 Approvals, effects and evidence in a Postgres schema (SPEC-v0.6 §4).

@@ -8,8 +8,13 @@ description: "The principal named by a trusted HTTP header (§3.3)."
 `ctrlrun.HeaderIdentityProvider` — class, defined at `src/ctrlrun/identity.py:126`
 
 ```python
-class HeaderIdentityProvider()
-    def __init__(agent_header: str, user_header: str | None, issuer: str | None)
+from ctrlrun import HeaderIdentityProvider
+```
+
+
+```python
+class HeaderIdentityProvider
+    def __init__(agent_header: str, user_header: str | None = None, issuer: str | None = None)
 ```
 
 The principal named by a trusted HTTP header (§3.3).

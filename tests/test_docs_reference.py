@@ -75,6 +75,96 @@ def test_the_api_reference_matches_the_docstrings():
     assert render_api.check(render_api.render()) == []
 
 
+def test_every_rendered_api_signature_is_the_one_python_would_accept():
+    """A reader copies the signature off the page and calls it. It has to work.
+
+    The renderer used to emit `name: annotation` and nothing else, which dropped the `*` and
+    every default — so `protect('stripe.refund', 'refund:{id}')`, taken straight off
+    `reference/api/protect.mdx`, raised `TypeError: takes 1 positional argument but 2 were
+    given`. The launch-readiness audit tried thirteen of these pages and all thirteen raised.
+
+    This compares the rendered parameter list against `inspect.signature`, name by name and
+    marker by marker, for every public callable. It is stricter than "the page exists" and it
+    is the check that would have caught it.
+    """
+    import inspect
+    import re
+
+    import ctrlrun
+
+    checked = 0
+    for name in sorted(ctrlrun.__all__):
+        member = getattr(ctrlrun, name)
+        if not inspect.isfunction(member) and not inspect.isclass(member):
+            continue
+        page = DOCS / "reference" / "api" / f"{name}.mdx"
+        if not page.exists():
+            continue
+        # The first python block is the import line; the signature is the one that declares.
+        blocks = re.findall(
+            r"^```python\n(.*?)^```$", page.read_text(encoding="utf-8"), re.M | re.S
+        )
+        declaring = [b for b in blocks if b.lstrip().startswith(("def ", "class "))]
+        assert declaring, f"{name}.mdx has no signature block"
+        rendered = declaring[0]
+
+        if inspect.isfunction(member):
+            declared = f"def {name}("
+            assert rendered.startswith(declared), rendered[:80]
+            params = rendered[len(declared) : rendered.rindex(")")]
+        else:
+            found = re.search(r"def __init__\((.*)\)", rendered)
+            if found is None:
+                continue  # a Protocol or a dataclass with no __init__ of its own
+            params = found.group(1)
+
+        target = member if inspect.isfunction(member) else member.__init__
+        expected = [
+            p.name
+            for p in inspect.signature(target).parameters.values()
+            if p.name not in {"self", "cls"}
+        ]
+        rendered_names = [
+            piece.strip().split(":")[0].split("=")[0].strip().lstrip("*")
+            for piece in _split_parameters(params)
+            if piece.strip() not in {"", "*", "/"}
+        ]
+        assert rendered_names == expected, (
+            f"{name}: page says {rendered_names}, code says {expected}"
+        )
+
+        # The marker itself: everything after a keyword-only parameter's `*` must be one.
+        signature = inspect.signature(target)
+        keyword_only = [p.name for p in signature.parameters.values() if p.kind is p.KEYWORD_ONLY]
+        if keyword_only and not any(
+            p.kind is p.VAR_POSITIONAL for p in signature.parameters.values()
+        ):
+            assert "*" in _split_parameters(params) or any(
+                piece.strip().startswith("*") for piece in _split_parameters(params)
+            ), f"{name}: {keyword_only} are keyword-only and the page shows no `*`"
+        checked += 1
+
+    assert checked >= 20, f"only {checked} signatures compared; this check found nothing to do"
+
+
+def _split_parameters(text: str) -> list[str]:
+    """Split on the commas that separate parameters, not the ones inside brackets."""
+    pieces, depth, current = [], 0, ""
+    for character in text:
+        if character in "[({":
+            depth += 1
+        elif character in "])}":
+            depth -= 1
+        if character == "," and depth == 0:
+            pieces.append(current)
+            current = ""
+            continue
+        current += character
+    if current.strip():
+        pieces.append(current)
+    return pieces
+
+
 def test_every_frozen_public_name_has_a_docstring_and_a_page():
     import importlib
 
@@ -177,3 +267,103 @@ def test_the_exit_codes_page_matches_the_report():
 
     source = Path(__import__("inspect").getsourcefile(Report)).read_text(encoding="utf-8")
     assert "return 2" in source and "self.applicable == 0" in source
+
+
+def test_every_quoted_verify_transcript_is_one_verify_actually_prints():
+    """The pages that quote `ctrlrun verify` are checked against a real run of their own policy.
+
+    Both of them were **written rather than captured**. Each showed eight `PASS  stripe.refund`
+    rows; the policy on the same page makes verify exercise `k8s.delete_namespace` on every one
+    of them, because it takes the first action that fits in alphabetical order. Each also
+    dropped the stderr line G7's own scenario logs, and one misaligned a column. Found by the
+    launch-readiness audit, which ran them.
+
+    That is the false-green problem this project spends thousands of words warning about,
+    arriving in its own quoted evidence. So the transcript is compared with a run: every line
+    except the `policy` line, whose absolute path is machine-specific and is labelled as such
+    on both pages.
+    """
+    import re
+    import subprocess
+    import sys
+    import tempfile
+
+    pages = [
+        DOCS / "guides" / "verify-in-ci.mdx",
+        DOCS / "cookbook" / "verify-in-github-actions.mdx",
+    ]
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        # The guide indents its blocks inside `<Steps>`, so the fence and the document are
+        # both offset; the cookbook page's are flush.
+        policy = re.search(r"```yaml[^\n]*\n(\s*schema: ctrlrun\.policy.*?)```", text, re.S)
+        assert policy, f"{page.name} quotes no policy"
+        quoted = re.search(r"```text\n(.*?CTRLRun verify.*?)```", text, re.S)
+        assert quoted, f"{page.name} quotes no transcript"
+
+        with tempfile.TemporaryDirectory() as directory:
+            indent = " " * (len(policy.group(1)) - len(policy.group(1).lstrip(" ")))
+            document = "\n".join(
+                line[len(indent) :] if line.startswith(indent) else line
+                for line in policy.group(1).splitlines()
+            )
+            (Path(directory) / "ctrlrun.yaml").write_text(document, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "ctrlrun.cli.main", "verify"],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        printed = (result.stderr + result.stdout).splitlines()
+
+        page_indent = " " * (len(quoted.group(1)) - len(quoted.group(1).lstrip(" ")))
+        shown = [
+            line[len(page_indent) :] if line.startswith(page_indent) else line
+            for line in quoted.group(1).splitlines()
+        ]
+        skip = ("policy     ",)
+        shown = [line for line in shown if line.strip() and not line.startswith(skip)]
+        printed = [line for line in printed if line.strip() and not line.startswith(skip)]
+        assert shown == printed, (
+            f"{page.name} quotes a transcript verify does not print:\n"
+            + "\n".join(f"  page: {line}" for line in shown if line not in printed)
+            + "\n"
+            + "\n".join(f"  real: {line}" for line in printed if line not in shown)
+        )
+
+
+def test_every_api_page_says_how_to_import_the_thing_it_documents():
+    """Zero of seventy-one carried an import line, and the five behind an extra never named it.
+
+    A reference page that gives a class name and no route to it is browsable and not usable —
+    the audit's phrase, and the right one. `PostgresStateStore`, `OTelEventSink`,
+    `JWTIdentityProvider`, `AcsControlHook` and `serve` all raise `MissingDependency` without
+    their extra, and no page said which.
+    """
+    import re
+
+    pages = sorted((DOCS / "reference" / "api").glob("*.mdx"))
+    assert len(pages) > 50, len(pages)
+    for page in pages:
+        if page.stem == "index":
+            continue
+        text = page.read_text(encoding="utf-8")
+        dotted = re.search(r"^`(ctrlrun[\w.]*)\.(\w+)` — ", text, re.M)
+        assert dotted, f"{page.name} does not name what it documents"
+        module, name = dotted.group(1), dotted.group(2)
+        assert f"from {module} import {name}" in text, f"{page.name} has no import line"
+
+        extra = {
+            "ctrlrun.postgres": "postgres",
+            "ctrlrun.otel": "otel",
+            "ctrlrun.jwt_identity": "identity",
+            "ctrlrun.acs": "gateway",
+            "ctrlrun.gateway": "gateway",
+            "ctrlrun.conformance": "conformance",
+            "ctrlrun.conformance.store": "conformance",
+        }.get(module)
+        if extra is not None:
+            assert f'pip install "ctrlrun[{extra}]"' in text, (
+                f"{page.name} needs the {extra} extra and does not say so"
+            )

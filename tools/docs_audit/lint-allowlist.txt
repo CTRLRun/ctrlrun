@@ -22,6 +22,15 @@ exclude docs/SPEC-*.md
 
 # The roadmap says what later versions may add, including a version line for sector packs
 # that does not exist yet. A roadmap that could not name future work would not be one.
+#
+# **Re-decided in session 6, because the fact under it changed.** `ROADMAP.md` is now a page on
+# the public site, not only a repository file, so a stranger can land on it from search and read
+# `EU AI Act Art. 12`, `SOC 2 CC6/CC7`, `PCI DSS`, `HIPAA` and an H2 headed *Sector packs*. The
+# exclusion stands, and the reason it stands is in the document rather than in this file: every
+# one of those names is future work, the standards line says it is written *"only when a design
+# partner asks"*, and the packs section says in its own words that **no pack describes itself as
+# compliant with any regulation**. If a line there ever asserts support rather than naming an
+# intention, the answer is to fix the line, not to widen this.
 exclude docs/ROADMAP.md
 
 # The style sheet and the information architecture name the forbidden words in order to

@@ -8,8 +8,13 @@ description: "The outcome of this effect is unknown; only a human may resolve it
 `ctrlrun.AmbiguousEffect` — class, defined at `src/ctrlrun/errors.py:141`
 
 ```python
+from ctrlrun import AmbiguousEffect
+```
+
+
+```python
 class AmbiguousEffect(CTRLRunError)
-    def __init__(message: str | None, effect_key: str, action_id: str | None)
+    def __init__(message: str | None = None, *, effect_key: str, action_id: str | None = None)
 ```
 
 The outcome of this effect is unknown; only a human may resolve it (SPEC-v0.1 §5.4).

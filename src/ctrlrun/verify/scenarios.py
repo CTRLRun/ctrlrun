@@ -89,7 +89,8 @@ APPROVER: Final = "ctrlrun-verify"
 #: §3.6 — the base instant where no grant carries an `expires_at`.
 FALLBACK_T0: Final = datetime(2026, 1, 1, tzinfo=UTC)
 
-#: §3.1 — the one `--store-url` value v0.4 accepts. Everything else exits 2 naming v0.6.
+#: §3.1 — the default `--store-url` value. v0.6 adds a `postgresql://` URL beside it
+#: (SPEC-v0.6 §4.1); anything else exits 2 naming the two.
 SQLITE_STORE_URL: Final = "sqlite"
 
 #: §3.4's derivation of a principal from a grant's subject.

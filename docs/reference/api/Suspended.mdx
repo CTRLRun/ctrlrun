@@ -8,6 +8,11 @@ description: "Raised by an executor: the remote asked for something before it wi
 `ctrlrun.Suspended` — class, defined at `src/ctrlrun/errors.py:165`
 
 ```python
+from ctrlrun import Suspended
+```
+
+
+```python
 class Suspended(CTRLRunError)
     def __init__(continuation: bytes | str)
 ```
