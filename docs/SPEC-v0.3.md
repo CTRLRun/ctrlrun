@@ -110,7 +110,7 @@ themselves carry.
 NIST has published **nothing normative on agent identity**. The one document dedicated to the
 subject is a concept paper: *Accelerating the Adoption of Software and AI Agent Identity and
 Authorization*, NCCoE, **Initial Public Draft, published 2026-02-05**, comments closed
-2026-04-02 (<https://csrc.nist.gov/pubs/other/2026/02/05/accelerating-the-adoption-of-software-and-ai-agent/ipd>).
+2026-04-02 ([https://csrc.nist.gov/pubs/other/2026/02/05/accelerating-the-adoption-of-software-and-ai-agent/ipd](https://csrc.nist.gov/pubs/other/2026/02/05/accelerating-the-adoption-of-software-and-ai-agent/ipd)).
 It contains no RFC 2119 keyword anywhere in its eleven pages, and its Note to Reviewers asks,
 among others, *"What are the mechanisms for an agent to prove its authority to perform a
 specific action?"* and *"How do we handle delegation of authority for 'on behalf of'
@@ -119,19 +119,19 @@ guide, not a standard. It names MCP, OAuth 2.0/2.1, OpenID Connect, SPIFFE/SPIRE
 as *candidates*, profiles none, and requires none.
 
 The adjacent finals do not fill the gap. **SP 800-63-4** (final, 2025-07-31,
-<https://csrc.nist.gov/pubs/sp/800/63/4/final>) is digital identity for natural persons.
+[https://csrc.nist.gov/pubs/sp/800/63/4/final](https://csrc.nist.gov/pubs/sp/800/63/4/final)) is digital identity for natural persons.
 **SP 800-207** (Zero Trust Architecture, August 2020,
-<https://csrc.nist.gov/pubs/sp/800/207/final>) has a subject model but nothing on machine
+[https://csrc.nist.gov/pubs/sp/800/207/final](https://csrc.nist.gov/pubs/sp/800/207/final)) has a subject model but nothing on machine
 delegation. **NIST IR 8587**, *Protecting Tokens and Assertions from Forgery, Theft, and Misuse*,
 is an Initial Public Draft (published 2025-12-22,
-<https://csrc.nist.gov/pubs/ir/8587/ipd>), and its verifier obligations informed §3.4 without
+[https://csrc.nist.gov/pubs/ir/8587/ipd](https://csrc.nist.gov/pubs/ir/8587/ipd)), and its verifier obligations informed §3.4 without
 being citable as a requirement. Its §4.2.1.2 is the one NIST sentence that addresses a
 component in CTRLRun's position — *"Policy enforcement points (e.g., at the application level)
 that rely on access tokens and identity assertions MUST confirm the validity, scope, source,
 and integrity of access tokens before granting access to resources"* — and it is draft
 guidance, aimed at agencies and cloud service providers, that mentions neither AI agents nor
 delegation. A NIST blog post of **2026-08-27**
-(<https://www.nist.gov/blogs/cybersecurity-insights/back-future-why-agentic-ai-needs-strong-identity-foundation>)
+([https://www.nist.gov/blogs/cybersecurity-insights/back-future-why-agentic-ai-needs-strong-identity-foundation](https://www.nist.gov/blogs/cybersecurity-insights/back-future-why-agentic-ai-needs-strong-identity-foundation))
 observes that *"other specifications, such as Transaction Tokens, are looking at ways to
 promulgate authorization context across human and agentic call chains to help ensure that
 authorization is attenuated as it's delegated"* — a description of IETF activity, not a
@@ -143,7 +143,7 @@ does not become a NIST anything.
 
 #### MCP — audience-bound tokens, and a warning label on the only fields that look like identity
 
-Read at revision **2026-07-28** (<https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization>
+Read at revision **2026-07-28** ([https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
 and its `security-considerations` page), which is the revision `SPEC-v0.2` is written against.
 
 MCP defines **no** principal, actor, delegation, attenuation or authority primitive. Its
@@ -159,7 +159,7 @@ date.
 
 The two fields that look like identity are both dead ends, and the specification says so on
 its reserved-`_meta` page
-(<https://modelcontextprotocol.io/specification/2026-07-28/basic/index>):
+([https://modelcontextprotocol.io/specification/2026-07-28/basic/index](https://modelcontextprotocol.io/specification/2026-07-28/basic/index)):
 `io.modelcontextprotocol/clientInfo` and `serverInfo` are *"self-reported by the sender and are
 not verified by the protocol… Implementations SHOULD NOT use them to change the behavior of the
 client or server, and SHOULD NOT rely on them for security decisions."* That sentence is why
@@ -207,7 +207,7 @@ ID-JAG that MCP's enterprise-managed-authorization extension builds on. Beyond t
 `draft-mishra-oauth-agent-grants-02` (2026-08-30) are **individual submissions**: no stream, no
 working group, no intended RFC status. An `agentproto` BOF exists with group state `bof` and no
 charter. OpenID's **Authorization API 1.0** reached Final
-(2026-01-11, <https://openid.net/specs/authorization-api-1_0.html>); its Access Request and
+(2026-01-11, [https://openid.net/specs/authorization-api-1_0.html](https://openid.net/specs/authorization-api-1_0.html)); its Access Request and
 Approval Profile (ARAP) is an AuthZEN **Working Group Draft**, retrieved 2026-09-04 — its title
 page carries a build date that moves, so it is cited by stage and retrieval date rather than by
 a version.
@@ -224,7 +224,7 @@ and no dates** — each opens with a stability banner and nothing more — so th
 identifier is a commit, and this read is pinned at `JWT-SVID.md` and `X509-SVID.md` at commit
 `21896ac` (2026-07-01), and `SPIFFE-ID.md` and `SPIFFE_Workload_API.md` at `665a28f`
 (2026-07-01). All four are marked Stable. A SPIFFE ID is `spiffe://trust-domain/path`, an RFC 3986 URI. A JWT-SVID
-(<https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md>) requires `sub` (the SPIFFE
+([https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md)) requires `sub` (the SPIFFE
 ID), `aud` and `exp`; restricts `alg` to nine asymmetric values and requires validators to reject
 anything else; and *"does not introduce any new claims."*
 
@@ -245,8 +245,8 @@ That is the `authority:` section's job. v0.3 ships no SPIFFE-specific code; it n
 #### Attenuated delegation — where §5 sits in the prior art
 
 Six families were read: macaroons (Birgisson, Politz, Erlingsson, Taly, Vrable and Lentczner,
-NDSS, February 2014, <https://theory.stanford.edu/~ataly/Papers/macaroons.pdf>); Biscuit (Eclipse project, Incubating,
-creation review 2025-02-05); UCAN 1.0.0 (<https://github.com/ucan-wg/spec>, self-declared 1.0.0,
+NDSS, February 2014, [https://theory.stanford.edu/~ataly/Papers/macaroons.pdf](https://theory.stanford.edu/~ataly/Papers/macaroons.pdf)); Biscuit (Eclipse project, Incubating,
+creation review 2025-02-05); UCAN 1.0.0 ([https://github.com/ucan-wg/spec](https://github.com/ucan-wg/spec), self-declared 1.0.0,
 no dated release); ZCAP-LD (W3C CCG **Community Group draft** v0.4.0-draft, not Recommendation
 track); SPKI/SDSI, **RFC 2693**, September 1999, **Experimental**; and
 `draft-niyikiza-oauth-attenuating-agent-tokens-01`, an individual submission with no IETF

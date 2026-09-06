@@ -1,0 +1,55 @@
+---
+title: "Action and hash"
+description: "An action is a named operation with canonical arguments, a resource, a principal and an environment; its SHA-256 is the action hash, the value an approval binds to."
+---
+
+An action is one proposed operation, normalized: a name such as `stripe.refund`, its arguments
+in canonical form, the resource it touches, the principal proposing it, and the environment it
+runs in. The action hash is the SHA-256 of that canonical form, and it is the value every
+approval is bound to.
+
+## What the canonical form is
+
+Two calls that mean the same thing must hash the same, and two that differ in anything a human
+would care about must hash differently. So the form is fixed:
+
+- keys sorted, recursively;
+- no insignificant whitespace, `separators=(",", ":")`;
+- UTF-8, `ensure_ascii=False`;
+- argument values are `str`, `int`, `bool`, `None`, or nested containers of those;
+- **`float` is rejected at any depth.** `0.1` and `0.10` are the same money and different
+  bytes, so amounts are integer minor units: `200000` is €2,000.00.
+
+The `action_id`, a fresh identifier per proposal, is excluded from the hash on purpose. Two
+proposals of the same action from the same principal hash the same, which is what lets an
+approval granted against the first pass of a LangGraph node match the second.
+
+```python runnable
+from ctrlrun import Action, Principal, action_hash
+
+who = Principal(agent="refund-agent")
+first = Action(name="stripe.refund", arguments={"payment_id": "txn_2", "amount": 200000}, principal=who)
+same = Action(name="stripe.refund", arguments={"amount": 200000, "payment_id": "txn_2"}, principal=who)
+more = Action(name="stripe.refund", arguments={"payment_id": "txn_2", "amount": 500000}, principal=who)
+
+assert action_hash(first) == action_hash(same)
+assert action_hash(first) != action_hash(more)
+print(action_hash(first)[:16], "==", action_hash(same)[:16])
+```
+
+## The guarantee it supports
+
+Approval binding. A human approves a hash, and only the action with that hash can consume the
+approval. Change the amount, the payment, the principal or the environment and the hash moves.
+
+## What it does not do
+
+The hash does not identify a *consequence*. Two different actions can cause the same effect,
+and one action can be proposed twice; the effect key, not the hash, is what stops a duplicate.
+The hash also says nothing about whether the arguments are sensible; the policy does.
+
+## Next
+
+- [Approval binding](/concepts/approval-binding): what the hash is for.
+- [Effect keys](/concepts/effect-keys): the other identity, for the consequence.
+- [Why](/why) · [Get started](/get-started/quickstart).

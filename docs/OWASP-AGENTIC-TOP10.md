@@ -20,7 +20,7 @@ comes out.
 | **Publisher** | OWASP GenAI Security Project, OWASP Foundation |
 | **Announced** | 2025-12-09 |
 | **Entry codes** | `ASI01:2026` – `ASI10:2026` |
-| **Landing page** | <https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/> |
+| **Landing page** | [https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) |
 | **Read on** | 2026-09-04 |
 
 **How the codes and titles below were derived, stated plainly because it matters.** The

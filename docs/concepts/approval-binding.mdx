@@ -1,0 +1,62 @@
+---
+title: "Approval binding"
+description: "An approval is bound to the hash of the exact action a human saw, is used once, expires, and is consumed in the same atomic write that reserves the effect, so a mutated or replayed action is refused."
+---
+
+An approval is a human's yes to one exact action, bound to that action's hash, single-use, and
+expiring. It is consumed in the same atomic write that reserves the effect key, so an action
+that differs from what the human saw matches nothing, and an action presenting an approval
+that was already spent is refused.
+
+## The four invariants
+
+| | The rule | What it stops |
+|---|---|---|
+| A1 | An approval authorizes exactly one `action_hash` | An agent re-planning to €5,000 after a human approved €2,000; a prompt injection changing the recipient |
+| A2 | An approval is used once | A loop presenting the same approval on every retry |
+| A3 | An approval expires, and expiry is checked at consumption, not only at grant | A yes given on Monday authorizing a call on Friday |
+| A4 | Consumption and reservation are one atomic write | Two workers both "using" one approval, or an approval consumed by an action that then failed to reserve |
+
+## What the human sees, and what executes
+
+```text
+agent proposes   stripe.refund  txn_2  €2,000   →  request apr_7f…  (hash h1)
+human approves   apr_7f…                          (bound to h1)
+agent executes   stripe.refund  txn_2  €5,000   →  hash h2 ≠ h1
+                 ✗ ApprovalMismatch: approved action ≠ requested action
+```
+
+The approval is left `granted` after a mismatch. It still authorizes the €2,000 action, and
+only that, until it expires.
+
+## Where the yes comes from
+
+`ctrlrun approve <request id>` writes the grant. So does a webhook answer from Slack, and so
+does an adapter routing the request through LangGraph's `interrupt()` or the OpenAI Agents SDK's
+tool-approval interruption: every path ends in the same two store calls, `grant_approval` and
+`deny_approval`. There is never a second place to say yes, because a second approval path is
+one nobody is watching.
+
+Where a framework carries the arguments the human answered against, the adapter hands them
+back and CTRLRun rebuilds the hash and compares: that is *prevention*. Where it carries only
+the verdict, CTRLRun records who answered and cannot re-check what they answered about: that
+is *attribution*, and the adapter's page says which it is, in that word.
+
+## The guarantee it supports
+
+Approval binding, verified as G1 (mutated approval refused) and G2 (replayed approval refused)
+by `ctrlrun verify` against your own policy, wherever it has an `approve` rule.
+
+## What it does not do
+
+An approval does not prove the human was right, or that the human was who they said; CTRLRun
+records the approver as given and authenticates nobody. It does not survive a policy change in
+one direction: if the policy now denies the action, the action is refused and the approval is
+left granted; if the policy now allows it outright, the action runs and the approval is
+invalidated so it cannot outlive the action it was for.
+
+## Next
+
+- [Action and hash](/concepts/action-and-hash): what the approval binds to.
+- [Effect keys](/concepts/effect-keys): the reservation it is consumed with.
+- [Approve in Slack](/guides/approvals-in-slack) · [Get started](/get-started/quickstart) · [Why](/why).

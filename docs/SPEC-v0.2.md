@@ -11,7 +11,7 @@ document or in v0.1 is out of scope for v0.2.
 Words: MUST / MUST NOT / SHOULD are used in the RFC 2119 sense.
 
 **The MCP revision this document is written against** is **2026-07-28**, the current revision
-as published at <https://modelcontextprotocol.io/specification/2026-07-28/>, read on
+as published at [https://modelcontextprotocol.io/specification/2026-07-28/](https://modelcontextprotocol.io/specification/2026-07-28/), read on
 2026-09-03. It is a stateless protocol: there is no `initialize` handshake, no protocol-level
 session, and no `Mcp-Session-Id`. Where this document depends on a rule of that revision it
 cites the page. §6.2 states exactly which revisions the gateway accepts and why.
@@ -1173,7 +1173,7 @@ is silent.
 
 The Agent Control Standard is an open specification for runtime agent governance, published at
 v0.1.0 on 27 May 2026 as a project of the OWASP GenAI Security Project
-(<https://agentcontrolstandard.org/>). It defines validation checkpoints across an agent's
+([https://agentcontrolstandard.org/](https://agentcontrolstandard.org/)). It defines validation checkpoints across an agent's
 lifecycle, expresses policy as YAML, and extends OpenTelemetry with agent-specific semantic
 conventions while mapping security events to OCSF.
 

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "CTRLRun",
+  "theme": "mint",
+  "colors": {
+    "primary": "#3b3f46",
+    "light": "#c9ccd3",
+    "dark": "#14161b"
+  },
+  "logo": {
+    "light": "/images/wordmark.svg",
+    "dark": "/images/wordmark.svg",
+    "href": "/"
+  },
+  "favicon": "/images/favicon.svg",
+  "description": "The execution safety layer for AI agents.",
+  "navbar": {
+    "links": [
+      { "label": "GitHub", "href": "https://github.com/CTRLRun/ctrlrun" },
+      { "label": "PyPI", "href": "https://pypi.org/project/ctrlrun/" }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          { "group": "Start", "pages": ["index", "why"] },
+          {
+            "group": "Get started",
+            "pages": [
+              "get-started/install",
+              "get-started/quickstart",
+              "get-started/three-ways-in",
+              "get-started/choosing"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/action-and-hash",
+              "concepts/decisions",
+              "concepts/approval-binding",
+              "concepts/effect-keys",
+              "concepts/outcomes-and-ambiguous",
+              "concepts/receipts-and-evidence",
+              "concepts/authority-and-delegation",
+              "concepts/observe-mode",
+              "concepts/fail-closed"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture and specifications",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": ["ARCHITECTURE", "THREAT_MODEL", "how-this-is-built"]
+          },
+          {
+            "group": "Specifications",
+            "pages": [
+              "SPEC-v0.1",
+              "SPEC-v0.2",
+              "SPEC-v0.3",
+              "SPEC-v0.4",
+              "SPEC-v0.5",
+              "SPEC-v0.6"
+            ]
+          },
+          {
+            "group": "Readings and references",
+            "pages": ["OWASP-AGENTIC-TOP10", "ACS", "adapters", "authority", "postgres", "verify", "CLAIMS", "ROADMAP"]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/CTRLRun/ctrlrun"
+    }
+  },
+  "seo": {
+    "metatags": {
+      "og:site_name": "CTRLRun",
+      "og:image": "/images/social-preview.png",
+      "twitter:card": "summary_large_image",
+      "twitter:image": "/images/social-preview.png"
+    },
+    "indexing": "navigable"
+  },
+  "redirects": []
+}

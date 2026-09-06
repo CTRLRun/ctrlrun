@@ -39,7 +39,7 @@ allow * does not mean secure, safe, compliant, certified or audited
 allow docs/verify.md do not appear as
 
 # "It is not a guardrail library, an IAM system, a workflow engine, or a compliance product."
-allow README.md It is not a .* compliance product
+allow * It is not a .* compliance product
 
 # Adapter READMEs and docs/adapters.md: the conformance kit is named and then denied as a claim.
 allow * not a compliance claim

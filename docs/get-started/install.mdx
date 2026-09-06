@@ -1,0 +1,59 @@
+---
+title: "Install"
+description: "pip install ctrlrun puts one package, pyyaml and click on your machine, nothing else. Python 3.11 or later. Extras add the gateway, identity, OpenTelemetry and Postgres."
+---
+
+`pip install ctrlrun` installs the kernel and exactly two dependencies, `pyyaml` and `click`. It
+needs Python 3.11 or later and nothing running: no server, no database, no dashboard. State is a
+SQLite file the library creates beside your policy.
+
+```bash
+pip install ctrlrun
+ctrlrun --version
+```
+
+## What is in the box
+
+| | |
+|---|---|
+| `ctrlrun` the package | the decorator, the policy loader, the SQLite store, approvals, authority, receipts, `verify` |
+| `ctrlrun` the command | `init`, `demo`, `approve`, `deny`, `resolve`, `inspect`, `receipts`, `effects`, `stats`, `verify`, `delegate`, `revoke`, `gateway` |
+| dependencies | `pyyaml`, `click` |
+
+A test asserts the dependency list has not grown, and another asserts that importing `ctrlrun`
+imports nothing from an extra.
+
+## Extras
+
+Each extra is imported lazily. Using a feature without its extra raises `MissingDependency`
+with the install command in the message.
+
+| Extra | Adds | Needed for |
+|---|---|---|
+| `ctrlrun[gateway]` | `httpx` | `ctrlrun gateway`, the MCP gateway |
+| `ctrlrun[identity]` | `pyjwt[crypto]` | `JWTIdentityProvider`, verifying a bearer token against a JWKS or a pinned key |
+| `ctrlrun[otel]` | the OpenTelemetry API, SDK and OTLP/HTTP exporter | `OTelEventSink` |
+| `ctrlrun[postgres]` | `psycopg` | `PostgresStateStore` |
+
+```bash
+pip install "ctrlrun[gateway,postgres]"
+```
+
+Adapters are separate distributions on their own version lines: `ctrlrun-langgraph` and
+`ctrlrun-openai-agents`. Most readers do not need one; see
+[Three ways in](/get-started/three-ways-in).
+
+## Check it works
+
+```bash
+ctrlrun demo
+```
+
+The demo runs five scenarios in process with no network and writes its evidence under
+`.ctrlrun/demo/` in the current directory. It never touches a store you already have.
+
+## Next
+
+- [60-second quickstart](/get-started/quickstart): protect one function end to end.
+- [Choosing between the three ways in](/get-started/choosing).
+- [Why](/why): what the library believes.

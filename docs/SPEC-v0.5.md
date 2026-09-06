@@ -114,9 +114,9 @@ Read on **2026-09-04** unless a document states otherwise.
   document** (§3.1).
 - `docs/ARCHITECTURE.md` §6, `docs/THREAT_MODEL.md`.
 - **LangGraph** — `interrupt()`, `Command(resume=...)` and checkpointers
-  (<https://langchain-ai.github.io/langgraph/>). **OpenAI Agents SDK** — `needs_approval`,
+  ([https://langchain-ai.github.io/langgraph/](https://langchain-ai.github.io/langgraph/)). **OpenAI Agents SDK** — `needs_approval`,
   `RunResult.interruptions`, `RunState.approve` / `reject`
-  (<https://openai.github.io/openai-agents-python/>). Both are read for *shape*: what each
+  ([https://openai.github.io/openai-agents-python/](https://openai.github.io/openai-agents-python/)). Both are read for *shape*: what each
   framework's primitive hands the adapter and what it hands back. Item 1 measures the
   behaviour, and §7 requires each adapter's README to record where its framework's behaviour
   is visible through this contract.

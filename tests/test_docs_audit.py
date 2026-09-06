@@ -355,6 +355,24 @@ def test_a_root_relative_docs_path_resolves_under_docs(tmp_path, monkeypatch):
 
 
 @checkout_only
+def test_a_link_to_a_page_the_ia_plans_is_planned_not_broken(tmp_path, monkeypatch):
+    monkeypatch.setattr(links, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(links, "_IA", tmp_path / "docs" / "IA.md")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "IA.md").write_text(
+        "Guides\n  ├─ Protect a function   guides/protect-a-function\n"
+    )
+    page = tmp_path / "docs" / "index.mdx"
+    page.write_text("[a](/guides/protect-a-function) [b](/guides/never-planned)\n")
+    links.PLANNED.clear()
+
+    broken = links.check_text(page.read_text(), page)
+
+    assert [b.target for b in broken] == ["/guides/never-planned"]
+    assert [b.target for b in links.PLANNED] == ["/guides/protect-a-function"]
+
+
+@checkout_only
 def test_the_real_documents_have_no_broken_internal_links():
     assert links.check_paths(links.documents_to_check()) == []
 

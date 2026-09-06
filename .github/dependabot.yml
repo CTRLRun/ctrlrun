@@ -1,15 +1,18 @@
 # Every action is pinned to a commit SHA (with its version in a comment), so an update is a
-# pull request that CI runs, not a tag somebody moved. Dependabot keeps the SHAs current.
+# pull request that CI runs, not a tag somebody moved. Dependabot keeps the SHAs current: one
+# grouped pull request a month, because ten one-line pull requests in a morning is noise that
+# gets merged unread.
+#
+# No pip entry on purpose. The version floors in pyproject.toml are deliberate minimums, each
+# with a reasoned comment, and CI installs the latest release of every extra anyway, so a
+# floor bump would exclude working installations for no gain. Security updates are a
+# repository setting (Dependabot alerts and security updates), not this file, and stay on.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-  - package-ecosystem: pip
-    directory: /
-    schedule:
-      interval: weekly
-    # The kernel depends on pyyaml and click and nothing else; what Dependabot will mostly
-    # move here are the dev, gateway, identity, otel and postgres extras' floors.
-    open-pull-requests-limit: 5
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
