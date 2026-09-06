@@ -1,14 +1,14 @@
 ---
 title: "CTRLRun and MCP"
 sidebarTitle: "Overview"
-description: "CTRLRun works with MCP in three ways: the gateway enforces policy, approval binding, effect keys and receipts in front of any MCP server."
+description: "Four ways: the gateway enforces policy in front of any MCP server, and the operator server lets an approver answer from their assistant."
 ---
 
-CTRLRun works with MCP in three ways. The gateway sits in front of any MCP server and applies
-your policy to every `tools/call`, with no change to the agent or the server. This documentation
-is itself an MCP server your coding tool can search. And the gateway is listed where MCP servers
-are discovered. A fourth way, an operator server that lets approvers answer from their own
-assistant, is planned and is not in 0.6.
+CTRLRun works with MCP in four ways. The gateway sits in front of any MCP server and applies
+your policy to every `tools/call`, with no change to the agent or the server. The operator
+server lets the person who has to answer an approval answer it from the assistant they are
+already talking to. This documentation is itself an MCP server your coding tool can search. And
+the gateway is listed where MCP servers are discovered.
 
 ## Enforcement: the gateway
 
@@ -45,16 +45,32 @@ The gateway is what you run to put CTRLRun in front of an MCP server, and it is 
 MCP registries as such once the listing is live. Until then this section carries no link rather
 than a placeholder; the registry entry is a launch-day item.
 
-## PLANNED: an operator server for approvers
+## Answering: the operator server
 
-An operator MCP server, `ctrlrun mcp-operator`, is planned and is **not shipped**. It would
-expose the operator's commands as tools, so that a person can list pending approvals, inspect
-an action, approve, deny and resolve from their own assistant, with the same hash binding,
-single use and expiry the CLI enforces, and with every write attributed. It is a new entry
-point, so it gets its row in the specification's entry-point table before any code; write tools
-will refuse without an authenticated human principal from the configured identity provider,
-never a name the client asserts. Nothing on this site describes it in the present tense. The
-[roadmap](/ROADMAP) is where its status lives.
+`ctrlrun mcp-operator` is an MCP server that exposes the operator's own commands as tools. An
+approver asks their assistant what is waiting, reads the action and its arguments, and answers —
+without a checkout, a shell or a store path.
+
+```text
+approver's assistant  ──▶  ctrlrun mcp-operator  ──▶  the same approval record
+                                                      the CLI and the webhook answer
+```
+
+- Read tools — `list_pending_approvals`, `inspect_action`, `receipts`, `effects`, `stats`.
+- Write tools — `approve`, `deny`, `resolve`. Each needs a credential that names a **human**,
+  from the identity provider you configured; never a name the client asserts.
+- Every answer is recorded under that person's name, and the name reaches the receipt the
+  action leaves.
+- It is not a second approval path: `approve` and `deny` are the two store calls
+  `ctrlrun approve` and `ctrlrun deny` make, against the same record, with the same hash
+  binding, single use and expiry.
+- Nothing here can make an agent act. There is no tool that proposes or executes an action, and
+  no auto-approve.
+- It binds loopback and has no flag that changes that, because its read tools answer without a
+  credential.
+
+[Approve from your assistant](/mcp/approve-from-your-assistant) is the page with the
+configuration and a transcript.
 
 ## What MCP does not change
 
@@ -66,5 +82,5 @@ gateway is in the path whether the agent likes it or not.
 
 ## Next
 
-- [The gateway in five minutes](/mcp/gateway-in-5-minutes).
+- [The gateway in five minutes](/mcp/gateway-in-5-minutes) · [Approve from your assistant](/mcp/approve-from-your-assistant).
 - [Three ways in](/get-started/three-ways-in) · [Get started](/get-started/quickstart) · [Why](/why).

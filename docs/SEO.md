@@ -49,8 +49,9 @@ that page's frontmatter, never here.
 | `production/receipt-integrity` | verify receipt chain | Run ctrlrun receipts --verify-chain and read the six names it can report. |
 | `production/soak` | ctrlrun soak test results | One published run, its measured duration, and the exit criterion it does not meet. |
 | `production/operations` | ctrlrun monitoring | Watch how many effects are sitting in an unknown outcome that nobody has answered. |
-| `mcp/overview` | MCP gateway human approval | CTRLRun works with MCP in three ways. |
+| `mcp/overview` | MCP gateway human approval | CTRLRun works with MCP in four ways. |
 | `mcp/gateway-in-5-minutes` | protect MCP server · MCP tool call approval | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
+| `mcp/approve-from-your-assistant` | approve MCP tool call from Claude · MCP human approval server | Run `ctrlrun mcp-operator` and answer a pending approval from an MCP client, under your own name. |
 | `mcp/use-the-docs-from-your-editor` | ctrlrun docs mcp server | This documentation is an MCP server, hosted with the site. |
 | `concepts/action-and-hash` | canonical action hash AI agent | An action is one proposed operation, normalized. |
 | `concepts/decisions` | AI agent action policy allow approve deny | A decision is what the policy says may happen to one action. |

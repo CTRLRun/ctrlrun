@@ -26,7 +26,7 @@ _HTTP_CLIENT: Final = "httpx"
 #: The extra that carries it, for the install command in the error.
 _EXTRA: Final = "gateway"
 
-__all__ = ["serve"]
+__all__ = ["serve", "serve_operator"]
 
 
 def http_client() -> ModuleType:
@@ -180,3 +180,103 @@ def _announce(control: Any, config: Any, identity: Any, authority_path: str | No
         lines.append("That is right for a read, and wrong for anything that changes the world.")
     for line in lines:
         print(line)
+
+
+def serve_operator(**options: Any) -> None:
+    """Run the operator MCP server (SPEC-mcp-operator.md §9.1).
+
+    It ships in this package, and therefore in `ctrlrun[gateway]`, because this project's rule
+    is that anything needing an HTTP server is an extra. It does **not** call `http_client()`:
+    it
+    is an origin server with no upstream and imports nothing from an extra, so refusing to
+    start for a missing `httpx` would be a refusal for a dependency it does not use. A core-only
+    install that reaches this gets a working server, and `import ctrlrun` still imports neither
+    (T192).
+
+    Blocks until interrupted. `Control.from_file()` finds the policy and the store, so the
+    approvals this answers are the ones the operator's agents are waiting on (`v0.2 §6.1`).
+    """
+    from ..control import Control
+    from .operator import (
+        OperatorConfig,
+        OperatorServer,
+        operator_identity_provider,
+        serve_operator_forever,
+    )
+
+    otel = bool(options.pop("otel", False))
+    otel_arguments = bool(options.pop("otel_arguments", False))
+    authority_path = options.pop("authority", None)
+    store_url = options.pop("store_url", None)
+    environment = options.pop("environment", None)
+
+    config = OperatorConfig(**options)
+    control = Control.from_file(environment=environment)
+    authority = _authority(control, authority_path)
+    sinks = list(control.sinks)
+    if otel:
+        from ..otel import OTelEventSink
+
+        sinks.append(OTelEventSink(arguments=otel_arguments))
+    store = control.store if store_url is None else _named_store(store_url)
+    # SPEC-mcp-operator §9.4 — one rebuild carrying everything, for the reason `serve` gives:
+    # two successive rebuilds each naming a subset is how a section goes missing. `--authority`
+    # changes no decision this server makes (§4.3); it is loaded so that the `Control` is the
+    # operator's own and not a second, different one.
+    control = Control(
+        control.policy,
+        store,
+        control.approvals,
+        sinks=sinks,
+        authority=authority,
+        environment=control.environment,
+    )
+    identity = operator_identity_provider(config)
+    server = OperatorServer(config, control, identity)
+    _announce_operator(control, config, identity)
+    try:
+        serve_operator_forever(server)
+    finally:
+        store.close()
+
+
+def _named_store(store_url: str) -> Any:
+    """`--store-url`, resolved the way every other command resolves it (`v0.6 §9.4`)."""
+    from ..cli.main import _store
+
+    return _store(store_url)
+
+
+def _announce_operator(control: Any, config: Any, identity: Any) -> None:
+    """SPEC-mcp-operator §6 — the block printed before the socket opens.
+
+    Everything here is something an operator can get wrong in a way that is invisible until an
+    incident: reads that answer without a credential, a header trusted more than they meant, an
+    observing deployment whose approvals change nothing in the world.
+
+    `print` rather than the logger, because this is the CLI's own output and a logger with no
+    configured handler would swallow it — which is the failure mode the block exists to
+    prevent, in miniature.
+    """
+    print(f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}")
+    print(f"environment  {control.environment}")
+    print(f"identity     {type(identity).__name__}")
+    if config.principal_header is not None:
+        print(
+            f"             trusts the header {config.principal_header!r}: it is worth what "
+            "the proxy that sets it is worth,"
+        )
+        print(
+            "             and that proxy must authenticate the caller and overwrite the "
+            "header on every request (SPEC-v0.3 §3.3)"
+        )
+    print(
+        "read tools   answer without a credential; loopback is not a boundary against "
+        "other processes on this host"
+    )
+    print(
+        "write tools  approve, deny, resolve — each needs a credential naming a human, "
+        "and each answer is recorded under that name"
+    )
+    if control.authority is not None:
+        print(f"authority    {len(control.authority.grants)} grant(s), evaluated by the agent")

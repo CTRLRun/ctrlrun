@@ -1050,11 +1050,21 @@ implementer that delegation is authenticated.
 | An adapter's protected tool -> `@protect` -> `Control.execute` | yes - `@protect` does, from the bound call | yes (§3.2), from the `Control`'s provider | yes, before the approval gate |
 | `ctrlrun.adapter.needs_approval` -> `Control.evaluate` | yes - **core** builds it; the adapter supplies neither a principal nor an `Action` | yes (§3.2), by `Control.resolve_principal` | yes - the combined §4.6 decision, and it writes nothing |
 | `ctrlrun.adapter.InterruptApprovalProvider.wait` -> `grant_approval` / `deny_approval` | no - it records an answer about an action that already exists | no - the principal was resolved when the request was created | **no**, and `SPEC-v0.5.md` §4.1 argues why: a grant authorizes nothing on its own, and `Control.execute` decides the action again in full before consuming it |
+| `ctrlrun mcp-operator`'s read tools | no | **no** - they are consulted for nothing, and `SPEC-mcp-operator.md` §4.1 argues why: a provider that ran on every read would make an expired credential turn `receipts` into a refusal | no - they report what the rows above already decided |
+| `ctrlrun mcp-operator`'s write tools -> `grant_approval` / `deny_approval` / `resolve_effect` | no - each answers about an action or an effect that already exists | yes, from the configured `IdentityProvider` and from nothing else; a decline, a raise, an expiry and a principal with no `user` are four distinguishable refusals (`SPEC-mcp-operator.md` §3.3) | **no**, for `SPEC-v0.5.md` §4.1's reason, restated in `SPEC-mcp-operator.md` §4.3: a grant authorizes nothing on its own |
 
 The `ctrlrun.verify.run` row is **informational**, added by `SPEC-v0.4.md` §3.9 and §9.4. The
 three adapter rows are added by `SPEC-v0.5.md` §4.1, which states each cell with its argument;
 the first of them is this table's `@protect` row reached through a framework, and is listed
 because a reader looking for "what does an adapter do" must find it here rather than infer it.
+
+The two `ctrlrun mcp-operator` rows are added by `SPEC-mcp-operator.md` §4.3. That server
+proposes no action at all: it answers approvals and states outcomes, through the same store calls
+`ctrlrun approve` and `ctrlrun resolve` make. It is in this table because it **resolves an
+identity over a socket** and then writes, which is the shape of every authorization hole this
+project has found — and because the expiry check of §2.3 has to be performed *by* it, this being
+the one entry point that resolves a principal and never reaches `Control.execute` to have it
+performed for it.
 
 `ctrlrun verify`
 proposes no action of its own: it constructs `Control` objects against a scratch store and calls

@@ -12,9 +12,9 @@ agent is waiting on in another shell.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -25,18 +25,16 @@ from ..approval import ApprovalRecord
 from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
-from ..errors import AuthorityEscalation, CTRLRunError, PolicyError
-from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Decision, Policy
+from ..errors import AuthorityEscalation, CTRLRunError, InvalidArgument, PolicyError
+from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Policy
 from ..receipt import (
-    BLOCKED_APPROVAL_REQUIRED,
-    BLOCKED_BY_STATE,
     Event,
     EventType,
     Receipt,
-    ReceiptResult,
     iso_timestamp,
     verify_chain,
 )
+from ..reporting import inspection_document, since_boundary, stats_document
 from ..state import RESOLUTIONS, SQLiteStateStore, StateStore
 from .demo import run_demo
 
@@ -51,15 +49,6 @@ _LEASED: Final = frozenset({EffectState.RESERVED, EffectState.EXECUTING})
 #: machine-readable and a pipeline cannot silently swallow it; on every invocation because a
 #: deployment that has been observing for six months is exactly the one this line is for.
 OBSERVE_BANNER: Final = "OBSERVE MODE — nothing is enforced"
-
-#: SPEC-v0.3 §6.4 — one `ctrlrun stats --json` document.
-STATS_SCHEMA: Final = "ctrlrun.stats/v1"
-
-#: SPEC-v0.2 §5 — the schema of one `ctrlrun inspect --json` document.
-#: SPEC-v0.3 §12.2 — v2 where the header block gained the principal's issuer, expiry and
-#: claim names. The values reach `--json`; the human block shows only the names, because a
-#: claim can hold an employee number or a case id and this output is read over shoulders.
-INSPECTION_SCHEMA: Final = "ctrlrun.inspection/v2"
 
 #: `ctrlrun init` writes this. It is `ctrlrun.example.yaml` in the repository, and
 #: `test_the_shipped_example_policy_is_the_one_in_the_repository` keeps the two identical.
@@ -509,20 +498,11 @@ def inspect(action_id: str, as_json: bool, store_url: str | None) -> None:
     approvals = _approvals_for(store, receipt, events)
     effect = _effect_of(store, receipt, events)
     if as_json:
-        click.echo(
-            json.dumps(
-                {
-                    "schema": INSPECTION_SCHEMA,
-                    "action_id": action_id,
-                    "receipt": None if receipt is None else receipt.to_dict(),
-                    "effect": None if effect is None else _effect_dict(effect),
-                    "approvals": [_approval_dict(record) for record in approvals],
-                    "events": [event.to_dict() for event in events],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        # SPEC-mcp-operator §9.1 — one producer for `ctrlrun.inspection/v2`, in
+        # `ctrlrun.reporting`, because the operator MCP server returns the same document and
+        # two builders that agree today are two that disagree later (T193).
+        document = inspection_document(action_id, receipt, effect, approvals, events)
+        click.echo(json.dumps(document, ensure_ascii=False, indent=2))
         return
     for line in _inspection_lines(action_id, receipt, effect, approvals, events):
         click.echo(line)
@@ -665,39 +645,6 @@ def _event_line(event: Event) -> str:
     return f"{event.event_id:>3}  {iso_timestamp(event.ts)}  {event.type:<28}{rendered}".rstrip()
 
 
-def _effect_dict(record: EffectRecord) -> dict[str, Any]:
-    """The effect record as plain JSON data, enums by value (v0.1 §6.1)."""
-    return {
-        "effect_key": record.effect_key,
-        "state": str(record.state),
-        "action_id": record.action_id,
-        "attempt": record.attempt,
-        "created_at": iso_timestamp(record.created_at),
-        "updated_at": iso_timestamp(record.updated_at),
-        "lease_expires_at": (
-            None if record.lease_expires_at is None else iso_timestamp(record.lease_expires_at)
-        ),
-        "error": record.error,
-        #: Which authority moved this out of `AMBIGUOUS`, or `None` (§5.3). Additive to
-        #: `ctrlrun.inspection/v2`: a reader that does not know the key ignores it.
-        "resolved_by": record.resolved_by,
-    }
-
-
-def _approval_dict(record: ApprovalRecord) -> dict[str, Any]:
-    """One approval record as plain JSON data, enums by value (v0.1 §6.1)."""
-    return {
-        "approval_id": record.approval_id,
-        "action_hash": record.action_hash,
-        "status": str(record.status),
-        "approver": record.approver,
-        "created_at": iso_timestamp(record.request.created_at),
-        "expires_at": iso_timestamp(record.expires_at),
-        "granted_at": None if record.granted_at is None else iso_timestamp(record.granted_at),
-        "consumed_at": None if record.consumed_at is None else iso_timestamp(record.consumed_at),
-    }
-
-
 @main.command()
 @click.option(
     "--since",
@@ -714,7 +661,12 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
     is diagnosing has been writing (SPEC-v0.3 §6.4).
     """
     policy = _loaded_policy()
-    boundary = _since(since)
+    try:
+        boundary = since_boundary(since)
+    except InvalidArgument as exc:
+        # SPEC-mcp-operator §9.1 — the parser moved to `ctrlrun.reporting` and raises the
+        # kernel's own refusal; the exit code an operator scripts against stays 2.
+        raise click.UsageError(str(exc)) from exc
     try:
         counted = [
             receipt
@@ -723,96 +675,12 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
         ]
     except CTRLRunError as exc:
         raise _fail(exc) from exc
-    document = _stats_document(counted, mode=policy.mode, boundary=boundary)
+    document = stats_document(counted, mode=policy.mode, boundary=boundary)
     if as_json:
         click.echo(json.dumps(document, ensure_ascii=False, indent=2))
         return
     for line in _stats_lines(document):
         click.echo(line)
-
-
-def _since(argument: str | None) -> datetime | None:
-    """Parse `--since` into an inclusive lower bound on `finished_at` (SPEC-v0.3 §6.4).
-
-    Absolute ISO-8601 **with an offset**, or a relative `<n><unit>` where the unit is exactly
-    one of `m`, `h` or `d`. No months, no weeks, no bare numbers: `2mo` and `1w` are ambiguous
-    enough that guessing one would silently report the wrong window, which is worse than
-    refusing.
-    """
-    if argument is None:
-        return None
-    text = argument.strip()
-    if text and text[-1] in _RELATIVE_UNITS and text[:-1].isdigit() and int(text[:-1]) > 0:
-        return datetime.now(UTC) - timedelta(**{_RELATIVE_UNITS[text[-1]]: int(text[:-1])})
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        parsed = None
-    if parsed is None or parsed.tzinfo is None:
-        raise click.UsageError(
-            f"--since {argument!r} is not a window this command accepts. Give an ISO-8601 "
-            "timestamp with an offset (2026-09-01T00:00:00Z), or one of <n>m, <n>h, <n>d "
-            "(30m, 24h, 7d). No months, no weeks, and no bare numbers"
-        )
-    return parsed
-
-
-#: The three relative units of §6.4, and the `timedelta` keyword each names.
-_RELATIVE_UNITS: Final[Mapping[str, str]] = {"m": "minutes", "h": "hours", "d": "days"}
-
-
-def _stats_document(
-    counted: list[Receipt], *, mode: str, boundary: datetime | None
-) -> dict[str, Any]:
-    """The numbers of §6.4, from `would_have` in observe mode and from `result` in enforce.
-
-    The two are deliberately different shapes. An enforce-mode receipt carries no
-    counterfactual and no structured `blocked_reason` — a `blocked` receipt keeps the
-    duplicate/ambiguous distinction only inside `error` as exception text (v0.1 §6.1) — so
-    the command reports what it can substantiate and says in its footer what it cannot.
-    """
-    finished = [receipt.finished_at for receipt in counted]
-    document: dict[str, Any] = {
-        "schema": STATS_SCHEMA,
-        "mode": mode,
-        "since": None if boundary is None else iso_timestamp(boundary),
-        "from": iso_timestamp(min(finished)) if finished else None,
-        "to": iso_timestamp(max(finished)) if finished else None,
-        "actions": len(counted),
-    }
-    if mode != OBSERVE:
-        refused = [r for r in counted if r.result is ReceiptResult.DENIED]
-        document["denied"] = len(refused)
-        document["denied_by_reason"] = _tally(r.decision_reason for r in refused)
-        document["ambiguous_outcomes"] = len(
-            [r for r in counted if r.result is ReceiptResult.AMBIGUOUS]
-        )
-        return document
-    # Every observe-mode number comes off `would_have`, so the counterfactuals are pulled out
-    # once. A receipt with none was written by one of §6.2's still-refuses rows: the action was
-    # genuinely stopped and there is nothing counterfactual to count.
-    counterfactuals = [r.would_have for r in counted if r.would_have is not None]
-    denied = [w for w in counterfactuals if w.decision is Decision.DENY]
-    blocked = [w for w in counterfactuals if w.blocked_reason in BLOCKED_BY_STATE]
-    document["would_have_been_denied"] = len(denied)
-    document["denied_by_reason"] = _tally(w.blocked_reason or w.reason for w in denied)
-    document["would_have_needed_approval"] = len(
-        [w for w in counterfactuals if w.blocked_reason == BLOCKED_APPROVAL_REQUIRED]
-    )
-    document["would_have_been_blocked"] = len(blocked)
-    document["blocked_by_reason"] = _tally(w.blocked_reason for w in blocked)
-    document["ambiguous_outcomes"] = len(
-        [r for r in counted if r.execution is ReceiptResult.AMBIGUOUS]
-    )
-    return document
-
-
-def _tally(reasons: Iterable[str | None]) -> dict[str, int]:
-    """Counts by reason, largest first, then alphabetically so the output is stable."""
-    counts: dict[str, int] = {}
-    for reason in reasons:
-        counts[str(reason)] = counts.get(str(reason), 0) + 1
-    return dict(sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])))
 
 
 def _stats_lines(document: Mapping[str, Any]) -> list[str]:
@@ -1019,6 +887,160 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
         "created_via": delegation.created_via,
         "created_at": iso_timestamp(delegation.created_at),
     }
+
+
+@main.command(name="mcp-operator")
+@click.option("--listen", default="127.0.0.1:8901", show_default=True, help="HOST:PORT.")
+@click.option("--path", default="/mcp", show_default=True, help="The MCP endpoint path.")
+@click.option(
+    "--principal-header",
+    default=None,
+    help="Take the approver's agent from this header, set by a proxy that authenticates them.",
+)
+@click.option(
+    "--user-header",
+    default=None,
+    help="Take the approver's name from this header. "
+    "Required with --principal-header (SPEC-mcp-operator §3.2).",
+)
+@click.option(
+    "--environment",
+    default=None,
+    help="The deployment this console reads. Default: $CTRLRUN_ENVIRONMENT, else the policy "
+    "document, else production (SPEC-v0.3 §2.5).",
+)
+@click.option("--max-body-bytes", type=int, default=1024 * 1024, show_default=True)
+@click.option("--allow-origin", "allow_origins", multiple=True, help="Repeatable.")
+@click.option(
+    "--authority",
+    "authority_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Load the authority: section from a separate YAML document (SPEC-v0.3 §8.3).",
+)
+@click.option("--identity-jwt", is_flag=True, help="Verify a bearer JWT (ctrlrun[identity]).")
+@click.option("--identity-jwt-jwks-url", default=None, help="Fetch keys from this JWKS (HTTPS).")
+@click.option(
+    "--identity-jwt-public-key",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="A PEM public key file.",
+)
+@click.option(
+    "--identity-jwt-secret-file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read the HS* shared secret from here. Never a flag value.",
+)
+@click.option(
+    "--identity-jwt-algorithms",
+    "identity_jwt_algorithms",
+    multiple=True,
+    help="Repeatable, required. There is no default and no wildcard.",
+)
+@click.option("--identity-jwt-issuer", default=None, help="Matched exactly. Required.")
+@click.option("--identity-jwt-audience", default=None, help="Matched by membership. Required.")
+@click.option(
+    "--identity-jwt-token-type",
+    default=None,
+    help='Required. The token\'s typ, e.g. at+jwt. Pass "" for "this issuer sets no typ".',
+)
+@click.option("--identity-jwt-header", default="authorization", show_default=True)
+@click.option("--identity-jwt-agent-claim", default="sub", show_default=True)
+@click.option(
+    "--identity-jwt-user-claim",
+    default=None,
+    help="Which claim names the human. Required with --identity-jwt (SPEC-mcp-operator §3.2).",
+)
+@click.option(
+    "--identity-jwt-claim",
+    "identity_jwt_claims",
+    multiple=True,
+    help="Repeatable: which verified claims reach the receipt. An allow-list.",
+)
+@click.option("--identity-jwt-leeway", type=float, default=60.0, show_default=True)
+@click.option("--identity-jwt-jwks-min-refresh", type=float, default=30.0, show_default=True)
+@click.option("--identity-jwt-http-timeout", type=float, default=5.0, show_default=True)
+@click.option("--otel", is_flag=True, help="Export one span per event (ctrlrun[otel]).")
+@click.option(
+    "--otel-arguments",
+    is_flag=True,
+    help="Include argument values as span attributes. Off by default.",
+)
+@STORE_URL_OPTION
+def mcp_operator(
+    listen: str,
+    path: str,
+    principal_header: str | None,
+    user_header: str | None,
+    environment: str | None,
+    max_body_bytes: int,
+    allow_origins: tuple[str, ...],
+    authority_path: str | None,
+    identity_jwt: bool,
+    identity_jwt_jwks_url: str | None,
+    identity_jwt_public_key: str | None,
+    identity_jwt_secret_file: str | None,
+    identity_jwt_algorithms: tuple[str, ...],
+    identity_jwt_issuer: str | None,
+    identity_jwt_audience: str | None,
+    identity_jwt_token_type: str | None,
+    identity_jwt_header: str,
+    identity_jwt_agent_claim: str,
+    identity_jwt_user_claim: str | None,
+    identity_jwt_claims: tuple[str, ...],
+    identity_jwt_leeway: float,
+    identity_jwt_jwks_min_refresh: float,
+    identity_jwt_http_timeout: float,
+    otel: bool,
+    otel_arguments: bool,
+    store_url: str | None,
+) -> None:
+    """Answer approvals from an MCP client, over loopback (SPEC-mcp-operator.md).
+
+    There is no --principal and no --allow-remote, and both absences are load-bearing: a
+    static principal cannot attribute an answer to a person (§3.1), and a server whose read
+    tools answer without a credential must not be the one that opens a port (§2.1).
+    """
+    host, _, port = listen.rpartition(":")
+    try:
+        from ..gateway import serve_operator
+
+        # §6 — the observe banner first, printed by `_loaded_policy` as it is for every command
+        # that loads the operator's policy (SPEC-v0.3 §6.5). An operator console against an
+        # observing deployment is worth the line: answering an approval there changes nothing.
+        _loaded_policy()
+        serve_operator(
+            host=host or "127.0.0.1",
+            port=int(port),
+            path=path,
+            principal_header=principal_header,
+            user_header=user_header,
+            environment=environment,
+            max_body_bytes=max_body_bytes,
+            allow_origins=tuple(allow_origins),
+            authority=authority_path,
+            store_url=store_url,
+            identity_jwt=identity_jwt,
+            identity_jwt_jwks_url=identity_jwt_jwks_url,
+            identity_jwt_public_key=identity_jwt_public_key,
+            identity_jwt_secret_file=identity_jwt_secret_file,
+            identity_jwt_algorithms=tuple(identity_jwt_algorithms),
+            identity_jwt_issuer=identity_jwt_issuer,
+            identity_jwt_audience=identity_jwt_audience,
+            identity_jwt_token_type=identity_jwt_token_type,
+            identity_jwt_header=identity_jwt_header,
+            identity_jwt_agent_claim=identity_jwt_agent_claim,
+            identity_jwt_user_claim=identity_jwt_user_claim,
+            identity_jwt_claims=tuple(identity_jwt_claims),
+            identity_jwt_leeway=identity_jwt_leeway,
+            identity_jwt_jwks_min_refresh=identity_jwt_jwks_min_refresh,
+            identity_jwt_http_timeout=identity_jwt_http_timeout,
+            otel=otel,
+            otel_arguments=otel_arguments,
+        )
+    except (ValueError, CTRLRunError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.command()
