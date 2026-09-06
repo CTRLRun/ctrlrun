@@ -529,6 +529,18 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
     ]
     assert not offending, offending
 
+    # **And `research/`, on the same build rather than a second one.** SPEC-v0.6 §8.1 and
+    # `v0.4 §7` both keep a harness out of the distribution while its *results* are published,
+    # and `tests/test_soak.py` skips itself when the directory is absent -- so this is the
+    # assertion that makes that skip safe rather than a hole. Anchored on a path **segment**,
+    # so a file called `research.py` is not a hit and a directory called `research/` is.
+    from pathlib import Path as _Path
+
+    unpackaged = [
+        name for name in names if any(part in {"research", "packs"} for part in _Path(name).parts)
+    ]
+    assert not unpackaged, unpackaged
+
 
 def test_T136_an_adapter_depends_on_ctrlrun_and_never_the_reverse():
     """The direction, asserted rather than assumed: `ctrlrun`'s own metadata names no adapter
