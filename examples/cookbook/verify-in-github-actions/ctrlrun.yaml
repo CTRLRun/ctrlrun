@@ -1,0 +1,14 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/verify-in-github-actions.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: approve
+  k8s.delete_namespace:
+    effect: "namespace:{cluster}:{name}"
+    decision: approve

@@ -84,6 +84,34 @@
               "guides/langgraph-adapter",
               "guides/openai-agents-adapter"
             ]
+          },
+          {
+            "group": "Cookbook",
+            "pages": [
+              "cookbook/index",
+              "cookbook/credential-rotation-agent",
+              "cookbook/crm-update-agent",
+              "cookbook/customer-notification-agent",
+              "cookbook/data-deletion-agent",
+              "cookbook/database-migration-agent",
+              "cookbook/deploy-agent",
+              "cookbook/iam-agent",
+              "cookbook/langgraph-interrupt",
+              "cookbook/manager-and-worker",
+              "cookbook/observe-then-enforce",
+              "cookbook/openai-agents-tool-approval",
+              "cookbook/outbound-email-agent",
+              "cookbook/payout-maker-checker",
+              "cookbook/protect-an-mcp-server",
+              "cookbook/receipts-to-opentelemetry",
+              "cookbook/reconcile-against-the-remote",
+              "cookbook/refund-agent",
+              "cookbook/resolve-an-ambiguous-effect",
+              "cookbook/slack-approvals",
+              "cookbook/sqlite-to-postgres",
+              "cookbook/verify-in-github-actions"
+            ],
+            "expanded": false
           }
         ]
       },

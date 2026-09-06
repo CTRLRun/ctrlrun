@@ -1,0 +1,14 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/customer-notification-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  notify.customer:
+    effect: "notify:{incident_id}:{customer_id}"
+    decision: allow
+  notify.batch:
+    effect: "batch:{incident_id}"
+    rules:
+      - when: { size_lte: 500 }
+        decision: allow
+      - decision: approve

@@ -1,0 +1,59 @@
+---
+title: "Cookbook"
+description: "One recipe per real situation: the policy, the code with a fake remote, what the agent sees when refused or asked, the receipt."
+---
+
+Each recipe is a situation an agent is put in, across money, infrastructure, permissions,
+records and communications, and shows the policy, the code against a stand-in remote, what the
+agent sees when it is refused or asked, the receipt, and what to do when an effect's outcome is
+unknown. Every runnable block runs offline in this repository's CI, and every recipe with code
+is also a directory under `examples/cookbook/` extracted from its page.
+
+## Money
+
+- [A refund agent with amount tiers](/cookbook/refund-agent)
+- [A payout agent with maker/checker via delegation](/cookbook/payout-maker-checker)
+
+## Infrastructure
+
+- [A deploy agent](/cookbook/deploy-agent)
+- [A database-migration agent](/cookbook/database-migration-agent)
+
+## Permissions
+
+- [An IAM agent that can grant read but never admin](/cookbook/iam-agent)
+- [A credential-rotation agent](/cookbook/credential-rotation-agent)
+
+## Records
+
+- [A CRM-update agent](/cookbook/crm-update-agent)
+- [A data-deletion agent under a retention rule](/cookbook/data-deletion-agent)
+
+## Communications
+
+- [An outbound-email agent with external-recipient approval](/cookbook/outbound-email-agent)
+- [A customer-notification agent](/cookbook/customer-notification-agent)
+
+## Multi-agent
+
+- [A manager agent delegating bounded authority to a worker](/cookbook/manager-and-worker)
+
+## Integrations
+
+- [Protect an existing MCP server in five minutes](/cookbook/protect-an-mcp-server)
+- [LangGraph with interrupt()](/cookbook/langgraph-interrupt)
+- [OpenAI Agents SDK tool approval](/cookbook/openai-agents-tool-approval)
+- [Approvals in Slack via webhook](/cookbook/slack-approvals)
+- [Receipts into OpenTelemetry](/cookbook/receipts-to-opentelemetry)
+
+## Operations
+
+- [Observe for a week, then enforce](/cookbook/observe-then-enforce)
+- [Resolve an ambiguous effect](/cookbook/resolve-an-ambiguous-effect)
+- [Reconcile against Stripe or Kubernetes automatically](/cookbook/reconcile-against-the-remote)
+- [Run verify in GitHub Actions](/cookbook/verify-in-github-actions)
+- [Move from SQLite to Postgres](/cookbook/sqlite-to-postgres)
+
+## Next
+
+- [Get started](/get-started/quickstart) · [Why](/why).

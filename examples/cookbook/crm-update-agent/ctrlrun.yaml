@@ -1,0 +1,14 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/crm-update-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  crm.update_record:
+    effect: "crm:{record_id}:{field}:{revision}"
+    resource: "record:{record_id}"
+    decision: allow
+  crm.merge_records:
+    effect: "merge:{keep}:{drop}"
+    decision: approve
+  crm.delete_record:
+    decision: deny

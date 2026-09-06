@@ -1,6 +1,6 @@
 ---
 title: "Observe mode"
-description: "mode: observe runs every real decision against real traffic and records what enforcement would have blocked, without blocking anything, so ctrlrun stats can show the cost of enforcing before you enforce. It executes; it is not a dry run."
+description: "mode: observe runs every real decision against real traffic and records what enforcement would have blocked, without blocking anything."
 ---
 
 Observe mode is one top-level line, `mode: observe`, that makes CTRLRun evaluate every action
@@ -30,13 +30,14 @@ Every receipt carries `would_have`: the decision enforce mode would have reached
 would have refused, the first reason, in the order enforce mode checks them, because enforce
 mode stops at the first. A duplicate effect is recorded as one and still runs. After a week:
 
-```console
-$ ctrlrun stats --since 7d
-observed actions            1,284
-would have been blocked        37
-  approval_required            29
-  policy_denied                 6
-  duplicate_effect              2
+```text
+actions                         1284
+would have been denied             6
+   rule[2]                         6
+would have needed approval        29
+would have been blocked            2
+   duplicate                       2
+ambiguous outcomes                 0
 ```
 
 The numbers are counted from `would_have.blocked_reason` and nothing else, from the local store,

@@ -1,0 +1,25 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/manager-and-worker.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v3
+
+authority:
+  max_delegation_depth: 3
+  grants:
+    - id: ops-manager
+      subject: { agent: "ops-manager" }
+      actions: ["k8s.rollout_restart", "k8s.scale"]
+      resources: ["cluster:*"]
+      constraints: { replicas_gte: 0, replicas_lte: 50 }
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+
+actions:
+  k8s.rollout_restart:
+    effect: "restart:{cluster}:{deployment}"
+    resource: "cluster:{cluster}"
+    decision: allow
+  k8s.scale:
+    effect: "scale:{cluster}:{deployment}:{replicas}"
+    resource: "cluster:{cluster}"
+    decision: allow

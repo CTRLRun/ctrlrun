@@ -1,0 +1,11 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/outbound-email-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  email.send:
+    effect: "email:{message_id}"
+    rules:
+      - when: { to_domain_eq: "example.com" }
+        decision: allow
+      - decision: approve

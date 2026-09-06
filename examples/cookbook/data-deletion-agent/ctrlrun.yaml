@@ -1,0 +1,14 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/data-deletion-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  records.purge:
+    effect: "purge:{record_id}"
+    resource: "record:{record_id}"
+    rules:
+      - when: { legal_hold_eq: true }
+        decision: deny
+      - when: { age_days_gte: 730 }
+        decision: allow
+      - decision: approve

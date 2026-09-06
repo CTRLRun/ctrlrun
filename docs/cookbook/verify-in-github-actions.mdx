@@ -1,0 +1,104 @@
+---
+title: "Run verify in GitHub Actions"
+description: "Run ctrlrun verify against your policy on every push with the CTRLRun action: the workflow, the report it produces, the N/A line, the exit codes."
+---
+
+Your policy lives in the repository with the agent. Every push should prove the guarantees it
+declares still hold against it, in a scratch store, with no network, and fail the build if one
+does not. That is one workflow step.
+
+## The policy
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: approve
+  k8s.delete_namespace:
+    effect: "namespace:{cluster}:{name}"
+    decision: approve
+```
+
+## The code
+
+Locally, and in the recipe's directory, the check is one command:
+
+```bash runnable file=run.sh
+ctrlrun verify
+ctrlrun verify --json > verify-report.json
+python -c "import json; s = json.load(open('verify-report.json'))['summary']; print('applicable', s['applicable'], 'passed', s['passed'], 'not applicable', s['not_applicable'])"
+rm -f verify-report.json
+```
+
+In CI, the workflow:
+
+```yaml
+name: CTRLRun verify
+
+on: [push, pull_request]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: CTRLRun/ctrlrun@main
+        with:
+          policy: ctrlrun.yaml
+```
+
+Pin `CTRLRun/ctrlrun` to a release tag once you rely on it.
+
+## What the agent sees
+
+The agent sees nothing; this is the operator's check. The build sees:
+
+```text
+CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+policy     ctrlrun.yaml (ctrlrun.policy/v2, mode: enforce)
+authority  none
+store      sqlite, scratch (created and destroyed for this run)
+
+G1   mutated approval refused         PASS  stripe.refund
+G2   replayed approval refused        PASS  stripe.refund
+G3   duplicate effect refused         PASS  stripe.refund
+G4   one winner under concurrency     PASS  stripe.refund (8 processes)
+G5   ambiguous blocks a blind retry   PASS  stripe.refund
+G6   unknown action refused           PASS
+G7   no principal refused             PASS  stripe.refund
+G8   expired authority refused        N/A   no authority section
+G9   delegation cannot escalate       N/A   no authority section
+G10  unknown exception is ambiguous   PASS  stripe.refund
+G11  an altered receipt is detected   PASS  stripe.refund
+
+9/9 declared guarantees pass. 2 not applicable: G8, G9.
+applicable 9 passed 9 not applicable 2
+```
+
+Two guarantees are not applicable because the policy has no `authority:` section; they are
+listed with the reason and excluded from the denominator. Green means nothing that could be
+checked was wrong.
+
+## The receipt
+
+The report is the receipt: `--json` writes a `ctrlrun.verify/v1` document and `--junit` a
+JUnit file, and the action uploads both with the badge JSON as one artifact. Exit 0 means every
+applicable guarantee passed; 1 a failure; 2 a refused or unusable configuration, including
+`mode: observe` and a policy in which nothing can be exercised; 3 an internal error.
+
+## When an AMBIGUOUS appears
+
+Verify's G5 and G10 make an ambiguous effect on purpose, in the scratch store, and assert that a
+blind retry is refused. Your store is never opened, so nothing here can leave a real effect
+ambiguous. An `AMBIGUOUS` in your own store is the agent's, and the
+[resolve recipe](/cookbook/resolve-an-ambiguous-effect) is for it.
+
+## Next
+
+- [Verify in CI](/guides/verify-in-ci): inputs, outputs and publishing the badge.
+- [Exit codes](/reference/exit-codes) · [Get started](/get-started/quickstart) · [Why](/why).

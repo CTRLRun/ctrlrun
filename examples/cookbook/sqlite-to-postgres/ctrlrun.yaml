@@ -1,0 +1,8 @@
+# Extracted by tools/docs_audit/render_cookbook.py from
+# docs/cookbook/sqlite-to-postgres.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow
