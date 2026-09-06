@@ -344,8 +344,19 @@ def test_T124b_the_package_ships_nothing_from_research():
     document = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert document["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
-    manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-    assert "research" not in manifest or "prune research" in manifest
+
+    # The **directives**, not the raw text. This read the whole file including its comments,
+    # so a comment merely mentioning `research/` -- one was added beside `prune fuzz` -- failed
+    # a test about what setuptools ships. Comments are not packaging instructions, and the
+    # thing being asserted is that no directive names the directory.
+    directives = [
+        line.strip()
+        for line in (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert directives, "MANIFEST.in has no directives at all; this test would pass on an empty file"
+    shipping = [d for d in directives if "research" in d and not d.startswith("prune ")]
+    assert shipping == [], shipping
 
 
 # --- the fairness rules are in the README, and they are normative ---------------------------

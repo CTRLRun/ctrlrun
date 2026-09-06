@@ -57,4 +57,10 @@ prune .github
 # a test, because `MANIFEST.in` resolves against the working tree rather than the index, which
 # is how v0.2 shipped four files it should not have.
 prune adapters
+# `fuzz/` is a development tree like `research/`: the targets, their seed corpus and the
+# invariants they assert. Belt and braces for the same reason the four lines above are --
+# `[tool.setuptools.packages.find]` looks only in `src/`, so nothing here is a package and the
+# sdist omits it either way. `test_the_fuzz_corpus_is_not_packaged` asserts the line, and
+# `test_T181_*` asserts the outcome.
+prune fuzz
 global-exclude *.py[cod] .DS_Store
