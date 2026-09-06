@@ -306,14 +306,19 @@ def test_the_surrogate_that_was_a_finding_is_now_refused_in_words():
     arguments = json.loads('{"note": "\\ud800"}')
     assert arguments == {"note": "\ud800"}, "the payload no longer carries a surrogate"
 
-    with pytest.raises(InvalidArgument):
+    with pytest.raises(InvalidArgument) as raised:
         Action(name="pay", environment="prod", principal=Principal(agent="a"), arguments=arguments)
-    try:
-        Action(name="pay", environment="prod", principal=Principal(agent="a"), arguments=arguments)
-    except CTRLRunError:
-        pass
-    except UnicodeEncodeError:  # pragma: no cover - the regression
-        raise AssertionError("the finding is back: UnicodeEncodeError escapes again") from None
+
+    # The half that matters to a caller, asserted rather than implied: the refusal is *in* the
+    # closed set, so `except CTRLRunError` catches it, and it is not the `UnicodeEncodeError`
+    # this used to raise, which no such handler would have caught.
+    #
+    # A `try/except CTRLRunError: pass` stood here and CodeQL flagged the bare `pass`. It was
+    # right, and for a better reason than the style: `InvalidArgument` is a `CTRLRunError`, so
+    # the line above already proved that branch and the `except UnicodeEncodeError` beside it
+    # was unreachable from any input. A guard no test can reach is not a guard.
+    assert isinstance(raised.value, CTRLRunError)
+    assert not isinstance(raised.value, UnicodeEncodeError)
 
 
 def test_a_paired_surrogate_is_still_accepted():
