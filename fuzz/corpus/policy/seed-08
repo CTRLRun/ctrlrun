@@ -1,0 +1,5 @@
+schema: ctrlrun.policy/v3
+actions:
+  pay:
+    default: allow
+    require_approval: true

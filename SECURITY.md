@@ -18,6 +18,31 @@ through trusted publishing, so there is no API token to leak or replay, and each
 carries an attestation naming the workflow that built it. Every GitHub Action the workflows use
 is pinned to a commit. `docs/how-this-is-built.md` says what has and has not been reviewed.
 
+From v0.6.0, every GitHub Release also carries signed SLSA build provenance for the same
+distributions — `ctrlrun-<version>.intoto.jsonl` (the DSSE envelopes) and
+`ctrlrun-<version>.sigstore.json` (the Sigstore bundle). Signing is against the workflow's OIDC
+identity, so there is no signing key in this repository, in its secrets, or in anyone's shell.
+
+### Verifying a release
+
+```sh
+gh release download v0.6.0 --repo CTRLRun/ctrlrun
+gh attestation verify ctrlrun-0.6.0.tar.gz --repo CTRLRun/ctrlrun
+```
+
+`gh attestation verify` fetches the attestation from GitHub. To check without a network round
+trip, point it at the bundle the release carries:
+
+```sh
+gh attestation verify ctrlrun-0.6.0.tar.gz \
+  --repo CTRLRun/ctrlrun --bundle ctrlrun-0.6.0.sigstore.json
+```
+
+Either way, what is verified is that these bytes were built by the `release.yml` workflow in
+this repository at the tagged commit. It says nothing about whether the code is correct — that
+is what the specifications and the test suite are for. Releases before v0.6.0 carry no
+provenance and cannot be checked this way.
+
 ## Supported versions
 
 CTRLRun is pre-1.0. Only the latest release receives fixes.

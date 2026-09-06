@@ -39,7 +39,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/CTRLRun/ctrlrun"
 Repository = "https://github.com/CTRLRun/ctrlrun"
-Documentation = "https://docs.ctrlrun.dev"
+Documentation = "https://ctrlrun.dev"
 Changelog = "https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md"
 Issues = "https://github.com/CTRLRun/ctrlrun/issues"
 
@@ -158,6 +158,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Error class names are frozen by SPEC-v0.1 §8; no "Error" suffix.
 "src/ctrlrun/errors.py" = ["N818"]
+"scripts/release_provenance.py" = ["N818"]
 # An adapter's own refusals follow this codebase's convention and not the suffix rule, for the
 # same reason `errors.py` does: they sit beside `ActionDenied`, `ApprovalRequired` and
 # `DuplicateEffect` in an operator's `except` clause, and `ApprovalNotAskedError` next to those
@@ -216,6 +217,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 "research/framework-probe/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/framework-probe/**/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/soak/*.py" = ["ANN401", "N818", "PLC0415"]
+"fuzz/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/soak/**/*.py" = ["ANN401", "N818", "PLC0415"]
 # The reference generators carry the pages' own prose as string literals, and a page's line is
 # not a code line: the rendered file is what has a width. Everything else about them is linted.
