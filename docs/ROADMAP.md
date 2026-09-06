@@ -162,6 +162,29 @@ place a reader would otherwise assume otherwise.
 
 Standards: none new.
 
+## `ctrlrun scan` — proposed, not started
+
+Not a kernel milestone, and listed here because the question it answers has no command today.
+`ctrlrun scan` reads a Python tree and a policy document and reports the consequential call
+sites and policy entries CTRLRun is **not** covering — the gap between *installed* and *in the
+path*. `docs/SPEC-scan.md` is the contract and its §8 tests are written and red.
+
+It gates no release and none gates it. Like the operator server it is a subcommand of the
+`ctrlrun` distribution and carries no version line of its own; unlike the operator server it
+adds no entry point at all, and `SPEC-scan.md` §9.2 states that as a rule rather than a fact
+about the first implementation, because the tempting version of this tool builds an action for
+each call site it finds and asks the policy what would happen to it — which would be a principal
+invented by a tool from a source file.
+
+The honest half is the load-bearing half: a scanner reports what it found where it looked, and
+a clean result is not a verdict. §4 enumerates what it misses by construction — dynamic
+dispatch, reachability, anything outside the tree, and a deployment whose protection is entirely
+the gateway — and requires that the report say so on every run, including the run with no
+findings. A number that improves when the vocabulary is shortened is a number that will be, so
+there is no score, no percentage and no badge (§10).
+
+Standards: none new.
+
 ## v0.7 — Multi-agent
 
 - A2A integration: task-bound delegated authority with limits, expiry, and depth.
