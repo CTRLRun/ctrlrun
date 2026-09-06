@@ -98,7 +98,7 @@ identity = ["pyjwt[crypto]>=2.8"]
 # psycopg 3 rather than psycopg2: `ON CONFLICT ... RETURNING`, a `sqlstate` on every error
 # (which §4.3.1's stated-abort set reads), and context-managed cursors. The binary wheel is
 # not required here -- an operator who wants the C implementation installs `psycopg[c]`.
-postgres = ["psycopg>=3.1"]
+postgres = ["psycopg>=3.3.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
