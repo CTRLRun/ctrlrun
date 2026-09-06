@@ -108,9 +108,13 @@ else on this site describes the current release.
 
 ## Verified, and how to check
 
-The sequence this page runs was verified under Node against the same Pyodide build on
+The Python this page runs was verified under Node against the same Pyodide build on
 **2026-09-06**: Pyodide 314.0.6, Python 3.14.2, SQLite 3.39.0, `ctrlrun` 0.5.0 from PyPI, all
-five scenarios. Two harnesses are committed, and you can run both:
+five scenarios. Not a copy of it — the harness reads the program out of `try-it.js` and runs
+that. It carried its own copy until that date, which is how a syntax error in the page's copy
+reached this page: both harnesses were green, one having stubbed the Python and the other
+having verified a program the page never ran. Two harnesses are committed, and you can run
+both:
 
 ```bash
 npm install pyodide jsdom
@@ -119,7 +123,9 @@ node docs/assets/verify-browser-wiring.mjs  # this page's button, against a real
 ```
 
 [`verify-browser-demo.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-demo.mjs)
-is the one that proved the demo runs.
+is the one that proved the demo runs. A third check needs neither Node nor the network:
+`tests/test_docs_travelling.py` lifts the program out of the JavaScript and compiles it on
+every commit, so a syntax error fails CI rather than this page.
 [`verify-browser-wiring.mjs`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/assets/verify-browser-wiring.mjs)
 is the one that proves the button on this page gets wired: this site is a single-page
 application, and the first version of the script looked for its container before the page had
