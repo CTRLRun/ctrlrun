@@ -35,7 +35,8 @@
             "group": "Start",
             "pages": [
               "index",
-              "why"
+              "why",
+              "try-it"
             ]
           },
           {
@@ -127,6 +128,13 @@
             "group": "FAQ",
             "pages": [
               "faq"
+            ]
+          },
+          {
+            "group": "More",
+            "pages": [
+              "verify/get-the-badge",
+              "study/does-your-framework-double-execute"
             ]
           }
         ]

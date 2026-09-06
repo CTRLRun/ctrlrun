@@ -281,6 +281,9 @@ jobs:
       - name: The cookbook directories are what their pages show
         run: python tools/docs_audit/render_cookbook.py --check
 
+      - name: The framework-probe page is the render of the published results
+        run: python tools/docs_audit/render_probe.py --check
+
       - name: Runnable snippets execute offline
         continue-on-error: true
         run: python tools/docs_audit/snippets.py

@@ -126,12 +126,19 @@ def test_inspect_shows_the_issuer_the_expiry_and_the_claim_names(control):
     action_id = _with_claims(control)
 
     output = _ok(_cli("inspect", action_id)).stdout
+    # Generated ids are hex, so `4471` appears inside one about once in every two hundred runs
+    # and this assertion failed in CI on an id and not on a leak. The ids carry no claim value
+    # by construction -- they are random -- so they are removed before the search, and the two
+    # values are looked for in the text a human actually reads.
+    import re as _re
+
+    readable = _re.sub(r"\b(?:act|apr|dlg|ctr)_[0-9a-f]+", "", output)
 
     assert "issuer      https://issuer.example/" in output
     assert "expires     2027-01-01T00:00:00.000Z" in output
     assert "claims      case, employee_no" in output
-    assert "4471" not in output
-    assert "CASE-9" not in output
+    assert "4471" not in readable
+    assert "CASE-9" not in readable
 
 
 def test_inspect_json_carries_the_claim_values(control):
