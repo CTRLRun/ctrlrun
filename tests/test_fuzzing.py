@@ -17,6 +17,7 @@ that breaks it deliberately and requires the check to notice.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -337,13 +338,51 @@ def test_the_seed_corpus_reproduces_every_known_finding():
 @pytest.mark.parametrize("name", ["fuzz_canonical.py", "fuzz_policy.py"])
 def test_each_target_is_an_atheris_harness(name):
     """Scorecard detects Python fuzzing by finding `import atheris` in a `.py` file, which is a
-    thing a decorative file could also do. These assert the harness is real: it instruments,
-    it feeds the decoder, and it hands control to the fuzzer."""
+    thing a decorative file could also do. These assert the harness is real: it instruments, it
+    feeds the decoder, and it hands control to the fuzzer."""
     source = (FUZZ / name).read_text(encoding="utf-8")
     assert "import atheris" in source
     assert "atheris.Setup(" in source and "atheris.Fuzz()" in source
-    assert "instrument_all" in source or "instrument_imports" in source
     assert "properties." in source, "the harness asserts nothing of its own"
+
+
+@pytest.mark.parametrize("name", ["fuzz_canonical.py", "fuzz_policy.py"])
+def test_the_target_under_test_is_imported_inside_the_instrumentation(name):
+    """The invariant behind `stat::new_units_added`, and the reason this is a structural check
+    and not `"instrument_imports" in source`.
+
+    `atheris.instrument_imports()` instruments what is imported *inside* it. A module already
+    in `sys.modules` is not re-imported, so an `import properties` at file scope makes the
+    instrumented import a silent no-op -- and the campaign then runs at full speed, guided by
+    nothing, reporting a green job. The first version of this file did exactly that: ten
+    million executions in CI and `new_units_added: 0` on both targets.
+
+    A string search could not tell the two apart, because the broken version contained the
+    string. This walks the tree instead."""
+    tree = ast.parse((FUZZ / name).read_text(encoding="utf-8"))
+
+    def imports_properties(node) -> bool:
+        return isinstance(node, ast.Import) and any(a.name == "properties" for a in node.names)
+
+    top_level = [n for n in tree.body if imports_properties(n)]
+    assert top_level == [], (
+        "`import properties` at module scope puts it in sys.modules before Atheris can "
+        "instrument it; move it inside the `instrument_imports()` block"
+    )
+
+    instrumented = [
+        node
+        for parent in ast.walk(tree)
+        if isinstance(parent, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and getattr(item.context_expr.func, "attr", None) == "instrument_imports"
+            for item in parent.items
+        )
+        for node in ast.walk(parent)
+        if imports_properties(node)
+    ]
+    assert instrumented, "nothing is imported inside instrument_imports(); nothing is instrumented"
 
 
 @pytest.mark.parametrize("name", ["fuzz_canonical.py", "fuzz_policy.py"])

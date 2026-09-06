@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 FUZZ = Path(__file__).resolve().parent
 if str(FUZZ) not in sys.path:
     sys.path.insert(0, str(FUZZ))
 
-import properties  # noqa: E402
+# **`properties` is deliberately not imported here.** `atheris.instrument_imports()` hooks the
+# import system and instruments what is imported *inside* it, transitively -- so `properties`,
+# and through it `ctrlrun.action`, has to reach the interpreter for the first time in that
+# block. An import at module scope puts it in `sys.modules` first and makes the instrumented
+# re-import a silent no-op: the campaign still runs, at full speed, guided by nothing at all.
+# `stat::new_units_added: 0` after ten million executions is what that looks like in a CI log,
+# and it is what the first version of this file did.
+properties: Any = None
 
 
 def one_input(data: bytes) -> None:
@@ -41,12 +49,19 @@ def _run_corpus() -> int:
 
 def main() -> int:
     if "--corpus" in sys.argv:
+        import properties as module
+
+        globals()["properties"] = module
         return _run_corpus()
 
     import atheris
 
+    # The first import of `properties` in this process, so the instrumentation actually
+    # applies to it and to `ctrlrun` underneath it.
     with atheris.instrument_imports():
-        import properties as instrumented  # noqa: F401
+        import properties as module
+
+    globals()["properties"] = module
 
     atheris.Setup(sys.argv, one_input)
     atheris.Fuzz()
