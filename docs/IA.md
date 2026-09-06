@@ -112,6 +112,7 @@ Get the badge                          verify/get-the-badge
 |---|---|---|
 | `index` | The tagline, the principle, the promise; the demo; the capability grid rendered from `capabilities.yaml`; the three ways in; three start-here cards; the one line that adds this site as an MCP server to a coding tool. | *ctrlrun* · *AI agent safety layer* |
 | `why` | Opens with the opener line. Five sections, one principle each: FAILED is not UNKNOWN · an approval is bound to what the human saw · autonomy belongs to the action · unknown means no · evidence leaves the building. Ends at How this is built. | *why do AI agents double execute actions* · *AI agent consequential actions* |
+| `not-only-agents` | For the reader who runs a task queue, a webhook handler or a cron job rather than an agent: the same failure with no model in it, the three examples under `examples/without-an-agent/`, what an agent actually changes, and the two guarantees that do the work when nobody is delegating authority to a worker. | *celery task retried twice* · *webhook delivered twice duplicate* · *retry safe background job python* |
 
 ## Get started
 
