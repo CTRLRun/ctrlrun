@@ -259,12 +259,24 @@ jobs:
           python-version: "3.11"
 
       - name: Install
+        # Every extra: a runnable guide block that exports to OpenTelemetry or opens the
+        # gateway's client needs the extra installed, and a block that skipped would be a
+        # sample nobody ran.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,gateway,otel,identity]"
 
       - name: Rendered capability tables match docs/capabilities.yaml
         run: python tools/docs_audit/render_capabilities.py --check
+
+      - name: The CLI reference matches click's help text
+        run: python tools/docs_audit/render_cli.py --check
+
+      - name: The receipt, event and error references match the code
+        run: python tools/docs_audit/render_schemas.py --check
+
+      - name: The Python API reference matches the docstrings
+        run: python tools/docs_audit/render_api.py --check
 
       - name: Runnable snippets execute offline
         continue-on-error: true

@@ -16,8 +16,14 @@
   "description": "The execution safety layer for AI agents.",
   "navbar": {
     "links": [
-      { "label": "GitHub", "href": "https://github.com/CTRLRun/ctrlrun" },
-      { "label": "PyPI", "href": "https://pypi.org/project/ctrlrun/" }
+      {
+        "label": "GitHub",
+        "href": "https://github.com/CTRLRun/ctrlrun"
+      },
+      {
+        "label": "PyPI",
+        "href": "https://pypi.org/project/ctrlrun/"
+      }
     ]
   },
   "navigation": {
@@ -25,7 +31,13 @@
       {
         "tab": "Documentation",
         "groups": [
-          { "group": "Start", "pages": ["index", "why"] },
+          {
+            "group": "Start",
+            "pages": [
+              "index",
+              "why"
+            ]
+          },
           {
             "group": "Get started",
             "pages": [
@@ -48,6 +60,115 @@
               "concepts/observe-mode",
               "concepts/fail-closed"
             ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/protect-a-function",
+              "guides/gateway-in-front-of-mcp",
+              "guides/approvals-in-slack",
+              "guides/resolve-an-ambiguous-effect",
+              "guides/reconcile-automatically",
+              "guides/observe-to-enforce",
+              "guides/run-on-postgres",
+              "guides/verify-in-ci",
+              "guides/export-to-opentelemetry",
+              "guides/langgraph-adapter",
+              "guides/openai-agents-adapter"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/policy-yaml",
+              "reference/authority-yaml",
+              "reference/cli",
+              "reference/receipt-and-event-schemas",
+              "reference/exit-codes",
+              "reference/errors"
+            ]
+          },
+          {
+            "group": "Python API",
+            "pages": [
+              "reference/api/index",
+              "reference/api/Action",
+              "reference/api/ActionDenied",
+              "reference/api/AmbiguousEffect",
+              "reference/api/Approval",
+              "reference/api/ApprovalAnswer",
+              "reference/api/ApprovalMismatch",
+              "reference/api/ApprovalProvider",
+              "reference/api/ApprovalRequest",
+              "reference/api/ApprovalRequired",
+              "reference/api/ApprovalTimeout",
+              "reference/api/Authority",
+              "reference/api/AuthorityDenied",
+              "reference/api/AuthorityEscalation",
+              "reference/api/AuthorityResult",
+              "reference/api/CTRLRunError",
+              "reference/api/Condition",
+              "reference/api/Control",
+              "reference/api/Decision",
+              "reference/api/Delegation",
+              "reference/api/DelegationRecord",
+              "reference/api/DuplicateEffect",
+              "reference/api/EffectKeyError",
+              "reference/api/EffectRecord",
+              "reference/api/EffectState",
+              "reference/api/Event",
+              "reference/api/EventSink",
+              "reference/api/FrameworkInterrupt",
+              "reference/api/Grant",
+              "reference/api/HeaderIdentityProvider",
+              "reference/api/IdentityContext",
+              "reference/api/IdentityError",
+              "reference/api/IdentityProvider",
+              "reference/api/InMemoryStateStore",
+              "reference/api/InterruptApprovalProvider",
+              "reference/api/InvalidArgument",
+              "reference/api/JSONLEventSink",
+              "reference/api/LocalApprovalProvider",
+              "reference/api/MissingDependency",
+              "reference/api/NotExecuted",
+              "reference/api/PendingApproval",
+              "reference/api/Policy",
+              "reference/api/PolicyError",
+              "reference/api/Principal",
+              "reference/api/Receipt",
+              "reference/api/ReconcileOutcome",
+              "reference/api/SQLiteStateStore",
+              "reference/api/SchemaMismatch",
+              "reference/api/ScriptedApprovalProvider",
+              "reference/api/StateStore",
+              "reference/api/StaticIdentityProvider",
+              "reference/api/Subject",
+              "reference/api/Suspended",
+              "reference/api/WebhookApprovalProvider",
+              "reference/api/acs-AcsControlHook",
+              "reference/api/action_hash",
+              "reference/api/banner",
+              "reference/api/canonical_bytes",
+              "reference/api/canonicalize",
+              "reference/api/conformance-run",
+              "reference/api/conformance-store-run",
+              "reference/api/context",
+              "reference/api/gateway-serve",
+              "reference/api/jwt_identity-JWTIdentityProvider",
+              "reference/api/needs_approval",
+              "reference/api/otel-OTelEventSink",
+              "reference/api/parse_conditions",
+              "reference/api/postgres-PostgresStateStore",
+              "reference/api/protect",
+              "reference/api/verify-run",
+              "reference/api/with_approval"
+            ],
+            "expanded": false
           }
         ]
       },
@@ -56,7 +177,11 @@
         "groups": [
           {
             "group": "Architecture",
-            "pages": ["ARCHITECTURE", "THREAT_MODEL", "how-this-is-built"]
+            "pages": [
+              "ARCHITECTURE",
+              "THREAT_MODEL",
+              "how-this-is-built"
+            ]
           },
           {
             "group": "Specifications",
@@ -71,7 +196,16 @@
           },
           {
             "group": "Readings and references",
-            "pages": ["OWASP-AGENTIC-TOP10", "ACS", "adapters", "authority", "postgres", "verify", "CLAIMS", "ROADMAP"]
+            "pages": [
+              "OWASP-AGENTIC-TOP10",
+              "ACS",
+              "adapters",
+              "authority",
+              "postgres",
+              "verify",
+              "CLAIMS",
+              "ROADMAP"
+            ]
           }
         ]
       }

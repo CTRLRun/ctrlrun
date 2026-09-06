@@ -106,7 +106,10 @@ STORE_URL_OPTION = click.option(
     "store_url",
     default=None,
     envvar="CTRLRUN_STORE_URL",
-    help="The store to open. Default: the SQLite database under CTRLRUN_HOME.",
+    help=(
+        "The store to open. Default: $CTRLRUN_STORE_URL, else the SQLite database beside the "
+        "policy (.ctrlrun/state.db, or wherever $CTRLRUN_STATE points)."
+    ),
 )
 
 #: CTRLRun's own parameter on a Postgres URL, peeled off before the URL reaches the driver. The
@@ -272,7 +275,7 @@ def _event(
 @click.group()
 @click.version_option(package_name="ctrlrun")
 def main() -> None:
-    """CTRLRun — transaction safety for AI-agent actions."""
+    """CTRLRun — the execution safety layer for AI agents."""
 
 
 @main.command()

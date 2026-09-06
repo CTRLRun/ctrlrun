@@ -1,0 +1,108 @@
+---
+title: "Authority YAML reference"
+description: "Every key of the authority: section: max_delegation_depth and grants, and on a grant id, subject (agent, user), actions, resources, constraints, environments, delegable and expires_at, with what omitting each one means."
+---
+
+The `authority:` section says which principal may propose which action. It lives at the top of
+`ctrlrun.yaml` from `ctrlrun.policy/v3`, or in a standalone document passed with `--authority`
+whose only keys are `schema` and `authority`. It is opt-in and then fail-closed: absent, nothing
+changes; present, every principal needs a matching grant and no grant means denied. A test
+asserts this page names every key the loader accepts.
+
+## The section
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_delegation_depth` | non-negative integer | `3` | how long a chain of delegations may be; recomputed on every evaluation by walking to the root, never read from the stored row |
+| `grants` | list of grants | **error** if missing | the whole of who may ask |
+
+## A grant
+
+| Key | Type | When omitted | Notes |
+|---|---|---|---|
+| `id` | string, unique | **error** | what a delegation names as its parent and what receipts cite |
+| `subject` | `{agent, user}` | **error** | who the grant is for; at least `agent`. A wildcard subject is refused: a grant is for someone |
+| `actions` | list of action-name patterns | **error** | `stripe.refund`, or `stripe.*` |
+| `resources` | list of resource patterns | any resource | `payment:*`, `payment:EU-*`; matched against the action's resolved `resource` template |
+| `constraints` | map of condition → operand | no value limit | the same seven operators as a policy rule, over the action's arguments; `amount_lte: 10000000` |
+| `environments` | list of environment names | any environment | `production`, `staging` |
+| `delegable` | `true` or `false` | `false` | whether the holder may narrow this grant at runtime with `ctrlrun delegate`; `true` **requires** `expires_at` |
+| `expires_at` | ISO-8601 timestamp with an offset | never expires | checked at every evaluation, and refused as a naive datetime |
+
+A grant carries no `decision:`. How much autonomy an action has is the policy's answer, the same
+for everyone; the grant answers whether this principal may ask at all.
+
+```yaml runnable
+schema: ctrlrun.policy/v3
+
+authority:
+  max_delegation_depth: 3
+  grants:
+    - id: head-of-support
+      subject: { agent: "head-of-support", user: "dana@example.com" }
+      actions: ["stripe.refund", "stripe.refund.partial"]
+      resources: ["payment:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+    - id: reconciliation
+      subject: { agent: "reconciliation-agent" }
+      actions: ["stripe.charge.read", "stripe.refund.read"]
+      resources: ["payment:*"]
+      environments: ["production", "staging"]
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }
+        decision: allow
+      - decision: approve
+  stripe.refund.partial:
+    effect: "refund:{payment_id}:{line_item}"
+    resource: "payment:{payment_id}"
+    decision: approve
+  stripe.charge.read:
+    decision: allow
+  stripe.refund.read:
+    decision: allow
+```
+
+## How a grant matches
+
+A grant covers an action when the subject matches the principal, the action name matches one
+of `actions`, the resolved resource matches one of `resources`, the environment is in
+`environments`, every constraint holds over the arguments, and `expires_at` has not passed.
+Every failing reason is collected and the reported one follows a fixed order, so the evidence
+for a configuration does not depend on the order grants appear in the file. Where several
+grants match, the receipt names the lowest id.
+
+## Delegation
+
+`ctrlrun delegate --parent <id> --file grant.yaml --as AGENT[/USER]` writes a delegated grant
+beneath a `delegable` one. The file has the keys above minus `id`. It is accepted only if it is
+provably a subset of its parent on every dimension, at creation and again at every evaluation:
+
+- a narrower or equal subject (never a wildcard, never dropping the parent's `user`);
+- `actions`, `resources`, `environments` each a subset;
+- `constraints` no looser on any argument;
+- `expires_at` no later than the parent's.
+
+**Omitting a dimension the parent constrains is rejected, not inherited.** A child that leaves
+out `resources:` would authorize resources its parent never could. `ctrlrun revoke <id>` cuts a
+chain of any depth with one write and is not reversible.
+
+## What the section does not do
+
+It does not authenticate anybody: the principal comes from the identity provider, and `--as` on
+the command line is an assertion recorded as `created_via: cli`. It does not match on a token
+claim, does not propagate across an agent-to-agent hop, and does not hot-reload: revocation and
+expiry are live, an edited file takes effect when the process next loads it.
+
+## Next
+
+- [Authority and delegation](/concepts/authority-and-delegation): the concept.
+- [Policy YAML reference](/reference/policy-yaml): the other axis.
+- [Get started](/get-started/quickstart) · [Why](/why).

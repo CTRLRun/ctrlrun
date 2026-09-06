@@ -1,0 +1,131 @@
+---
+title: "Policy YAML reference"
+description: "Every key of ctrlrun.yaml, from ctrlrun.policy/v1 to v4: schema, actions, decision, rules, when conditions and their seven operators, effect and resource templates, mcp, mode, environment, authority, version, controls and data, with the fail-closed behaviour when each is omitted."
+---
+
+`ctrlrun.yaml` is one document: a `schema`, an `actions` map, and from `ctrlrun.policy/v3` the
+`mode`, `environment` and `authority` keys, and from `v4` `version` and `controls`. Every key
+set is closed: an unknown key anywhere is a load error, never ignored, because a key an older
+reader silently dropped would be a typo that never surfaced. A test asserts this page names
+every key and operator the loader accepts.
+
+## Top level
+
+| Key | Type | Since | Default when omitted | Notes |
+|---|---|---|---|---|
+| `schema` | string | v1 | **error**: a document with no schema is an unknown schema, never "assume v1" | one of `ctrlrun.policy/v1`, `ctrlrun.policy/v2`, `ctrlrun.policy/v3`, `ctrlrun.policy/v4`; each accepts the keys below marked with its version or earlier, and refuses the rest |
+| `actions` | map of action name → entry | v1 | **error** | the whole list of what an agent may do; an action not in it is denied |
+| `mode` | `enforce` or `observe` | v3 | `enforce` | top level only; refused anywhere else |
+| `environment` | string | v3 | `production`, unless `$CTRLRUN_ENVIRONMENT` or the gateway's `--environment` says otherwise | part of every action's hash and of authority matching; never read off the wire |
+| `authority` | section | v3 | none: the document behaves as v2, with no authority check | the moment it exists, every principal needs a grant. See the [authority reference](/reference/authority-yaml) |
+| `version` | string | v4 | none recorded | your label for this document, carried on every receipt as `policy_version`; never authoritative, the hash is |
+| `controls` | map of id → entry with `title` and `source` | v4 | empty | the registry an action or a rule may cite; `source` is cited on receipts and never interpreted; a cited id the registry does not define is a load error |
+
+A file that cannot be read, does not parse, or fails any check above raises `PolicyError`, and
+no `Control` is built. There is no empty permissive policy.
+
+```yaml runnable
+schema: ctrlrun.policy/v4
+version: "2026-09-refunds-3"
+mode: enforce
+environment: production
+
+controls:
+  maker-checker-refunds:
+    title: "A refund over the desk limit is approved by a second person"
+    source: "House policy FIN-4.2"
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    controls: [maker-checker-refunds]
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 }
+        decision: approve
+      - decision: deny
+```
+
+## An action entry
+
+Exactly one of `decision` and `rules`, plus the optional keys.
+
+| Key | Type | Since | When omitted | Notes |
+|---|---|---|---|---|
+| `decision` | `allow`, `approve` or `deny` | v1 | required unless `rules` is present | the same answer for every argument |
+| `rules` | non-empty list of rules | v1 | required unless `decision` is present | tried in order; the first match wins; **no match is `deny`** |
+| `effect` | template | v2 | no reservation: the action runs unguarded against duplicates, and the gateway names it on the line that starts it | `"refund:{payment_id}"`; every placeholder must resolve from the arguments or the action is refused before it runs |
+| `resource` | template | v2 | no resource in the hash, and a grant's `resources:` cannot match | `"payment:{payment_id}"`; the decorator's `resource=` wins where both exist |
+| `mcp` | mapping with one key, `not_executed_on_error` (bool) | v2 | `false` | gateway only: whether an upstream's in-band error means the tool did nothing (`FAILED`) or nobody knows (`AMBIGUOUS`). Say `true` only for an upstream that rejects before acting |
+| `controls` | list of ids | v4 | none | cited on every receipt for this action, in registry order |
+| `data` | map of argument name → label, either a bare string or a mapping with the one key `label` | v4 | no labels; `data_scope` is empty | labels the arguments carry, for the `data_scope` condition below |
+
+## A rule
+
+| Key | Type | When omitted | Notes |
+|---|---|---|---|
+| `when` | map of condition → operand | the rule matches every action; put it last | all conditions must hold |
+| `decision` | `allow`, `approve` or `deny` | **error** | |
+| `controls` | list of ids | none | added to the action's own on the receipt when this rule matches |
+
+## Conditions
+
+A condition key is `<subject>_<operator>`. The subject is an argument name, or the derived
+`data_scope`; the operator is one of seven, and there is no other syntax. Amounts and every
+other numeric operand are integers: `float` is refused everywhere in CTRLRun.
+
+| Operator | Meaning | Example |
+|---|---|---|
+| `eq` | equal | `role_eq: admin` |
+| `neq` | not equal | `to_domain_neq: example.com` |
+| `in` | member of the list | `role_in: [reader, viewer]` |
+| `lt` | less than | `amount_lt: 100` |
+| `lte` | at most | `amount_lte: 50000` |
+| `gt` | greater than | `amount_gt: 0` |
+| `gte` | at least | `amount_gte: 0` |
+
+Bound both ends of a numeric band. `amount_lte: 50000` alone matches a negative amount, and a
+refund of a negative amount is a charge.
+
+**Reserved subjects.** `agent`, `user`, `claims`, `issuer` and `expires_at` name the principal
+and are refused as condition subjects at load, in a document of every schema version: the
+policy cannot see who is asking. `data_scope` is the one derived subject: it is the set of
+labels the supplied arguments carry, `data_scope_in: [phi]` means the set intersects the list,
+and `data_scope_eq` / `data_scope_neq` compare the whole set. `data_scope` may not be an
+argument's name, an effect placeholder, or a protected function's parameter.
+
+```yaml runnable
+schema: ctrlrun.policy/v4
+
+actions:
+  patient.record.update:
+    effect: "record:{patient_id}"
+    data:
+      diagnosis: phi
+      patient_id: phi
+      note: internal
+    rules:
+      - when: { data_scope_in: [phi] }
+        decision: approve
+      - decision: allow
+```
+
+## What a version adds
+
+| Schema | Adds | An older reader would |
+|---|---|---|
+| `ctrlrun.policy/v1` | `schema`, `actions`, `decision`, `rules`, `when` | |
+| `ctrlrun.policy/v2` | `effect`, `resource`, `mcp` on an entry | run a gateway tool with no reservation |
+| `ctrlrun.policy/v3` | `mode`, `environment`, `authority` at the top | enforce an observed deployment, or run with no authority check |
+| `ctrlrun.policy/v4` | `version`, `controls` at the top; `controls`, `data` on an entry and a rule | cite ids nothing defines, or evaluate a `data_scope` rule against nothing |
+
+That is why the key sets are closed by version: each key is refused by every reader that would
+misread it.
+
+## Next
+
+- [Authority YAML reference](/reference/authority-yaml).
+- [Decisions](/concepts/decisions): how a rule is matched.
+- [Get started](/get-started/quickstart) · [Why](/why).

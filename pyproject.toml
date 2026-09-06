@@ -62,6 +62,10 @@ dev = [
     # four. A definition-of-done check that skips everywhere it runs is the false green this
     # repository keeps finding, so the dependency is named rather than assumed.
     "build>=1",
+    # The Python API reference under docs/reference/api/ is generated from docstrings by
+    # tools/docs_audit/render_api.py with griffe (docs/IA.md, decision (b)). A documentation
+    # build dependency; the kernel never imports it.
+    "griffe>=1.0",
 ]
 # SPEC-v0.2 §1: `pip install ctrlrun` must not grow. Anything needing an HTTP server or a
 # third-party SDK lands here, lazily imported, with `MissingDependency` when it is absent.
@@ -213,6 +217,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 "research/framework-probe/**/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/soak/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/soak/**/*.py" = ["ANN401", "N818", "PLC0415"]
+# The reference generators carry the pages' own prose as string literals, and a page's line is
+# not a code line: the rendered file is what has a width. Everything else about them is linted.
+"tools/docs_audit/render_*.py" = ["E501"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]
