@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [0.6.0] - unreleased — Durable runtime
+## [0.6.0] - 2026-09-07 — Durable runtime
 
 **The soak criterion was amended on 2026-09-07, and it was amended downwards.** It read *a soak
 of at least one week with no unexplained `AMBIGUOUS`*; the week was removed rather than waited
@@ -24,8 +24,6 @@ The published run is twenty minutes, 889,735 actions, 133,393 ambiguous outcomes
 the run** so a reader can discount it: the README's readiness block, the docs home, the
 production index, and `docs/production/soak.mdx`, which now recomputes the criterion from the
 published counts instead of reading `exit_criterion_met` out of the same file.
-
-This entry stays dated `unreleased` until the tag is cut.
 
 v0.5 asked *can somebody else implement this?* v0.6 asks: **does it still hold when the process
 dies, the host goes away, and the database is somewhere else?**
