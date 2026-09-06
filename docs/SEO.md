@@ -37,6 +37,7 @@ that page's frontmatter, never here.
 |---|---|---|
 | `index` | ctrlrun · AI agent safety layer | The last check before an AI agent does something it can't undo. |
 | `why` | why do AI agents double execute · AI agent consequential actions | Everyone is rushing to ship AI agents without thinking about consequences. |
+| `not-only-agents` | celery task retried twice · webhook delivered twice duplicate · retry safe background job python | Every page on this site says agent, and the failure underneath them does not require one. |
 | `get-started/install` | install ctrlrun | `pip install ctrlrun` installs the kernel and exactly two dependencies, `pyyaml` and `click`. |
 | `get-started/quickstart` | protect an AI agent action python · ctrlrun quickstart | In sixty seconds you will write a policy, protect a refund function, and watch a mutated approval be refused. |
 | `get-started/three-ways-in` | do I need a ctrlrun adapter · ctrlrun langgraph | There are three ways to put CTRLRun in front of a consequential action, and only one of them is an adapter. |
