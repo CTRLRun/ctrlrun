@@ -9,6 +9,7 @@ refusal, and a source file that composes nothing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import urllib.error
@@ -1043,10 +1044,12 @@ def test_T191_a_content_length_the_server_cannot_bound_is_refused(listening, dec
     connection.putheader("Mcp-Method", "tools/list")
     connection.putheader("Content-Length", declared)
     connection.endheaders()
-    try:
+    with contextlib.suppress(OSError):
+        # The server answers from the Content-Length alone and never reads the body, so it may
+        # already have replied and closed by the time this write lands. The refusal is what is
+        # under test and it is asserted below; a broken pipe here is the server having been
+        # *quicker*, not the check having been skipped.
         connection.send(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
-    except OSError:
-        pass  # the server may already have answered and closed
     assert connection.getresponse().status == expected
     connection.close()
 

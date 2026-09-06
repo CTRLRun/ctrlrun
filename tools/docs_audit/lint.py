@@ -42,7 +42,7 @@ EXEMPT_BY_RULE: tuple[str, ...] = ("docs/OWASP-AGENTIC-TOP10.md", "docs/THREAT_M
 class Rule:
     id: str
     pattern: re.Pattern[str]
-    scope: str  # "headline" or "everywhere"
+    scope: str  # "headline", "everywhere" or "planned-only"
     why: str
 
 
@@ -80,13 +80,15 @@ RULES: tuple[Rule, ...] = (
     _rule("trusted-by", r"\btrusted by\b", "everywhere", "no social proof that does not exist"),
     _rule("testimonial", r"\btestimonials?\b", "everywhere", "no social proof"),
     _rule("excited", r"\bwe(?:'re| are) excited\b", "everywhere", "docs/STYLE.md"),
-    _rule(
-        "operator-mcp-server",
-        r"\boperator MCP server\b|\bmcp-operator\b",
-        "planned-only",
-        "does not exist yet; only a page carrying the PLANNED label may name it",
-    ),
 )
+
+#: There is no `planned-only` rule in `RULES` right now, and that is a statement about the
+#: product rather than about this file: the one there was, `operator-mcp-server`, existed
+#: because `ctrlrun mcp-operator` did not, and it went when the server shipped
+#: (`docs/SPEC-mcp-operator.md`). The scope survives for the next thing this repository
+#: describes before it builds it, and `test_the_planned_only_scope_still_works` exercises it
+#: against a rule the test defines -- otherwise the machinery would be dead code that every
+#: `lint_text` call trivially satisfied.
 
 #: The label a page must carry, verbatim, before a `planned-only` rule lets it name the thing.
 PLANNED_LABEL = "PLANNED"

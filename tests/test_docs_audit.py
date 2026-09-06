@@ -236,12 +236,33 @@ def test_a_claim_word_anywhere_is_flagged():
     assert {f.rule.id for f in found} == {"sector", "pack", "hipaa"}
 
 
-def test_a_planned_thing_may_be_named_only_on_a_page_that_says_planned():
-    """The operator MCP server does not exist. A page that carries the PLANNED label may name
-    it; any other page naming it is describing something that is not there."""
-    assert lint.lint_text("Use the operator MCP server to approve.\n", "x.mdx", _empty()) != []
-    assert lint.lint_text("PLANNED: an operator MCP server.\n", "x.mdx", _empty()) == []
-    assert lint.lint_text("Run ctrlrun mcp-operator now.\n", "x.mdx", _empty()) != []
+def test_the_planned_only_scope_still_works(monkeypatch):
+    """A page carrying the PLANNED label may name a thing that does not exist; any other page
+    naming it is describing something that is not there.
+
+    The rule this used to test was `operator-mcp-server`, and it went when
+    `ctrlrun mcp-operator` shipped. Asserting the scope against a *removed* rule would have
+    left a test that passes because nothing matches — so the rule is defined here, and the
+    test is of the machinery the next planned thing will use.
+    """
+    rule = lint._rule("not-yet", r"\bflux capacitor\b", "planned-only", "does not exist")
+    monkeypatch.setattr(lint, "RULES", (*lint.RULES, rule))
+    named = "Use the flux capacitor to approve.\n"
+
+    # The *same sentence* either side of the label, because the first version of this test
+    # wrote "a flux capacitor" under the label and "the flux capacitor" above it against a
+    # pattern that required "the". The second assertion could not fire whatever the scope did,
+    # and a mutation of the scope check left it green.
+    assert lint.lint_text(named, "x.mdx", _empty()) != []
+    assert lint.lint_text("PLANNED: not yet.\n" + named, "x.mdx", _empty()) == []
+
+
+def test_no_rule_claims_a_thing_is_planned_that_has_shipped():
+    """`RULES` carries no `planned-only` rule today, and this is the assertion that says the
+    absence is deliberate. Adding one is how a document describes something before it exists;
+    leaving a stale one is how a shipped feature becomes unmentionable."""
+    planned = [rule.id for rule in lint.RULES if rule.scope == "planned-only"]
+    assert planned == [], planned
 
 
 def test_a_word_inside_a_code_fence_is_not_linted():
