@@ -167,7 +167,7 @@ class ApprovalAnswer:
     `approved_arguments` are the arguments the answer was given against, as the adapter
     recovered them from its framework's own record of it. Required where the interrupt declares
     `carries_approved_arguments`; `None` only where it does not. **Never a copy of
-    `PendingApproval.arguments`**: handing back what you were just given makes every comparison
+    `PendingApproval.arguments`**: handing back exactly what you were given makes every comparison
     trivially pass, which is manufacturing the check.
     """
 

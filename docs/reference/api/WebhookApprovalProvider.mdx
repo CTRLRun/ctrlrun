@@ -8,8 +8,13 @@ description: "Notify a human system on `APPROVAL_REQUESTED`, and let it answer (
 `ctrlrun.WebhookApprovalProvider` — class, defined at `src/ctrlrun/webhook.py:135`
 
 ```python
-class WebhookApprovalProvider()
-    def __init__(store: ApprovalStore, url: str, secret: object, timeout: timedelta, retries: int, backoff: timedelta, replay_window: timedelta, public_url: str | None, allow_insecure: bool, clock: Callable[[], datetime])
+from ctrlrun import WebhookApprovalProvider
+```
+
+
+```python
+class WebhookApprovalProvider
+    def __init__(store: ApprovalStore, *, url: str, secret: object, timeout: timedelta = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES, backoff: timedelta = DEFAULT_BACKOFF, replay_window: timedelta = DEFAULT_REPLAY_WINDOW, public_url: str | None = None, allow_insecure: bool = False, clock: Callable[[], datetime] = lambda: datetime.now(UTC))
 ```
 
 Notify a human system on `APPROVAL_REQUESTED`, and let it answer (SPEC-v0.2 §7).

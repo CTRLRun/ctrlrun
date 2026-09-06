@@ -3,7 +3,7 @@ title: "Threat model"
 description: "What CTRLRun defends against, what it deliberately does not, and the fail-closed rules that follow from both."
 ---
 
-CTRLRun sits in the execution path of consequential actions. This document states what it defends against, what it explicitly does not, and the fail-closed rules that follow. It covers v0.1, v0.2 and v0.3, and grows with the roadmap.
+CTRLRun sits in the execution path of consequential actions. This document states what it defends against, what it explicitly does not, and the fail-closed rules that follow. It covers every shipped version through v0.6, and grows with the roadmap.
 
 ## Assets
 
@@ -99,7 +99,7 @@ cannot see matters more than the feature does, so it is here as well as in
 - **Not whether the policy is the *right* policy.** Verify has no opinion on whether
   `stripe.refund` should be autonomous to €500 or to €5. It is not a linter, it does not score,
   and it never says a configuration is too permissive. A configuration that permits everything
-  and constrains nobody can pass all ten guarantees, because the guarantees are about the
+  and constrains nobody can pass every guarantee in the catalogue, because the guarantees are about the
   kernel doing what it says under that configuration.
 
 And the corollary, stated because a badge invites the opposite reading: **the badge means
@@ -125,7 +125,7 @@ certified, not audited.
 - Single-host reservation only (SQLite). Multi-host needs Postgres (v0.6).
 - Approver identity is free text; no authentication of the approver (v0.3).
 - Receipts are not signed, and they are not signed after v0.6 either. v0.6 adds a **hash chain** (`SPEC-v0.6.md` §6): each receipt carries the hash of the one before it, with `seq` inside the hashed content, so a partial tamper is detected and named — an `UPDATE` on one row, a `DELETE` from the middle, a reordering. What that closes is **alteration that keeps the receipts after it**: changing what receipt *n* says while leaving the rest in place costs a rewrite of all of them plus the head, rather than one statement. **Not a truncation at the end, and not an append.** Two earlier versions of this line claimed the first; a review measured both at **two statements, undetected** — delete the rows and rewind the head, or insert a well-formed row and advance it. The head is a row in the same database as the receipts, so it raises the cost of *forgetting* and not the cost of erasing; an anchor outside the database is what would close that, and v0.6 has none. What it does **not** close is authorship, and it does not close a database admin who can rewrite every row including the chain head: such an adversary recomputes the chain and it verifies. The malicious-administrator line above is unchanged; v0.6 narrows it rather than removing it. Nor does the chain prove that every action wrote a receipt — a receipt whose write failed leaves no gap in `seq` and is invisible to the chain by construction; the events log is where that is reconciled.
-- No reconciliation; AMBIGUOUS always needs a human (v0.2 adds executor `check`).
+- No reconciliation; AMBIGUOUS always needs a human (v0.2 adds the executor `reconcile` hook).
 - The decorator can be bypassed by code that doesn't use it.
 
 ## Known v0.2 limitations

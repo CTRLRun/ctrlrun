@@ -146,7 +146,9 @@ can act on, never as tool results the model would read as text and retry.
 ctrlrun receipts --last 4
 ```
 
-Every `tools/call` has a receipt, refused ones too, named `mcp.ops.<tool>`.
+Every `tools/call` that reaches a decision has a receipt named `mcp.ops.<tool>`, denied ones
+included — which is why four protected calls above leave three receipts and not four: the one
+waiting on a human is not decided yet.
 
 ## When an AMBIGUOUS appears
 

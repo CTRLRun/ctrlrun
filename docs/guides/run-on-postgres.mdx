@@ -44,8 +44,10 @@ same protocol, graded by the same suite as SQLite; what changes is a URL.
     GRANT USAGE, CREATE ON SCHEMA ctrlrun TO ctrlrun;
     ```
 
-    `CREATE` on the schema is what migrations need; a read-only reporting role needs `USAGE`
-    and `SELECT` on the tables, and `ctrlrun receipts --verify-chain` runs fine on it. The
+    `CREATE` on the schema is what migrations need, and it is not optional: the store migrates
+    at open, so **a role without it cannot run the CLI at all** — `ctrlrun receipts
+    --verify-chain` is refused before a receipt is read, naming the missing privilege. A
+    read-only role with `USAGE` and `SELECT` is for your own queries against the tables. The
     database's encoding must be UTF-8; a lossy encoding is refused at open, because a receipt
     that cannot store the argument it records is not a receipt.
   </Step>
@@ -73,8 +75,19 @@ same protocol, graded by the same suite as SQLite; what changes is a URL.
 ## Verify against it
 
 `ctrlrun verify --store-url postgresql://…` runs the guarantee catalogue against a scratch
-schema it creates and drops, never against yours. The store conformance suite,
-`python -m ctrlrun.conformance.store`, grades your database with the same cases SQLite passes.
+schema it creates and drops, never against yours.
+
+The store conformance suite grades your database with the same cases SQLite passes. It is not a
+command — it is a function, because it takes a live backend:
+
+```python
+from ctrlrun.conformance.store import run
+from ctrlrun.conformance.store.backends import PostgresBackend
+
+report = run(PostgresBackend("postgresql://…"))
+print(report.to_text())
+raise SystemExit(0 if report.ok else 1)
+```
 
 ## Throughput
 

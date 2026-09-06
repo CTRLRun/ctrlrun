@@ -8,8 +8,13 @@ description: "Who a grant is addressed to: an agent pattern, a user pattern, or 
 `ctrlrun.Subject` — class, defined at `src/ctrlrun/authority.py:264`
 
 ```python
-class Subject()
-    def __init__(agent: str | None, user: str | None)
+from ctrlrun import Subject
+```
+
+
+```python
+class Subject
+    def __init__(agent: str | None = None, user: str | None = None)
 ```
 
 Who a grant is addressed to: an agent pattern, a user pattern, or both (§4.2).

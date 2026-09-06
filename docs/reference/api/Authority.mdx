@@ -8,8 +8,13 @@ description: "The `authority:` section, loaded and evaluable (SPEC-v0.3 §4)."
 `ctrlrun.Authority` — class, defined at `src/ctrlrun/authority.py:752`
 
 ```python
-class Authority()
-    def __init__(grants: Mapping[str, Grant], max_delegation_depth: int, source: str)
+from ctrlrun import Authority
+```
+
+
+```python
+class Authority
+    def __init__(grants: Mapping[str, Grant], *, max_delegation_depth: int = DEFAULT_MAX_DELEGATION_DEPTH, source: str = '<string>')
 ```
 
 The `authority:` section, loaded and evaluable (SPEC-v0.3 §4).

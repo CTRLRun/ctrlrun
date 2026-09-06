@@ -866,7 +866,15 @@ def _breakdown(counts: Mapping[str, int]) -> list[str]:
     help="Also write a JUnit XML file for CI.",
 )
 @click.option("--only", default="", help="Comma-separated guarantee ids, e.g. G1,G3.")
-@click.option("--store-url", "store_url", default=None, help="Reserved; v0.4 accepts 'sqlite'.")
+@click.option(
+    "--store-url",
+    "store_url",
+    default=None,
+    help=(
+        "The backend to grade against: 'sqlite' (the default) or a postgresql:// URL. "
+        "Verify runs in a scratch store it creates there and never opens yours."
+    ),
+)
 def verify(
     authority_path: Path | None,
     as_json: bool,

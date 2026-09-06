@@ -8,7 +8,12 @@ description: "What the framework's interrupt is handed, and the only thing it is
 `ctrlrun.PendingApproval` — class, defined at `src/ctrlrun/adapter.py:92`
 
 ```python
-class PendingApproval()
+from ctrlrun import PendingApproval
+```
+
+
+```python
+class PendingApproval
     def __init__(request_id: str, action_id: str, action: str, action_hash: str, arguments: Mapping[str, Any], resource: str | None, environment: str, agent: str, user: str | None, created_at: datetime, expires_at: datetime)
 ```
 

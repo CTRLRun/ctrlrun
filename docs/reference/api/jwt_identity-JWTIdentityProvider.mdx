@@ -8,8 +8,15 @@ description: "Verify a bearer JWT and map its verified claims onto a `Principal`
 `ctrlrun.jwt_identity.JWTIdentityProvider` — class, defined at `src/ctrlrun/jwt_identity.py:87`
 
 ```python
-class JWTIdentityProvider()
-    def __init__(jwks_url: str | None, public_key: str | None, secret: str | None, algorithms: Sequence[str], issuer: str, audience: str, token_type: str | None, header: str, agent_claim: str, user_claim: str | None, claim_names: Sequence[str], leeway: timedelta, jwks_min_refresh_interval: timedelta, http_timeout: timedelta, clock: Callable[[], datetime])
+from ctrlrun.jwt_identity import JWTIdentityProvider
+```
+
+Needs the `identity` extra: `pip install "ctrlrun[identity]"`. Importing it without that raises `MissingDependency` carrying the install command.
+
+
+```python
+class JWTIdentityProvider
+    def __init__(*, jwks_url: str | None = None, public_key: str | None = None, secret: str | None = None, algorithms: Sequence[str], issuer: str, audience: str, token_type: str | None, header: str = DEFAULT_HEADER, agent_claim: str = DEFAULT_AGENT_CLAIM, user_claim: str | None = None, claim_names: Sequence[str] = (), leeway: timedelta = DEFAULT_LEEWAY, jwks_min_refresh_interval: timedelta = DEFAULT_JWKS_MIN_REFRESH, http_timeout: timedelta = DEFAULT_HTTP_TIMEOUT, clock: Callable[[], datetime] = _utc_now)
 ```
 
 Verify a bearer JWT and map its verified claims onto a `Principal` (SPEC-v0.3 §3.4).

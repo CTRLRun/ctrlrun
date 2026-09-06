@@ -26,7 +26,7 @@ after     agent  ──▶  CTRLRun gateway  ──▶  MCP server
 - No code changes: the agent and the server are untouched.
 - Works in any language: the gateway fronts an HTTP endpoint.
 - Approvals bound to the exact tool call, arguments included.
-- Every call leaves a receipt, refused ones too.
+- Every call that **reaches a decision** leaves a receipt, denied ones included. A call still waiting on a human has not been decided yet and has none until it is.
 - Measure first with observe mode, in the same policy file.
 
 [The gateway in five minutes](/mcp/gateway-in-5-minutes) is the page for someone who already

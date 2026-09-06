@@ -87,7 +87,20 @@
     var REFUSED = "#f28b82";
 
     function reveal(text) {
+      // The transcript goes inside one block child rather than straight into the <pre>.
+      // Mintlify's theme lays this <pre> out as `display: flex`, and in a flex container every
+      // appended child is a flex item in a *row*: the lines ran off to the right instead of
+      // down, and a coloured refusal landed beside its neighbours rather than under them.
+      // `say` never hit it because it sets a single text node, which is one item however the
+      // box is laid out. The page also asks for `display: block` — belt to this brace, since
+      // an inline style loses to an `!important` rule the theme does not have today.
       output.textContent = "";
+      var body = document.createElement("code");
+      body.style.display = "block";
+      body.style.whiteSpace = "pre";
+      body.style.fontFamily = "inherit";
+      body.style.fontSize = "inherit";
+      output.appendChild(body);
       var lines = text.split("\n");
       return new Promise(function (resolve) {
         var index = 0;
@@ -103,9 +116,15 @@
           } else {
             node = document.createTextNode(line);
           }
-          output.appendChild(node);
-          output.appendChild(document.createTextNode("\n"));
-          output.scrollTop = output.scrollHeight;
+          // Follow the newest line, but only for a reader who is already at the bottom:
+          // yanking somebody back who has scrolled up to re-read scenario 1 is worse than
+          // not following at all. The box has a max height, so this is a real scroll — it
+          // was dead code while the box could only grow, and the reader got a horizontal
+          // scrollbar and a page that got taller instead of a terminal that scrolled.
+          var following = output.scrollHeight - output.scrollTop - output.clientHeight < 40;
+          body.appendChild(node);
+          body.appendChild(document.createTextNode("\n"));
+          if (following) output.scrollTop = output.scrollHeight;
           window.setTimeout(next, line.trim() === "" ? 0 : LINE_MS);
         }
         next();

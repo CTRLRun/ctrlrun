@@ -88,7 +88,7 @@ requirement for the same reason: a self-reported name cannot be an authorization
 - GitHub Action + badge, "CTRLRun verified N/M", where M is **applicable** guarantees. The badge means *declared guarantees pass*, never "this agent is secure."
 - `research/framework-probe/`, outside `src/` and never packaged: what an agent stack does with a lost response when nothing guards the effect. Behaviour, not quality.
 
-Exit: every acceptance test in `SPEC-v0.4.md §8` passes, and every one in v0.1, v0.2 and v0.3 still does. `ctrlrun verify` against `examples/authority/payments.yaml` reports 10/10; against `examples/policies/payments.yaml`, 5/5 with five not applicable — the N/A rule dogfooded rather than described.
+Exit: every acceptance test in `SPEC-v0.4.md §8` passes, and every one in v0.1, v0.2 and v0.3 still does. `ctrlrun verify` against `examples/authority/payments.yaml` reports 11/11; against `examples/policies/payments.yaml`, 6/6 with five not applicable — the N/A rule dogfooded rather than described.
 
 Standards: first mapping doc — `docs/OWASP-AGENTIC-TOP10.md`, each guarantee mapped to the OWASP Top 10 for Agentic Applications entries it mitigates, and the four entries CTRLRun does not address listed by name. A reading of somebody else's taxonomy, and it says so on its first line.
 

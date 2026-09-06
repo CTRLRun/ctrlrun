@@ -113,7 +113,7 @@ accepts `2025-11-25`, `2025-06-18` and `2025-03-26`.
 - No code changes.
 - Any language.
 - Approvals bound to the exact tool call.
-- Every call leaves a receipt.
+- Every call that **reaches a decision** leaves a receipt, denied ones included. A call still waiting on a human has not been decided yet and has none until it is.
 - Measure first: `mode: observe` at the top of the same file.
 
 ## If it didn't work

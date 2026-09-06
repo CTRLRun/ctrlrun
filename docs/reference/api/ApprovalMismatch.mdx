@@ -8,8 +8,13 @@ description: "The presented approval does not authorize this action (SPEC-v0.1 �
 `ctrlrun.ApprovalMismatch` — class, defined at `src/ctrlrun/errors.py:111`
 
 ```python
+from ctrlrun import ApprovalMismatch
+```
+
+
+```python
 class ApprovalMismatch(CTRLRunError)
-    def __init__(message: str | None, reason: str, approval_id: str | None)
+    def __init__(message: str | None = None, *, reason: str, approval_id: str | None = None)
 ```
 
 The presented approval does not authorize this action (SPEC-v0.1 §4.2).

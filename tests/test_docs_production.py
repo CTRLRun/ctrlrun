@@ -458,6 +458,40 @@ def test_the_recorded_readiness_still_matches_what_it_was_measured_from():
         }
 
 
+def test_the_readiness_block_does_not_say_an_unreleased_version_is_on_pypi():
+    """`pyproject.toml` moves at the start of a milestone; PyPI moves at the end of one.
+
+    The block said *"Version 0.6.0, on PyPI"* off `pyproject.toml` alone while the changelog
+    still read `## [0.6.0] - unreleased` and PyPI held 0.5.0 — a false sentence on the README,
+    produced by a generator, which is the one failure a generator exists to prevent. Found by
+    the launch-readiness audit, by fetching the badge and reading what it said.
+    """
+    import sys
+
+    sys.path.insert(0, str(TOOLS))
+    try:
+        import render_readiness
+    finally:
+        sys.path.pop(0)
+
+    recorded = render_readiness.state()
+    assert recorded["released"] == render_readiness.released()
+    line = render_readiness.render("readme", recorded).splitlines()[1]
+
+    if recorded["released"] == recorded["version"]:
+        assert "on [PyPI]" in line, line
+        assert "in development" not in line, line
+    else:
+        assert "is in development" in line, line
+        assert f"has {recorded['released']}" in line, line
+
+    # The control: the line is derived, and dating the changelog entry flips it.
+    dated = dict(recorded, released=recorded["version"])
+    assert "on [PyPI]" in render_readiness.render("readme", dated).splitlines()[1]
+    ahead = dict(recorded, released="0.0.1")
+    assert "is in development" in render_readiness.render("readme", ahead).splitlines()[1]
+
+
 def test_the_not_yet_list_grows_the_week_until_the_week_is_run():
     """The soak's absence is derived, not written down, so it leaves on its own when it is due.
 
