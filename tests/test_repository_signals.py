@@ -125,6 +125,34 @@ def test_the_scorecard_workflow_publishes_and_the_readme_shows_it():
     assert "api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" in readme
 
 
+def test_codeql_analyses_every_pull_request():
+    """Static analysis that runs on a schedule alone reports findings against code that was
+    merged a week ago. This asserts it runs on the pull request, covers the language the
+    project is written in, and can write its findings somewhere a person will see them."""
+    workflow = _workflow("codeql.yml")
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert "pull_request" in triggers, "findings would arrive after the merge"
+    assert "schedule" in triggers, "a new query release should reach old code"
+
+    job = workflow["jobs"]["analyze"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["permissions"]["security-events"] == "write"
+    assert job["timeout-minutes"] <= 30, "an analysis that can hang is a queue nobody clears"
+
+    init = next(s for s in job["steps"] if "codeql-action/init" in str(s.get("uses", "")))
+    assert init["with"]["languages"] == "python"
+    assert "codeql-action/analyze" in "".join(str(s.get("uses", "")) for s in job["steps"])
+
+
+def test_codeql_does_not_gate_a_merge():
+    """Deliberate, and recorded here so it is a decision rather than an oversight: a static
+    analyser's first run on an unfamiliar codebase is a reading list, not a verdict. The
+    required checks stay the three that were already required, and the workflow's own comment
+    says so -- if that changes, this test is where the argument gets rewritten."""
+    workflow = (WORKFLOWS / "codeql.yml").read_text(encoding="utf-8")
+    assert "Nothing here gates a merge" in workflow
+
+
 # --- community files -----------------------------------------------------------------------
 
 

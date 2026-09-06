@@ -1,0 +1,46 @@
+name: CodeQL
+
+# Static analysis on every pull request, so a finding arrives while the change is still being
+# read rather than in a weekly digest nobody opens. `security-and-quality` rather than the
+# default suite: this is a small codebase in the execution path of consequential actions, and
+# the extra queries cost a few minutes that a project this size can afford.
+#
+# Findings land in the repository's code-scanning tab. Nothing here gates a merge -- the
+# required checks stay `check (3.11)`, `check (3.12)` and `package` -- because a static
+# analyser's first run on an unfamiliar codebase is a reading list, not a verdict.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write # to upload the findings to code scanning
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: python
+          # The core is stdlib plus pyyaml and click, and every extra is imported lazily, so
+          # there is nothing to build and nothing to install for the analyser to see the code.
+          build-mode: none
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:python"
