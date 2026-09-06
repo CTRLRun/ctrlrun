@@ -142,6 +142,13 @@ have recovered or retrying work nothing can.
 
 ### Changed
 
+- **`ctrlrun init` writes a `ctrlrun.policy/v2` starter, with an `effect:` on the refund and on
+  the namespace delete.** The starter was a v1 document headed "(v0.1)" with a comment about a
+  feature that "arrives later", six releases on; the first file a new user reads should not be
+  the oldest one in the repository. The actions and decisions are unchanged, so a policy written
+  from the old starter evaluates the same way, and `ctrlrun verify` against the new one exercises
+  the effect guarantees instead of reporting them not applicable.
+
 - **Observe mode no longer spends a presented approval, and that is a change to shipped v0.3
   behaviour.** `_observe_secure` routed a presented approval through the same consuming path
   enforce mode uses, so an operator evaluating a policy in observe mode was silently burning
@@ -206,6 +213,15 @@ have recovered or retrying work nothing can.
   Measured at 38 of 60 concurrent opens succeeding before, 120 of 120 after.
 
 ### Documentation
+
+- **The front door leads somewhere.** The docs home shows `@protect` and a policy before it
+  shows anything else, the capability grid shows the six guarantees and folds the other twenty,
+  the quickstart is titled for what it takes and opens with `pip install`, the cookbook sidebar
+  is grouped the way its index is, and the README puts *Protect your first action* ahead of the
+  problem statement and the release notes, with the long policy and the verify transcripts
+  collapsed. The capability *One effect, once* now reads "happens at most once", which is the
+  hero's phrase and the one the limitations section had been contradicting. The policy reference
+  states the version rule: declare the lowest schema that has every key you use.
 
 - **`docs/SPEC-v0.6.md`** — the v0.6 "Durable runtime" contract, a delta over v0.1–v0.5. No code
   lands with it. It asks one question: *does it still hold when the process dies, the host goes

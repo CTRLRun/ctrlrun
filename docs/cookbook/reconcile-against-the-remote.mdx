@@ -141,6 +141,16 @@ With eager reconciliation it appears and is resolved in the same call. It stays 
 hook answers `"unknown"` or raises, which is the right outcome when the remote itself cannot be
 reached: then a person resolves it, and the hook's failure is in the events.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/reconcile-against-the-remote
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Reconcile automatically](/guides/reconcile-automatically): the three answers and when to run the hook.

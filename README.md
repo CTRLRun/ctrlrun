@@ -47,6 +47,9 @@ an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says 
 pip install ctrlrun && ctrlrun demo
 ```
 
+No Python to hand? [Try it in your browser](https://ctrlrun.dev/try-it) runs the same five
+scenarios on the released wheel, in the tab, with nothing sent anywhere.
+
 ## What `ctrlrun demo` shows
 
 Five ways an agent action goes wrong, and what stops each one, in process, in under a second,
@@ -113,6 +116,56 @@ prints, and a test fails if the two drift apart.
 
 </details>
 
+## Protect your first action
+
+Wrap the call that has the consequence, and let one YAML file say how much autonomy it gets. In
+a directory with a `ctrlrun.yaml` (`ctrlrun init` writes a starter, and the starter already says
+a namespace delete needs a human):
+
+```bash runnable
+ctrlrun init
+```
+
+```python runnable
+import ctrlrun
+
+
+def kubectl(*args: str) -> str:  # stand-in for your real client
+    return " ".join(args)
+
+
+@ctrlrun.protect("k8s.delete_namespace", effect="namespace:{cluster}:{name}")
+def delete_namespace(cluster: str, name: str) -> str:
+    return kubectl("delete", "namespace", name, "--context", cluster)
+
+
+with ctrlrun.context(agent="deploy-agent"):
+    try:
+        delete_namespace(cluster="prod-eu", name="checkout")
+    except ctrlrun.ApprovalRequired as pending:
+        print(f"a human decides:  ctrlrun approve {pending.request_id}")
+    else:
+        raise SystemExit("the delete ran without a human; the policy is not in force")
+```
+
+The human runs `ctrlrun approve <request id>` and the agent calls again inside
+`ctrlrun.with_approval(request_id)`. The approval matches this cluster and this namespace and
+nothing else; `effect` names the consequence, so the same delete from a second worker is refused.
+The same starter file holds a refund by amount, and what it does with one is the rest of the
+product in six lines:
+
+| The agent | CTRLRun |
+|---|---|
+| refunds €100 | runs it; one receipt |
+| refunds €2,000 | `ApprovalRequired`; a human answers `ctrlrun approve <id>` |
+| has €2,000 approved, executes €5,000 | `ApprovalMismatch`: the approval is bound to what the human saw |
+| refunds €20,000 | `ActionDenied`; no request is created |
+| retries a refund whose reply was lost | `AmbiguousEffect`: the remote may have committed; a human or a hook decides |
+| runs the same refund from two workers | one reserves `refund:txn_1`, the other gets `DuplicateEffect` |
+
+[Protect your first action](https://ctrlrun.dev/get-started/quickstart), end to end with the
+outputs · [Try it in your browser](https://ctrlrun.dev/try-it) · [Policy YAML reference](https://ctrlrun.dev/reference/policy-yaml) · [Cookbook](https://ctrlrun.dev/cookbook/index): refunds, deploys, IAM, deletions, email, MCP, each a recipe that runs.
+
 ## The problem
 
 Agents are getting write access to the real world. The hard part is not deciding whether a
@@ -154,28 +207,6 @@ Every protected call, whichever way it arrives, goes through the same six steps:
 6. **Record.** A portable JSON receipt: who, what, decision, approval, effect key, outcome, and
    the hash of the policy that decided it, chained to the receipt before it.
 
-## New in 0.6: the guarantees stop depending on one process
-
-Every guarantee before this release was a guarantee about one process holding one SQLite file.
-`BEGIN IMMEDIATE` is a whole-database write lock on a local file; take the file away, put the
-store on another host, and *one effect, once* has to be re-earned by a different mechanism.
-
-- **Postgres** — `pip install "ctrlrun[postgres]"`, one URL. The same `StateStore` protocol,
-  extended by nothing, graded by the suite written for SQLite rather than one written for it.
-- **Schema migrations**, automatic at open and forward-only, with no flag that opens a database
-  un-migrated. An older binary against a newer schema refuses immediately.
-- **Recovery after a crash** — what a restarted worker may conclude, and what nothing sweeps.
-- **Receipt integrity** — each receipt carries the hash of the one before it, so an edit, a
-  deletion from the middle or a reordering is detected and named by `seq`. It detects
-  **alteration**, which is not authorship: receipts are not signed.
-- **Policy versioning** — every receipt records the policy that decided it, so a receipt from six
-  months ago says what the rules were rather than what they are now.
-- **A store conformance suite**, so a second backend is graded rather than described.
-
-[`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) has the entry, including the two subcommands that
-ride along in this release without being part of the milestone: `ctrlrun scan` and
-`ctrlrun mcp-operator`.
-
 ## Three ways to use it
 
 **You probably do not need an adapter.** `@protect` covers anything running in this process:
@@ -185,36 +216,9 @@ look for an adapter; an adapter buys exactly one thing, and it is described last
 
 ### The decorator
 
-In a directory with a `ctrlrun.yaml` (`ctrlrun init` writes a starter), wrap the call that acts.
-The starter policy already says a namespace delete needs a human:
-
-```bash runnable
-ctrlrun init
-```
-
-```python runnable
-import ctrlrun
-
-
-def kubectl(*args: str) -> str:  # stand-in for your real client
-    return " ".join(args)
-
-
-@ctrlrun.protect("k8s.delete_namespace", effect="namespace:{cluster}:{name}")
-def delete_namespace(cluster: str, name: str) -> str:
-    return kubectl("delete", "namespace", name, "--context", cluster)
-
-
-with ctrlrun.context(agent="deploy-agent"):
-    try:
-        delete_namespace(cluster="prod-eu", name="checkout")
-    except ctrlrun.ApprovalRequired as pending:
-        print(f"a human decides:  ctrlrun approve {pending.request_id}")
-```
-
-The human runs `ctrlrun approve <request id>` and the agent calls again inside
-`ctrlrun.with_approval(request_id)`. The approval matches this cluster and this namespace and
-nothing else; `effect` names the consequence, so the same delete from a second worker is refused.
+Shown above in *Protect your first action*: `@ctrlrun.protect(name, effect=...)` around the call
+that acts, `ctrlrun.context(agent=...)` around the caller, `ctrlrun.with_approval(request_id)`
+to present a grant. It needs nothing beyond `pip install ctrlrun`.
 
 ### The gateway
 
@@ -284,6 +288,9 @@ leaves the building needs a human, money is by amount with both ends bound, and 
 destroys the evidence is not an agent action at any size. Unknown actions are denied; there is
 no default-allow.
 
+<details>
+<summary>The whole file: CRM, Kubernetes, email, IAM, Stripe, the audit log</summary>
+
 ```yaml runnable
 schema: ctrlrun.policy/v2
 
@@ -331,6 +338,8 @@ actions:
     decision: deny
 ```
 
+</details>
+
 Amounts are integer minor units; floats are rejected outright, because `0.1` and `0.10` are the
 same money and different hashes. The policy cannot see who is asking — deliberately, since v0.1:
 `agent_eq` and every other principal-addressing condition is refused at load. Who may ask is
@@ -358,6 +367,9 @@ What you deploy is *your* policy, *your* grants and *your* store, so `ctrlrun ve
 kernel's own failure scenarios against the configuration in front of it, in a scratch store,
 with fake executors, and no network. Your `.ctrlrun/state.db` is byte-identical before and after.
 
+<details>
+<summary><code>ctrlrun verify</code> against a policy with approvals, effects and grants: 11/11</summary>
+
 ```console
 $ ctrlrun verify
 CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
@@ -380,11 +392,16 @@ G11  an altered receipt is detected   PASS  stripe.refund
 11/11 declared guarantees pass. 0 not applicable.
 ```
 
+</details>
+
 **Not applicable is not a pass.** A policy with no `approve` rule cannot exercise the
 approval-binding guarantees, and one with no `effect:` templates cannot exercise the effect
 guarantees, so each is reported `N/A` with the reason, excluded from the denominator and listed
 separately: `6/6 (5 not applicable)`, never `11/11`. There is no flag that folds one into the
 count. The same command against a `ctrlrun.policy/v1` document with no templates and no grants:
+
+<details>
+<summary>The same command against a v1 policy with no templates and no grants: 6/6, five N/A</summary>
 
 ```console
 $ CTRLRUN_CONFIG=examples/policies/payments.yaml ctrlrun verify
@@ -410,6 +427,8 @@ G11  an altered receipt is detected   PASS  invoice.read
 6/6 declared guarantees pass. 5 not applicable: G3, G4, G5, G8, G9.
 ```
 
+</details>
+
 The badge at the top of this page means the **declared guarantees pass**: every guarantee this
 configuration can exercise was exercised, and none failed. It does not mean secure, safe,
 compliant, certified or audited, and [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
@@ -431,7 +450,7 @@ The six guarantees, and which of the three ways in carries each:
 | Guarantee | `@protect` | Gateway | Adapter |
 |---|---|---|---|
 | **Approval binding** — An approval is bound to the exact action; a mutated or replayed one is refused. | yes | yes | prevention or attribution, per adapter |
-| **One effect, once** — One logical effect executes once, across threads, processes and hosts. | yes | yes | yes |
+| **One effect, once** — One logical effect happens at most once, across threads, processes and hosts. | yes | yes | yes |
 | **Unknown is not failed** — An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. | yes | yes | yes |
 | **Fail closed** — An unknown action, a missing policy or a missing principal is denied. | yes | yes | yes |
 | **Authority and delegation** — With authority on, every principal needs a grant, and delegation cannot widen one. | yes | yes | yes |
@@ -547,6 +566,28 @@ SQLite. Choose by how many machines write, not by how serious you are.
 choosing a store, what reservation does under a lost `COMMIT`, migrations, recovery after a
 crash, the receipt chain, the soak, and what to watch once it is running.
 
+### Beyond one process
+
+Every guarantee before 0.6 was a guarantee about one process holding one SQLite file.
+`BEGIN IMMEDIATE` is a whole-database write lock on a local file; take the file away, put the
+store on another host, and *one effect, once* has to be re-earned by a different mechanism.
+
+- **Postgres** — `pip install "ctrlrun[postgres]"`, one URL. The same `StateStore` protocol,
+  extended by nothing, graded by the suite written for SQLite rather than one written for it.
+- **Schema migrations**, automatic at open and forward-only, with no flag that opens a database
+  un-migrated. An older binary against a newer schema refuses immediately.
+- **Recovery after a crash** — what a restarted worker may conclude, and what nothing sweeps.
+- **Receipt integrity** — each receipt carries the hash of the one before it, so an edit, a
+  deletion from the middle or a reordering is detected and named by `seq`. It detects
+  **alteration**, which is not authorship: receipts are not signed.
+- **Policy versioning** — every receipt records the policy that decided it, so a receipt from six
+  months ago says what the rules were rather than what they are now.
+- **A store conformance suite**, so a second backend is graded rather than described.
+
+[`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) has the entry, including the two subcommands that
+ride along in this release without being part of the milestone: `ctrlrun scan` and
+`ctrlrun mcp-operator`.
+
 ## Documentation
 
 **[ctrlrun.dev](https://ctrlrun.dev)** is the documentation: concepts, guides, a
@@ -554,7 +595,7 @@ cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no ins
 
 | Section | Where |
 |---|---|
-| Start here | [Why](https://ctrlrun.dev/why) · [60-second quickstart](https://ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/try-it) |
+| Start here | [Why](https://ctrlrun.dev/why) · [Protect your first action](https://ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/try-it) |
 | The ideas | [Concepts](https://ctrlrun.dev/concepts/outcomes-and-ambiguous) |
 | Doing something | [Guides](https://ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/cookbook/index) |
 | Running it for real | [Production](https://ctrlrun.dev/production/index) · [Postgres](https://ctrlrun.dev/production/postgres) · [Recovery](https://ctrlrun.dev/production/recovery) · [Operations](https://ctrlrun.dev/production/operations) |

@@ -119,6 +119,16 @@ An SMTP submission that timed out may have been accepted. Check the provider's m
 `m_N`, then `ctrlrun resolve email:m_N --committed` or `--failed`. The effect key is the message
 id, so a resend of the same message is one effect and a new message is a new one.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/outbound-email-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A customer-notification agent](/cookbook/customer-notification-agent).

@@ -120,6 +120,16 @@ Query the migrations table in the database itself: if `0043` is recorded,
 `ctrlrun resolve migration:staging:0043 --committed`; if not, `--failed`, and the agent's next
 attempt runs. A `reconcile` hook that runs that query is the automatic form.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/database-migration-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A deploy agent](/cookbook/deploy-agent).

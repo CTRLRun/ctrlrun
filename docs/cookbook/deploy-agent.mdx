@@ -123,6 +123,16 @@ because it never runs. The duplicate restart is `allow/blocked` on `restart:prod
 manifest's hash, so a re-apply of the same manifest is the same effect and a changed manifest is
 a new one, which is what you want.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/deploy-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A database-migration agent](/cookbook/database-migration-agent).

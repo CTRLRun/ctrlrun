@@ -111,6 +111,16 @@ for the customer, then `ctrlrun resolve notify:inc_7:c_N --committed` or `--fail
 provider accepts an idempotency key, pass the effect key as it, and the resolution is nearly
 always `--committed`.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/customer-notification-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [An outbound-email agent](/cookbook/outbound-email-agent).

@@ -120,6 +120,16 @@ This recipe is what to do. Two rules: never resolve from memory or from a cache,
 remote; and resolve `--failed` only when the remote is authoritative for the absence, because
 `--failed` licenses a second execution.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/resolve-an-ambiguous-effect
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Reconcile against the remote](/cookbook/reconcile-against-the-remote): the same answer from a hook.

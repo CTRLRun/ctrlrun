@@ -126,6 +126,16 @@ lost, the effect is `AMBIGUOUS` and the approval is already spent: resolve the e
 `ctrlrun resolve refund:txn_5 --committed` or `--failed`. On `--failed` a retry needs a new
 approval, because the old one authorized one execution.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/slack-approvals
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Approve in Slack](/guides/approvals-in-slack): the outbound half, the payload and the flags.

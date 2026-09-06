@@ -121,6 +121,16 @@ Stripe dashboard, then `ctrlrun resolve refund:txn_N --committed` or `--failed`.
 hook that queries `stripe.Refund.list(payment_intent=...)` does the same automatically:
 [Reconcile against the remote](/cookbook/reconcile-against-the-remote).
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/refund-agent
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A payout agent with maker/checker](/cookbook/payout-maker-checker): the same money, two people.

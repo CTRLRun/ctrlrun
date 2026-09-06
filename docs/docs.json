@@ -54,13 +54,13 @@
             "pages": [
               "production/index",
               "production/postgres",
+              "postgres",
               "production/how-reservation-works",
               "production/migrations",
               "production/recovery",
               "production/receipt-integrity",
               "production/soak",
-              "production/operations",
-              "postgres"
+              "production/operations"
             ]
           },
           {
@@ -106,27 +106,67 @@
             "group": "Cookbook",
             "pages": [
               "cookbook/index",
-              "cookbook/credential-rotation-agent",
-              "cookbook/crm-update-agent",
-              "cookbook/customer-notification-agent",
-              "cookbook/data-deletion-agent",
-              "cookbook/database-migration-agent",
-              "cookbook/deploy-agent",
-              "cookbook/iam-agent",
-              "cookbook/langgraph-interrupt",
-              "cookbook/manager-and-worker",
-              "cookbook/observe-then-enforce",
-              "cookbook/openai-agents-tool-approval",
-              "cookbook/outbound-email-agent",
-              "cookbook/payout-maker-checker",
-              "cookbook/protect-an-mcp-server",
-              "cookbook/receipts-to-opentelemetry",
-              "cookbook/reconcile-against-the-remote",
-              "cookbook/refund-agent",
-              "cookbook/resolve-an-ambiguous-effect",
-              "cookbook/slack-approvals",
-              "cookbook/sqlite-to-postgres",
-              "cookbook/verify-in-github-actions"
+              {
+                "group": "Money",
+                "pages": [
+                  "cookbook/refund-agent",
+                  "cookbook/payout-maker-checker"
+                ]
+              },
+              {
+                "group": "Infrastructure",
+                "pages": [
+                  "cookbook/deploy-agent",
+                  "cookbook/database-migration-agent"
+                ]
+              },
+              {
+                "group": "Permissions",
+                "pages": [
+                  "cookbook/iam-agent",
+                  "cookbook/credential-rotation-agent"
+                ]
+              },
+              {
+                "group": "Records",
+                "pages": [
+                  "cookbook/crm-update-agent",
+                  "cookbook/data-deletion-agent"
+                ]
+              },
+              {
+                "group": "Communications",
+                "pages": [
+                  "cookbook/outbound-email-agent",
+                  "cookbook/customer-notification-agent"
+                ]
+              },
+              {
+                "group": "Multi-agent",
+                "pages": [
+                  "cookbook/manager-and-worker"
+                ]
+              },
+              {
+                "group": "Integrations",
+                "pages": [
+                  "cookbook/protect-an-mcp-server",
+                  "cookbook/langgraph-interrupt",
+                  "cookbook/openai-agents-tool-approval",
+                  "cookbook/slack-approvals",
+                  "cookbook/receipts-to-opentelemetry"
+                ]
+              },
+              {
+                "group": "Operations",
+                "pages": [
+                  "cookbook/observe-then-enforce",
+                  "cookbook/resolve-an-ambiguous-effect",
+                  "cookbook/reconcile-against-the-remote",
+                  "cookbook/verify-in-github-actions",
+                  "cookbook/sqlite-to-postgres"
+                ]
+              }
             ],
             "expanded": false
           },

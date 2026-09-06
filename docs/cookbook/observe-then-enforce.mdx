@@ -120,6 +120,16 @@ and the record is written. What differs is that observe mode records that a retr
 been refused and lets it run, so resolve the effect before switching to enforce, or the first
 enforced retry is refused.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/observe-then-enforce
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Roll out observe, then enforce](/guides/observe-to-enforce): the week, the numbers and the switch.

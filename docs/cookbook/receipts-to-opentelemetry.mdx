@@ -112,6 +112,16 @@ The span's status is `ERROR` and its result attribute is `ambiguous`, which is t
 build: a span whose result is ambiguous is an effect waiting for `ctrlrun resolve`. The
 resolution is a later event, not a change to the span.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/receipts-to-opentelemetry
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [Export to OpenTelemetry](/guides/export-to-opentelemetry): the OTLP exporter and the gateway's `--otel`.

@@ -195,6 +195,16 @@ and a denial there never leaves a pending request.
 A payout whose confirmation was lost is `AMBIGUOUS`. Ask the bank by reference, then
 `ctrlrun resolve payout:ops-eu:inv-N --committed` or `--failed`. Never re-send on a guess.
 
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/payout-maker-checker
+pip install ctrlrun && python main.py
+```
+
 ## Next
 
 - [A manager agent delegating to a worker](/cookbook/manager-and-worker).
