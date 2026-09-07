@@ -24,6 +24,8 @@
 .cr-site .cr-button { display:inline-flex; justify-content:center; align-items:center; gap:28px; min-height:46px; padding:10px 18px; border:1px solid var(--cr-ink); border-radius:5px; background:var(--cr-ink); color:var(--cr-paper); font-size:13px; line-height:1.5; font-weight:600; text-decoration:none; transition:opacity .15s; }
 .cr-site .cr-button:hover { opacity:.8; }
 .cr-site .cr-secondary { color:var(--cr-ink); background:transparent; border-color:var(--cr-line); }
+.cr-site .cr-github-badge { gap:10px; color:var(--cr-accent); background:var(--cr-panel); border-color:var(--cr-accent); }
+.cr-github-badge svg { flex-shrink:0; }
 .cr-site .cr-caption { font-size:12px; line-height:1.7; color:var(--cr-muted); }
 .cr-boundary { display:grid; grid-template-columns:1fr 40px 1.3fr 40px 1fr; gap:15px; align-items:center; padding:28px 32px; background:var(--cr-paper); border-top:1px solid var(--cr-line); border-bottom:1px solid var(--cr-line); }
 .cr-boundary-node { display:flex; flex-direction:column; gap:8px; }
