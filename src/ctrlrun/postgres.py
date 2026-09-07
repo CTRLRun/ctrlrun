@@ -602,7 +602,14 @@ class PostgresStateStore:
             if effect_key is None or plan.reservation is None:
                 raise
             if plan.renews:
-                self._resolve_lost_renewal(effect_key, plan.reservation, now, lease)
+                self._resolve_lost_renewal(
+                    effect_key,
+                    plan.reservation,
+                    now,
+                    approval_id=approval_id,
+                    action_hash=action_hash,
+                    lease=lease,
+                )
             else:
                 self._resolve_lost_insert(
                     effect_key,
@@ -615,7 +622,14 @@ class PostgresStateStore:
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
     def _resolve_lost_renewal(
-        self, effect_key: str, reservation: Reservation, now: datetime, lease: timedelta
+        self,
+        effect_key: str,
+        reservation: Reservation,
+        now: datetime,
+        *,
+        approval_id: str | None,
+        action_hash: str | None,
+        lease: timedelta,
     ) -> None:
         """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`.
 
@@ -635,9 +649,17 @@ class PostgresStateStore:
             _took(A2_LANDED, effect_key)
             return  # the commit landed
         if found.state is EffectState.FAILED:
+            # Re-issue the SAME operation, approval included. Passing `None, None` here was the
+            # double-spend `_resolve_lost_insert`'s comment describes, in the branch that
+            # comment was not applied to: the effect was renewed, the caller was handed an
+            # `Approval` by the `return` at the end of `consume_approval_and_reserve` and
+            # executed on it, and the `approvals` row stayed `granted` with `consumed_at NULL`
+            # -- so `find_granted_approval` handed the same human "yes" out again for a
+            # different effect key. `v0.1 §4.2 A2` is that an approval is single-use and
+            # consumed atomically with the reservation; this failed it open.
             _took(A2_REISSUE, effect_key)
             self._authorize_and_reserve(
-                None, None, effect_key, reservation.action_id, lease, retrying=True
+                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
             return
         _took(A2_REFUSE, effect_key)
