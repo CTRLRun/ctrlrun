@@ -1,29 +1,12 @@
 ---
 title: "Try it in your browser"
 description: "Break a protected agent action with no install: real Python and the released ctrlrun wheel run in this tab, and every refusal you see is CTRLRun's own."
+mode: "wide"
 ---
 
-Real Python and the released `ctrlrun` wheel from PyPI load into this tab. Below is one
-protected refund under one policy, with a fake Stripe that commits before its reply can go
+One protected refund, under one policy, with a fake Stripe that commits before its reply can go
 missing. Change the amount, lose the reply, approve one amount and execute another, and read
-what CTRLRun did. Every line in the box was produced by `ctrlrun` here: the page owns the
-controls and nothing else. Nothing is sent anywhere; the store is in memory and no socket is
-opened.
-
-The policy the refund runs under, in cents:
-
-```yaml
-schema: ctrlrun.policy/v2
-actions:
-  stripe.refund:
-    effect: "refund:{payment_id}"
-    rules:
-      - when: { amount_gte: 0, amount_lte: 100000 }
-        decision: allow
-      - when: { amount_gte: 0, amount_lte: 1000000 }
-        decision: approve
-      - decision: deny
-```
+what refused you.
 
 <div id="ctrlrun-playground">
   <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "flex-end" }}>
@@ -90,6 +73,24 @@ actions:
 Press Refund. The first press downloads about 10 MB of Python; after that the browser caches it.
   </pre>
 </div>
+
+Real Python and the released `ctrlrun` wheel from PyPI load into this tab. Every line in the box
+was produced by `ctrlrun` here: the page owns the controls and nothing else. Nothing is sent
+anywhere; the store is in memory and no socket is opened. The policy the refund runs under, in
+cents:
+
+```yaml
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 1000000 }
+        decision: approve
+      - decision: deny
+```
 
 ## Try this, in order
 
