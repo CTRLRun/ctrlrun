@@ -199,14 +199,30 @@ among and contradicted by.
 
 Standards: none new.
 
-## v0.7 — Multi-agent
+## v0.7 — Execution boundary
+
+Every guarantee shipped so far is a guarantee about what happens *inside* CTRLRun. But the kernel does not decide whether the remote side acted — an executor does, by raising `NotExecuted` or not. It does not own the clock its leases are measured against, once the store is on another host. It does not know whether the world still looks the way it did when a human said yes. v0.7 asks what the kernel owes at each of those edges.
+
+- **A transport classifier in core.** `FAILED` versus `AMBIGUOUS` is the one decision this project exists to get right, and the kernel does not make it — the user's executor does. The correct rule is already written and already implemented, in the gateway's `outcome.py`: the connection was never established, or the peer said in band and before dispatch that it rejected the request; everything after the first byte is `AMBIGUOUS`. It is reachable today only by installing `ctrlrun[gateway]`, while `@protect` — the surface the README leads with — gets a docstring. One rule, one implementation, reachable from core.
+- **Clock-skew detection.** v0.6 moved the store to another host so several hosts could share it; lease liveness stayed on the application clock. Skew is fail-closed and therefore quiet — a host running ahead marks a live reservation `AMBIGUOUS` while its real holder is mid-flight and about to succeed, and nothing names the cause. This makes divergence observable. It does not change how a lease is evaluated.
+- **A provider idempotency token**, derived from the effect key *and the attempt number*. Derived from the effect key alone it would be stable across v0.1 §5.4's renewal, and a provider would replay its cached failure for the one retry the kernel permits precisely because the executor proved nothing happened. Its main value is a deterministic handle for reconciliation to observe with — not a licence for anything to act twice.
+- **A ceiling on renewal after `FAILED`.** There is none today: one human approval plus an executor that always reports "nothing happened" is unlimited dispatches, each recorded as an ordinary retry. An operator-set policy key, and an amendment to §5.4 written as an amendment.
+- **Precondition fingerprints.** An approval binds to an action hash and an expiry, and to nothing about the world it was granted against. A human approves a deletion when the balance is zero; thirty minutes later it is not, and the action hash has not moved. The operator supplies a fingerprint, it is hashed through the canonicalizer so raw resource state never reaches a receipt, and it is rechecked before the reservation. **It narrows the window between decision and execution; it does not close it** — the recheck cannot run inside the atomic reservation write, so a residual gap remains, and that sentence appears wherever the feature does.
+
+Exit: a classifier that observes rather than infers, with a test that writes a byte, kills the peer and asserts `AMBIGUOUS`; a skew detector with a positive control that stays silent when the clocks agree; a token that provably changes across a renewal; and the precondition recheck documented as narrowing everywhere it is described.
+
+**A2A moved from v0.7 to v0.8 on 2026-09-08, and the reason is recorded here rather than made silently**, on the rule this file already follows for the v0.6 receipt-integrity line and the soak criterion. Multi-agent authority propagation builds on a kernel whose executor boundary is sound. Three of the five items above are weaknesses in guarantees the project already sells — the classifier most of all — and shipping a hop-counting authority model on top of an outcome mapping the primary surface leaves undefended would be building the next floor before the joists. Nothing about A2A changed; only its position.
+
+Standards: none new.
+
+## v0.8 — Multi-agent
 
 - A2A integration: task-bound delegated authority with limits, expiry, and depth.
 - Authority propagation across agent hops.
 
 Standards: none new.
 
-## v0.8–0.9 — Hardening
+## v0.9 — Hardening
 
 Fuzzing, property tests, concurrency stress, failure injection, benchmarks, external security review, upgrade testing, compatibility guarantees, CodeQL/SAST/SBOM/signed artifacts.
 
