@@ -1,7 +1,6 @@
 name: CTRLRun verify
 description: >-
-  Run CTRLRun's declared guarantees against your policy and grants, and report what passed,
-  what failed, and what could not be tested at all.
+  Run CTRLRun's declared guarantees against your policy and grants, and report what passed, failed, or was not applicable.
 author: CTRLRun
 
 branding:
