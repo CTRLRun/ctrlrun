@@ -1,0 +1,65 @@
+---
+title: "Cookbook"
+description: "One recipe per real situation: the policy, the code with a fake remote, what the agent sees when refused or asked, the receipt."
+---
+
+Each recipe is a situation an agent is put in, across money, infrastructure, permissions,
+records and communications, and shows the policy, the code against a stand-in remote, what the
+agent sees when it is refused or asked, the receipt, and what to do when an effect's outcome is
+unknown. Every runnable block runs offline in this repository's CI, and every recipe with code
+is also a directory under `examples/cookbook/` extracted from its page. To run one instead of
+reading it:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/refund-agent
+pip install ctrlrun && python main.py
+```
+
+## Money
+
+- [A refund agent with amount tiers](/docs/cookbook/refund-agent)
+- [A payout agent with maker/checker via delegation](/docs/cookbook/payout-maker-checker)
+
+## Infrastructure
+
+- [A deploy agent](/docs/cookbook/deploy-agent)
+- [A database-migration agent](/docs/cookbook/database-migration-agent)
+
+## Permissions
+
+- [An IAM agent that can grant read but never admin](/docs/cookbook/iam-agent)
+- [A credential-rotation agent](/docs/cookbook/credential-rotation-agent)
+
+## Records
+
+- [A CRM-update agent](/docs/cookbook/crm-update-agent)
+- [A data-deletion agent under a retention rule](/docs/cookbook/data-deletion-agent)
+
+## Communications
+
+- [An outbound-email agent with external-recipient approval](/docs/cookbook/outbound-email-agent)
+- [A customer-notification agent](/docs/cookbook/customer-notification-agent)
+
+## Multi-agent
+
+- [A manager agent delegating bounded authority to a worker](/docs/cookbook/manager-and-worker)
+
+## Integrations
+
+- [Protect an existing MCP server in five minutes](/docs/cookbook/protect-an-mcp-server)
+- [LangGraph with interrupt()](/docs/cookbook/langgraph-interrupt)
+- [OpenAI Agents SDK tool approval](/docs/cookbook/openai-agents-tool-approval)
+- [Approvals in Slack via webhook](/docs/cookbook/slack-approvals)
+- [Receipts into OpenTelemetry](/docs/cookbook/receipts-to-opentelemetry)
+
+## Operations
+
+- [Observe for a week, then enforce](/docs/cookbook/observe-then-enforce)
+- [Resolve an ambiguous effect](/docs/cookbook/resolve-an-ambiguous-effect)
+- [Reconcile against Stripe or Kubernetes automatically](/docs/cookbook/reconcile-against-the-remote)
+- [Run verify in GitHub Actions](/docs/cookbook/verify-in-github-actions)
+- [Move from SQLite to Postgres](/docs/cookbook/sqlite-to-postgres)
+
+## Next
+
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

@@ -1,0 +1,104 @@
+---
+title: "Outcomes and AMBIGUOUS"
+description: "An executed action ends COMMITTED, FAILED or AMBIGUOUS. Only NotExecuted, raised by the executor, means FAILED."
+---
+
+An outcome is what CTRLRun knows about the consequence after the executor returns or raises,
+and there are three: `COMMITTED`, the remote did it; `FAILED`, the remote definitely did not;
+and `AMBIGUOUS`, nobody knows. A timeout is not a failure. A lost reply is not a failure. An
+exception nobody expected is not a failure. All three are `AMBIGUOUS`, and an `AMBIGUOUS` effect
+blocks a blind retry.
+
+This is the idea that explains the product. Every framework has two outcomes, success and
+error, and retries on error. The real world has a third, and it is where double execution lives.
+
+## The asymmetry
+
+| The executor | The outcome | Why |
+|---|---|---|
+| returns | `COMMITTED` | the remote answered |
+| raises `NotExecuted` | `FAILED` | the executor is asserting the remote did nothing, and only it can know |
+| raises anything else | `AMBIGUOUS` | a `TimeoutError`, a `ConnectionResetError`, a `KeyError` in the response parser: none of them says what the remote did |
+| never returns (worker died) | `AMBIGUOUS` when the lease lapses | the key is never released, because the dead worker may have acted |
+
+`NotExecuted` is the one exception that makes an effect retryable, which makes it the most
+dangerous line in an integration: an executor that raises it after the remote acted has turned
+the guarantee into a licence to act twice. `ctrlrun verify` cannot check that for you. Raise it
+only where the remote told you, in band, that it rejected the request before doing anything.
+
+## What the lost reply looks like
+
+```python runnable
+import ctrlrun
+from ctrlrun import Control, InMemoryStateStore, Policy
+
+policy = Policy.from_yaml("""
+schema: ctrlrun.policy/v2
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+""")
+control = Control(policy, InMemoryStateStore())
+calls: list[str] = []
+
+
+@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}", control=control)
+def refund(payment_id: str, amount: int) -> dict:
+    calls.append(payment_id)                      # the money has moved by now
+    raise TimeoutError("no response from api.stripe.com after 30s")
+
+
+with ctrlrun.context(agent="refund-agent"):
+    try:
+        refund(payment_id="txn_1", amount=50000)
+    except TimeoutError:
+        pass                                      # the agent's framework sees an error and retries
+    try:
+        refund(payment_id="txn_1", amount=50000)
+    except ctrlrun.AmbiguousEffect as blocked:
+        print("retry refused:", blocked)
+    else:
+        raise SystemExit("the retry ran; the customer was refunded twice")
+
+print("remote refund calls:", len(calls))
+```
+
+```text
+retry refused: effect refund:txn_1 is ambiguous ...
+remote refund calls: 1
+```
+
+## Who moves it on
+
+Exactly two things move a record out of `AMBIGUOUS`, and both have to say which way:
+
+- **A human**, with `ctrlrun resolve refund:txn_1 --committed` or `--failed`, after asking the
+  remote. The **effect record** keeps `cli:local` in `resolved_by`, and an `EFFECT_RESOLVED`
+  event carries the same string. No receipt changes: a receipt is written when the action ends,
+  a resolution happens afterwards, and editing one would be an alteration the chain reports.
+- **A reconcile hook**, `@protect(..., reconcile=...)`, a function that asks the remote what
+  happened to an effect key and answers committed, not executed, or unknown. It moves the
+  record only in the direction its answer points, and an answer of unknown leaves it where it
+  was.
+
+Nothing sweeps. A process restarting reads the state and repairs nothing; an expired lease is
+reported as expired and transitions nothing. The Postgres store applies the same rule to itself:
+a connection lost during `COMMIT` is `AMBIGUOUS` until the store re-reads the row.
+
+## The guarantee it supports
+
+Unknown is not failed: G5 (ambiguous blocks a blind retry) and G10 (unknown exception is
+ambiguous) in `ctrlrun verify`.
+
+## What it does not do
+
+CTRLRun cannot find out what the remote did. It refuses to guess, and it makes the question
+impossible to skip. It also cannot tell that an executor lied with `NotExecuted`; that is the
+integration bug the threat model names as the most dangerous one available.
+
+## Next
+
+- [Resolve an AMBIGUOUS effect](/docs/guides/resolve-an-ambiguous-effect).
+- [Reconcile automatically](/docs/guides/reconcile-automatically).
+- [Effect keys](/docs/concepts/effect-keys) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

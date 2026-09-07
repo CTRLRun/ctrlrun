@@ -11,3 +11,7 @@ assets/
 # words written for somebody building against the kernel, and they stay public on GitHub.
 # docs/architecture/specifications.mdx links to each one.
 SPEC-v*.md
+
+# Implementation specifications remain linked on GitHub, outside the reader-facing site.
+SPEC-mcp-operator.md
+SPEC-scan.md

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Re-derive every line number in `docs/CLAIMS.md` from the code it cites.
+"""Re-derive every line number in `docs/docs/CLAIMS.md` from the code it cites.
 
 The table cites `file.py:NNN`, and `test_the_claims_table_line_numbers_point_at_what_they_name`
 requires the cited line to be where a named symbol is **defined**. Every commit that shifts a
@@ -38,7 +38,7 @@ from claims import citations  # noqa: E402  — the path above is what makes it 
 
 
 def main() -> int:
-    claims = ROOT / "docs" / "CLAIMS.md"
+    claims = ROOT / "docs" / "docs" / "CLAIMS.md"
     rows = claims.read_text(encoding="utf-8").splitlines(keepends=True)
     unresolved: list[str] = []
     repointed = 0

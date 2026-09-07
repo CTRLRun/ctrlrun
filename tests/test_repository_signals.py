@@ -174,7 +174,7 @@ def test_the_community_files_exist_and_say_what_they_must():
         "scripts/check.sh",
         "Specification first",
         "mutation-tested",
-        "docs/CLAIMS.md",
+        "docs/docs/CLAIMS.md",
         "tools/docs_audit",
         "trusted publishing",
     ):
@@ -231,11 +231,11 @@ def test_the_citation_names_the_repository_the_version_and_the_tagline():
 
 
 def test_how_this_is_built_states_the_review_gap_and_the_tooling_once():
-    page = (REPO_ROOT / "docs" / "how-this-is-built.md").read_text(encoding="utf-8")
+    page = (REPO_ROOT / "docs" / "docs" / "how-this-is-built.md").read_text(encoding="utf-8")
     assert "no external security audit" in page
     assert 1 <= page.count("AI coding agents") <= 3, "stated plainly, not hyped"
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "docs/how-this-is-built.md" in readme
+    assert "docs/docs/how-this-is-built.md" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in (
         REPO_ROOT / "SECURITY.md"

@@ -3,7 +3,7 @@
 - **4,404 tests**, every version specified before it was written and every requirement mutation-tested.
 - **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/production/soak).
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/docs/production/soak).
 - **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
 - **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
 

@@ -1,0 +1,58 @@
+---
+title: "Exit codes"
+description: "What each ctrlrun command's exit status means: 0 done, 1 a refusal or a failed guarantee, 2 a usage error or an unusable configuration."
+---
+
+Every `ctrlrun` command exits 0 when it did what it was asked, 1 when CTRLRun refused
+(a `CTRLRunError`, printed as one line), and 2 on a usage error. `ctrlrun verify` adds a third
+code for its own failure, because a verifier that crashed must not look like one that refused.
+
+## Every command
+
+| Code | Meaning | Examples |
+|---|---|---|
+| `0` | the command did what it was asked | a grant written, a receipt printed, a revocation applied (revoking an already-revoked delegation is idempotent and exits 0) |
+| `1` | CTRLRun refused, and said why on one line | `resolve` on an effect that is not `AMBIGUOUS`; `approve` on a request that expired; `delegate` beyond the parent's grant; a `--store-url` naming a database this binary does not recognise |
+| `2` | the command line was wrong | a missing argument, an unknown option, `resolve` without exactly one of `--committed` and `--failed` |
+
+A refusal is the command's exit code and its last line. Nothing is retried on the operator's
+behalf and nothing is written on a refusal.
+
+## `ctrlrun verify`
+
+| Code | Meaning |
+|---|---|
+| `0` | every applicable guarantee passed and at least one was applicable |
+| `1` | a guarantee `FAILED` |
+| `2` | the configuration was refused or is unusable — which includes `mode: observe` and a configuration in which nothing could be exercised |
+| `3` | an internal error in verify itself |
+
+Not applicable never changes the code by itself, and zero applicable guarantees is exit 2, never
+0: `0/0` reported as success is the same false green as `8/8` with five N/As. A partial run
+(`--only`) writes no badge. The GitHub Action fails the job on any code but 0 and carries the
+code through as an output.
+
+## `ctrlrun scan`
+
+| Code | Meaning |
+|---|---|
+| `0` | the scan ran and found nothing of any kind |
+| `1` | it found a finding, a suppressed finding, or a call whose name it could not resolve |
+| `2` | it could not run: the path is not a directory, it holds no Python file, the policy will not load |
+
+A file that will not parse is exit `1` and not `2` — the scan ran, and the file is a finding. A
+suppressed finding keeps the code at `1`, because annotating a finding does not change the code
+it points at, and there is no flag that turns `1` into `0`.
+
+## `ctrlrun gateway`
+
+The gateway runs until it is stopped. It exits 2 before listening when its configuration is
+refused: a non-loopback `--listen` without `--allow-remote`, an `http://` webhook without
+`--allow-insecure-webhook`, a JWT option set without the identity extra, or a policy that will
+not load.
+
+## Next
+
+- [CLI reference](/docs/reference/cli).
+- [Errors](/docs/reference/errors): the exception behind each exit 1.
+- [Verify in CI](/docs/guides/verify-in-ci) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

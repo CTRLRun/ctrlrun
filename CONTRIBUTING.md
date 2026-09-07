@@ -103,7 +103,7 @@ mutants (say so in the table instead of claiming to have closed one).
 
 ## Every claim maps to a test
 
-`docs/CLAIMS.md` maps every sentence in the README to the code that implements it and the
+`docs/docs/CLAIMS.md` maps every sentence in the README to the code that implements it and the
 test that proves it. A sentence with no row is cut. A row whose test disappears takes its
 sentence with it in the same commit. A test resolves every `file.py:NNN` in the table against
 the line it cites and fails if the named symbol is not on it.

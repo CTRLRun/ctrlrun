@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Every addition answers one question first: *does this improve control or correctness of an agent action that can affect the real world?* If it helps a model think, improves prompts, stores memory, retrieves documents, chooses models or visualises traces, it belongs somewhere else. `docs/ROADMAP.md` lists what is planned and `VISION.md` what is not a build spec.
+        Every addition answers one question first: *does this improve control or correctness of an agent action that can affect the real world?* If it helps a model think, improves prompts, stores memory, retrieves documents, chooses models or visualises traces, it belongs somewhere else. `docs/docs/ROADMAP.md` lists what is planned and `VISION.md` what is not a build spec.
   - type: dropdown
     id: guarantee
     attributes:

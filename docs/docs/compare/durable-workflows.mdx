@@ -1,0 +1,56 @@
+---
+title: "CTRLRun and durable workflow engines"
+sidebarTitle: "vs durable workflows"
+description: "A workflow engine makes a workflow finish, retrying until it succeeds. CTRLRun decides whether an effect may happen at all, and never retries an unknown."
+---
+
+A durable workflow engine guarantees that a workflow finishes: it persists every step, replays
+after a crash, and retries an activity until it succeeds. CTRLRun guarantees that a consequential
+effect is authorized and happens at most once, and refuses to retry when nobody knows whether it
+already happened. One drives work forward; the other decides whether the work may happen. They
+compose, and the second question is not the first one's job.
+
+## What durable engines are good at
+
+Long-running processes that must survive a crash, a deploy or a week of waiting. Deterministic
+replay. Timers, signals, child workflows, fan-out. Visibility into where a workflow is. An
+activity that fails transiently and should be retried until the network cooperates. If your
+agent's work is a multi-step process with state, that is exactly the problem they solve, and
+CTRLRun does not solve it.
+
+## What they do not do
+
+| | Durable engines | CTRLRun |
+|---|---|---|
+| Guarantee | the workflow progresses; activities run at least once | the effect happens at most once per intent, or not at all |
+| Retry policy | retry until success is the default | a retry against an unknown outcome is refused |
+| Idempotency | your activity must be idempotent, by convention | the effect key is enforced by the store, across processes and hosts |
+| A human's yes | a signal, or a wait | an approval bound to the action's hash, single-use, expiring |
+| Who may act | not their question | authority: a grant per principal, delegable and revocable |
+| A lost reply | retried | `AMBIGUOUS`, and only a human or a reconcile hook moves it |
+| Evidence | the workflow history | a receipt per action, portable, chained, readable without the engine |
+
+The sharp edge is the retry default. Retry until it succeeds is right for a read and wrong for a
+refund, and the usual advice, make your activities idempotent, is exactly the work CTRLRun does
+for you: an effect key per consequence, reserved atomically, enforced by the store rather than
+by convention.
+
+## When to use both
+
+Run the workflow in the engine, and decorate the activity that acts. The engine retries; the
+decorator refuses the retry that would double an effect, and turns a lost reply into an
+`AMBIGUOUS` record with a receipt rather than a silent second call. Nothing about the engine's
+replay changes: a replayed activity proposes the same action, hashes the same, and finds its
+effect key already reserved.
+
+## The distinction that matters
+
+An engine asks *has this step finished*. CTRLRun asks *did this effect happen, and may it happen
+now*. An engine that cannot get an answer retries. CTRLRun that cannot get an answer stops and
+says so.
+
+## Next
+
+- [Effect keys](/docs/concepts/effect-keys) · [Outcomes and AMBIGUOUS](/docs/concepts/outcomes-and-ambiguous).
+- [Compare: idempotency keys](/docs/compare/idempotency-keys).
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

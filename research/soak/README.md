@@ -95,7 +95,7 @@ the harness is allowed to decide; the clock is reported and left to a human.
 The throughput figure is a by-product and is not a performance claim. Note in particular what it
 does **not** measure: most of these actions are denied or refused by policy before any receipt is
 written, so it says very little about the one-row head that `SPEC-v0.6.md` §6.3 serializes every
-receipt write on. `docs/postgres.md` describes that ceiling; this run does not size it.
+receipt write on. `docs/docs/postgres.md` describes that ceiling; this run does not size it.
 
 ## What it does not do
 

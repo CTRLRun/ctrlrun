@@ -20,5 +20,5 @@ The remote commits the refund and the response goes missing. ACS reports `exit_s
 records `AMBIGUOUS` and refuses the retry, because a tool that timed out after acting and one
 that timed out before acting send the same string.
 
-See [`docs/ACS.md`](../../docs/ACS.md) for the full mapping and for where the two models
+See [`docs/docs/ACS.md`](../../docs/docs/ACS.md) for the full mapping and for where the two models
 disagree.

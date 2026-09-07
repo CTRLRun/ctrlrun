@@ -1,4 +1,4 @@
-"""Which symbol each `file.py:NNN` citation in `docs/CLAIMS.md` belongs to.
+"""Which symbol each `file.py:NNN` citation in `docs/docs/CLAIMS.md` belongs to.
 
 One producer, imported by both `scripts/repoint-claims.py`, which **writes** the line numbers,
 and `test_the_claims_table_line_numbers_point_at_what_they_name`, which **checks** them. They

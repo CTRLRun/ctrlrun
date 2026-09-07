@@ -1,0 +1,116 @@
+/* Run with Mintlify preview on port 3000 and Playwright installed:
+ * NODE_PATH="$(npm root -g)" node docs/assets/verify-website.cjs
+ * No emails are opened or sent. No real actions or network-backed demo runs.
+ */
+module.exports = async function verifyWebsite(page, base = 'http://localhost:3000') {
+  const checks = [];
+  const assert = (value, message) => { if (!value) throw new Error(message); checks.push(message); };
+  const result = () => page.locator('.cr-result').innerText();
+  const choose = value => page.getByLabel('Explore a situation').selectOption(value);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  assert((await page.goto(base)).status() === 200, 'Homepage responds without a redirect loop');
+  await page.getByRole('button', { name: 'Approve this exact action →' }).waitFor();
+  assert(await page.locator('h1').count() === 1, 'Homepage has one H1');
+  assert(await page.locator('.cr-footer').isVisible(), 'Final CTAs render in custom mode');
+  assert(await page.locator('link[rel=canonical]').getAttribute('href') === 'https://ctrlrun.dev/', 'Homepage canonical points to /');
+  await page.evaluate(() => { window.crTestEvents = []; window.addEventListener('ctrlrun:conversion', event => window.crTestEvents.push(event.detail)); });
+  await page.getByRole('button', { name: 'Approve this exact action →' }).click();
+  assert((await result()).includes('Exact action approved'), 'Approval binds to the exact action');
+  await page.getByRole('button', { name: 'Change to $5,000' }).click();
+  assert((await result()).includes('Approval was for $500, not $5,000.'), 'Changing $500 to $5,000 is blocked');
+  await choose('allowed');
+  await page.getByRole('button', { name: 'Execute action →' }).click();
+  await page.getByRole('button', { name: 'Retry the same action →' }).click();
+  assert((await result()).includes('Duplicate blocked'), 'A completed action cannot execute twice');
+  await choose('blocked');
+  assert((await result()).includes('does not have permission'), 'Permission denial is explained');
+  await choose('uncertain');
+  assert((await result()).includes('Outcome uncertain'), 'A lost response does not imply failure');
+  await page.getByRole('button', { name: 'Try again →' }).click();
+  assert((await result()).includes('Reconciliation required'), 'Unconfirmed retries remain blocked');
+  await page.getByRole('button', { name: 'Simulate provider confirming success →' }).click();
+  await page.getByRole('button', { name: 'Retry the same action →' }).click();
+  assert((await result()).includes('Duplicate blocked'), 'Confirmed success retains duplicate protection');
+  await page.getByRole('button', { name: 'Choose your domain Finance' }).click();
+  assert(await page.getByRole('option').count() >= 48, 'Industry breadth is discoverable');
+  await page.getByRole('combobox', { name: 'Search domains' }).fill('DevOps');
+  await page.keyboard.press('Enter');
+  assert(await page.getByLabel('Choose an action').inputValue() === '0', 'Changing domain resets the selected action');
+  assert((await page.locator('.cr-domain-cta').innerText()).includes('production infrastructure'), 'Commercial CTA follows the selected domain');
+  await page.getByLabel('Choose an action').selectOption('2');
+  assert((await page.locator('.cr-request').innerText()).includes('Delete infrastructure'), 'Changing action updates the request');
+  await page.getByRole('button', { name: 'Choose your domain DevOps' }).click();
+  await page.getByRole('combobox', { name: 'Search domains' }).fill('does-not-exist');
+  assert(await page.getByText('No matching domain.').isVisible(), 'Empty search has a useful recovery message');
+  await page.keyboard.press('Escape');
+  assert(await page.getByRole('button', { name: 'Choose your domain DevOps' }).evaluate(node => node === document.activeElement), 'Escape restores focus to the domain button');
+  assert((await page.evaluate(() => window.crTestEvents)).some(event => event.name === 'scenario_completed'), 'Scenario conversion events are emitted');
+  for (const width of [375, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Homepage fits viewport ' + width);
+  }
+  await page.goto(base + '/risk-check');
+  await page.getByLabel('Move money', { exact: true }).check();
+  for (let index = 0; index < 5; index++) await page.locator('input[name="risk-' + index + '"][value="' + ([2, 4].includes(index) ? 'No' : 'Yes') + '"]').check();
+  await page.getByRole('button', { name: 'Check my execution risk →' }).click();
+  assert((await page.locator('.cr-risk-result').innerText()).includes('5 execution-risk patterns'), 'All five indicated patterns appear in the risk result');
+  assert((await page.locator('.cr-risk-result').innerText()).includes('Execution risk: High'), 'High result has a transparent threshold');
+  await page.locator('input[name="risk-0"][value="Unsure"]').check();
+  assert(await page.locator('.cr-risk-result').count() === 0, 'Changing an answer clears the stale result');
+  for (let index = 0; index < 5; index++) await page.locator('input[name="risk-' + index + '"][value="' + ([2, 4].includes(index) ? 'Yes' : 'No') + '"]').check();
+  await page.getByRole('button', { name: 'Check my execution risk →' }).click();
+  assert((await page.locator('.cr-risk-result').innerText()).includes('Lower indicated risk'), 'Controls present produce a lower indicated result');
+  await page.setViewportSize({ width: 375, height: 812 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Risk check fits mobile');
+  await page.goto(base + '/protect-my-agent?domain=DevOps&risk=High&patterns=4&unknowns=1');
+  assert((await page.locator('.cr-domain-context').innerText()).includes('DevOps'), 'Domain context carries into the review form');
+  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  assert(await page.locator('.cr-email-preview').count() === 0, 'Empty form cannot prepare a request');
+  await page.getByLabel('Work email', { exact: true }).fill('engineer@example.com');
+  await page.getByLabel('Company', { exact: true }).fill('Example test company');
+  await page.getByLabel('What does your agent do?').fill('Test deployment workflow');
+  await page.getByLabel('Which actions can it execute?').fill('Deploy production releases');
+  await page.getByLabel('Retry safety', { exact: true }).check();
+  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  const href = await page.getByRole('link', { name: 'Use my email app instead ↗' }).getAttribute('href');
+  assert(href.startsWith('mailto:contact@arpanghoshal.com?'), 'Review handoff uses the approved recipient');
+  const body = decodeURIComponent(href.split('&body=')[1]);
+  assert(body.includes('Example test company') && body.includes('Deploy production releases') && body.includes('Retry safety') && body.includes('High'), 'Email brief includes qualification and risk context');
+  assert((await page.locator('.cr-email-preview').innerText()).includes('has not been sent'), 'The form never falsely claims delivery');
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Review form fits mobile');
+  await page.getByLabel('Company', { exact: true }).fill('Updated test company');
+  assert(await page.locator('.cr-email-preview').count() === 0, 'Editing the brief clears the prepared handoff');
+  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  const submissions = [];
+  await page.route('https://ctrlrun-review-form.vercel.app/api/review', async route => {
+    submissions.push(route.request().postDataJSON());
+    await route.fulfill({ status: submissions.length === 1 ? 502 : 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify(submissions.length === 1 ? { error: 'Provider temporarily unavailable.' } : { ok: true, id: 'mock-only-no-email-sent' }) });
+  });
+  await page.getByRole('button', { name: 'Send review request →' }).click();
+  await page.getByRole('alert').filter({ hasText: 'Provider temporarily unavailable.' }).waitFor();
+  assert((await page.locator('.cr-email-preview').innerText()).includes('has not been sent'), 'Provider failure never claims success');
+  await page.getByRole('button', { name: 'Retry submission →' }).click();
+  await page.getByRole('heading', { name: 'Review request submitted.' }).waitFor();
+  assert(submissions.length === 2 && submissions[0].requestId === submissions[1].requestId, 'Uncertain email retries reuse the same idempotency key');
+  assert(submissions[1].email === 'engineer@example.com', 'Work email is included for replies');
+  assert(await page.getByRole('button', { name: 'Send review request →' }).count() === 0, 'Successful submission cannot be double-clicked');
+  await page.unroute('https://ctrlrun-review-form.vercel.app/api/review');
+  await page.setViewportSize({ width: 1280, height: 900 });
+  assert((await page.goto(base + '/docs')).status() === 200, 'Documentation landing responds without a redirect loop');
+  await page.locator('#sidebar').waitFor();
+  assert(await page.locator('#sidebar').isVisible(), 'Documentation retains the native sidebar');
+  assert((await page.locator('main').innerText()).includes('Protect one function'), 'The original technical overview remains at /docs');
+  const docLinks = await page.locator('#sidebar a[href]').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')).filter(href => href.startsWith('/')));
+  assert(docLinks.every(href => href === '/docs' || href.startsWith('/docs/')), 'Technical sidebar links stay under /docs');
+  await page.goto(base + '/docs/get-started/quickstart');
+  assert(await page.locator('main h1').count() === 1, 'Quickstart renders at its migrated route');
+  assert(await page.locator('link[rel=canonical]').getAttribute('href') === 'https://ctrlrun.dev/docs/get-started/quickstart', 'Documentation canonical uses the migrated route');
+  assert(errors.length === 0, 'No browser runtime errors: ' + errors.join('; '));
+  return { passed: checks.length, checks };
+};
+if (typeof require !== 'undefined' && require.main === module) {
+  const { chromium } = require('playwright');
+  (async () => { const browser = await chromium.launch(); try { const page = await browser.newPage(); console.log(JSON.stringify(await module.exports(page, process.env.WEBSITE_BASE_URL), null, 2)); } finally { await browser.close(); } })().catch(error => { console.error(error); process.exitCode = 1; });
+}

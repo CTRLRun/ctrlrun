@@ -35,107 +35,107 @@ that page's frontmatter, never here.
 
 | Page | Target query | The sentence that answers it |
 |---|---|---|
-| `index` | ctrlrun · AI agent safety layer | The last check before an AI agent does something it can't undo. |
-| `why` | why do AI agents double execute · AI agent consequential actions | Everyone is rushing to ship AI agents without thinking about consequences. |
-| `not-only-agents` | celery task retried twice · webhook delivered twice duplicate · retry safe background job python | Every page on this site says agent, and the failure underneath them does not require one. |
-| `get-started/install` | install ctrlrun | `pip install ctrlrun` installs the kernel and exactly two dependencies, `pyyaml` and `click`. |
-| `get-started/quickstart` | protect an AI agent action python · ctrlrun quickstart | In sixty seconds you will write a policy, protect a refund function, and watch a mutated approval be refused. |
-| `get-started/three-ways-in` | do I need a ctrlrun adapter · ctrlrun langgraph | There are three ways to put CTRLRun in front of a consequential action, and only one of them is an adapter. |
-| `get-started/choosing` | ctrlrun decorator vs gateway | In-process Python takes the decorator, tools behind MCP take the gateway, and a framework with its own approval UI takes an adapter. |
-| `production/index` | is ctrlrun production ready | SQLite is the default and is production-grade on one host; Postgres is for many hosts. |
-| `production/postgres` | ctrlrun sqlite vs postgres | Choose by how many machines write to the store, not by how serious you are. |
-| `production/how-reservation-works` | lost commit ambiguous outcome | An exception before COMMIT is a failed write to retry; one during COMMIT is unknown and is re-read. |
-| `production/migrations` | ctrlrun schema migration | Migrations run at open, forward only, with no flag that opens a database un-migrated. |
-| `production/recovery` | agent crashed mid action | A restarted process repairs nothing and cannot know the holder is dead. |
-| `production/receipt-integrity` | verify receipt chain | Run ctrlrun receipts --verify-chain and read the six names it can report. |
-| `production/soak` | ctrlrun soak test results | One published run, its measured duration, and the exit criterion it does not meet. |
-| `production/operations` | ctrlrun monitoring | Watch how many effects are sitting in an unknown outcome that nobody has answered. |
-| `mcp/overview` | MCP gateway human approval | CTRLRun works with MCP in four ways. |
-| `mcp/gateway-in-5-minutes` | protect MCP server · MCP tool call approval | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
-| `mcp/approve-from-your-assistant` | approve MCP tool call from an assistant · MCP human approval server | Run `ctrlrun mcp-operator` and answer a pending approval from an MCP client, under your own name. |
-| `mcp/use-the-docs-from-your-editor` | ctrlrun docs mcp server | This documentation is an MCP server, hosted with the site. |
-| `concepts/action-and-hash` | canonical action hash AI agent | An action is one proposed operation, normalized. |
-| `concepts/decisions` | AI agent action policy allow approve deny | A decision is what the policy says may happen to one action. |
-| `concepts/approval-binding` | approval bound to action · approval mutation AI agent | An approval is a human's yes to one exact action, bound to that action's hash. |
-| `concepts/effect-keys` | idempotency key AI agent · prevent duplicate tool execution | An effect key is the name of a consequence in the real world. |
-| `concepts/outcomes-and-ambiguous` | agent tool call timeout · double execution AI agent retry | An outcome is what CTRLRun knows about the consequence, and there are three. |
-| `concepts/receipts-and-evidence` | AI agent audit trail receipts | A receipt is the portable JSON record of one action that reached the executor. |
-| `concepts/authority-and-delegation` | AI agent authorization delegation · least privilege AI agents | Authority answers the question the policy cannot: may this principal propose this action at all? |
-| `concepts/observe-mode` | AI agent policy shadow mode | Observe mode is one top-level line that evaluates every action and executes it regardless. |
-| `concepts/fail-closed` | fail closed AI agent | Fail closed means that anything CTRLRun cannot decide, it denies. |
-| `guides/protect-a-function` | protect python function approval | Decorate the function that acts, name the action and the consequence. |
-| `guides/gateway-in-front-of-mcp` | MCP gateway policy | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
-| `guides/approvals-in-slack` | slack approval AI agent | `WebhookApprovalProvider` sends one signed POST to a URL you own for every approval request. |
-| `guides/resolve-an-ambiguous-effect` | ctrlrun resolve ambiguous | An `AMBIGUOUS` effect is one whose executor raised something other than `NotExecuted`. |
-| `guides/reconcile-automatically` | reconcile agent action stripe kubernetes | A `reconcile` hook asks the remote what happened to an effect key. |
-| `guides/observe-to-enforce` | roll out agent policy safely | Start with `mode: observe`: every action is decided exactly as enforce mode would decide it. |
-| `guides/run-on-postgres` | ctrlrun postgres | Use Postgres when workers on more than one host must share one store. |
-| `guides/verify-in-ci` | verify agent safety configuration CI | `ctrlrun verify` runs the kernel's own failure scenarios against your policy. |
-| `guides/export-to-opentelemetry` | opentelemetry AI agent actions | `OTelEventSink` turns every action into one OpenTelemetry span. |
-| `guides/langgraph-adapter` | langgraph interrupt human approval | `ctrlrun-langgraph` makes an `approve` decision surface as a LangGraph `interrupt()`. |
-| `guides/openai-agents-adapter` | openai agents sdk tool approval | `ctrlrun-openai-agents` makes an `approve` decision stop the run with the SDK's own `ToolApprovalItem`. |
-| `cookbook/index` | AI agent policy examples | Each recipe is a situation an agent is put in. |
-| `cookbook/refund-agent` | AI agent refund approval tiers | A support agent issues refunds: small ones run, larger ones wait for a human. |
-| `cookbook/payout-maker-checker` | maker checker AI agent payout | A payout agent acts on a delegated slice; above the desk limit a second person approves. |
-| `cookbook/deploy-agent` | AI agent kubernetes deploy approval | Restart runs, production apply waits for a human, namespace delete is refused. |
-| `cookbook/database-migration-agent` | AI agent database migration safety | Staging migrations run; every production migration waits; a dropped connection stays unknown. |
-| `cookbook/iam-agent` | AI agent grant role approval | Read roles run on their own, admin is refused, and an approval for one role is not another. |
-| `cookbook/credential-rotation-agent` | AI agent rotate api key safely | Minting a key runs; revoking the old one waits; a lost mint is never repeated. |
-| `cookbook/crm-update-agent` | AI agent update crm record | A field update runs, a merge waits for a human, a delete is refused. |
-| `cookbook/data-deletion-agent` | AI agent data deletion retention | Past retention purges run, inside retention waits, legal hold is refused. |
-| `cookbook/outbound-email-agent` | AI agent send email approval | Internal mail goes; external mail waits, bound to the exact recipient. |
-| `cookbook/customer-notification-agent` | AI agent notify customers once | One effect per customer per incident, so a retry or a second worker sends once. |
-| `cookbook/manager-and-worker` | multi agent delegation bounded authority | A manager delegates a narrower slice; the worker cannot exceed or widen it. |
-| `cookbook/protect-an-mcp-server` | protect existing MCP server | Name the tools in a policy and put the gateway between the agent and the server. |
-| `cookbook/langgraph-interrupt` | langgraph approval refund | The approval surfaces as LangGraph's own interrupt and the resumption carries the arguments. |
-| `cookbook/openai-agents-tool-approval` | openai agents sdk approval refund | The run stops with the SDK's own tool-approval interruption. |
-| `cookbook/slack-approvals` | slack approve AI agent action | One signed POST out, a signed answer back, and the same grant call the CLI makes. |
-| `cookbook/receipts-to-opentelemetry` | AI agent actions in traces | One span per action, one event per step, argument values kept out. |
-| `cookbook/observe-then-enforce` | test agent policy without blocking | Everything executes and the receipts record what enforcement would have blocked. |
-| `cookbook/resolve-an-ambiguous-effect` | resolve unknown agent action outcome | Ask the remote, then record the answer with ctrlrun resolve. |
-| `cookbook/reconcile-against-the-remote` | reconcile agent effect stripe kubernetes | A hook asks the remote and moves the record only the way the answer points. |
-| `cookbook/verify-in-github-actions` | verify agent policy CI | One workflow step proves the declared guarantees still hold against your policy. |
-| `cookbook/sqlite-to-postgres` | share agent state across hosts | One line changes: the store, and the guarantee now holds across hosts. |
-| `compare/framework-hitl` | langgraph human in the loop limitations | A framework's human-in-the-loop primitive is the right place for a human to answer, and CTRLRun uses it rather than replacing it. |
-| `compare/guardrail-libraries` | AI guardrails vs execution control | A guardrail library reads text; CTRLRun sits one layer down, where a decision becomes an effect. |
-| `compare/governance-toolkits` | AI agent oversight vs enforcement | A toolkit describes; CTRLRun refuses. |
-| `compare/durable-workflows` | temporal vs ctrlrun · durable execution agents | One drives work forward; the other decides whether the work may happen. |
-| `compare/idempotency-keys` | idempotency keys AI agents · stripe idempotency vs | An idempotency key deduplicates at one API; an effect key deduplicates at the agent, across every API it touches. |
-| `demos/index` | ctrlrun demo online · try agent safety library | Every demo here runs real Python in your tab. |
-| `demos/medical-affairs` | AI medical information letter review · agent citation drift · medical affairs LLM harness | A harness that retrieves biomedical evidence, reasons over it, cites it and drafts a reply is four problems, and CTRLRun solves none of them. |
-| `try-it` | try ctrlrun in browser · ctrlrun demo online | Press the button and `ctrlrun demo` runs in this tab: real Python, the released wheel. |
-| `verify/get-the-badge` | ctrlrun verified badge | Two minutes, three steps: verify on every push, publish the badge JSON, point Shields at it. |
-| `study/does-your-framework-double-execute` | does langgraph retry tool calls · agent framework double execution | When a remote commits a refund and the reply is lost, what does an agent framework do? |
-| `faq` | ctrlrun faq, and each question verbatim | The twelve questions that come up first, answered in under eighty words each. |
-| `security/receipt-chain` | tamper evident audit log AI agent | The receipt chain is a hash chain over the evidence log. |
-| `security/verify-guarantees` | ctrlrun verify guarantees | `ctrlrun verify` runs eleven guarantees against the configuration in front of it. |
-| `security/disclosure` | ctrlrun security report | Report vulnerabilities privately to contact@arpanghoshal.com. |
-| `how-this-is-built` | is ctrlrun trustworthy · how ctrlrun is tested | CTRLRun is built specification-first, every requirement in it is mutation-tested. |
-| `reference/policy-yaml` | ctrlrun.yaml reference · ctrlrun policy schema | `ctrlrun.yaml` is one document: a `schema`, an `actions` map, and from v3 the `mode`, `environment` and `authority` keys. |
-| `reference/authority-yaml` | ctrlrun authority grants yaml | The `authority:` section says which principal may propose which action. |
-| `reference/cli` | ctrlrun cli | The `ctrlrun` command reads the policy in the working directory and the store beside it. |
-| `reference/errors` | ctrlrun ApprovalMismatch · ctrlrun AmbiguousEffect | Every refusal is an exception of its own, raised as itself before the executor runs. |
-| `reference/exit-codes` | ctrlrun verify exit code | Every `ctrlrun` command exits 0 when it did what it was asked, 1 when CTRLRun refused, 2 on a usage error. |
-| `reference/receipt-and-event-schemas` | ctrlrun receipt json schema | A receipt is one executed action; an event is one step on the way. |
-| `reference/api/index` | ctrlrun Control · ctrlrun protect decorator | Every frozen public name of the package and its extras, one page each. |
-| `architecture/specifications` | ctrlrun specification | Every version of CTRLRun was a specification before it was code. |
-| `ARCHITECTURE` | ctrlrun architecture | The boundary CTRLRun owns, and the six steps every protected call takes. |
-| `THREAT_MODEL` | ctrlrun threat model | What CTRLRun defends against, and what it deliberately does not. |
-| `how-this-is-built` | is ctrlrun trustworthy · how ctrlrun is tested | Specification first, every requirement mutation-tested, every claim mapped to a test. |
-| `verify` | ctrlrun verify guarantees badge | Running the guarantee catalogue against your own configuration. |
-| `adapters` | ctrlrun adapter langgraph openai | The three ways in, and when you do not need an adapter. |
-| `authority` | ctrlrun authority delegation grants | Grants, containment and the omission rule, in plain language. |
-| `postgres` | ctrlrun postgres store | Connection strings, what to grant, migrations, and failover. |
-| `CLAIMS` | ctrlrun claims tests | Every README sentence mapped to the code and the test that proves it. |
-| `ROADMAP` | ctrlrun roadmap v1.0 | What each version asked and answered, and what is not on the list. |
-| `ACS` | agent control standard ctrlrun | What was read, what maps, and where the standard is silent. |
-| `OWASP-AGENTIC-TOP10` | OWASP agentic top 10 mapping | A reading of somebody else's taxonomy against the guarantees CTRLRun tests. |
+| `docs` | ctrlrun · AI agent safety layer | The last check before an AI agent does something it can't undo. |
+| `docs/why` | why do AI agents double execute · AI agent consequential actions | Everyone is rushing to ship AI agents without thinking about consequences. |
+| `docs/not-only-agents` | celery task retried twice · webhook delivered twice duplicate · retry safe background job python | Every page on this site says agent, and the failure underneath them does not require one. |
+| `docs/get-started/install` | install ctrlrun | `pip install ctrlrun` installs the kernel and exactly two dependencies, `pyyaml` and `click`. |
+| `docs/get-started/quickstart` | protect an AI agent action python · ctrlrun quickstart | In sixty seconds you will write a policy, protect a refund function, and watch a mutated approval be refused. |
+| `docs/get-started/three-ways-in` | do I need a ctrlrun adapter · ctrlrun langgraph | There are three ways to put CTRLRun in front of a consequential action, and only one of them is an adapter. |
+| `docs/get-started/choosing` | ctrlrun decorator vs gateway | In-process Python takes the decorator, tools behind MCP take the gateway, and a framework with its own approval UI takes an adapter. |
+| `docs/production/index` | is ctrlrun production ready | SQLite is the default and is production-grade on one host; Postgres is for many hosts. |
+| `docs/production/postgres` | ctrlrun sqlite vs postgres | Choose by how many machines write to the store, not by how serious you are. |
+| `docs/production/how-reservation-works` | lost commit ambiguous outcome | An exception before COMMIT is a failed write to retry; one during COMMIT is unknown and is re-read. |
+| `docs/production/migrations` | ctrlrun schema migration | Migrations run at open, forward only, with no flag that opens a database un-migrated. |
+| `docs/production/recovery` | agent crashed mid action | A restarted process repairs nothing and cannot know the holder is dead. |
+| `docs/production/receipt-integrity` | verify receipt chain | Run ctrlrun receipts --verify-chain and read the six names it can report. |
+| `docs/production/soak` | ctrlrun soak test results | One published run, its measured duration, and the exit criterion it does not meet. |
+| `docs/production/operations` | ctrlrun monitoring | Watch how many effects are sitting in an unknown outcome that nobody has answered. |
+| `docs/mcp/overview` | MCP gateway human approval | CTRLRun works with MCP in four ways. |
+| `docs/mcp/gateway-in-5-minutes` | protect MCP server · MCP tool call approval | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
+| `docs/mcp/approve-from-your-assistant` | approve MCP tool call from an assistant · MCP human approval server | Run `ctrlrun mcp-operator` and answer a pending approval from an MCP client, under your own name. |
+| `docs/mcp/use-the-docs-from-your-editor` | ctrlrun docs mcp server | This documentation is an MCP server, hosted with the site. |
+| `docs/concepts/action-and-hash` | canonical action hash AI agent | An action is one proposed operation, normalized. |
+| `docs/concepts/decisions` | AI agent action policy allow approve deny | A decision is what the policy says may happen to one action. |
+| `docs/concepts/approval-binding` | approval bound to action · approval mutation AI agent | An approval is a human's yes to one exact action, bound to that action's hash. |
+| `docs/concepts/effect-keys` | idempotency key AI agent · prevent duplicate tool execution | An effect key is the name of a consequence in the real world. |
+| `docs/concepts/outcomes-and-ambiguous` | agent tool call timeout · double execution AI agent retry | An outcome is what CTRLRun knows about the consequence, and there are three. |
+| `docs/concepts/receipts-and-evidence` | AI agent audit trail receipts | A receipt is the portable JSON record of one action that reached the executor. |
+| `docs/concepts/authority-and-delegation` | AI agent authorization delegation · least privilege AI agents | Authority answers the question the policy cannot: may this principal propose this action at all? |
+| `docs/concepts/observe-mode` | AI agent policy shadow mode | Observe mode is one top-level line that evaluates every action and executes it regardless. |
+| `docs/concepts/fail-closed` | fail closed AI agent | Fail closed means that anything CTRLRun cannot decide, it denies. |
+| `docs/guides/protect-a-function` | protect python function approval | Decorate the function that acts, name the action and the consequence. |
+| `docs/guides/gateway-in-front-of-mcp` | MCP gateway policy | Point the MCP client at `ctrlrun gateway` instead of the tool server. |
+| `docs/guides/approvals-in-slack` | slack approval AI agent | `WebhookApprovalProvider` sends one signed POST to a URL you own for every approval request. |
+| `docs/guides/resolve-an-ambiguous-effect` | ctrlrun resolve ambiguous | An `AMBIGUOUS` effect is one whose executor raised something other than `NotExecuted`. |
+| `docs/guides/reconcile-automatically` | reconcile agent action stripe kubernetes | A `reconcile` hook asks the remote what happened to an effect key. |
+| `docs/guides/observe-to-enforce` | roll out agent policy safely | Start with `mode: observe`: every action is decided exactly as enforce mode would decide it. |
+| `docs/guides/run-on-postgres` | ctrlrun postgres | Use Postgres when workers on more than one host must share one store. |
+| `docs/guides/verify-in-ci` | verify agent safety configuration CI | `ctrlrun verify` runs the kernel's own failure scenarios against your policy. |
+| `docs/guides/export-to-opentelemetry` | opentelemetry AI agent actions | `OTelEventSink` turns every action into one OpenTelemetry span. |
+| `docs/guides/langgraph-adapter` | langgraph interrupt human approval | `ctrlrun-langgraph` makes an `approve` decision surface as a LangGraph `interrupt()`. |
+| `docs/guides/openai-agents-adapter` | openai agents sdk tool approval | `ctrlrun-openai-agents` makes an `approve` decision stop the run with the SDK's own `ToolApprovalItem`. |
+| `docs/cookbook/index` | AI agent policy examples | Each recipe is a situation an agent is put in. |
+| `docs/cookbook/refund-agent` | AI agent refund approval tiers | A support agent issues refunds: small ones run, larger ones wait for a human. |
+| `docs/cookbook/payout-maker-checker` | maker checker AI agent payout | A payout agent acts on a delegated slice; above the desk limit a second person approves. |
+| `docs/cookbook/deploy-agent` | AI agent kubernetes deploy approval | Restart runs, production apply waits for a human, namespace delete is refused. |
+| `docs/cookbook/database-migration-agent` | AI agent database migration safety | Staging migrations run; every production migration waits; a dropped connection stays unknown. |
+| `docs/cookbook/iam-agent` | AI agent grant role approval | Read roles run on their own, admin is refused, and an approval for one role is not another. |
+| `docs/cookbook/credential-rotation-agent` | AI agent rotate api key safely | Minting a key runs; revoking the old one waits; a lost mint is never repeated. |
+| `docs/cookbook/crm-update-agent` | AI agent update crm record | A field update runs, a merge waits for a human, a delete is refused. |
+| `docs/cookbook/data-deletion-agent` | AI agent data deletion retention | Past retention purges run, inside retention waits, legal hold is refused. |
+| `docs/cookbook/outbound-email-agent` | AI agent send email approval | Internal mail goes; external mail waits, bound to the exact recipient. |
+| `docs/cookbook/customer-notification-agent` | AI agent notify customers once | One effect per customer per incident, so a retry or a second worker sends once. |
+| `docs/cookbook/manager-and-worker` | multi agent delegation bounded authority | A manager delegates a narrower slice; the worker cannot exceed or widen it. |
+| `docs/cookbook/protect-an-mcp-server` | protect existing MCP server | Name the tools in a policy and put the gateway between the agent and the server. |
+| `docs/cookbook/langgraph-interrupt` | langgraph approval refund | The approval surfaces as LangGraph's own interrupt and the resumption carries the arguments. |
+| `docs/cookbook/openai-agents-tool-approval` | openai agents sdk approval refund | The run stops with the SDK's own tool-approval interruption. |
+| `docs/cookbook/slack-approvals` | slack approve AI agent action | One signed POST out, a signed answer back, and the same grant call the CLI makes. |
+| `docs/cookbook/receipts-to-opentelemetry` | AI agent actions in traces | One span per action, one event per step, argument values kept out. |
+| `docs/cookbook/observe-then-enforce` | test agent policy without blocking | Everything executes and the receipts record what enforcement would have blocked. |
+| `docs/cookbook/resolve-an-ambiguous-effect` | resolve unknown agent action outcome | Ask the remote, then record the answer with ctrlrun resolve. |
+| `docs/cookbook/reconcile-against-the-remote` | reconcile agent effect stripe kubernetes | A hook asks the remote and moves the record only the way the answer points. |
+| `docs/cookbook/verify-in-github-actions` | verify agent policy CI | One workflow step proves the declared guarantees still hold against your policy. |
+| `docs/cookbook/sqlite-to-postgres` | share agent state across hosts | One line changes: the store, and the guarantee now holds across hosts. |
+| `docs/compare/framework-hitl` | langgraph human in the loop limitations | A framework's human-in-the-loop primitive is the right place for a human to answer, and CTRLRun uses it rather than replacing it. |
+| `docs/compare/guardrail-libraries` | AI guardrails vs execution control | A guardrail library reads text; CTRLRun sits one layer down, where a decision becomes an effect. |
+| `docs/compare/governance-toolkits` | AI agent oversight vs enforcement | A toolkit describes; CTRLRun refuses. |
+| `docs/compare/durable-workflows` | temporal vs ctrlrun · durable execution agents | One drives work forward; the other decides whether the work may happen. |
+| `docs/compare/idempotency-keys` | idempotency keys AI agents · stripe idempotency vs | An idempotency key deduplicates at one API; an effect key deduplicates at the agent, across every API it touches. |
+| `docs/demos/index` | ctrlrun demo online · try agent safety library | Every demo here runs real Python in your tab. |
+| `docs/demos/medical-affairs` | AI medical information letter review · agent citation drift · medical affairs LLM harness | A harness that retrieves biomedical evidence, reasons over it, cites it and drafts a reply is four problems, and CTRLRun solves none of them. |
+| `docs/try-it` | try ctrlrun in browser · ctrlrun demo online | Press the button and `ctrlrun demo` runs in this tab: real Python, the released wheel. |
+| `docs/verify/get-the-badge` | ctrlrun verified badge | Two minutes, three steps: verify on every push, publish the badge JSON, point Shields at it. |
+| `docs/study/does-your-framework-double-execute` | does langgraph retry tool calls · agent framework double execution | When a remote commits a refund and the reply is lost, what does an agent framework do? |
+| `docs/faq` | ctrlrun faq, and each question verbatim | The twelve questions that come up first, answered in under eighty words each. |
+| `docs/security/receipt-chain` | tamper evident audit log AI agent | The receipt chain is a hash chain over the evidence log. |
+| `docs/security/verify-guarantees` | ctrlrun verify guarantees | `ctrlrun verify` runs eleven guarantees against the configuration in front of it. |
+| `docs/security/disclosure` | ctrlrun security report | Report vulnerabilities privately to contact@arpanghoshal.com. |
+| `docs/how-this-is-built` | is ctrlrun trustworthy · how ctrlrun is tested | CTRLRun is built specification-first, every requirement in it is mutation-tested. |
+| `docs/reference/policy-yaml` | ctrlrun.yaml reference · ctrlrun policy schema | `ctrlrun.yaml` is one document: a `schema`, an `actions` map, and from v3 the `mode`, `environment` and `docs/authority` keys. |
+| `docs/reference/authority-yaml` | ctrlrun authority grants yaml | The `authority:` section says which principal may propose which action. |
+| `docs/reference/cli` | ctrlrun cli | The `ctrlrun` command reads the policy in the working directory and the store beside it. |
+| `docs/reference/errors` | ctrlrun ApprovalMismatch · ctrlrun AmbiguousEffect | Every refusal is an exception of its own, raised as itself before the executor runs. |
+| `docs/reference/exit-codes` | ctrlrun verify exit code | Every `ctrlrun` command exits 0 when it did what it was asked, 1 when CTRLRun refused, 2 on a usage error. |
+| `docs/reference/receipt-and-event-schemas` | ctrlrun receipt json schema | A receipt is one executed action; an event is one step on the way. |
+| `docs/reference/api/index` | ctrlrun Control · ctrlrun protect decorator | Every frozen public name of the package and its extras, one page each. |
+| `docs/architecture/specifications` | ctrlrun specification | Every version of CTRLRun was a specification before it was code. |
+| `docs/ARCHITECTURE` | ctrlrun architecture | The boundary CTRLRun owns, and the six steps every protected call takes. |
+| `docs/THREAT_MODEL` | ctrlrun threat model | What CTRLRun defends against, and what it deliberately does not. |
+| `docs/how-this-is-built` | is ctrlrun trustworthy · how ctrlrun is tested | Specification first, every requirement mutation-tested, every claim mapped to a test. |
+| `docs/verify` | ctrlrun verify guarantees badge | Running the guarantee catalogue against your own configuration. |
+| `docs/adapters` | ctrlrun adapter langgraph openai | The three ways in, and when you do not need an adapter. |
+| `docs/authority` | ctrlrun authority delegation grants | Grants, containment and the omission rule, in plain language. |
+| `docs/postgres` | ctrlrun postgres store | Connection strings, what to grant, migrations, and failover. |
+| `docs/CLAIMS` | ctrlrun claims tests | Every README sentence mapped to the code and the test that proves it. |
+| `docs/ROADMAP` | ctrlrun roadmap v1.0 | What each version asked and answered, and what is not on the list. |
+| `docs/ACS` | agent control standard ctrlrun | What was read, what maps, and where the standard is silent. |
+| `docs/OWASP-AGENTIC-TOP10` | OWASP agentic top 10 mapping | A reading of somebody else's taxonomy against the guarantees CTRLRun tests. |
 
 ## The words that appear once
 
-`idempotency` on `concepts/effect-keys` and `compare/idempotency-keys`; `human-in-the-loop` on
-`get-started/three-ways-in` and `compare/framework-hitl`; `MCP gateway` on `mcp/overview`;
-`double execution` on `concepts/outcomes-and-ambiguous`; `AI agent safety` on `index`. Anywhere
+`idempotency` on `docs/concepts/effect-keys` and `docs/compare/idempotency-keys`; `human-in-the-loop` on
+`docs/get-started/three-ways-in` and `docs/compare/framework-hitl`; `MCP gateway` on `docs/mcp/overview`;
+`double execution` on `docs/concepts/outcomes-and-ambiguous`; `AI agent safety` on `docs`. Anywhere
 else they are noise.
 
 ## What is deliberately not done
@@ -144,3 +144,11 @@ No keyword density targets, no repeated phrases across pages, no content written
 rather than a reader, and no `llms.txt` hand-maintained beside the generated one. Google's own
 guidance (July 2026) is that the fundamentals are what matter and that extra machine files are
 not needed; the assistants that do read `llms.txt` get Mintlify's.
+
+## Product pages
+
+| Page | Search intent |
+|---|---|
+| `index` | Execution safety for AI agents |
+| `risk-check` | AI agent execution risk assessment |
+| `protect-my-agent` | AI agent architecture review and integration help |

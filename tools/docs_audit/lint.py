@@ -12,8 +12,8 @@ renders as the page's title, description and social preview.
 **Claim words** — *compliance*, *conformant*, *certified*, *aligned with*, *pack*, *sector*, the
 named regulations, and social proof that does not exist — are checked **everywhere**, because a
 body sentence is where a compliance claim or a sector product gets asserted. Two documents are
-exempt by name, because they exist to list what is *not* covered: `docs/OWASP-AGENTIC-TOP10.md`
-and `docs/THREAT_MODEL.md`. Everything else negates such a word through the allowlist beside
+exempt by name, because they exist to list what is *not* covered: `docs/docs/OWASP-AGENTIC-TOP10.md`
+and `docs/docs/THREAT_MODEL.md`. Everything else negates such a word through the allowlist beside
 this file, one regex per legitimate sentence, with the reason.
 
 `lint-allowlist.txt` also names the files the lint does not read, with a reason on each line.
@@ -35,7 +35,7 @@ ALLOWLIST = Path(__file__).with_name("lint-allowlist.txt")
 
 #: The two documents the rules exempt by name. Not in the allowlist file, because an entry
 #: there could be deleted by a session that found it inconvenient; these are the rule.
-EXEMPT_BY_RULE: tuple[str, ...] = ("docs/OWASP-AGENTIC-TOP10.md", "docs/THREAT_MODEL.md")
+EXEMPT_BY_RULE: tuple[str, ...] = ("docs/docs/OWASP-AGENTIC-TOP10.md", "docs/docs/THREAT_MODEL.md")
 
 
 @dataclass(frozen=True)

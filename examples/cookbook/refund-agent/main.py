@@ -1,5 +1,5 @@
 # Extracted by tools/docs_audit/render_cookbook.py from
-# docs/cookbook/refund-agent.mdx — edit the page, never this file.
+# docs/docs/cookbook/refund-agent.mdx — edit the page, never this file.
 from pathlib import Path
 
 import ctrlrun

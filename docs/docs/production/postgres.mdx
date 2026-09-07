@@ -1,0 +1,80 @@
+---
+title: "SQLite or Postgres"
+description: "Choose by how many machines write to the store. SQLite holds the same guarantees on one host; Postgres holds them across hosts."
+---
+
+Use SQLite until workers on **more than one host** must share a store. `BEGIN IMMEDIATE` is a
+write lock on a local file: it holds one-effect-once across threads and across processes on that
+machine, and it does not reach the machine next to it. Postgres does, and nothing else about your
+setup changes — the same `StateStore` protocol, and the same suite grading both.
+
+## The decision, in one table
+
+| | SQLite | Postgres |
+|---|---|---|
+| Install | in the standard library | `pip install "ctrlrun[postgres]"` |
+| Configure | a file path | a connection URL and a schema you create |
+| One effect once | `BEGIN IMMEDIATE`, across processes on this host | `UNIQUE(effect_key)` and checked row counts, which do not depend on a shared file |
+| Approval binding, authority, receipts, the chain | identical | identical |
+| Graded by | the store conformance suite | **that same suite**, not one written for it |
+| Fails when | two hosts share the file over a network filesystem | the database is unreachable, which is a refusal and never a false outcome |
+| Costs you | nothing | a server, a role, a schema, and backups |
+
+**A single host is not a smaller deployment.** One process, four workers and a file is the
+configuration most agent deployments actually are, and it holds every guarantee this project
+claims. Reach for Postgres when a second host appears, not before.
+
+## What changes when you move
+
+One line, and a schema you create yourself:
+
+```python
+from ctrlrun.postgres import PostgresStateStore
+
+store = PostgresStateStore("postgresql://ctrlrun@db.internal:5432/ctrlrun", schema="ctrlrun")
+```
+
+You create the schema; the store does not. Its encoding must be UTF-8 and anything else is
+refused at open, and migrations run at open, forward only, with no flag that suppresses them.
+
+[Run on Postgres](/docs/guides/run-on-postgres) is the step-by-step — the two SQL statements, the
+grants, where to put the password. [The Postgres reference](/docs/postgres) has connection strings,
+pooling, failover and the throughput ceiling, and says why each refusal is where it is.
+
+## What does not change
+
+Your policy, your authority document, your decorators, your gateway configuration and every
+receipt already written. The move is a store swap, and the suite that grades it was written for
+SQLite before Postgres existed — which is the point of running one suite rather than two.
+
+## What this does not do
+
+- **Postgres does not buy you a stronger guarantee.** It buys the same guarantee across more
+  machines. A deployment that did not need the second machine gains nothing and pays for a server.
+- **Neither store makes a remote idempotent.** The reservation stops a second *attempt*; what the
+  remote already did is [a different question](/docs/concepts/outcomes-and-ambiguous).
+- **The store never fails open when the database is unreachable.** It raises, and the caller sees
+  the store's exception rather than an outcome. An unreachable database stops work; it does not
+  quietly permit it.
+- **There is no third backend.** `--store-url` takes a `sqlite://` path or a `postgresql://`
+  URL and refuses anything else, naming the two it knows. A bare file path is not one of them.
+- **Nothing here was run on two machines.** The cross-host tests are separate OS processes
+  against one Postgres, with the connection broken by a proxy they own — separate connections,
+  no shared memory, no shared file locks, which is the part `BEGIN IMMEDIATE` was relying on and
+  a second host removes. A **network partition between hosts** is not exercised by anything in
+  this repository, and the mechanism's independence from a shared file is an argument, not a
+  measurement. [How reservation works](/docs/production/how-reservation-works) says the same in the
+  place it cites the tests.
+
+**Verified by** `T141` and `T154` — every case of the store conformance suite against SQLite, the
+in-memory store and a real Postgres, with every not-applicable carrying its reason and none of
+them counted as a pass — plus `T154b` for the URL
+refusal, `T154c` for the encoding, and `T154f` for connection discipline and collation. `G3` and
+`G4` in `ctrlrun verify` grade duplicate refusal and one-winner-under-concurrency on whichever
+backend you configured, in a scratch store verify creates and destroys rather than in yours.
+
+## Next
+
+- [How reservation works](/docs/production/how-reservation-works): what happens when a `COMMIT` is lost.
+- [Migrations](/docs/production/migrations): what a new binary does to an old database.
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

@@ -1,0 +1,211 @@
+---
+title: "A payout agent with maker/checker via delegation"
+description: "A treasury lead holds a delegable grant, delegates a narrower slice to a payout agent."
+---
+
+A payout agent moves money out of the platform on behalf of a treasury lead. The lead may
+delegate a bounded slice of that authority to the agent, the agent may never widen it, and
+every payout above the desk limit still needs a second person before it runs.
+
+## The policy
+
+Authority and policy are separate axes. The grant says the lead may propose payouts to
+€100,000 and may delegate; the policy says anything above €10,000 needs a human, whoever asks.
+
+```yaml runnable
+schema: ctrlrun.policy/v3
+
+authority:
+  grants:
+    - id: treasury-lead
+      subject: { agent: "treasury-lead", user: "mira@example.com" }
+      actions: ["bank.payout"]
+      resources: ["account:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }
+      environments: ["production"]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+
+actions:
+  bank.payout:
+    effect: "payout:{account}:{reference}"
+    resource: "account:{account}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 1000000 }
+        decision: allow
+      - decision: approve
+```
+
+## The code
+
+```python runnable file=main.py
+from pathlib import Path
+
+from ctrlrun import (
+    Action,
+    ApprovalRequired,
+    Authority,
+    AuthorityDenied,
+    AuthorityEscalation,
+    Control,
+    Policy,
+    Principal,
+    SQLiteStateStore,
+    with_approval,
+)
+from ctrlrun.authority import grant_from_yaml
+
+HERE = Path(__file__).resolve().parent
+STATE = HERE / ".ctrlrun"
+STATE.mkdir(exist_ok=True)
+for name in ("state.db", "state.db-wal", "state.db-shm"):
+    (STATE / name).unlink(missing_ok=True)
+
+LEAD = Principal(agent="treasury-lead", user="mira@example.com")
+AGENT = Principal(agent="payout-agent", user="mira@example.com")
+document = (HERE / "ctrlrun.yaml").read_text(encoding="utf-8")
+store = SQLiteStateStore(STATE / "state.db")
+control = Control(
+    Policy.from_yaml(document, source="ctrlrun.yaml"),
+    store,
+    authority=Authority.from_yaml(document, source="ctrlrun.yaml"),
+    environment="production",
+)
+paid: list[tuple[str, int]] = []
+
+
+def payout(account: str, reference: str, amount: int) -> dict:
+    paid.append((reference, amount))
+    return {"reference": reference, "status": "sent"}
+
+
+def proposal(who: Principal, account: str, reference: str, amount: int) -> Action:
+    return Action(
+        name="bank.payout",
+        arguments={"account": account, "reference": reference, "amount": amount},
+        principal=who,
+        resource=f"account:{account}",
+    )
+
+
+# The lead hands the agent a €25,000 slice, itself delegable so the agent could pass a narrower
+# one on. Every dimension is stated: omission is rejected, never inherited.
+slice_ = grant_from_yaml("""
+subject: { agent: "payout-agent", user: "mira@example.com" }
+actions: ["bank.payout"]
+resources: ["account:ops-*"]
+constraints: { amount_gte: 0, amount_lte: 2500000 }
+environments: ["production"]
+delegable: true
+expires_at: "2026-12-31T00:00:00Z"
+""")
+delegation = control.delegate("treasury-lead", slice_, by=LEAD)
+print("delegated to the payout agent:", delegation.delegation_id)
+
+# €8,000: inside the slice, inside the autonomous band. Runs.
+control.execute(
+    proposal(AGENT, "ops-eu", "inv-1042", 800000),
+    lambda: payout("ops-eu", "inv-1042", 800000),
+    "payout:ops-eu:inv-1042",
+)
+print("€8,000 payout: sent")
+
+# €18,000: inside the slice, above the desk limit. A second person.
+try:
+    control.execute(
+        proposal(AGENT, "ops-eu", "inv-1043", 1800000),
+        lambda: payout("ops-eu", "inv-1043", 1800000),
+        "payout:ops-eu:inv-1043",
+    )
+except ApprovalRequired as pending:
+    print("€18,000 payout: a checker decides:", pending.request_id)
+    store.grant_approval(pending.request_id, "checker:sam@example.com")
+    with with_approval(pending.request_id):
+        control.execute(
+            proposal(AGENT, "ops-eu", "inv-1043", 1800000),
+            lambda: payout("ops-eu", "inv-1043", 1800000),
+            "payout:ops-eu:inv-1043",
+        )
+    print("€18,000 payout, checked: sent")
+else:
+    raise SystemExit("a payout above the desk limit ran without a checker")
+
+# €40,000: outside the slice. Authority refuses before the policy is asked.
+try:
+    control.execute(
+        proposal(AGENT, "ops-eu", "inv-1044", 4000000),
+        lambda: payout("ops-eu", "inv-1044", 4000000),
+        "payout:ops-eu:inv-1044",
+    )
+except AuthorityDenied as refused:
+    print("€40,000 payout: refused,", refused.reason)
+else:
+    raise SystemExit("a payout outside the delegated grant ran")
+
+# The agent tries to widen its own slice.
+try:
+    control.delegate(
+        delegation.delegation_id,
+        grant_from_yaml("""
+subject: { agent: "payout-agent", user: "mira@example.com" }
+actions: ["bank.payout"]
+resources: ["account:*"]
+constraints: { amount_gte: 0, amount_lte: 9000000 }
+environments: ["production"]
+expires_at: "2026-12-31T00:00:00Z"
+"""),
+        by=AGENT,
+    )
+except AuthorityEscalation as refused:
+    print("widening the slice: refused,", refused.reason, refused.dimension)
+else:
+    raise SystemExit("an agent widened its own authority")
+
+print("payouts sent:", len(paid))
+store.close()
+```
+
+## What the agent sees
+
+```text
+delegated to the payout agent: dlg_…
+€8,000 payout: sent
+€18,000 payout: a checker decides: apr_…
+€18,000 payout, checked: sent
+€40,000 payout: refused, authority_constraint
+widening the slice: refused, containment resources
+payouts sent: 2
+```
+
+The maker is the agent, the checker is whoever answers the approval, and the delegation is what
+bounds the maker. `ctrlrun revoke dlg_…` cuts it with one write.
+
+## The receipt
+
+```bash runnable
+ctrlrun receipts --last 3
+```
+
+Each receipt names the principal and, for the checked payout, the approver. The refusal for
+€40,000 is an `AUTHORITY_DENIED` event with no approval request behind it: authority runs first,
+and a denial there never leaves a pending request.
+
+## When an AMBIGUOUS appears
+
+A payout whose confirmation was lost is `AMBIGUOUS`. Ask the bank by reference, then
+`ctrlrun resolve payout:ops-eu:inv-N --committed` or `--failed`. Never re-send on a guess.
+
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/payout-maker-checker
+pip install ctrlrun && python main.py
+```
+
+## Next
+
+- [A manager agent delegating to a worker](/docs/cookbook/manager-and-worker).
+- [Authority and delegation](/docs/concepts/authority-and-delegation) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

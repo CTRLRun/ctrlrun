@@ -1,0 +1,141 @@
+---
+title: "Put the gateway in front of MCP"
+description: "Two commands put policy, approval binding, effect keys and receipts in front of an existing MCP server, in any language."
+---
+
+Point the MCP client at `ctrlrun gateway` instead of the tool server. Every `tools/call` is
+then decided by your policy, bound to an approval where it says `approve`, reserved by effect
+key, relayed to the server, and recorded; everything else on the wire passes through untouched.
+The agent does not change. The server does not change. It works for a server written in any
+language.
+
+```text
+before    agent  ──▶  MCP server
+after     agent  ──▶  CTRLRun gateway  ──▶  MCP server
+```
+
+**Prerequisites:** an MCP server reachable over HTTP, `pip install "ctrlrun[gateway]"`, and a
+directory for the policy and the store. The gateway speaks MCP revision `2026-07-28` and
+accepts `2025-11-25`, `2025-06-18` and `2025-03-26`; the client's declared revision is
+validated, never trusted.
+
+<Steps>
+  <Step title="Name the tools in the policy">
+    A tool becomes the action `mcp.<alias>.<tool>`. A tool call has no decorator to carry an
+    effect template, so the policy carries it; a write with no `effect:` gets no reservation,
+    and the gateway names every such action on the line that starts it.
+
+    ```yaml runnable
+    schema: ctrlrun.policy/v2
+
+    actions:
+      mcp.acme.list_payments:
+        decision: allow
+      mcp.acme.create_refund:
+        effect: "refund:{payment_id}"
+        resource: "payment:{payment_id}"
+        rules:
+          - when: { amount_gte: 0, amount_lte: 50000 }
+            decision: allow
+          - when: { amount_gte: 0, amount_lte: 500000 }
+            decision: approve
+          - decision: deny
+      mcp.acme.delete_customer:
+        decision: deny
+    ```
+
+    Argument names in `when:` and in templates are the tool's own parameter names, as the
+    client sends them. Floats are refused; if a tool takes a float amount, it cannot be fronted
+    until it takes minor units.
+  </Step>
+
+  <Step title="Start the gateway">
+    ```bash
+    pip install "ctrlrun[gateway]"
+    ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal refund-agent
+    ```
+
+    ```text
+    CTRLRun gateway  →  http://localhost:8000/mcp  as mcp.acme.*
+    listening on http://127.0.0.1:8900/mcp   environment: production
+    identity: fixed principal refund-agent   authority: none
+    1 action(s) have no effect: template and get no reservation:
+      mcp.acme.list_payments
+    That is right for a read, and wrong for anything that changes the world.
+    ```
+
+    Then point the client at `http://127.0.0.1:8900/mcp`. The gateway listens on loopback
+    unless `--allow-remote`, and its body limit and upstream timeout are flags.
+  </Step>
+
+  <Step title="Choose how the principal is known">
+    `--principal refund-agent` is one fixed name, right for one agent behind one gateway.
+    `--principal-header X-Agent` reads the agent from a header a proxy in front sets, and is
+    worth exactly what that proxy is worth: if the agent can set the header, the agent chooses
+    its own authority. `--identity-jwt ...` verifies a bearer token against a JWKS or a pinned
+    key, with the algorithms, issuer, audience and token type all required and none defaulted.
+    Whatever the source, the principal is consumed; the gateway never reads one off the request
+    body, and a `tools/call` with no principal is refused.
+  </Step>
+
+  <Step title="What the agent sees">
+    A refusal is a JSON-RPC error, not a tool result. A tool result with `isError` would reach
+    the model as text and invite the retry the refusal exists to prevent; an error with a code
+    the client can read does not.
+
+    Denied, `-41001` (`ctrlrun.denied`, HTTP 403):
+
+    ```json
+    {"jsonrpc": "2.0", "id": 7,
+     "error": {"code": -41001, "message": "mcp.acme.delete_customer: denied (policy)",
+               "data": {"error": "ctrlrun.denied"}}}
+    ```
+
+    Approval required, `-41002` (`ctrlrun.approval_required`, HTTP 403), carrying the request
+    id a human answers with `ctrlrun approve`:
+
+    ```json
+    {"jsonrpc": "2.0", "id": 8,
+     "error": {"code": -41002, "message": "mcp.acme.create_refund: a human must approve",
+               "data": {"error": "ctrlrun.approval_required", "request_id": "apr_…"}}}
+    ```
+
+    The other codes: `-41003` approval denied, `-41004` duplicate effect (409), `-41005`
+    ambiguous effect (409), `-41006` blocked, `-41007` no principal, `-41012` this principal
+    holds no grant. A relayed result carries `_meta["com.ctrlrun/receipt"]` with the receipt
+    id, so a client can find what was recorded.
+  </Step>
+
+  <Step title="A lost reply over the wire">
+    The upstream commits, then the connection drops. The gateway records `AMBIGUOUS`, returns
+    `-41010` (`ctrlrun.upstream_ambiguous`, HTTP 502), and the identical call sent again is
+    refused with `-41005` until a human resolves the effect. `FAILED` over the wire means only
+    that the connection was never established or the upstream said in band that it rejected the
+    call before acting; everything after the first byte is unknown, and `mcp.not_executed_on_error`
+    in the policy is how you say an upstream's in-band error means it did nothing.
+  </Step>
+</Steps>
+
+## What you get, in your terms
+
+- No code changes: the agent and the server are untouched.
+- Any language: the gateway is a process in front of an HTTP endpoint.
+- Approvals bound to the exact tool call, arguments included.
+- Every call that **reaches a decision** leaves a receipt, denied ones included. A call still waiting on a human has not been decided yet and has none until it is.
+- Measure first: `mode: observe` in the same policy records what enforcing would block.
+
+## If it didn't work
+
+- `unsupported protocol version`: the client declared a revision the gateway does not accept.
+- `header mismatch` (`-32020`): the MCP header and the body disagree; the gateway routes on the
+  body and refuses the mismatch rather than guessing.
+- `no principal is available` (`-41007`): none of `--principal`, `--principal-header` or
+  `--identity-jwt` produced one for this request.
+- The gateway exits 2 at start: a non-loopback `--listen` without `--allow-remote`, a JWT flag
+  without `pip install "ctrlrun[identity]"`, or a policy that does not load.
+
+## Next
+
+- [Approve in Slack](/docs/guides/approvals-in-slack): where the request id goes.
+- [Choosing between the three ways in](/docs/get-started/choosing).
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

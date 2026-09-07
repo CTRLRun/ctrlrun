@@ -1,6 +1,6 @@
 # VISION.md
 
-> **This is not a build spec, and it is not the state of the code.** It was written before v0.1 shipped, so that the long-term shape is written down once and stops leaking into READMEs, schemas, and PRs. What has actually shipped is in [`docs/ROADMAP.md`](docs/ROADMAP.md) and in each version's `docs/SPEC-v0.x.md`; where a section below has since been built, a *Status* line says which version built it and where it differs from the sketch. Everything without one is still a sketch, and nothing here is a commitment. Do not derive tasks from this file.
+> **This is not a build spec, and it is not the state of the code.** It was written before v0.1 shipped, so that the long-term shape is written down once and stops leaking into READMEs, schemas, and PRs. What has actually shipped is in [`docs/docs/ROADMAP.md`](docs/docs/ROADMAP.md) and in each version's `docs/SPEC-v0.x.md`; where a section below has since been built, a *Status* line says which version built it and where it differs from the sketch. Everything without one is still a sketch, and nothing here is a commitment. Do not derive tasks from this file.
 
 ---
 
@@ -106,7 +106,7 @@ Delegation attenuates, never amplifies: `child ⊆ parent`. Human €100k → fi
 
 **Verify** — `ctrlrun verify` runs deterministic adversarial scenarios against a real configuration and reports per-guarantee pass/fail with counterexamples. Badge means "declared guarantees pass", never "secure".
 
-*Status: built in v0.4 (`docs/SPEC-v0.4.md`, `docs/verify.md`). One thing the sketch did not have: a guarantee the configuration cannot exercise reports `not_applicable` with a reason, and not applicable is not a pass.*
+*Status: built in v0.4 (`docs/SPEC-v0.4.md`, `docs/docs/verify.md`). One thing the sketch did not have: a guarantee the configuration cannot exercise reports `not_applicable` with a reason, and not applicable is not a pass.*
 
 ## 6. Standards posture
 

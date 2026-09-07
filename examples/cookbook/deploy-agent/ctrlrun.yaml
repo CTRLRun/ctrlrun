@@ -1,5 +1,5 @@
 # Extracted by tools/docs_audit/render_cookbook.py from
-# docs/cookbook/deploy-agent.mdx — edit the page, never this file.
+# docs/docs/cookbook/deploy-agent.mdx — edit the page, never this file.
 schema: ctrlrun.policy/v2
 
 actions:

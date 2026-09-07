@@ -154,7 +154,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
         "receipt — and when the outcome is unknown, CTRLRun says so instead of guessing." in head
     )
     # The category noun, which the hero went without until 0.6: a reader had to reverse-engineer
-    # what CTRLRun *is* from three slogans. `docs/index.mdx` carried it and the README did not.
+    # what CTRLRun *is* from three slogans. `docs/docs.mdx` carried it and the README did not.
     assert "A Python library that sits between the decision to act and the call that acts." in head
     for badge in (
         "pypi/v/ctrlrun",

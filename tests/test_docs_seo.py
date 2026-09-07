@@ -67,7 +67,7 @@ def test_the_description_is_not_the_title_again(page: Path):
 def test_the_faq_structured_data_matches_the_page():
     """The FAQ carries FAQ structured data. Every question in it is a question on the page, so
     the markup cannot answer something the reader never sees."""
-    text = (DOCS / "faq.mdx").read_text(encoding="utf-8")
+    text = (DOCS / "docs" / "faq.mdx").read_text(encoding="utf-8")
     block = text.split("application/ld+json", 1)[1].split("</script>", 1)[0]
     document = json.loads(block.split("JSON.stringify(", 1)[1].rsplit(")", 1)[0].strip())
 
@@ -99,7 +99,7 @@ def test_seo_md_names_every_page_and_its_query():
     missing = []
     for page in PAGES:
         slug = page.relative_to(DOCS).with_suffix("").as_posix()
-        if slug.startswith("reference/api/") and slug != "reference/api/index":
+        if slug.startswith("docs/reference/api/") and slug != "docs/reference/api/index":
             continue  # one row covers the generated API pages
         if f"`{slug}`" not in plan:
             missing.append(slug)
@@ -113,7 +113,7 @@ def test_the_definitional_words_appear_where_the_plan_says():
         ("get-started/three-ways-in", "human-in-the-loop"),
         ("concepts/outcomes-and-ambiguous", "double execution"),
     ):
-        text = (DOCS / f"{slug}.mdx").read_text(encoding="utf-8").lower()
+        text = (DOCS / "docs" / f"{slug}.mdx").read_text(encoding="utf-8").lower()
         assert word in text, f"{slug} does not carry {word!r}"
 
 

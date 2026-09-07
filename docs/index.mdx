@@ -1,290 +1,56 @@
 ---
-title: "The execution safety layer for AI agents"
-sidebarTitle: "Home"
-description: "The last check before an AI agent does something it can't undo. Autonomy belongs to the action, not the agent."
-mode: "wide"
-"og:title": "CTRLRun — the execution safety layer for AI agents"
-"twitter:title": "CTRLRun — the execution safety layer for AI agents"
+title: "Execution safety for AI agents"
+sidebarTitle: "CTRLRun"
+description: "Control AI agent actions before they affect real systems. Prevent duplicate actions, require exact approval, and stop unsafe retries."
+mode: "custom"
+"og:title": "CTRLRun — Execution safety for AI agents"
+"twitter:title": "CTRLRun — Execution safety for AI agents"
+canonical: "https://ctrlrun.dev/"
+"og:url": "https://ctrlrun.dev/"
 ---
 
-CTRLRun is a Python library that sits between an agent's decision to act and the call that acts.
-A consequential action happens at most once, exactly as approved, and leaves a receipt — and when
-the outcome is unknown, CTRLRun says so instead of guessing.
+import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
 
-```bash
-pip install ctrlrun && ctrlrun demo
-```
+<div className="cr-site">
+  <section className="cr-hero" aria-labelledby="cr-title">
+    <p className="cr-eyebrow">CONTROL THE ACTION. KEEP THE AUTONOMY.</p>
+    <h1 id="cr-title">Execution safety <br />for AI agents<span className="cr-dot">.</span></h1>
+    <p className="cr-lede">Let agents act. Keep control of what happens next.</p>
+    <p className="cr-intro">CTRLRun checks consequential actions before they reach real systems. Stop duplicate actions, require human approval, and pause unsafe retries.</p>
+    <div className="cr-actions">
+      <a className="cr-button" href="#try-ctrlrun" data-cr-event="try_clicked">Try CTRLRun <span aria-hidden="true">↗</span></a>
+      <a className="cr-button cr-secondary" href="/docs" data-cr-event="documentation_clicked">Documentation <span aria-hidden="true">→</span></a>
+      <a className="cr-button cr-github-badge" href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked"><svg aria-hidden="true" focusable="false" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .75a11.25 11.25 0 0 0-3.558 21.923c.563.104.77-.244.77-.542 0-.267-.01-.975-.015-1.913-3.13.68-3.79-1.508-3.79-1.508-.513-1.303-1.252-1.65-1.252-1.65-1.023-.7.077-.686.077-.686 1.132.08 1.727 1.162 1.727 1.162 1.006 1.724 2.64 1.226 3.283.938.102-.73.394-1.226.715-1.508-2.498-.284-5.124-1.25-5.124-5.563 0-1.228.44-2.233 1.162-3.02-.116-.285-.504-1.43.11-2.98 0 0 .945-.303 3.094 1.154a10.786 10.786 0 0 1 5.625 0c2.148-1.457 3.09-1.154 3.09-1.154.617 1.55.23 2.695.113 2.98.724.787 1.16 1.792 1.16 3.02 0 4.323-2.63 5.276-5.136 5.555.404.35.765 1.043.765 2.1 0 1.515-.014 2.737-.014 3.11 0 .3.203.65.774.54A11.252 11.252 0 0 0 12 .75Z" /></svg><span>Open source on GitHub</span><span aria-hidden="true">↗</span></a>
+    </div>
+    <p className="cr-caption">Open source. Your agent. Your systems. Your rules.</p>
+  </section>
 
-<Columns cols={2}>
-  <Card title="Break a protected action in your browser" icon="play" href="/try-it">
-    No install. Approve €2,000, execute €5,000, lose a reply, retry: real refusals, in this tab.
-  </Card>
-  <Card title="Protect your first action" icon="shield" href="/get-started/quickstart">
-    One policy file, one decorator, one approval from the shell, three receipts.
-  </Card>
-</Columns>
+  <section className="cr-boundary" aria-label="CTRLRun sits between an AI agent and the real system">
+    <div className="cr-boundary-node"><span className="cr-step">01 / PROPOSE</span><strong>AI agent</strong><span>Decides what to do</span></div>
+    <span className="cr-flow-arrow" aria-hidden="true">→</span>
+    <div className="cr-boundary-node cr-control"><span className="cr-step">02 / CHECK</span><strong>CTRLRun<span className="cr-dot">_</span></strong><span>The control point before execution</span><ul><li>Is this allowed?</li><li>Is this exactly what was approved?</li><li>Has this already happened?</li><li>Is it safe to continue?</li></ul></div>
+    <span className="cr-flow-arrow" aria-hidden="true">→</span>
+    <div className="cr-boundary-node"><span className="cr-step">03 / ACT</span><strong>Real system</strong><span>Move money. Change access.<br />Send email. Deploy software.</span></div>
+  </section>
 
-**Runs in production on a single file, or on Postgres across hosts.** SQLite is the default and
-is production-grade on one host; Postgres is for many. Apache-2.0.
+  <section className="cr-section cr-failure" aria-labelledby="cr-failure-title">
+    <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">“Try again” can cost &#36;500.</h2><p>An agent refunds &#36;500. The provider processes it, but the response is lost. The agent thinks it failed.</p></div>
+    <div className="cr-comparison"><div><span className="cr-step">WITHOUT AN EXECUTION CHECK</span><p>Retry the refund <span aria-hidden="true">→</span> another &#36;500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Pause the retry.</strong> Confirm what happened before trying again.</p></div></div>
+  </section>
 
-## Protect one function
+  <section className="cr-section" id="try-ctrlrun" aria-labelledby="cr-try-title">
+    <div className="cr-section-heading"><div><p className="cr-eyebrow">MAKE IT RELEVANT TO YOU</p><h2 id="cr-try-title">Your industry. Your action.</h2></div><p className="cr-caption">No login. No API key. No setup.</p></div>
+    <ScenarioExplorer />
+  </section>
 
-CTRLRun wraps the call that has the consequence, and a YAML file says how much autonomy that
-call gets. This is the whole integration for a function in your own process:
+  <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">
+    <div><p className="cr-eyebrow">FOR THE PEOPLE BUILDING IT</p><h2 id="cr-integrate-title">Start at the function<br />that takes action.</h2><p>Wrap the call. Define your rules. Keep a record of what happened.</p><p className="cr-caption">Python, agent frameworks, or an MCP gateway.<br />The execution boundary stays the same.</p><a className="cr-text-link" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Start integrating <span aria-hidden="true">→</span></a></div>
+    <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"stripe.refund\",\n    effect=\"refund:{payment_id}\"\n)\ndef refund(payment_id, amount):\n    ..."}</code></pre><p>Illustrative wrapper. The quickstart adds your policy, identity, and approval flow.</p></div>
+  </section>
 
-```yaml runnable
-schema: ctrlrun.policy/v2
+  <section className="cr-section cr-commercial" aria-labelledby="cr-commercial-title">
+    <div><p className="cr-eyebrow">WHEN THE ACTIONS ARE REAL</p><h2 id="cr-commercial-title">Protect my agent.</h2><p>Have an agent taking real actions? Get engineering help deciding what can run automatically, what needs approval, and when to stop and confirm.</p><p className="cr-caption">Paid architecture reviews, integration sprints, and ongoing production support. CTRLRun OSS stays free.</p></div><div className="cr-commercial-links"><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Review my architecture <span aria-hidden="true">↗</span></a><a className="cr-text-link" href="/risk-check">Take the free execution risk check →</a></div>
+  </section>
 
-actions:
-  stripe.refund:
-    effect: "refund:{payment_id}"
-    rules:
-      - when: { amount_gte: 0, amount_lte: 50000 }     # up to €500: autonomous
-        decision: allow
-      - when: { amount_gte: 0, amount_lte: 500000 }    # up to €5,000: a human decides
-        decision: approve
-      - decision: deny                                  # above that: never
-```
-
-```python runnable
-import ctrlrun
-
-
-class Stripe:  # stands in for the real client so this block runs offline
-    def refund(self, payment_id: str, amount: int) -> dict:
-        return {"status": "succeeded"}
-
-
-stripe = Stripe()
-
-
-@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
-def refund(payment_id: str, amount: int) -> dict:
-    return stripe.refund(payment_id, amount)
-
-
-with ctrlrun.context(agent="refund-agent"):
-    refund(payment_id="txn_1", amount=10000)  # €100: runs, and leaves a receipt
-    try:
-        refund(payment_id="txn_2", amount=200000)  # €2,000: waits for a human
-    except ctrlrun.ApprovalRequired as pending:
-        print("a human decides:", pending.request_id)
-    else:
-        raise SystemExit("the €2,000 refund ran without a human; the policy is not in force")
-```
-
-What the same function does next, and what stops it:
-
-| The agent | CTRLRun |
-|---|---|
-| refunds €100 | runs it; one receipt |
-| refunds €2,000 | raises `ApprovalRequired`; `ctrlrun approve <id>` from the shell lets it through |
-| has €2,000 approved, executes €5,000 | `ApprovalMismatch`: the approval is bound to the action a human saw |
-| refunds €20,000 | `ActionDenied`; no request is created |
-| retries a refund whose reply was lost | `AmbiguousEffect`: the remote may have committed; a human or a reconcile hook decides |
-| runs the same refund from two workers | one reserves `refund:txn_1`, the other gets `DuplicateEffect` |
-
-The refund is the first example because everyone understands it; the same file protects a
-`kubectl delete`, an IAM grant, a record deletion or an outbound email, and the
-[cookbook](/cookbook/index) has each of those as a runnable recipe.
-
-## What the demo shows
-
-Five ways an agent action goes wrong, and what stops each one, in under a second with no network.
-The first scenario is the one that explains the product: a refund commits at the remote, the
-reply is lost, the agent retries, and the retry is refused. The customer was refunded once.
-
-```console
-$ ctrlrun demo
-CTRLRun demo — five ways an agent action goes wrong, and what stops it.
-Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, above that are denied.
-
-1. Duplicate effect after a lost response
-
-   refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS
-   agent retries the same refund
-   ✗ BLOCKED — effect may already have committed; blind retry refused
-   remote refund calls: 1
-   only a human moves it on:  ctrlrun resolve refund:txn_1 --committed|--failed
-```
-
-The other four are approval mutation, two agents racing for one effect, approval replay, and an
-agent trying to act outside what was delegated to it. [Try it in your browser](/try-it) runs
-the same demo without an install and lets you break one refund yourself, or read the full transcript in the
-[repository README](https://github.com/CTRLRun/ctrlrun#what-ctrlrun-demo-shows).
-
-## What it does
-
-{/* generated from docs/capabilities.yaml (mdx) — edit the YAML, never this grid */}
-<Columns cols={2}>
-  <Card title="Approval binding" href="/concepts/approval-binding">
-    An approval is bound to the exact action; a mutated or replayed one is refused. Since v0.1.
-  </Card>
-  <Card title="One effect, once" href="/concepts/effect-keys">
-    One logical effect happens at most once, across threads, processes and hosts. Since v0.1.
-  </Card>
-  <Card title="Unknown is not failed" href="/concepts/outcomes-and-ambiguous">
-    An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. Since v0.1.
-  </Card>
-  <Card title="Fail closed" href="/concepts/fail-closed">
-    An unknown action, a missing policy or a missing principal is denied. Since v0.1.
-  </Card>
-  <Card title="Authority and delegation" href="/concepts/authority-and-delegation">
-    With authority on, every principal needs a grant, and delegation cannot widen one. Since v0.3.
-  </Card>
-  <Card title="Receipts" href="/concepts/receipts-and-evidence">
-    Every executed action leaves a portable JSON receipt of who, what and outcome. Since v0.1.
-  </Card>
-</Columns>
-<Accordion title="Everything else it does (20 more)">
-  <Columns cols={2}>
-    <Card title="Per-action policy" href="/reference/policy-yaml">
-      One YAML file decides allow, approve or deny per action and argument. Since v0.1.
-    </Card>
-    <Card title="Operator CLI" href="/reference/cli">
-      Approve, deny, resolve, inspect and count from the shell, against any store. Since v0.1.
-    </Card>
-    <Card title="MCP gateway" href="/guides/gateway-in-front-of-mcp">
-      Every guarantee in front of an MCP tool server, with no agent changes. Since v0.2.
-    </Card>
-    <Card title="Reconciliation" href="/guides/reconcile-automatically">
-      A reconcile hook asks the remote what happened and resolves an AMBIGUOUS effect. Since v0.2.
-    </Card>
-    <Card title="Webhook approvals" href="/guides/approvals-in-slack">
-      Approval requests go to a webhook, such as Slack, and the answer comes back. Since v0.2.
-    </Card>
-    <Card title="OpenTelemetry export" href="/guides/export-to-opentelemetry">
-      One span per action, one span event per step; argument values are opt-in. Since v0.2.
-    </Card>
-    <Card title="Consumed identity" href="/concepts/authority-and-delegation">
-      A principal comes from a verified header or JWT; CTRLRun issues nothing. Since v0.3.
-    </Card>
-    <Card title="Runtime delegation" href="/concepts/authority-and-delegation">
-      A principal narrows its own grant at runtime; one revocation cuts the chain. Since v0.3.
-    </Card>
-    <Card title="Observe mode" href="/concepts/observe-mode">
-      Records what enforcement would have blocked, blocks nothing, and counts it. Since v0.3.
-    </Card>
-    <Card title="Verify" href="/guides/verify-in-ci">
-      Runs the guarantee catalogue against your policy and store; N/A is not a pass. Since v0.4.
-    </Card>
-    <Card title="The verified badge" href="/verify/get-the-badge">
-      A GitHub Action and a badge that means the declared guarantees pass. Since v0.4.
-    </Card>
-    <Card title="Framework adapters" href="/get-started/three-ways-in">
-      An approval routed through the framework's own interrupt; never a second path. Since v0.5.
-    </Card>
-    <Card title="Runs on one host or many" href="/production/index">
-      SQLite on one host, Postgres across hosts, the same guarantees either way. Since v0.6.
-    </Card>
-    <Card title="Postgres store" href="/production/postgres">
-      The same store on Postgres, graded by the suite written for SQLite. Since v0.6.
-    </Card>
-    <Card title="Versioned schema" href="/production/migrations">
-      Migrations run at open, forward only, and an unknown schema is refused. Since v0.6.
-    </Card>
-    <Card title="Recovery on restart" href="/production/recovery">
-      A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it. Since v0.6.
-    </Card>
-    <Card title="Receipt chain" href="/security/receipt-chain">
-      Each receipt carries the hash of the one before; alteration is detected and named. Since v0.6.
-    </Card>
-    <Card title="Policy versioning" href="/concepts/receipts-and-evidence">
-      Every receipt names the policy hash and version that decided it. Since v0.6.
-    </Card>
-    <Card title="Control registry" href="/reference/policy-yaml">
-      Name the house controls an action satisfies, and receipts cite them. Since v0.6.
-    </Card>
-    <Card title="Data scope" href="/reference/policy-yaml">
-      Label arguments by data class and condition a rule on the labels present. Since v0.6.
-    </Card>
-  </Columns>
-</Accordion>
-{/* end generated */}
-
-## Three ways in
-
-| You have | Use | Needs |
-|---|---|---|
-| Python in this process: a raw model call, a LangChain tool, a hand-rolled loop, a cron job | the `@protect` decorator | nothing beyond `pip install ctrlrun` |
-| Tools behind an MCP server, in any language | the gateway, `ctrlrun gateway` | `pip install "ctrlrun[gateway]"` |
-| A framework with its own approval interrupt, and a place where humans already answer | an adapter | the framework to have a human-in-the-loop primitive |
-
-Most readers need the decorator. An adapter buys exactly one thing, routing an approval through
-the framework's own interrupt, and a framework with no such primitive does not need one.
-[Choosing between them](/get-started/choosing) has the decision table.
-
-## Where it stands
-
-{/* generated from the suite, pyproject and the soak (mdx) — run the generator */}
-- **Version 0.6.1**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
-- **4,404 tests**, every version specified before it was written and every requirement mutation-tested.
-- **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
-- **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/production/soak).
-- **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
-- **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
-
-**Not yet:**
-
-- No external security audit. (planned for v0.8 or v0.9)
-- No third-party review of the kernel. (every review so far was run inside this project)
-- No sector packs. (the policy templates are starting points, not a product)
-{/* end generated */}
-
-## Start here
-
-<Columns cols={3}>
-  <Card title="Protect your first action" icon="play" href="/get-started/quickstart">
-    Protect one function end to end and read the receipt. Ten minutes.
-  </Card>
-  <Card title="Try it in your browser" icon="flask" href="/try-it">
-    One refund you can break six ways, and the five demo scenarios, on the released wheel.
-  </Card>
-  <Card title="Cookbook" icon="book" href="/cookbook/index">
-    Refunds, deploys, IAM, deletions, email, MCP, LangGraph: each a recipe that runs.
-  </Card>
-</Columns>
-
-<Columns cols={3}>
-  <Card title="Three ways in" icon="signpost" href="/get-started/three-ways-in">
-    Decorator, gateway, adapter: what each covers and what each needs.
-  </Card>
-  <Card title="MCP" icon="plug" href="/mcp/overview">
-    The gateway in front of any MCP server, and this site as an MCP server.
-  </Card>
-  <Card title="Run it for real" icon="server" href="/production/index">
-    Which store, what a lost `COMMIT` does, what survives a crash, and what to watch.
-  </Card>
-</Columns>
-
-<Columns cols={2}>
-  <Card title="Why" icon="book-open" href="/why">
-    The five principles, in 700 words. The page people link to.
-  </Card>
-  <Card title="Outcomes and AMBIGUOUS" icon="circle-help" href="/concepts/outcomes-and-ambiguous">
-    The idea that explains the product: a timeout is not a failure.
-  </Card>
-</Columns>
-
-## Ask your coding tool
-
-This site is an MCP server. Add it to Cursor or any MCP client that takes an `mcpServers`
-entry, and the assistant answers from these pages rather than from memory:
-
-```json
-{
-  "mcpServers": {
-    "ctrlrun-docs": { "type": "http", "url": "https://ctrlrun.dev/mcp" }
-  }
-}
-```
-
-The server exposes one tool, a search across this documentation. When the site moves to its own
-domain the URL moves with it; the current one is always in this block.
-
-## Next
-
-- [Why](/why): what CTRLRun believes and why.
-- [Install](/get-started/install): what `pip install ctrlrun` puts on your machine, and what it does not.
-- [How this is built](/how-this-is-built): the discipline behind the guarantees.
+  <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="#try-ctrlrun" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a></div></div>
+</div>

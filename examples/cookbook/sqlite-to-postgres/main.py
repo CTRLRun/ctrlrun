@@ -1,5 +1,5 @@
 # Extracted by tools/docs_audit/render_cookbook.py from
-# docs/cookbook/sqlite-to-postgres.mdx — edit the page, never this file.
+# docs/docs/cookbook/sqlite-to-postgres.mdx — edit the page, never this file.
 import os
 from pathlib import Path
 

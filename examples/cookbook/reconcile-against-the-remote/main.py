@@ -1,5 +1,5 @@
 # Extracted by tools/docs_audit/render_cookbook.py from
-# docs/cookbook/reconcile-against-the-remote.mdx — edit the page, never this file.
+# docs/docs/cookbook/reconcile-against-the-remote.mdx — edit the page, never this file.
 import contextlib
 from pathlib import Path
 

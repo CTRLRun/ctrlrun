@@ -1,4 +1,4 @@
-"""Which symbol a `docs/CLAIMS.md` citation is about, and the false green that came of guessing.
+"""Which symbol a claims citation is about, and the false green that came of guessing.
 
 `scripts/repoint-claims.py` writes the line numbers and
 `test_the_claims_table_line_numbers_point_at_what_they_name` checks them. They answered "which

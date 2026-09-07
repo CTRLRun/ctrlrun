@@ -1,9 +1,9 @@
-"""The composite action, the badge and `docs/verify.md`. SPEC-v0.4 §5; T118-T120.
+"""The composite action, the badge and `docs/docs/verify.md`. SPEC-v0.4 §5; T118-T120.
 
 The badge is the shortest sentence this project makes, and the one most likely to be read
 without the report behind it. So its text is asserted as a *concatenation* and against a
 regex rather than a word list — no adjective can be appended to it later — and the vocabulary
-it is not allowed to use is asserted against the badge, the job summary and `docs/verify.md`
+it is not allowed to use is asserted against the badge, the job summary and `docs/docs/verify.md`
 together.
 
 T118's substance runs in this repository's CI, where the action actually executes. What is
@@ -34,7 +34,7 @@ from ctrlrun.verify.report import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACTION = REPO_ROOT / "action.yml"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-VERIFY_DOC = REPO_ROOT / "docs" / "verify.md"
+VERIFY_DOC = REPO_ROOT / "docs" / "docs" / "verify.md"
 README = REPO_ROOT / "README.md"
 AUTHORITY_PAYMENTS = REPO_ROOT / "examples" / "authority" / "payments.yaml"
 V1_PAYMENTS = REPO_ROOT / "examples" / "policies" / "payments.yaml"
@@ -231,9 +231,9 @@ def test_T119_the_link_target_carries_the_exact_phrase():
 
 @pytest.mark.parametrize("word", FORBIDDEN)
 def test_T119_no_claim_uses_the_forbidden_vocabulary(tmp_path, word):
-    """Asserted against the badge, its JSON, the job summary and `docs/verify.md` together.
+    """Asserted against the badge, its JSON, the job summary and `docs/docs/verify.md` together.
 
-    `docs/verify.md` names the words in order to refuse them, and the sentence that does is the
+    `docs/docs/verify.md` names the words in order to refuse them, and the sentence that does is the
     only place any of them may appear on the page.
     """
     report = run(_write(tmp_path, ALL_APPLICABLE))
@@ -368,13 +368,13 @@ def test_the_readme_carries_the_badge_and_links_it_to_what_it_means():
 
     assert "img.shields.io/endpoint" in readme
     assert "verify-badge.json" in readme
-    assert "docs/verify.md#what-the-badge-means" in readme
+    assert "docs/docs/verify.md#what-the-badge-means" in readme
 
 
 def test_the_readme_documentation_table_links_the_verify_page():
     readme = _repository_file(README)
 
-    assert "docs/verify.md" in readme
+    assert "docs/docs/verify.md" in readme
     assert "declared guarantees pass" in readme
 
 

@@ -21,8 +21,8 @@
   <a href="https://ctrlrun.dev"><img src="https://img.shields.io/badge/docs-ctrlrun.dev-B8730A" alt="Docs"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
-  <a href="https://ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
-  <a href="https://ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://ctrlrun.dev/docs/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
+  <a href="https://ctrlrun.dev/docs/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/scripts/check.sh"><img src="https://img.shields.io/badge/mypy-strict-B8730A" alt="Checked with mypy --strict"></a>
@@ -58,14 +58,14 @@ an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says 
 pip install ctrlrun && ctrlrun demo
 ```
 
-No Python to hand? [Break a protected action in your browser](https://ctrlrun.dev/try-it):
+No Python to hand? [Break a protected action in your browser](https://ctrlrun.dev/docs/try-it):
 one refund under one policy on the released wheel, in the tab, with nothing sent anywhere.
 Approve €2,000, execute €5,000, lose a reply, retry — and read what refused you.
 
 The same boundary has five other faces: two workers running one `kubectl delete namespace`, an
 approval for `grant reader` spent on `grant admin`, a `delete_customer` nobody put in the
 policy, quarterly numbers mailed to a personal address, and a web page that talks the agent
-into a refund. [Why](https://ctrlrun.dev/why) is the 700-word version.
+into a refund. [Why](https://ctrlrun.dev/docs/why) is the 700-word version.
 
 ## What `ctrlrun demo` shows
 
@@ -266,10 +266,10 @@ That is the whole integration: a policy file, a decorator, a context, and `with_
 present a grant. Money is one more action with a rule — `amount_gte`/`amount_lte` in place of
 `role_in`, and both ends of every band bound, because an upper bound alone lets a negative
 amount through and a refund of a negative amount is a charge.
-[Protect your first action](https://ctrlrun.dev/get-started/quickstart) is the
-same walkthrough with every output explained · [Try it in your browser](https://ctrlrun.dev/try-it) ·
-[Policy YAML reference](https://ctrlrun.dev/reference/policy-yaml) ·
-[Cookbook](https://ctrlrun.dev/cookbook/index): refunds, deploys, IAM, deletions, email, MCP,
+[Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) is the
+same walkthrough with every output explained · [Try it in your browser](https://ctrlrun.dev/docs/try-it) ·
+[Policy YAML reference](https://ctrlrun.dev/docs/reference/policy-yaml) ·
+[Cookbook](https://ctrlrun.dev/docs/cookbook/index): refunds, deploys, IAM, deletions, email, MCP,
 each a recipe that runs.
 
 ## How it works
@@ -334,7 +334,7 @@ actions:
 Everything but `tools/call` is relayed untouched, a lost response over the wire blocks the retry
 exactly as it does in process, and the gateway prints on the line that starts it every action in
 your policy with no `effect:` template — because a write with no effect key is the configuration
-this exists to prevent. [`ctrlrun.dev/mcp/overview`](https://ctrlrun.dev/mcp/overview) is the
+this exists to prevent. [`ctrlrun.dev/mcp/overview`](https://ctrlrun.dev/docs/mcp/overview) is the
 whole section.
 
 **An adapter** exists for one reason: to route an `approve` decision through **the framework's
@@ -351,7 +351,7 @@ You build the `Control` with your policy, store, identity provider and authority
 hand it over: an adapter never constructs one and never supplies a principal. Adapters ship on
 their own version line, `adapters-langgraph-1.0` and never `0.6.1`, because an adapter breaks
 when its framework makes a breaking release, which is not a kernel event.
-[`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the three
+[`docs/docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/adapters.md) has the three
 ways in and how to write one for a framework not listed here.
 
 ## The same shape in nine domains
@@ -466,7 +466,7 @@ the two**. A `delegable` grant can be narrowed at runtime with `ctrlrun delegate
 widened — a delegation must be provably a subset of its parent on every dimension, at creation
 and again at every evaluation, and omitting a dimension the parent constrains is rejected rather
 than inherited — and `ctrlrun revoke` cuts a chain of any depth with one write.
-[`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) has it in
+[`docs/docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/authority.md) has it in
 plain language.
 
 **Roll it out with `mode: observe` first.** One top-level line runs every real decision against
@@ -516,10 +516,10 @@ grants ends `6/6 declared guarantees pass. 5 not applicable: G3, G4, G5, G8, G9.
 
 The badge at the top of this page means the **declared guarantees pass**: every guarantee this
 configuration can exercise was exercised, and none failed. It does not mean secure, safe,
-compliant, certified or audited, and [`docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)
+compliant, certified or audited, and [`docs/docs/verify.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/verify.md#what-the-badge-means)
 says on the same screen what verify cannot see: your executors, your `reconcile` hooks, where
 you put the decorator, your deployment, and whether your policy is the right policy. There is a
-[GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#in-ci):
+[GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/verify.md#in-ci):
 
 ```yaml
       - uses: CTRLRun/ctrlrun@v0.6.1
@@ -547,8 +547,8 @@ The six guarantees, and which of the three ways in carries each:
 <!-- end generated -->
 
 **It guarantees** what the matrix says, plus the mechanics behind it. Every line has a test in
-[`docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/CLAIMS.md), and
-[`docs/how-this-is-built.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/how-this-is-built.md)
+[`docs/docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/CLAIMS.md), and
+[`docs/docs/how-this-is-built.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/how-this-is-built.md)
 says how those tests came to exist:
 
 - **One effect, once, across hosts.** `BEGIN IMMEDIATE` on SQLite; on Postgres a unique index on
@@ -575,7 +575,7 @@ says how those tests came to exist:
 - The receipt chain detects alteration, and alteration is not authorship. Receipts are not
   signed, the chain is no evidence of who wrote one, and it is not tamper-proof: it does not
   survive an administrator who can rewrite every row including the chain head, and erasing the
-  end of the log costs two statements. [`docs/THREAT_MODEL.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/THREAT_MODEL.md) states
+  end of the log costs two statements. [`docs/docs/THREAT_MODEL.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/THREAT_MODEL.md) states
   what remains open.
 - `ctrlrun verify` cannot see your executors. An executor that raises `NotExecuted` after the
   remote acted turns the one retryable exception into a licence to act twice, and nothing here
@@ -586,7 +586,7 @@ says how those tests came to exist:
   human, and an approval bound to the recipient the human saw. Containment of the consequence,
   not detection of the cause.
 - It does not host models, plan, prompt, retrieve, route, remember or orchestrate, and it makes
-  no claim about any standard: [`docs/OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/OWASP-AGENTIC-TOP10.md)
+  no claim about any standard: [`docs/docs/OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/OWASP-AGENTIC-TOP10.md)
   is a reading of somebody else's taxonomy against the guarantees, and names the four entries it
   does not address.
 
@@ -606,7 +606,7 @@ SQLite. Choose by how many machines write, not by how serious you are.
 - **4,404 tests**, every version specified before it was written and every requirement mutation-tested.
 - **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
-- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/production/soak).
+- **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/docs/production/soak).
 - **Each receipt carries the hash of the one before it**, so an alteration is detected and named.
 - **Apache-2.0**, and the enforcement kernel stays open source. Releases carry PyPI provenance attestations from GitHub Actions.
 
@@ -631,7 +631,7 @@ effect, once* has to be re-earned. What 0.6 added to re-earn it:
   deletion from the middle or a reordering is detected and named by `seq`. It detects
   **alteration**, which is not authorship: receipts are not signed.
 
-[ctrlrun.dev/production/index](https://ctrlrun.dev/production/index) is the whole section:
+[ctrlrun.dev/production/index](https://ctrlrun.dev/docs/production/index) is the whole section:
 choosing a store, what reservation does under a lost `COMMIT`, migrations, recovery after a
 crash, the receipt chain, the soak, and what to watch once it is running.
 [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) has the entry,
@@ -645,19 +645,19 @@ cookbook, the reference, and a browser demo that runs `ctrlrun demo` with no ins
 
 | Section | Where |
 |---|---|
-| Start here | [Why](https://ctrlrun.dev/why) · [Protect your first action](https://ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/try-it) |
-| The ideas | [Concepts](https://ctrlrun.dev/concepts/outcomes-and-ambiguous) |
-| Doing something | [Guides](https://ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/cookbook/index) |
-| Running it for real | [Production](https://ctrlrun.dev/production/index) · [Postgres](https://ctrlrun.dev/production/postgres) · [Recovery](https://ctrlrun.dev/production/recovery) · [Operations](https://ctrlrun.dev/production/operations) |
-| MCP | [Overview](https://ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/mcp/gateway-in-5-minutes) |
-| Every key, flag and error | [Reference](https://ctrlrun.dev/reference/policy-yaml) |
-| Compared with other things | [Compare](https://ctrlrun.dev/compare/idempotency-keys) · [FAQ](https://ctrlrun.dev/faq) |
-| Security | [Threat model](https://ctrlrun.dev/THREAT_MODEL) · [What verify guarantees](https://ctrlrun.dev/security/verify-guarantees) · [SECURITY.md](https://github.com/CTRLRun/ctrlrun/blob/main/SECURITY.md) |
-| How this is built, and what is not done | [How this is built](https://ctrlrun.dev/how-this-is-built) |
-| Every sentence above, mapped to the code and the test that proves it | [`docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/CLAIMS.md) |
+| Start here | [Why](https://ctrlrun.dev/docs/why) · [Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/docs/try-it) |
+| The ideas | [Concepts](https://ctrlrun.dev/docs/concepts/outcomes-and-ambiguous) |
+| Doing something | [Guides](https://ctrlrun.dev/docs/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/docs/cookbook/index) |
+| Running it for real | [Production](https://ctrlrun.dev/docs/production/index) · [Postgres](https://ctrlrun.dev/docs/production/postgres) · [Recovery](https://ctrlrun.dev/docs/production/recovery) · [Operations](https://ctrlrun.dev/docs/production/operations) |
+| MCP | [Overview](https://ctrlrun.dev/docs/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/docs/mcp/gateway-in-5-minutes) |
+| Every key, flag and error | [Reference](https://ctrlrun.dev/docs/reference/policy-yaml) |
+| Compared with other things | [Compare](https://ctrlrun.dev/docs/compare/idempotency-keys) · [FAQ](https://ctrlrun.dev/docs/faq) |
+| Security | [Threat model](https://ctrlrun.dev/docs/THREAT_MODEL) · [What verify guarantees](https://ctrlrun.dev/docs/security/verify-guarantees) · [SECURITY.md](https://github.com/CTRLRun/ctrlrun/blob/main/SECURITY.md) |
+| How this is built, and what is not done | [How this is built](https://ctrlrun.dev/docs/how-this-is-built) |
+| Every sentence above, mapped to the code and the test that proves it | [`docs/docs/CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/CLAIMS.md) |
 | The contract, per version | [`docs/SPEC-v0.1.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.1.md) · [v0.2](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.2.md) · [v0.3](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.3.md) · [v0.4](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.4.md) · [v0.5](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.5.md) · [v0.6](https://github.com/CTRLRun/ctrlrun/blob/main/docs/SPEC-v0.6.md) |
 | Contributing | [`CONTRIBUTING.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CODE_OF_CONDUCT.md) |
-| Changelog and roadmap | [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md), [`docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/ROADMAP.md) |
+| Changelog and roadmap | [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md), [`docs/docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/ROADMAP.md) |
 
 ## License
 

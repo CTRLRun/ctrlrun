@@ -68,7 +68,7 @@ LONG_FORM = frozenset(
         "how-this-is-built",
     }
 )
-CONCEPTS = sorted((DOCS / "concepts").glob("*.mdx"))
+CONCEPTS = sorted((DOCS / "docs" / "concepts").glob("*.mdx"))
 WORD_BUDGET = 900
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _FENCE = re.compile(r"^```.*?^```", re.M | re.S)
@@ -139,7 +139,7 @@ def test_every_page_has_a_title_and_a_description(page: Path):
 
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_ends_with_next_links(page: Path):
-    if page.suffix == ".md":
+    if page.suffix == ".md" or _frontmatter(page).get("mode") == "custom":
         return  # a document read on GitHub too ends where its own text ends
     body = _body(page).rstrip()
     assert "## Next" in body, page.name
@@ -149,14 +149,14 @@ def test_every_page_ends_with_next_links(page: Path):
 
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_links_to_why_and_to_get_started_or_is_one_of_them(page: Path):
-    if page.suffix == ".md":
+    if page.suffix == ".md" or _frontmatter(page).get("mode") == "custom":
         return  # same reason: read on GitHub too, where a site path resolves to nothing
     slug = page.relative_to(DOCS).with_suffix("").as_posix()
     text = _body(page)
-    if slug != "why":
-        assert "](/why)" in text, f"{page.name} does not link to Why"
-    if not slug.startswith("get-started/") and slug != "index":
-        assert "](/get-started/" in text, f"{page.name} does not link to Get started"
+    if slug != "docs/why":
+        assert "](/docs/why)" in text, f"{page.name} does not link to Why"
+    if not slug.startswith("docs/get-started/") and slug != "docs":
+        assert "](/docs/get-started/" in text, f"{page.name} does not link to Get started"
 
 
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
@@ -168,7 +168,11 @@ def test_every_page_is_in_the_navigation(page: Path):
 @pytest.mark.parametrize("page", PAGES, ids=[p.relative_to(DOCS).as_posix() for p in PAGES])
 def test_every_page_but_a_reference_page_fits_the_word_budget(page: Path):
     slug = page.relative_to(DOCS).with_suffix("").as_posix()
-    if slug.startswith("reference/") or slug == "index" or slug in LONG_FORM:
+    if (
+        slug.startswith("docs/reference/")
+        or slug in {"index", "docs"}
+        or slug.removeprefix("docs/") in LONG_FORM
+    ):
         return
     words = len(_prose(page).split())
     assert words <= WORD_BUDGET, f"{page.name}: {words} words of prose, budget {WORD_BUDGET}"
@@ -189,8 +193,8 @@ def test_every_concepts_page_says_what_it_does_not_do(page: Path):
     assert "## What it does not do" in _body(page) or "## What it never does" in _body(page)
 
 
-def test_the_home_page_carries_the_fixed_copy_and_the_generated_grid():
-    text = (DOCS / "index.mdx").read_text(encoding="utf-8")
+def test_the_documentation_root_preserves_the_technical_overview():
+    text = (DOCS / "docs.mdx").read_text(encoding="utf-8")
     assert "The last check before an AI agent does something it can't undo." in text
     assert "Autonomy belongs to the action, not the agent." in text
     assert "generated from docs/capabilities.yaml (mdx)" in text
@@ -198,13 +202,13 @@ def test_the_home_page_carries_the_fixed_copy_and_the_generated_grid():
 
 
 def test_the_why_page_opens_with_the_opener_and_stays_under_700_words():
-    page = DOCS / "why.mdx"
+    page = DOCS / "docs" / "why.mdx"
     prose = _prose(page).strip()
     assert prose.startswith(
         "Everyone is rushing to ship AI agents without thinking about consequences."
     )
     assert len(prose.split()) <= 700, len(prose.split())
-    assert "](/how-this-is-built)" in _body(page)
+    assert "](/docs/how-this-is-built)" in _body(page)
 
 
 def test_the_site_ignores_what_is_not_a_page():
@@ -259,7 +263,7 @@ def test_no_page_states_a_guarantee_count_the_catalogue_does_not_have():
 
 def test_the_verify_shapes_the_roadmap_quotes_are_the_ones_verify_reports():
     """`ROADMAP.md` is a site page and quoted `10/10` and `5/5` long after both moved."""
-    roadmap = (DOCS / "ROADMAP.md").read_text(encoding="utf-8")
+    roadmap = (DOCS / "docs" / "ROADMAP.md").read_text(encoding="utf-8")
     assert "10/10" not in roadmap and "5/5" not in roadmap, "a stale verify shape is quoted"
     assert "11/11" in roadmap and "6/6" in roadmap
 
@@ -276,7 +280,7 @@ def test_how_this_is_built_does_not_undercount_the_suite_it_describes():
     for module in (REPO_ROOT / "tests").glob("*.py"):
         functions.update(re.findall(r"^def (test_\w+)", module.read_text(encoding="utf-8"), re.M))
 
-    text = (DOCS / "how-this-is-built.md").read_text(encoding="utf-8")
+    text = (DOCS / "docs" / "how-this-is-built.md").read_text(encoding="utf-8")
     found = re.search(r"([\d,]+) test functions, ([\d,]+) cases", text)
     assert found, "the page no longer states a suite size"
     stated_functions = int(found.group(1).replace(",", ""))

@@ -1,0 +1,120 @@
+---
+title: "Reconcile automatically"
+description: "Give @protect a reconcile hook that asks the remote what happened to an effect key."
+---
+
+A `reconcile` hook is a function that takes an effect key, asks the remote what happened, and
+answers `"committed"`, `"not_executed"` or `"unknown"`. It is the only thing besides a human
+permitted to move a record out of `AMBIGUOUS`, and it moves the record only in the direction its
+answer points: `"unknown"` leaves it where it was.
+
+**Prerequisites:** `pip install ctrlrun`, an empty directory. The remote is a stand-in with a
+lookup the hook can call.
+
+<Steps>
+  <Step title="Write the hook beside the executor">
+    The hook receives the effect key and nothing else. Parse what you need out of it; the key
+    was built from the arguments, so it carries the identifiers the remote indexes by.
+
+    ```yaml runnable
+    schema: ctrlrun.policy/v2
+
+    actions:
+      stripe.refund:
+        effect: "refund:{payment_id}"
+        decision: allow
+    ```
+
+    ```python runnable
+    import ctrlrun
+
+    ledger: dict[str, dict] = {}                       # what the remote holds
+    calls: list[str] = []
+
+
+    def refund_at_stripe(payment_id: str, amount: int) -> dict:
+        calls.append(payment_id)
+        ledger[payment_id] = {"id": f"re_{payment_id}", "amount": amount}
+        raise TimeoutError("no response from api.stripe.com after 30s")
+
+
+    def ask_stripe(effect_key: str) -> ctrlrun.ReconcileOutcome:
+        payment_id = effect_key.removeprefix("refund:")
+        return "committed" if payment_id in ledger else "not_executed"
+
+
+    @ctrlrun.protect(
+        "stripe.refund",
+        effect="refund:{payment_id}",
+        reconcile=ask_stripe,
+        reconcile_eagerly=True,
+    )
+    def refund(payment_id: str, amount: int) -> dict:
+        return refund_at_stripe(payment_id, amount)
+
+
+    with ctrlrun.context(agent="refund-agent"):
+        try:
+            refund(payment_id="txn_9", amount=50000)
+        except TimeoutError:
+            print("the reply was lost; the hook asked the remote")
+        try:
+            refund(payment_id="txn_9", amount=50000)
+        except ctrlrun.DuplicateEffect:
+            print("retry refused as a duplicate: the remote had it")
+        else:
+            raise SystemExit("the retry ran; the refund happened twice")
+
+    print("remote refund calls:", len(calls))
+    ```
+
+    ```text
+    the reply was lost; the hook asked the remote
+    retry refused as a duplicate: the remote had it
+    remote refund calls: 1
+    ```
+  </Step>
+
+  <Step title="Choose when it runs">
+    With `reconcile_eagerly=True` the hook runs as soon as the call produces an `AMBIGUOUS`
+    outcome. Without it, the hook runs when a later attempt is blocked by the ambiguous record,
+    which is the cheaper default when reconciliation costs a network call and most ambiguous
+    effects are never retried.
+  </Step>
+
+  <Step title="Read the evidence">
+    ```bash runnable
+    ctrlrun receipts
+    ```
+
+    The reconciliation is two events, `RECONCILIATION_STARTED` and `RECONCILIATION_RESOLVED`,
+    with the hook's answer. A hook that raises is recorded and the record stays `AMBIGUOUS`; it
+    is never read as an answer.
+  </Step>
+</Steps>
+
+## The three answers
+
+| The hook returns | The record becomes | A retry is then |
+|---|---|---|
+| `"committed"` | `COMMITTED` | refused as a duplicate |
+| `"not_executed"` | `FAILED` | permitted |
+| `"unknown"` | `AMBIGUOUS`, unchanged | refused until a human resolves it |
+
+Answer `"not_executed"` only when the remote told you it has no record of the effect, and the
+remote is authoritative for that. A hook that answers it from a cache, or from a lookup that
+can lag, has the same failure as an executor raising `NotExecuted` too early: it licenses a
+second execution.
+
+## If it didn't work
+
+- The record stayed `AMBIGUOUS` after an eager reconcile: the hook returned `"unknown"` or
+  raised. Both are recorded in the events.
+- `InvalidArgument: reconcile must be callable`: `reconcile=` was given something other than a
+  function of one argument.
+
+## Next
+
+- [Resolve an AMBIGUOUS effect](/docs/guides/resolve-an-ambiguous-effect): the human path.
+- [Outcomes and AMBIGUOUS](/docs/concepts/outcomes-and-ambiguous).
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).
