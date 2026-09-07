@@ -981,8 +981,8 @@ Its first line, before any table:
 
 > This is a **reading** of somebody else's taxonomy against the guarantees CTRLRun tests. It
 > is not a compliance claim, a conformance claim, a certification, or a statement that CTRLRun
-> covers the OWASP Top 10 for Agentic Applications. Four of the ten entries are not addressed
-> by CTRLRun at all, and they are listed by name below.
+> covers the OWASP Top 10 for Agentic Applications. Three of the ten entries are not
+> addressed by CTRLRun at all, and they are listed by name below.
 
 `ROADMAP.md`'s standards rule is the reason this document can exist at all: *integrate first,
 map second, never claim compliance.* Every row maps a `G` to an entry, and every `G` is
