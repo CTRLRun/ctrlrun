@@ -1,25 +1,15 @@
 ---
-title: "CTRLRun"
+title: "The execution safety layer for AI agents"
 sidebarTitle: "Home"
-description: "The execution safety layer for AI agents. A consequential action happens at most once, exactly as approved, and leaves a receipt."
+description: "The last check before an AI agent does something it can't undo. Autonomy belongs to the action, not the agent."
 mode: "wide"
 "og:title": "CTRLRun — the execution safety layer for AI agents"
 "twitter:title": "CTRLRun — the execution safety layer for AI agents"
 ---
 
-**The last check before an AI agent does something it can't undo.**
-
-Autonomy belongs to the action, not the agent. A consequential action happens at most once,
-exactly as approved, and leaves a receipt — and when the outcome is unknown, CTRLRun says so
-instead of guessing.
-
-**Runs in production on a single file, or on Postgres across hosts.** SQLite is the default and
-is production-grade on one host; Postgres is for many. Apache-2.0.
-
 CTRLRun is a Python library that sits between an agent's decision to act and the call that acts.
-It binds a human's approval to the exact action they saw, executes one logical effect at most
-once across processes and hosts, treats an unknown outcome as unknown rather than failed, denies
-anything it cannot decide, and records what happened.
+A consequential action happens at most once, exactly as approved, and leaves a receipt — and when
+the outcome is unknown, CTRLRun says so instead of guessing.
 
 ```bash
 pip install ctrlrun && ctrlrun demo
@@ -33,6 +23,9 @@ pip install ctrlrun && ctrlrun demo
     One policy file, one decorator, one approval from the shell, three receipts.
   </Card>
 </Columns>
+
+**Runs in production on a single file, or on Postgres across hosts.** SQLite is the default and
+is production-grade on one host; Postgres is for many. Apache-2.0.
 
 ## Protect one function
 

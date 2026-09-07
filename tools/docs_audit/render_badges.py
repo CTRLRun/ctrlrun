@@ -9,13 +9,21 @@ artifact nobody reads, and an independent review is what noticed the first versi
     python tools/docs_audit/render_badges.py --write    # refresh docs/generated/
     python tools/docs_audit/render_badges.py --check    # CI
 
-Six of the seven badges are rendered by somebody else — PyPI, GitHub Actions, OpenSSF. Two are
+Most of the row is rendered by somebody else — PyPI, GitHub Actions, OpenSSF, Astral. Two are
 this repository's own, published to the orphan `badges` branch by a job that runs only on a
 push to `main`:
 
 - `verify-badge.json`, written by the composite action from a real `ctrlrun verify` run;
 - `tests-badge.json`, written by `--write-count` **after** `scripts/check.sh` has passed, so no
   number is published for a run whose suite was red.
+
+Two are static, and a static badge is a self-assertion unless something enforces it. These two
+are enforced: `scripts/check.sh` runs `ruff format --check`, `ruff check` and `mypy --strict
+src`, CI calls that file rather than naming the tools itself, and `test_ci_runs_the_check_script`
+fails if it stops. The `docs` badge is a link and claims nothing.
+
+Downloads and stars are deliberately absent. `docs/STYLE.md` forbids social proof that does not
+exist, and a count published four days after the first release measures mirrors.
 
 `--write-count` is what CI calls, and what it counts is what `pytest` **collects**. That is not
 the same as what passed: the suite skips a handful of tests on a machine without a framework
@@ -53,8 +61,9 @@ class Badge:
     href: str
 
 
-#: The row, in reading order: what it is, that it builds, that its own suite is this big, that
-#: its guarantees were checked, how its supply chain scores, and the licence.
+#: The row, in reading order: what it is, where it is documented, that it builds and is
+#: analysed, that its own suite is this big, that its guarantees were checked, how its supply
+#: chain scores, how it is written, and the licence.
 BADGES: tuple[Badge, ...] = (
     Badge(
         "PyPI",
@@ -67,9 +76,19 @@ BADGES: tuple[Badge, ...] = (
         "https://pypi.org/project/ctrlrun/",
     ),
     Badge(
+        "Docs",
+        "https://img.shields.io/badge/docs-ctrlrun.dev-B8730A",
+        "https://ctrlrun.dev",
+    ),
+    Badge(
         "CI",
         "https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main",
         "https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml",
+    ),
+    Badge(
+        "CodeQL",
+        "https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml/badge.svg?branch=main",
+        "https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml",
     ),
     Badge(
         "Tests",
@@ -85,6 +104,16 @@ BADGES: tuple[Badge, ...] = (
         "OpenSSF Scorecard",
         "https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge",
         "https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun",
+    ),
+    Badge(
+        "Ruff",
+        "https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json",
+        "https://github.com/astral-sh/ruff",
+    ),
+    Badge(
+        "Checked with mypy --strict",
+        "https://img.shields.io/badge/mypy-strict-B8730A",
+        "https://github.com/CTRLRun/ctrlrun/blob/main/scripts/check.sh",
     ),
     Badge(
         "License",
