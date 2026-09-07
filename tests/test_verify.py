@@ -1021,3 +1021,48 @@ def test_an_effect_template_verify_cannot_render_is_skipped_not_raised(tmp_path)
     report = run(_write(tmp_path, UNRENDERABLE_EFFECT))
 
     assert report.exit_code in (0, 1)
+
+
+# --- verify's own scenarios do not narrate themselves onto the operator's stderr ----------
+#
+# G7 asserts that a call with no principal is refused, so it makes one -- and the kernel is
+# right to warn about it. The warning reached the operator's stderr *above* verify's report,
+# so a run that passed every applicable guarantee opened with
+# `stripe.refund: denied: no principal is available`. In CI that reads as a failure on a green
+# run, which is the opposite of what a verification tool is for.
+#
+# Nothing about the `Control` changes: it denies exactly as it did, the report says exactly
+# what it said, and only the log record verify's *own* deliberate denial produces is quieted.
+# Verify's own logger is not touched -- a warning from verify about verify is still the
+# operator's business.
+
+
+@pytest.mark.authority
+def test_a_passing_run_writes_no_kernel_warning_to_stderr(caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="ctrlrun")
+
+    report = run(AUTHORITY_PAYMENTS)
+
+    leaked = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("ctrlrun.") and not record.name.startswith("ctrlrun.verify")
+    ]
+
+    assert report.exit_code == 0
+    assert leaked == [], f"verify narrated its own scenarios onto stderr: {leaked}"
+
+
+@pytest.mark.authority
+def test_the_kernel_logger_is_restored_after_a_run():
+    """The suppression is scoped to the run: a later action in the same process must still
+    warn, or verify would have silenced the deployment it was called from."""
+    import logging
+
+    run(AUTHORITY_PAYMENTS)
+
+    # Restored to what it was, so verify does not silence the deployment it was called from.
+    assert logging.getLogger("ctrlrun").level == logging.NOTSET
+    assert logging.getLogger("ctrlrun.control").getEffectiveLevel() <= logging.WARNING

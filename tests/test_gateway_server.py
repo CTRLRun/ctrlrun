@@ -1994,6 +1994,33 @@ def test_the_gateway_startup_block_reaches_a_piped_stdout(tmp_path):
 # The 400 and 413 paths set `close_connection` explicitly for the same reason.
 
 
+def _read_one_response(sock) -> bytes:
+    """Headers plus exactly `Content-Length` bytes, so nothing is left in the socket buffer.
+
+    A bare `recv(4096)` is not enough: under load it can return a partial response, and the
+    remainder then looks like the *next* reply. That artefact is what made the desync appear
+    real in the first place, and it made the first version of this test flaky for the same
+    reason.
+    """
+    buffered = b""
+    while b"\r\n\r\n" not in buffered:
+        chunk = sock.recv(1)
+        if not chunk:
+            return buffered
+        buffered += chunk
+    head, body = buffered.split(b"\r\n\r\n", 1)
+    length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":", 1)[1])
+    while len(body) < length:
+        chunk = sock.recv(length - len(body))
+        if not chunk:
+            break
+        body += chunk
+    return head
+
+
 @pytest.mark.parametrize("path", ["/wrong", "/ctrlrun/nope"])
 def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
     import socket
@@ -2005,19 +2032,16 @@ def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
     body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.settimeout(10)
             sock.sendall(
                 b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n"
                 % (path.encode(), len(body))
                 + body
             )
-            first = sock.recv(4096)
-            assert first.startswith(b"HTTP/1."), first[:40]
+            head = _read_one_response(sock)
+            assert head.startswith(b"HTTP/1."), head[:40]
 
-            sock.settimeout(10)
             try:
-                # The write itself can fail once the peer has closed, and that is the same
-                # safe answer as an empty read -- so both are inside the guard. Leaving
-                # `sendall` outside it made this flaky, which is worse than not testing it.
                 sock.sendall(
                     b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Agent: bot\r\n"
                     b"Content-Length: %d\r\n\r\n" % len(body)
@@ -2027,8 +2051,8 @@ def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
             except (TimeoutError, ConnectionError, OSError):
                 second = b""
 
-        # Either a proper response or a closed connection. What must not happen is the client
-        # reading bytes that are not a status line -- that is the previous body, misread.
+        # Either a proper status line or a closed connection. What must not happen is the
+        # client reading bytes that are not a response -- that would be the previous body.
         assert second == b"" or second.startswith(b"HTTP/1."), (
             f"the connection was left desynchronised; the client read {second[:80]!r}"
         )

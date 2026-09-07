@@ -314,6 +314,28 @@ def _suppression(line: str) -> tuple[bool, str | None]:
 # --- the scan ----------------------------------------------------------------------------
 
 
+def _is_excluded(relative: str, exclude: Sequence[str]) -> bool:
+    """Whether a pattern excludes this file, matching an ancestor directory as well as the file.
+
+    `--exclude` is documented as *"a glob, relative to the tree, not to read"*, and
+    `PurePath.match` compares components from the right -- so `Path("vendor/x.py")` does not
+    match `"vendor"`, and `--exclude vendor` silently read every file under it. The built-in
+    list one line above already excludes by *directory name*, so the flag an operator types
+    behaved differently from the list they cannot change.
+
+    Matching each ancestor as well as the path itself makes `vendor` exclude its whole subtree,
+    keeps `gen/*.py` meaning what it meant, and still refuses `ven` for `vendor` -- a glob, not
+    a prefix.
+    """
+    candidate = Path(relative)
+    for pattern in exclude:
+        if candidate.match(pattern):
+            return True
+        if any(parent.match(pattern) for parent in candidate.parents if parent != Path(".")):
+            return True
+    return False
+
+
 def _python_files(root: Path, exclude: Sequence[str]) -> tuple[list[Path], int]:
     chosen: list[Path] = []
     excluded = 0
@@ -322,7 +344,7 @@ def _python_files(root: Path, exclude: Sequence[str]) -> tuple[list[Path], int]:
         if set(path.relative_to(root).parts) & DEFAULT_EXCLUDED_DIRECTORIES:
             excluded += 1
             continue
-        if any(Path(relative).match(pattern) for pattern in exclude):
+        if _is_excluded(relative, exclude):
             excluded += 1
             continue
         chosen.append(path)

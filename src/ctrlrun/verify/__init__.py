@@ -18,6 +18,7 @@ thing being verified is not the thing that ships.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shutil
 import tempfile
@@ -109,6 +110,47 @@ def _selected(only: Sequence[str]) -> tuple[str, ...] | None:
     return tuple(chosen)
 
 
+class _QuietKernel:
+    """Silence the kernel's own log records while a scenario runs (§2.1).
+
+    G7 asserts that a call with no principal is refused, so it makes one, and the kernel is
+    right to warn about it -- but that warning reached the operator's stderr *above* verify's
+    report, so a run that passed every applicable guarantee opened with
+    `stripe.refund: denied: no principal is available`. In CI that reads as a failure on a
+    green run, which is the opposite of what a verification tool is for. Every refusal verify
+    provokes is deliberate; the report is where it says so.
+
+    **This relaxes no check.** The `Control` is the operator's, it decides exactly as it did,
+    and §3.9's rule -- that verify has no flag making its Control behave differently -- is
+    untouched: a log handler is not a decision. Records from `ctrlrun.verify` itself pass
+    through, because a warning from verify about verify is the operator's business.
+    """
+
+    _KEEP = "ctrlrun.verify"
+
+    def __init__(self) -> None:
+        self._kernel = logging.getLogger("ctrlrun")
+        self._verify = logging.getLogger(self._KEEP)
+        self._kernel_level = self._kernel.level
+        self._verify_level = self._verify.level
+
+    def __enter__(self) -> _QuietKernel:
+        # Levels rather than a filter: a filter on `ctrlrun` never sees a record logged through
+        # `ctrlrun.control`, because propagation to an ancestor runs that ancestor's *handlers*
+        # and not its filters. A child at NOTSET does inherit the ancestor's effective level,
+        # which is what actually silences the kernel here.
+        #
+        # `ctrlrun.verify` is pinned to what it was effectively set to first, so raising the
+        # parent does not take verify's own records with it.
+        self._verify.setLevel(self._verify.getEffectiveLevel())
+        self._kernel.setLevel(logging.CRITICAL)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._kernel.setLevel(self._kernel_level)
+        self._verify.setLevel(self._verify_level)
+
+
 def run(
     config: str | os.PathLike[str] | None = None,
     *,
@@ -155,6 +197,7 @@ def run(
     results: list[GuaranteeResult] = []
     try:
         engine = Engine(loaded, scratch, chosen)
+        _quiet = _QuietKernel()
         for guarantee in reg.GUARANTEES:
             if selection is not None and guarantee.id not in selection:
                 results.append(
@@ -168,7 +211,8 @@ def run(
                 )
                 continue
             scenario = getattr(engine, guarantee.id.lower())
-            results.append(scenario())
+            with _quiet:
+                results.append(scenario())
     finally:
         with contextlib.suppress(Exception):
             engine.drop_scratch_schemas()

@@ -509,3 +509,54 @@ def test_the_starter_policy_passes_the_scanner_that_ships_with_it(tmp_path):
         "the policy `ctrlrun init` writes fails the scanner that ships beside it: "
         + ", ".join(f"{f.name} [{f.rule}]" for f in report.findings)
     )
+
+
+# --- `--exclude` is a glob relative to the tree, so a directory name excludes its subtree --
+#
+# `PurePath.match` compares components from the right, so `Path("vendor/x.py").match("vendor")`
+# is False and `--exclude vendor` read every file under `vendor/` anyway -- "files read: 2,
+# excluded: 0". The built-in list one line above already excludes by *directory name*
+# (`set(parts) & DEFAULT_EXCLUDED_DIRECTORIES`), so the flag an operator types behaved
+# differently from the list they cannot change, and neither the help text nor the reference
+# said so.
+
+
+def test_exclude_by_directory_name_excludes_the_subtree(tmp_path):
+    from ctrlrun.scan import scan
+
+    (tmp_path / "vendor" / "deep").mkdir(parents=True)
+    (tmp_path / "vendor" / "x.py").write_text("import ctrlrun\n", encoding="utf-8")
+    (tmp_path / "vendor" / "deep" / "y.py").write_text("import ctrlrun\n", encoding="utf-8")
+    (tmp_path / "top.py").write_text("import ctrlrun\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["vendor"])
+
+    assert report.files_read == 1, "only top.py should have been read"
+    assert report.files_excluded == 2
+
+
+def test_exclude_still_accepts_a_path_glob(tmp_path):
+    """The documented shape must keep working: this is a widening, not a replacement."""
+    from ctrlrun.scan import scan
+
+    (tmp_path / "gen").mkdir()
+    (tmp_path / "gen" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "keep.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["gen/*.py"])
+
+    assert report.files_read == 1
+    assert report.files_excluded == 1
+
+
+def test_exclude_does_not_match_an_unrelated_prefix(tmp_path):
+    """The positive control on the widening: `ven` must not exclude `vendor`."""
+    from ctrlrun.scan import scan
+
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "x.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["ven"])
+
+    assert report.files_read == 1
+    assert report.files_excluded == 0
