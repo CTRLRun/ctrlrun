@@ -2,8 +2,7 @@
  * NODE_PATH="$(npm root -g)" node docs/assets/verify-website.cjs
  * No emails are opened or sent. No real actions or network-backed demo runs.
  */
-module.exports = async function verifyWebsite(page) {
-  const base = 'http://localhost:3000';
+module.exports = async function verifyWebsite(page, base = 'http://localhost:3000') {
   const checks = [];
   const assert = (value, message) => { if (!value) throw new Error(message); checks.push(message); };
   const result = () => page.locator('.cr-result').innerText();
@@ -11,7 +10,7 @@ module.exports = async function verifyWebsite(page) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto(base);
+  assert((await page.goto(base)).status() === 200, 'Homepage responds without a redirect loop');
   await page.getByRole('button', { name: 'Approve this exact action →' }).waitFor();
   assert(await page.locator('h1').count() === 1, 'Homepage has one H1');
   assert(await page.locator('.cr-footer').isVisible(), 'Final CTAs render in custom mode');
@@ -99,7 +98,7 @@ module.exports = async function verifyWebsite(page) {
   assert(await page.getByRole('button', { name: 'Send review request →' }).count() === 0, 'Successful submission cannot be double-clicked');
   await page.unroute('https://ctrlrun-review-form.vercel.app/api/review');
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto(base + '/docs');
+  assert((await page.goto(base + '/docs')).status() === 200, 'Documentation landing responds without a redirect loop');
   await page.locator('#sidebar').waitFor();
   assert(await page.locator('#sidebar').isVisible(), 'Documentation retains the native sidebar');
   assert((await page.locator('main').innerText()).includes('Protect one function'), 'The original technical overview remains at /docs');
@@ -113,5 +112,5 @@ module.exports = async function verifyWebsite(page) {
 };
 if (typeof require !== 'undefined' && require.main === module) {
   const { chromium } = require('playwright');
-  (async () => { const browser = await chromium.launch(); try { const page = await browser.newPage(); console.log(JSON.stringify(await module.exports(page), null, 2)); } finally { await browser.close(); } })().catch(error => { console.error(error); process.exitCode = 1; });
+  (async () => { const browser = await chromium.launch(); try { const page = await browser.newPage(); console.log(JSON.stringify(await module.exports(page, process.env.WEBSITE_BASE_URL), null, 2)); } finally { await browser.close(); } })().catch(error => { console.error(error); process.exitCode = 1; });
 }

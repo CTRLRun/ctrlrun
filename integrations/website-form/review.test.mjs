@@ -27,9 +27,13 @@ test('untrusted origins and malformed input cannot send mail', async () => {
   assert.equal(calls, 0);
 });
 
-test('preflight is readable only by the Mintlify domain and never sends', async () => {
-  const res = response(); await handler()({ ...request(), method: 'OPTIONS' }, res);
-  assert.equal(res.code, 204); assert.equal(res.headers['Access-Control-Allow-Origin'], 'https://ctrlrun.dev');
+test('preflight allows production and the exact review preview without sending', async () => {
+  const fn = handler({ fetcher: async () => { throw new Error('Preflight must not send'); } });
+  for (const origin of ['https://ctrlrun.dev', 'https://www.ctrlrun.dev', 'https://ctrlrun-codex-website-redesign.mintlify.site', 'https://unrelated.mintlify.site']) {
+    const res = response(); await fn({ ...request(valid, { origin }), method: 'OPTIONS' }, res);
+    assert.equal(res.code, origin.includes('unrelated') ? 403 : 204);
+    assert.equal(res.headers['Access-Control-Allow-Origin'], origin.includes('unrelated') ? undefined : origin);
+  }
 });
 
 test('provider failure, timeout and malformed success never become success', async () => {

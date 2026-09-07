@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const ORIGINS = new Set(['https://ctrlrun.dev', 'https://www.ctrlrun.dev']);
+const ORIGINS = new Set(['https://ctrlrun.dev', 'https://www.ctrlrun.dev', 'https://ctrlrun-codex-website-redesign.mintlify.site']);
 const CONCERNS = new Set(['Wrong actions', 'Duplicate execution', 'Human approval', 'Retry safety', 'Permissions', 'Auditability', 'Other']);
 const RECIPIENT = 'contact@arpanghoshal.com';
 // A small per-instance backstop. Edge rate limiting should also protect /api/review.

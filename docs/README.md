@@ -31,7 +31,7 @@ NODE_PATH="$(npm root -g)" node docs/assets/verify-website.cjs
 cd docs && mint validate && mint broken-links
 ```
 
-The browser harness requires Playwright and the preview server. It covers the demo state transitions, keyboard picker, mobile overflow, risk scoring, form validation, mocked email failure/retry/success, documentation sidebar, and key canonical URLs. It never sends an email.
+The browser harness requires Playwright and the preview server. It covers the demo state transitions, keyboard picker, mobile overflow, risk scoring, form validation, mocked email failure/retry/success, documentation sidebar, and key canonical URLs. It never sends an email. Set `WEBSITE_BASE_URL` to the hosted Mintlify preview URL to run the same checks against a deployment. Hosted checks also catch redirect normalization that differs from the local server. Do not add `/index` → `/` or `/docs/index` → `/docs` redirects: Mintlify normalizes those sources to their destinations, causing self-redirects.
 
 ## Scenario and conversion behavior
 

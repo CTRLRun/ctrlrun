@@ -1173,16 +1173,6 @@
       "source": "/ROADMAP",
       "destination": "/docs/ROADMAP",
       "permanent": true
-    },
-    {
-      "source": "/index",
-      "destination": "/",
-      "permanent": true
-    },
-    {
-      "source": "/docs/index",
-      "destination": "/docs",
-      "permanent": true
     }
   ]
 }

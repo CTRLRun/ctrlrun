@@ -13,7 +13,7 @@ The sending domain was verified in Resend during setup. Do not commit API keys, 
 
 ## Validation and retries
 
-The handler restricts CORS to the production Mintlify domains, validates and bounds every field, rejects a honeypot, caps request size, and fixes the sender and recipient. CORS is a browser boundary, not authentication. The per-instance limit of five requests per ten minutes is a backstop; it does not act as a shared global counter across Vercel instances.
+The handler restricts CORS to the production Mintlify domains and the exact redesign preview origin, validates and bounds every field, rejects a honeypot, caps request size, and fixes the sender and recipient. CORS is a browser boundary, not authentication. The per-instance limit of five requests per ten minutes is a backstop; it does not act as a shared global counter across Vercel instances.
 
 The browser generates a UUID per reviewed brief. The server uses it as Resend's idempotency key. Retry without changing the brief after an uncertain response; editing a brief creates a new request. No form contents or credentials are logged by the handler.
 
