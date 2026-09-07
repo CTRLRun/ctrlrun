@@ -27,7 +27,7 @@
     ],
     "primary": {
       "type": "button",
-      "label": "Protect my agent",
+      "label": "Get a safety review",
       "href": "/protect-my-agent"
     }
   },
