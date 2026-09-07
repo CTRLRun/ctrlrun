@@ -331,6 +331,9 @@ def test_client_cancellation_marks_an_idle_stream_ambiguous(gateway_http):
             if handler.connection.recv(1) == b"":
                 upstream_closed.set()
         except TimeoutError:
+            # Not a swallowed refusal: a timeout *is* the negative observation here -- the
+            # upstream connection is still open. The assertion is `upstream_closed` below,
+            # which stays unset in that case and fails the test.
             pass
 
     h.respond = respond

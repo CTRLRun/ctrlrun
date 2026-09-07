@@ -163,16 +163,24 @@ def resumed_receipt_keeps_approval() -> dict[str, object]:
     def suspend() -> NoReturn:
         raise Suspended("audit-continuation")
 
+    # Each expected refusal has an `else` that fails. Without them `request_id` is unbound
+    # when approval was *not* required, so the probe dies with `UnboundLocalError` several
+    # lines later instead of saying which precondition did not hold -- and the second block
+    # would carry on silently past an action that never suspended, quietly proving nothing.
     try:
         control.execute(action, suspend, "refund:txn_1")
     except ApprovalRequired as pending:
         request_id = pending.request_id
+    else:
+        raise SystemExit("expected ApprovalRequired: the policy did not ask for approval")
     store.grant_approval(request_id, "human:alice")
     try:
         with with_approval(request_id):
             control.execute(action, suspend, "refund:txn_1")
     except Suspended:
         pass
+    else:
+        raise SystemExit("expected Suspended: the executor did not suspend")
     now[0] += timedelta(minutes=2)
     receipt = control.resume("audit-continuation", lambda: "refunded")
     assert store.get_approval(request_id).status.value == "consumed"
