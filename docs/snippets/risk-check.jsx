@@ -45,7 +45,7 @@ export const RiskCheck = () => {
       <ul>{patterns.map((pattern, index) => (result.risky[index] || answers[index] === 'Unsure') && <li key={pattern.label}><strong>{answers[index] === 'Unsure' ? 'Check: ' : ''}{pattern.label}</strong><p>{pattern.advice} <a href={pattern.href}>Implementation guide →</a></p></li>)}</ul>
       {result.count === 0 && result.unknowns === 0 && <p>Your answers indicate fewer of these patterns. Validate the controls with concurrency, changed-approval, and lost-response tests before rollout.</p>}
       <p className="cr-caption">A planning aid based on your answers, not an audit or a safety certification. High means at least three indicated patterns; “Needs review” means one or more patterns or unknowns.</p>
-      <a className="cr-button" href={'/protect-my-agent?risk=' + encodeURIComponent(result.level) + '&patterns=' + result.count + '&unknowns=' + result.unknowns} onClick={() => track('protect_clicked')}>Get a production architecture review ↗</a>
+      <a className="cr-button" href={'/protect-my-agent?risk=' + encodeURIComponent(result.level) + '&patterns=' + result.count + '&unknowns=' + result.unknowns} onClick={() => track('protect_clicked')}>Get a safety review ↗</a>
     </section>}
   </div>;
 };

@@ -94,6 +94,10 @@
 .cr-code pre { padding:22px; background:transparent; border:0; font-size:12px; line-height:1.85; overflow:auto; color:var(--cr-ink); }
 .cr-site code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; background:transparent; color:inherit; font-weight:400; padding:0; }
 .cr-code p { padding:0 22px 18px; font-size:10px; }
+.cr-code .cr-outcomes { list-style:none; padding:16px 22px; border-top:1px solid var(--cr-line); font-size:12px; line-height:1.85; }
+.cr-integration .cr-integration-scope { grid-column:1 / -1; }
+.cr-integration-scope a { text-decoration:underline; text-underline-offset:3px; }
+.cr-integration .cr-caption a { text-decoration:underline; text-underline-offset:3px; }
 .cr-commercial { display:grid; grid-template-columns:1.3fr 1fr; gap:64px; align-items:center; }
 .cr-commercial-links { display:flex; flex-direction:column; align-items:flex-start; gap:16px; justify-self:end; }
 .cr-footer { display:flex; justify-content:space-between; gap:32px; padding:38px 0 50px; color:var(--cr-muted); font-size:13px; }
@@ -107,6 +111,13 @@
 .cr-services details { border-bottom:1px solid var(--cr-line); padding:16px 0; }
 .cr-services summary { font-size:15px; font-weight:550; }
 .cr-services p { font-size:14px; padding:12px 0; }
+.cr-review-example { margin-bottom:45px; }
+.cr-review-example h2+p { margin-top:18px; }
+.cr-control-map { margin-top:24px; overflow-x:auto; }
+.cr-control-map table { width:100%; min-width:600px; border-collapse:collapse; text-align:left; font-size:13px; line-height:1.7; }
+.cr-control-map th,.cr-control-map td { min-width:130px; padding:14px 16px; border:1px solid var(--cr-line); vertical-align:top; }
+.cr-control-map thead { background:var(--cr-paper); }
+.cr-control-map th { font-weight:550; }
 .cr-review h2 { margin-bottom:20px; }
 .cr-review form { margin:24px 0; }
 .cr-review .cr-field { margin-bottom:22px; }

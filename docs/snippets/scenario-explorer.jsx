@@ -93,7 +93,7 @@ export const ScenarioExplorer = () => {
         </div>
       </div>
       <p className="cr-demo-note">Interactive simulation · Example rules, not industry defaults. No real actions are taken.{physical ? ' CTRLRun governs the software authorization and execution workflow; physical safety controls remain separate.' : ''}{domain === 'Healthcare Operations' ? ' Administrative workflows only; no diagnosis or clinical decisions.' : ''}</p>
-      <div className="cr-domain-cta"><div><strong>{reviewQuestion}</strong><p>Review where execution controls belong in your architecture.</p></div><a className="cr-text-link" href={'/protect-my-agent?domain=' + encodeURIComponent(domain)} onClick={() => track('protect_clicked')}>Protect my agent ↗</a></div>
+      <div className="cr-domain-cta"><div><strong>{reviewQuestion}</strong><p>Review where execution controls belong in your architecture.</p></div><a className="cr-text-link" href={'/protect-my-agent?domain=' + encodeURIComponent(domain)} onClick={() => track('protect_clicked')}>Get a safety review ↗</a></div>
     </div>
   );
 };

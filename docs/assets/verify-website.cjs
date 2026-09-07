@@ -37,9 +37,9 @@ module.exports = async function verifyWebsite(page, base = 'http://localhost:300
   assert(await page.getByRole('option').count() >= 48, 'Industry breadth is discoverable');
   await page.getByRole('combobox', { name: 'Search domains' }).fill('DevOps');
   await page.keyboard.press('Enter');
-  assert(await page.getByLabel('Choose an action').inputValue() === '0', 'Changing domain resets the selected action');
+  assert(await page.getByRole('combobox', { name: /^Choose an action/ }).inputValue() === '0', 'Changing domain resets the selected action');
   assert((await page.locator('.cr-domain-cta').innerText()).includes('production infrastructure'), 'Commercial CTA follows the selected domain');
-  await page.getByLabel('Choose an action').selectOption('2');
+  await page.getByRole('combobox', { name: /^Choose an action/ }).selectOption('2');
   assert((await page.locator('.cr-request').innerText()).includes('Delete infrastructure'), 'Changing action updates the request');
   await page.getByRole('button', { name: 'Choose your domain DevOps' }).click();
   await page.getByRole('combobox', { name: 'Search domains' }).fill('does-not-exist');
@@ -66,14 +66,14 @@ module.exports = async function verifyWebsite(page, base = 'http://localhost:300
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Risk check fits mobile');
   await page.goto(base + '/protect-my-agent?domain=DevOps&risk=High&patterns=4&unknowns=1');
   assert((await page.locator('.cr-domain-context').innerText()).includes('DevOps'), 'Domain context carries into the review form');
-  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  await page.getByRole('button', { name: 'Review my request →' }).click();
   assert(await page.locator('.cr-email-preview').count() === 0, 'Empty form cannot prepare a request');
   await page.getByLabel('Work email', { exact: true }).fill('engineer@example.com');
   await page.getByLabel('Company', { exact: true }).fill('Example test company');
   await page.getByLabel('What does your agent do?').fill('Test deployment workflow');
   await page.getByLabel('Which actions can it execute?').fill('Deploy production releases');
   await page.getByLabel('Retry safety', { exact: true }).check();
-  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  await page.getByRole('button', { name: 'Review my request →' }).click();
   const href = await page.getByRole('link', { name: 'Use my email app instead ↗' }).getAttribute('href');
   assert(href.startsWith('mailto:contact@arpanghoshal.com?'), 'Review handoff uses the approved recipient');
   const body = decodeURIComponent(href.split('&body=')[1]);
@@ -82,7 +82,7 @@ module.exports = async function verifyWebsite(page, base = 'http://localhost:300
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Review form fits mobile');
   await page.getByLabel('Company', { exact: true }).fill('Updated test company');
   assert(await page.locator('.cr-email-preview').count() === 0, 'Editing the brief clears the prepared handoff');
-  await page.getByRole('button', { name: 'Review my agent →' }).click();
+  await page.getByRole('button', { name: 'Review my request →' }).click();
   const submissions = [];
   await page.route('https://ctrlrun-review-form.vercel.app/api/review', async route => {
     submissions.push(route.request().postDataJSON());
