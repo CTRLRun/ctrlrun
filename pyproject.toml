@@ -46,7 +46,11 @@ dependencies = [
     # makes that checkable. PyYAML 5 subtracts the offset and hands back a naive datetime, which
     # would reject the specification's own example at load.
     "pyyaml>=6.0",
-    "click",
+    # `click.Path(path_type=...)` is click 8.0, and `cli/main.py` uses it in four commands.
+    # Declared with no floor at all, an environment already holding click 7 resolved cleanly
+    # and then those commands died at decoration with an unexpected-keyword TypeError. A fresh
+    # install gets click 8 and never sees it, which is why nothing caught it.
+    "click>=8.0",
 ]
 
 [project.urls]

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1821,3 +1822,156 @@ def test_a_signed_grant_posted_to_the_advertised_url_lands_the_approval(store):
         server.server_close()
         hook.shutdown()
         hook.server_close()
+
+
+# --- a decoded body must not carry the upstream's Content-Encoding -----------------------
+#
+# httpx decompresses `response.content`, and the forwarder relayed `dict(response.headers)`
+# verbatim -- `Content-Encoding: gzip` included, since `_HOP_BY_HOP` did not list it. The
+# client then tried to gunzip plain JSON: `DecodingError: incorrect header check`, on every
+# response. httpx sends `Accept-Encoding: gzip` by default, so an ordinary upstream that
+# honours content negotiation made the gateway unusable -- no special server behaviour needed.
+#
+# `Content-Length` was already stripped and recomputed for exactly this reason; the encoding
+# describes the same bytes and belongs with it.
+
+
+def _gzip_upstream():
+    import gzip as _gzip
+    import threading as _threading
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = _gzip.compress(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": []}}).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("method", ["tools/list", "tools/call"])
+def test_a_gzip_upstream_is_readable_by_the_client(store, method):
+    """Both paths: `tools/list` is relayed, `tools/call` is intercepted."""
+    import threading as _threading
+
+    upstream = _gzip_upstream()
+    config = GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_address[1]}/mcp",
+        alias="acme",
+        principal_header="X-Agent",
+        port=0,
+    )
+    forwarder = httpx_forwarder(config)
+    gateway = Gateway(config, Control(Policy.from_yaml(POLICY), store), forwarder)
+    server = build_server(gateway)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        params = (
+            {"name": "read_only", "arguments": {}} if method == "tools/call" else {}
+        )
+        response = httpx.post(
+            f"http://127.0.0.1:{server.server_address[1]}/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            headers={"X-Agent": "bot"},
+            timeout=10,
+        )
+
+        # The assertion is that reading the body works at all: before the fix this raised
+        # `httpx.DecodingError` on `.text`, because the header said gzip and the bytes did not.
+        assert response.status_code in range(200, 600)
+        assert "gzip" not in (response.headers.get("content-encoding") or "")
+        assert response.text is not None
+    finally:
+        server.shutdown()
+        server.server_close()
+        forwarder.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+# --- a malformed --upstream is refused at startup, not once per request -------------------
+#
+# `GatewayConfig.__post_init__` already refuses a bad `--alias` and a bad `--path`, and the
+# one value the gateway cannot work without went unchecked. `--upstream 127.0.0.1:8000/mcp`
+# -- a scheme left off, which is what a typo looks like -- started a listener that answered
+# 502 to every request for the life of the process, and told the operator nothing at startup.
+
+
+@pytest.mark.parametrize(
+    "upstream", ["127.0.0.1:8000/mcp", "example.com/mcp", "ftp://example.com/mcp", ""]
+)
+def test_an_upstream_without_an_http_scheme_is_refused_at_construction(upstream):
+    from ctrlrun.errors import InvalidArgument
+
+    with pytest.raises(InvalidArgument) as raised:
+        GatewayConfig(upstream=upstream, alias="acme", principal_header="X-Agent", port=0)
+
+    assert "--upstream" in str(raised.value)
+
+
+@pytest.mark.parametrize("upstream", ["http://127.0.0.1:8000/mcp", "https://example.com/mcp"])
+def test_an_upstream_with_a_scheme_is_accepted(upstream):
+    """The positive control: the check must not refuse the URLs the docs tell people to use."""
+    config = GatewayConfig(upstream=upstream, alias="acme", principal_header="X-Agent", port=0)
+
+    assert config.upstream == upstream
+
+
+# --- the startup block survives a pipe (SPEC-v0.3 §8.4) ----------------------------------
+#
+# Python block-buffers a stdout that is not a tty, so the whole startup block -- what identity
+# provider is in force, which store, which environment -- was still sitting in the buffer when
+# the process was signalled, and never reached the log. Every real deployment pipes stdout:
+# systemd, docker, kubernetes. The block that tells an operator what the gateway trusts was
+# invisible in exactly the deployments it is written for, and visible only at an interactive
+# terminal, which is the one place nobody runs a server.
+
+
+def test_the_gateway_startup_block_reaches_a_piped_stdout(tmp_path):
+    import subprocess
+    import sys
+
+    (tmp_path / "ctrlrun.yaml").write_text(
+        "schema: ctrlrun.policy/v2\nactions:\n  a.b:\n    decision: allow\n", encoding="utf-8"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable, "-m", "ctrlrun.cli.main", "gateway",
+            "--upstream", "http://127.0.0.1:9/mcp", "--alias", "acme", "--principal", "bot",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        # Bounded by construction: give the block a moment to be written, then kill the
+        # process and read whatever actually left it. Reading line by line first would block
+        # for ever on the unflushed case, which is the failure this is testing -- a test for a
+        # missing flush must not itself wait on a flush.
+        time.sleep(2)
+    finally:
+        process.kill()
+    printed, _ = process.communicate(timeout=15)
+
+    # `environment` and `identity` are §8.4's own first two lines. Asserting on the text the
+    # block actually writes, not on a line the *operator* server writes, which is a different
+    # command with a different block.
+    assert "environment" in printed, (
+        f"the startup block did not reach a piped stdout; got {printed!r}"
+    )
+    assert "identity" in printed

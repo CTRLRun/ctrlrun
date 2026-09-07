@@ -417,7 +417,15 @@ def test_T134b_the_kit_is_stdlib_and_needs_no_extra():
         "an extra with no dependency behind it installs nothing and can never raise "
         "MissingDependency"
     )
-    assert pyproject["project"]["dependencies"] == ["pyyaml>=6.0", "click"]
+    # The claim is that core has not *grown*, so it is about the distributions named and not
+    # about their version bounds -- pinning `click>=8.0` for the click 8 API the CLI uses is
+    # not a new dependency. Comparing the literal strings made a floor look like growth.
+    from packaging.requirements import Requirement
+
+    assert {Requirement(name).name for name in pyproject["project"]["dependencies"]} == {
+        "pyyaml",
+        "click",
+    }
 
 
 def test_T134b_the_kit_imports_nothing_from_an_extra():

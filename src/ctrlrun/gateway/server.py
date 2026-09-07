@@ -203,6 +203,16 @@ class GatewayConfig:
     def __post_init__(self) -> None:
         import re
 
+        # The one value the gateway cannot work without, and the only one that went
+        # unchecked. Without a scheme httpx raises `UnsupportedProtocol` on every request, so
+        # a typo started a listener that answered 502 for the life of the process and said
+        # nothing at startup. Refused here, beside `--alias` and `--path`, so it is a
+        # configuration error where the operator is looking.
+        if not self.upstream.startswith(("http://", "https://")):
+            raise InvalidArgument(
+                f"--upstream {self.upstream!r} must start with 'http://' or 'https://'; "
+                "without a scheme every forwarded request fails before it is sent"
+            )
         if not re.match(ALIAS_PATTERN, self.alias):
             raise InvalidArgument(
                 f"--alias {self.alias!r} must match {ALIAS_PATTERN} — no dots, so the alias "
@@ -1000,7 +1010,8 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
         relayed = {
             key: value
             for key, value in headers.items()
-            if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
+            if key.lower() not in _HOP_BY_HOP
+            and key.lower() not in _DESCRIBES_THE_UPSTREAM_BODY
         }
         relayed["Content-Type"] = "application/json"
         client = httpx.Client(timeout=config.upstream_timeout) if fresh else pooled
@@ -1058,6 +1069,14 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
     forward.close = pooled.close  # type: ignore[attr-defined]
     return forward
 
+
+#: Headers that describe the *transfer* of the upstream's body rather than the body the
+#: gateway relays. `content-encoding` is here with `content-length` for one reason: httpx has
+#: already decoded `response.content`, so relaying the upstream's encoding attached the wrong
+#: description to the right bytes and every client failed with `DecodingError: incorrect
+#: header check`. httpx sends `Accept-Encoding: gzip` by default, so an upstream doing nothing
+#: but honouring content negotiation made the gateway unusable.
+_DESCRIBES_THE_UPSTREAM_BODY: Final = frozenset({"content-length", "content-encoding"})
 
 _HOP_BY_HOP: Final = frozenset(
     {
@@ -1159,7 +1178,7 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
         def _respond(self, response: _Response) -> None:
             self.send_response(response.status)
             for key, value in response.headers.items():
-                if key.lower() in _HOP_BY_HOP or key.lower() == "content-length":
+                if key.lower() in _HOP_BY_HOP or key.lower() in _DESCRIBES_THE_UPSTREAM_BODY:
                     continue
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(response.body)))

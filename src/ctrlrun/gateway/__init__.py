@@ -13,6 +13,7 @@ non-execution, and it is only provable if no request byte can have been written.
 from __future__ import annotations
 
 import importlib
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
@@ -180,6 +181,12 @@ def _announce(control: Any, config: Any, identity: Any, authority_path: str | No
         lines.append("That is right for a read, and wrong for anything that changes the world.")
     for line in lines:
         print(line)
+    # One flush for the block: stdout is a pipe in every real deployment (systemd, docker,
+    # kubernetes) and Python block-buffers those, so SPEC-v0.3 §8.4's block -- what
+    # identity provider is in force, which store, which environment -- never reached the
+    # log. It was visible only at an interactive terminal, which is the one place nobody
+    # runs a server.
+    sys.stdout.flush()
 
 
 def serve_operator(**options: Any) -> None:
@@ -262,13 +269,16 @@ def _announce_operator(control: Any, config: Any, identity: Any, store: Any) -> 
     configured handler would swallow it — which is the failure mode the block exists to
     prevent, in miniature.
     """
-    print(f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}")
-    print(f"environment  {control.environment}")
+    print(
+        f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}",
+        flush=True,
+    )
+    print(f"environment  {control.environment}", flush=True)
     # SPEC-mcp-operator §6 — for a server whose whole premise is "both processes on one host
     # against one store", and which has a `--store-url` that silently changes it, this is the
     # line an operator most needs. A review found the block printing everything but this.
-    print(f"store        {getattr(store, 'path', store)}")
-    print(f"identity     {type(identity).__name__}")
+    print(f"store        {getattr(store, 'path', store)}", flush=True)
+    print(f"identity     {type(identity).__name__}", flush=True)
     if config.principal_header is not None:
         print(
             f"             trusts the header {config.principal_header!r}: it is worth what "
@@ -287,4 +297,7 @@ def _announce_operator(control: Any, config: Any, identity: Any, store: Any) -> 
         "and each answer is recorded under that name"
     )
     if control.authority is not None:
-        print(f"authority    {len(control.authority.grants)} grant(s), evaluated by the agent")
+        print(
+            f"authority    {len(control.authority.grants)} grant(s), evaluated by the agent",
+            flush=True,
+        )

@@ -115,6 +115,32 @@ def _at(text: str | None) -> datetime | None:
     return None if text is None else datetime.fromisoformat(text)
 
 
+#: The oldest SQLite this store works on. `put_receipt` uses `UPDATE ... RETURNING`, which
+#: arrived in SQLite 3.35 (March 2021).
+#:
+#: `requires-python >= 3.11` does not imply it: on Linux CPython links the *system*
+#: libsqlite3, and RHEL 8 ships 3.26. Undeclared and unchecked, the first receipt write on
+#: such a host raised a bare `sqlite3.OperationalError` about a syntax error near RETURNING,
+#: which names neither the real cause nor the remedy.
+MIN_SQLITE_VERSION: Final = (3, 35)
+
+
+def _require_sqlite() -> None:
+    """Refuse at open, where the message can name the version, not at the first receipt."""
+    if sqlite3.sqlite_version_info >= MIN_SQLITE_VERSION:
+        return
+    wanted = ".".join(str(part) for part in MIN_SQLITE_VERSION)
+    # `InvalidArgument`, on the `:memory:` precedent in this same constructor: the closed
+    # error set has no member for "the environment is too old", and `MissingDependency`
+    # renders a fixed "it ships in the X extra" sentence that would be false here.
+    raise InvalidArgument(
+        f"this Python is linked against SQLite {sqlite3.sqlite_version}, and CTRLRun needs "
+        f"{wanted} or newer: the receipt chain is written with `UPDATE ... RETURNING`, which "
+        f"older SQLite cannot parse. Upgrade the system SQLite, use a Python built against a "
+        f"newer one, or run the Postgres backend (pip install 'ctrlrun[postgres]')."
+    )
+
+
 def _storable(text: str | None) -> str | None:
     """`text` in a form SQLite can encode, escaping any lone surrogate.
 
@@ -1000,6 +1026,7 @@ class SQLiteStateStore:
                 f"{text!r} is per-connection and cannot reserve across processes; "
                 "use a file path, or InMemoryStateStore if that is what you meant"
             )
+        _require_sqlite()
         self._path = Path(text)
         self._clock = clock
         self._local = threading.local()

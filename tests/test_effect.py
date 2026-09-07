@@ -1655,3 +1655,41 @@ def test_an_executor_raising_a_lone_surrogate_gets_an_ambiguous_outcome(tmp_path
         assert store.get_effect("pay:inv-1").state is EffectState.AMBIGUOUS
     finally:
         store.close()
+
+
+# --- the SQLite the store actually needs (SPEC-v0.6 §3) ----------------------------------
+#
+# `put_receipt` uses `UPDATE ... RETURNING`, which is SQLite 3.35 (March 2021). On Linux
+# CPython links the *system* libsqlite3, so `requires-python >= 3.11` does not imply it --
+# RHEL 8 ships 3.26. Nothing declared the minimum and nothing checked it, so the first receipt
+# write on such a host raised a raw `sqlite3.OperationalError` about a syntax error, naming
+# neither the real cause nor the remedy.
+
+
+def test_the_store_states_the_sqlite_version_it_needs():
+    from ctrlrun.state import MIN_SQLITE_VERSION
+
+    assert MIN_SQLITE_VERSION >= (3, 35), "UPDATE ... RETURNING needs SQLite 3.35"
+
+
+def test_a_store_on_an_older_sqlite_is_refused_naming_the_version(tmp_path, monkeypatch):
+    """Fail closed at open, where the message can name the version, rather than at the first
+    receipt write with a syntax error."""
+    import sqlite3 as _sqlite3
+
+    from ctrlrun.errors import InvalidArgument as _Refused
+
+    monkeypatch.setattr(_sqlite3, "sqlite_version_info", (3, 26, 0))
+    monkeypatch.setattr(_sqlite3, "sqlite_version", "3.26.0")
+
+    with pytest.raises(_Refused) as raised:
+        SQLiteStateStore(tmp_path / "state.db")
+
+    assert "3.26" in str(raised.value)
+    assert "3.35" in str(raised.value)
+
+
+def test_the_current_interpreter_satisfies_the_floor(tmp_path):
+    """The positive control: the check must not refuse a supported SQLite."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.close()

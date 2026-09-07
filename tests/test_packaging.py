@@ -1010,3 +1010,33 @@ def test_each_adapter_readme_states_the_same_kernel_range_as_its_metadata(adapte
         f"adapters/{adapter}/README.md does not state the kernel range {specifier!r} that "
         "its pyproject.toml declares"
     )
+
+
+def test_click_declares_a_lower_bound_that_covers_the_api_the_cli_uses():
+    """`click.Path(path_type=...)` arrives in click 8.0, and the CLI uses it in four commands.
+
+    `click` was declared with no floor at all, so an environment already holding click 7
+    resolved cleanly and then those commands died at decoration with `TypeError: __init__()
+    got an unexpected keyword argument 'path_type'`. A fresh `pip install` gets click 8 and
+    never sees it, which is exactly why nothing caught it.
+    """
+    from packaging.requirements import Requirement
+
+    declared = {
+        Requirement(name).name: Requirement(name).specifier
+        for name in _pyproject()["project"]["dependencies"]
+    }
+
+    assert str(declared["click"]), "click is declared with no version bound at all"
+    assert "8" in str(declared["click"]), (
+        f"click is declared as {str(declared['click'])!r}, which does not require the click 8 "
+        "API `click.Path(path_type=...)` that src/ctrlrun/cli/main.py uses"
+    )
+
+
+def test_the_cli_uses_the_click_8_api_this_floor_is_for():
+    """The positive control on the test above: if the CLI stopped using `path_type`, the floor
+    would be arbitrary and this says so rather than leaving it unexplained."""
+    text = (REPO_ROOT / "src" / "ctrlrun" / "cli" / "main.py").read_text(encoding="utf-8")
+
+    assert "path_type=" in text

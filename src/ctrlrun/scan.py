@@ -501,8 +501,16 @@ def scan(
             name for name, has_effect, _, _ in protected if name is not None and has_effect
         }
         for name, can_act in sorted(actions.items()):
+            # `can_act` is "the policy permits this", which every allowed action satisfies --
+            # so asking it alone flagged every read. The question this rule means is "does
+            # this action have a consequence to reserve?", and that is `matched_verb` against
+            # the same consequence vocabulary the call-site rule already uses. `ctrlrun init`
+            # writes `customer.read` and `invoice.read` under the comment *"Reads: autonomous.
+            # Declare no effect on these; nothing to reserve"*, and `ctrlrun scan` failed the
+            # policy `ctrlrun init` had just written, exit 1, on exactly those two.
             if (
                 can_act
+                and matched_verb(name, words) is not None
                 and loaded.effect_template(name) is None
                 and name not in decorated_with_effect
             ):

@@ -66,7 +66,10 @@ actions:
 
   # External communication: autonomous here. Add a rule on the recipient's domain
   # before an agent can reach anyone outside the building.
+  # `effect` because a send is a consequence: two attempts with the same message_id are
+  # one email, and `ctrlrun scan` says so if you leave it off.
   email.send:
+    effect: "email:{message_id}"
     decision: allow
 
   # Money: autonomy depends on the amount. First matching rule wins.
