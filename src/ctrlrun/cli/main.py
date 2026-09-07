@@ -163,13 +163,17 @@ def _store(store_url: str | None = None) -> StateStore:
         # `MissingDependency`'s whole purpose is that an operator does not read a missing
         # extra as a broken package, which is exactly what a stack trace says.
         try:
-            from ..postgres import PostgresStateStore
+            from ..postgres import PostgresStateStore, _psycopg
 
             bare, schema = _peel_schema(store_url)
             _require_head(bare, schema)
             return PostgresStateStore(bare, schema=schema)
         except CTRLRunError as exc:
             raise _fail(exc) from exc
+        except _psycopg().Error as exc:
+            # A mistyped host is a typo, and `psycopg.OperationalError` with a resolver stack
+            # under it reads as a broken package rather than as a URL to check.
+            raise click.ClickException(f"cannot reach {store_url!r}: {exc}") from exc
     raise click.ClickException(
         f"no store backend for {store_url!r}; expected a 'sqlite://' path or a 'postgresql://' URL"
     )

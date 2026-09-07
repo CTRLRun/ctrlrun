@@ -1036,7 +1036,19 @@ class SQLiteStateStore:
         # SPEC-v0.6 §3. The store's admission check: classify, then migrate or refuse. It runs
         # before any other table is read, and there is no argument, keyword or environment
         # variable that suppresses it (§3.6).
-        migrate(self._connection(), self._clock())
+        try:
+            migrate(self._connection(), self._clock())
+        except sqlite3.DatabaseError as exc:
+            # `sqlite3.DatabaseError: file is not a database` names neither the path nor the
+            # remedy, and is not a `CTRLRunError` -- so neither the CLI's error contract nor an
+            # application catching the kernel's own errors caught it. `$CTRLRUN_STATE` pointing
+            # at the wrong file is an ordinary misconfiguration and deserves an ordinary
+            # refusal.
+            raise InvalidArgument(
+                f"{str(self._path)!r} is not a CTRLRun state database: {exc}. Point "
+                "$CTRLRUN_STATE or --store-url at the database your agents write, or let "
+                "the agent process create one."
+            ) from exc
 
     @property
     def path(self) -> Path:

@@ -153,8 +153,18 @@ def since_boundary(argument: str | None) -> datetime | None:
     if argument is None:
         return None
     text = argument.strip()
-    if text and text[-1] in _RELATIVE_UNITS and text[:-1].isdigit() and int(text[:-1]) > 0:
-        return datetime.now(UTC) - timedelta(**{_RELATIVE_UNITS[text[-1]]: int(text[:-1])})
+    # `.isascii()` as well as `.isdigit()`: `str.isdigit()` is true for '²' and '١٢', and
+    # `int()` refuses both, so a superscript or an Arabic-Indic digit raised a bare `ValueError`
+    # out of a function documented to raise `InvalidArgument`.
+    digits = text[:-1]
+    if (
+        text
+        and text[-1] in _RELATIVE_UNITS
+        and digits.isascii()
+        and digits.isdigit()
+        and int(digits) > 0
+    ):
+        return datetime.now(UTC) - timedelta(**{_RELATIVE_UNITS[text[-1]]: int(digits)})
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:

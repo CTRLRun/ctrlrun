@@ -229,3 +229,32 @@ def _subject_principal(control, parent_id):
 
     subject = control.authority.grants[parent_id].subject
     return Principal(agent=subject.agent, user=subject.user)
+
+
+# --- a driver's own exception is not the CLI's error contract ----------------------------
+
+
+def test_a_state_path_that_is_not_a_database_is_one_clean_line(tmp_path):
+    """`sqlite3.DatabaseError: file is not a database` names neither the path nor the remedy,
+    and is not a `CTRLRunError`, so nothing in the CLI or in an application catches it."""
+    here = tmp_path / "empty"
+    here.mkdir(exist_ok=True)
+    decoy = tmp_path / "notadb.db"
+    decoy.write_text("this is not a database\n", encoding="utf-8")
+
+    result, _ = _run(["receipts"], tmp_path, env={"CTRLRUN_STATE": str(decoy)})
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert str(decoy) in result.output
+
+
+def test_an_unreachable_postgres_host_is_one_clean_line(tmp_path):
+    """A mistyped `--store-url` is a typo, and `psycopg.OperationalError` with a resolver
+    stack under it reads as a broken package."""
+    result, _ = _run(
+        ["receipts", "--store-url", "postgresql://nosuchhost.invalid/db"], tmp_path
+    )
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
