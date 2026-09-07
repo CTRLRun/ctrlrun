@@ -284,7 +284,12 @@ def test_T204_the_human_output_and_the_json_come_from_one_producer(tmp_path):
     """§5.3."""
     module = _scan()
     policy = tmp_path / "ctrlrun.yaml"
-    policy.write_text("schema: ctrlrun.policy/v2\nactions:\n  a.b:\n    decision: allow\n")
+    # `stripe.refund` rather than `a.b`: `action_without_effect` fires on an action that
+    # has a consequence to reserve, and `a.b` carries no verb from the vocabulary, so it
+    # is correctly not one. The kind under test needs a subject it applies to.
+    policy.write_text(
+        "schema: ctrlrun.policy/v2\nactions:\n  stripe.refund:\n    decision: allow\n"
+    )
     _tree(
         tmp_path,
         {
@@ -441,3 +446,117 @@ def test_the_cli_carries_the_flags_the_spec_freezes(arguments):
     result = CliRunner().invoke(main, arguments)
 
     assert result.exit_code == 0, result.output
+
+
+# --- a read is not a consequence (SPEC-scan §3.2) ----------------------------------------
+#
+# `ctrlrun init` writes a starter policy and `ctrlrun scan` immediately failed it with exit 1
+# -- on the two actions the starter policy's own comment says need no effect: *"Reads:
+# autonomous. Declare no effect on these; nothing to reserve."* The first two commands the
+# quick start teaches contradicted each other, and in CI that is a red build on a new project.
+#
+# The rule asked `can_act` -- "does the policy permit this?" -- where it meant "does this
+# action have a consequence?". Every permitted action is `can_act`, so every read was flagged.
+# The consequence vocabulary the call-site rule already uses is the right question, and it has
+# `send` in it and not `read`.
+
+
+def test_a_read_action_without_an_effect_template_is_not_a_finding(tmp_path):
+    from ctrlrun.scan import scan
+
+    (tmp_path / "ctrlrun.yaml").write_text(
+        "schema: ctrlrun.policy/v2\nactions:\n"
+        "  customer.read:\n    decision: allow\n"
+        "  invoice.read:\n    decision: allow\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path)
+
+    assert [f.name for f in report.findings] == [], (
+        "a read declares no effect because it has none to reserve"
+    )
+
+
+def test_an_acting_action_without_an_effect_template_is_still_a_finding(tmp_path):
+    """The positive control. Without it the fix above would be "report nothing", which is the
+    false green a scanner exists to avoid."""
+    from ctrlrun.scan import scan
+
+    (tmp_path / "ctrlrun.yaml").write_text(
+        "schema: ctrlrun.policy/v2\nactions:\n  stripe.refund:\n    decision: allow\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path)
+
+    assert [f.name for f in report.findings] == ["stripe.refund"]
+
+
+def test_the_starter_policy_passes_the_scanner_that_ships_with_it(tmp_path):
+    """`ctrlrun init` then `ctrlrun scan` is the first thing a new user does."""
+    from ctrlrun.cli.main import EXAMPLE_POLICY
+    from ctrlrun.scan import scan
+
+    (tmp_path / "ctrlrun.yaml").write_text(EXAMPLE_POLICY, encoding="utf-8")
+    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path)
+
+    assert report.findings == (), (
+        "the policy `ctrlrun init` writes fails the scanner that ships beside it: "
+        + ", ".join(f"{f.name} [{f.rule}]" for f in report.findings)
+    )
+
+
+# --- `--exclude` is a glob relative to the tree, so a directory name excludes its subtree --
+#
+# `PurePath.match` compares components from the right, so `Path("vendor/x.py").match("vendor")`
+# is False and `--exclude vendor` read every file under `vendor/` anyway -- "files read: 2,
+# excluded: 0". The built-in list one line above already excludes by *directory name*
+# (`set(parts) & DEFAULT_EXCLUDED_DIRECTORIES`), so the flag an operator types behaved
+# differently from the list they cannot change, and neither the help text nor the reference
+# said so.
+
+
+def test_exclude_by_directory_name_excludes_the_subtree(tmp_path):
+    from ctrlrun.scan import scan
+
+    (tmp_path / "vendor" / "deep").mkdir(parents=True)
+    (tmp_path / "vendor" / "x.py").write_text("import ctrlrun\n", encoding="utf-8")
+    (tmp_path / "vendor" / "deep" / "y.py").write_text("import ctrlrun\n", encoding="utf-8")
+    (tmp_path / "top.py").write_text("import ctrlrun\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["vendor"])
+
+    assert report.files_read == 1, "only top.py should have been read"
+    assert report.files_excluded == 2
+
+
+def test_exclude_still_accepts_a_path_glob(tmp_path):
+    """The documented shape must keep working: this is a widening, not a replacement."""
+    from ctrlrun.scan import scan
+
+    (tmp_path / "gen").mkdir()
+    (tmp_path / "gen" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "keep.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["gen/*.py"])
+
+    assert report.files_read == 1
+    assert report.files_excluded == 1
+
+
+def test_exclude_does_not_match_an_unrelated_prefix(tmp_path):
+    """The positive control on the widening: `ven` must not exclude `vendor`."""
+    from ctrlrun.scan import scan
+
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "x.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = scan(tmp_path, exclude=["ven"])
+
+    assert report.files_read == 1
+    assert report.files_excluded == 0

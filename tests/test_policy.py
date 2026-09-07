@@ -912,3 +912,129 @@ def test_T16_an_unknown_schema_names_every_supported_one():
 
     for known in ("ctrlrun.policy/v1", "ctrlrun.policy/v2", "ctrlrun.policy/v3"):
         assert known in str(raised.value)
+
+
+# --- a repeated key is a refusal, not a silent override ----------------------------------
+#
+# `yaml.safe_load` resolves a duplicated mapping key to the last one, silently. Every other
+# mistake in these documents is caught -- the key sets are closed at every level precisely so
+# that `action:` for `actions:` fails loudly -- so an operator reasonably reads a clean load as
+# "the document is what I meant".
+#
+# The authority case fails **open**: a grant that reads as scoped to one action, with
+# `actions:` written twice during a narrowing edit, loads as `actions: ['**']`. `ctrlrun
+# verify` reads the same loader, so it does not catch it either.
+
+
+def test_a_duplicate_key_in_a_policy_is_refused():
+    document = """schema: ctrlrun.policy/v1
+actions:
+  pay.send:
+    decision: deny
+  pay.send:
+    decision: allow
+"""
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert "pay.send" in str(raised.value)
+    assert "duplicate" in str(raised.value).lower()
+
+
+def test_a_duplicate_condition_key_is_refused():
+    """Editing a threshold by pasting the new line above the old one."""
+    document = """schema: ctrlrun.policy/v1
+actions:
+  pay.send:
+    rules:
+      - when:
+          amount_gt: 1000
+          amount_gt: 100000
+        decision: deny
+      - decision: allow
+"""
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert "amount_gt" in str(raised.value)
+
+
+def test_the_refusal_names_the_line_the_duplicate_is_on():
+    document = """schema: ctrlrun.policy/v1
+actions:
+  pay.send:
+    decision: deny
+  pay.send:
+    decision: allow
+"""
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert "line" in str(raised.value).lower()
+
+
+def test_a_document_with_no_duplicate_still_loads():
+    """The positive control: the strict loader must not refuse an ordinary document, and the
+    same key appearing under two *different* parents is not a duplicate."""
+    policy = Policy.from_yaml(
+        """schema: ctrlrun.policy/v1
+actions:
+  pay.send:
+    decision: deny
+  pay.read:
+    decision: allow
+"""
+    )
+
+    assert sorted(policy.actions) == ["pay.read", "pay.send"]
+
+
+# --- a set-valued operand must hold values a set can hold --------------------------------
+#
+# `data_scope_eq: [[phi]]` -- the shape an operator lands on when they nest the label set one
+# level too deep -- loaded without complaint and then raised `TypeError: unhashable type:
+# 'list'` out of `frozenset(self.operand)` on *every* evaluation of that action. A `TypeError`
+# is not a `CTRLRunError`, so an application catching `ctrlrun.CTRLRunError` did not catch it,
+# and the action was dead until the policy was edited with nothing pointing at the line.
+
+
+@pytest.mark.parametrize("operand", [[["phi"]], ["phi", {"label": "phi"}]])
+def test_a_nested_data_scope_operand_is_refused_at_load(operand):
+    import yaml as _yaml
+
+    document = _yaml.safe_dump(
+        {
+            "schema": "ctrlrun.policy/v4",
+            "actions": {
+                "a.b": {
+                    "data": {"pid": "phi"},
+                    "rules": [
+                        {"when": {"data_scope_eq": operand}, "decision": "deny"},
+                        {"decision": "allow"},
+                    ],
+                }
+            },
+        }
+    )
+    with pytest.raises(PolicyError) as raised:
+        Policy.from_yaml(document)
+
+    assert "data_scope_eq" in str(raised.value)
+
+
+def test_a_flat_data_scope_operand_still_loads_and_evaluates():
+    """The positive control: only unhashable elements are refused."""
+    document = """schema: ctrlrun.policy/v4
+actions:
+  a.b:
+    data:
+      pid: phi
+    rules:
+      - when: { data_scope_eq: [phi] }
+        decision: deny
+      - decision: allow
+"""
+    policy = Policy.from_yaml(document)
+    action = Action(name="a.b", arguments={"pid": "x"}, principal=Principal(agent="bot"))
+
+    assert policy.evaluate(action).decision is Decision.DENY

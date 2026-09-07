@@ -72,9 +72,12 @@ def sign(body: bytes, secret: str, *, at: datetime | None = None) -> str:
     """`t=<unix seconds>,v1=<hex>` over `f"{t}.{body}"` (SPEC-v0.2 §7.1)."""
     moment = at if at is not None else datetime.now(UTC)
     stamp = int(moment.timestamp())
-    mac = hmac.new(
-        secret.encode("utf-8"), f"{stamp}.{body.decode('utf-8')}".encode(), hashlib.sha256
-    )
+    # `f"{stamp}.".encode() + body`, not `f"{stamp}.{body.decode()}".encode()`. For any body
+    # that *is* UTF-8 those are the same bytes, so every signature ever issued still verifies;
+    # for a body that is not, the old form raised `UnicodeDecodeError` out of both `sign` and
+    # `verify`, so an inbound POST of arbitrary bytes crashed the handler instead of being
+    # refused. A signature check answers yes or no; raising is neither.
+    mac = hmac.new(secret.encode("utf-8"), f"{stamp}.".encode() + body, hashlib.sha256)
     return f"t={stamp},v1={mac.hexdigest()}"
 
 
@@ -96,8 +99,11 @@ def verify(header: str, body: bytes, secret: str, window: timedelta) -> bool:
         return False
     if abs(time.time() - stamp) > window.total_seconds():
         return False
+    # The same bytes `sign` MACs, and the same reason: a body that is not UTF-8 must be
+    # *refused*, not raise `UnicodeDecodeError` out of the handler. Two copies of one
+    # expression is how one of them stayed wrong after the other was fixed.
     expected = hmac.new(
-        secret.encode("utf-8"), f"{stamp}.{body.decode('utf-8')}".encode(), hashlib.sha256
+        secret.encode("utf-8"), f"{stamp}.".encode() + body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, parts["v1"])
 

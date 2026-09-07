@@ -351,16 +351,36 @@ def test_every_api_page_says_how_to_import_the_thing_it_documents():
         module, name = dotted.group(1), dotted.group(2)
         assert f"from {module} import {name}" in text, f"{page.name} has no import line"
 
-        extra = {
-            "ctrlrun.postgres": "postgres",
-            "ctrlrun.otel": "otel",
-            "ctrlrun.jwt_identity": "identity",
-            "ctrlrun.acs": "gateway",
-            "ctrlrun.gateway": "gateway",
-            "ctrlrun.conformance": "conformance",
-            "ctrlrun.conformance.store": "conformance",
-        }.get(module)
+        # Read the generator's own map rather than a second copy of it. The copy that used
+        # to be here listed a `conformance` extra that had been reversed, so the test asserted
+        # the same false install line the generator emitted and the drift was invisible from
+        # both sides. `test_every_extra_the_reference_names_is_an_extra_that_exists` is what
+        # checks that map against the extras `pyproject.toml` actually declares.
+        extra = render_api.EXTRA_FOR.get(module)
         if extra is not None:
             assert f'pip install "ctrlrun[{extra}]"' in text, (
                 f"{page.name} needs the {extra} extra and does not say so"
             )
+
+
+def test_every_extra_the_reference_names_is_an_extra_that_exists():
+    """A reference page that says `pip install "ctrlrun[conformance]"` sends a reader to a
+    command that installs nothing.
+
+    SPEC-v0.5 §5.1 planned the conformance kit as an extra and then reversed it -- the kit
+    needs nothing `ctrlrun` does not already install, and `conformance/__init__.py` records
+    why. `EXTRA_FOR` was not updated, so two generated pages kept promising an extra that
+    `pyproject.toml` does not declare, plus a `MissingDependency` that can never fire. Both
+    halves of that sentence were false.
+    """
+    import tomllib
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        declared = set(tomllib.load(handle)["project"].get("optional-dependencies", {}))
+
+    named = set(render_api.EXTRA_FOR.values())
+
+    assert named <= declared, (
+        f"the API reference names extras that pyproject.toml does not declare: "
+        f"{sorted(named - declared)}"
+    )

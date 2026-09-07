@@ -3,7 +3,7 @@
 Route a CTRLRun `APPROVE` through **LangGraph's own `interrupt()`**, so the human answers where
 your LangGraph users already answer.
 
-- **Supported kernel range:** `ctrlrun>=0.5,<0.6`
+- **Supported kernel range:** `ctrlrun>=0.5,<0.7`
 - **Supported framework range:** `langgraph>=1.0,<2.0`
 - **Primitive reused:** [`interrupt()` and `Command(resume=...)`](https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/add-human-in-the-loop/), with a checkpointer. Read 2026-09-05.
 - **Framework shape:** resumed in place (SPEC-v0.5 §3.5).

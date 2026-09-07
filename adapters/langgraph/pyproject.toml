@@ -26,7 +26,7 @@ classifiers = [
 # surface that has not been written. The README states the same two, and T137 asserts that what
 # it states is what CI installed.
 dependencies = [
-    "ctrlrun>=0.5,<0.6",
+    "ctrlrun>=0.5,<0.7",
     "langgraph>=1.0,<2.0",
 ]
 

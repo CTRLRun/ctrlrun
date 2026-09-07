@@ -956,3 +956,113 @@ def test_the_throwaway_sector_configuration_ships_nowhere():
         f"the throwaway configuration appears in {[str(p) for p in holders]}; §7.5 keeps it in "
         "the test suite and nowhere else"
     )
+
+
+ADAPTER_DIRECTORIES = ("langgraph", "openai-agents")
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_each_adapter_declares_a_kernel_range_that_contains_this_kernel(adapter):
+    """SPEC-v0.5 §6.3's two ranges, checked against the kernel that is actually here.
+
+    `test_T137_the_declared_framework_range_contains_the_version_ci_installed` already does
+    this for the *framework* range. There was no mirror for the *kernel* range, so
+    `ctrlrun>=0.5,<0.6` shipped alongside a 0.6.0 kernel and `pip install ctrlrun-langgraph`
+    either refused to resolve or silently downgraded ctrlrun to 0.5.x -- an adapter that
+    excludes the kernel it ships with.
+
+    It lives here rather than in the adapter suites because those open with
+    `importorskip("ctrlrun_langgraph")`: a check on a file in this repository must not be
+    gated behind installing a distribution built from it, or it skips exactly where it is
+    needed. This reads pyproject.toml off disk and needs nothing installed but ctrlrun.
+    """
+    from packaging.specifiers import SpecifierSet
+
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    if not manifest.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+    with manifest.open("rb") as handle:
+        dependencies = tomllib.load(handle)["project"]["dependencies"]
+
+    specifier = next(d for d in dependencies if d.startswith("ctrlrun")).removeprefix("ctrlrun")
+    kernel = _pyproject()["project"]["version"]
+
+    assert kernel in SpecifierSet(specifier), (
+        f"adapters/{adapter} declares ctrlrun{specifier}, which excludes the {kernel} kernel "
+        "in this repository"
+    )
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_each_adapter_readme_states_the_same_kernel_range_as_its_metadata(adapter):
+    """T137 asserts this from inside the adapter suites, where it skips without the adapter
+    installed. The range is a claim in a file in this repository, so it is checkable here."""
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    readme = REPO_ROOT / "adapters" / adapter / "README.md"
+    if not manifest.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+    with manifest.open("rb") as handle:
+        dependencies = tomllib.load(handle)["project"]["dependencies"]
+
+    specifier = next(d for d in dependencies if d.startswith("ctrlrun"))
+
+    assert specifier in readme.read_text(encoding="utf-8"), (
+        f"adapters/{adapter}/README.md does not state the kernel range {specifier!r} that "
+        "its pyproject.toml declares"
+    )
+
+
+def test_click_declares_a_lower_bound_that_covers_the_api_the_cli_uses():
+    """`click.Path(path_type=...)` arrives in click 8.0, and the CLI uses it in four commands.
+
+    `click` was declared with no floor at all, so an environment already holding click 7
+    resolved cleanly and then those commands died at decoration with `TypeError: __init__()
+    got an unexpected keyword argument 'path_type'`. A fresh `pip install` gets click 8 and
+    never sees it, which is exactly why nothing caught it.
+    """
+    from packaging.requirements import Requirement
+
+    declared = {
+        Requirement(name).name: Requirement(name).specifier
+        for name in _pyproject()["project"]["dependencies"]
+    }
+
+    assert str(declared["click"]), "click is declared with no version bound at all"
+    assert "8" in str(declared["click"]), (
+        f"click is declared as {str(declared['click'])!r}, which does not require the click 8 "
+        "API `click.Path(path_type=...)` that src/ctrlrun/cli/main.py uses"
+    )
+
+
+def test_the_cli_uses_the_click_8_api_this_floor_is_for():
+    """The positive control on the test above: if the CLI stopped using `path_type`, the floor
+    would be arbitrary and this says so rather than leaving it unexplained."""
+    text = (REPO_ROOT / "src" / "ctrlrun" / "cli" / "main.py").read_text(encoding="utf-8")
+
+    assert "path_type=" in text
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_no_adapter_source_file_states_a_stale_kernel_range(adapter):
+    """The range is written in three places per adapter -- pyproject, README, and the module
+    docstring -- and the first fix updated two of them. A range in prose that contradicts the
+    metadata is the version somebody typed, which is what T137 refuses in the other direction.
+    """
+    import tomllib
+
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    if not manifest.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+    with manifest.open("rb") as handle:
+        dependencies = tomllib.load(handle)["project"]["dependencies"]
+    declared = next(d for d in dependencies if d.startswith("ctrlrun"))
+
+    sources = (REPO_ROOT / "adapters" / adapter / "src").rglob("*.py")
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "ctrlrun>=" in line:
+                assert declared in line, (
+                    f"{source.relative_to(REPO_ROOT)} states a kernel range that "
+                    f"pyproject.toml does not: {line.strip()!r}"
+                )

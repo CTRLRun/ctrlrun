@@ -25,7 +25,7 @@ classifiers = [
 # not before, so `>=0.5` would claim compatibility with a surface not yet written. T137 asserts
 # the README states these and that CI ran inside them.
 dependencies = [
-    "ctrlrun>=0.5,<0.6",
+    "ctrlrun>=0.5,<0.7",
     "openai-agents>=0.20,<1.0",
 ]
 

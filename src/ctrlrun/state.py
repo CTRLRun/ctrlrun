@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -114,6 +115,54 @@ def _at(text: str | None) -> datetime | None:
     return None if text is None else datetime.fromisoformat(text)
 
 
+#: The oldest SQLite this store works on. `put_receipt` uses `UPDATE ... RETURNING`, which
+#: arrived in SQLite 3.35 (March 2021).
+#:
+#: `requires-python >= 3.11` does not imply it: on Linux CPython links the *system*
+#: libsqlite3, and RHEL 8 ships 3.26. Undeclared and unchecked, the first receipt write on
+#: such a host raised a bare `sqlite3.OperationalError` about a syntax error near RETURNING,
+#: which names neither the real cause nor the remedy.
+MIN_SQLITE_VERSION: Final = (3, 35)
+
+
+def _require_sqlite() -> None:
+    """Refuse at open, where the message can name the version, not at the first receipt."""
+    if sqlite3.sqlite_version_info >= MIN_SQLITE_VERSION:
+        return
+    wanted = ".".join(str(part) for part in MIN_SQLITE_VERSION)
+    # `InvalidArgument`, on the `:memory:` precedent in this same constructor: the closed
+    # error set has no member for "the environment is too old", and `MissingDependency`
+    # renders a fixed "it ships in the X extra" sentence that would be false here.
+    raise InvalidArgument(
+        f"this Python is linked against SQLite {sqlite3.sqlite_version}, and CTRLRun needs "
+        f"{wanted} or newer: the receipt chain is written with `UPDATE ... RETURNING`, which "
+        f"older SQLite cannot parse. Upgrade the system SQLite, use a Python built against a "
+        f"newer one, or run the Postgres backend (pip install 'ctrlrun[postgres]')."
+    )
+
+
+def _storable(text: str | None) -> str | None:
+    """`text` in a form SQLite can encode, escaping any lone surrogate.
+
+    Every str SQLite stores is encoded as UTF-8, and a lone surrogate cannot be: writing one
+    raises `UnicodeEncodeError` from inside the transaction. That turned the *recording* of an
+    outcome into a failure -- `mark_ambiguous` raised out of `Control.execute`, not as a
+    `CTRLRunError`, and left the effect in EXECUTING, which is neither outcome and blocks the
+    retry until the lease expires. An error message is evidence about an action; it must never
+    be able to decide the action's fate.
+
+    Lone surrogates arrive the ordinary way. `json.loads('"\\ud800"')` yields one, and so does
+    `os.fsdecode` of any non-UTF-8 filename -- that is what `errors="surrogateescape"` is.
+
+    `backslashreplace` rather than `replace`: `\\ud800` in a stored message says what the byte
+    was, where `?` throws it away, and this text is read by a human diagnosing an ambiguous
+    effect.
+    """
+    if text is None:
+        return None
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _result_json(result: Any) -> str | None:
     """Serialize an executor's return value. Never raises: the effect *did* commit.
 
@@ -123,9 +172,12 @@ def _result_json(result: Any) -> str | None:
     if result is None:
         return None
     try:
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=repr)
+        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=repr)
     except (TypeError, ValueError, RecursionError):
-        return json.dumps({"repr": repr(result)}, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps({"repr": repr(result)}, ensure_ascii=False, separators=(",", ":"))
+    # `json.dumps` is happy to emit a lone surrogate; SQLite is not. The promise above is
+    # that this never raises, and it is only kept as far as the value can actually be stored.
+    return _storable(text)
 
 
 def _result_value(text: str | None) -> Any:
@@ -923,6 +975,34 @@ class InMemoryStateStore:
             )
 
 
+class _HeldConnection:
+    """One thread's SQLite connection, owned by an object that thread's locals hold.
+
+    `SQLiteStateStore` keeps only a **weak** reference to this, so when the owning thread ends
+    and CPython drops its thread-local values, the holder is collected and the finalizer closes
+    the connection. Before this, the registry held connections strongly and only `close()` --
+    a documented whole-store shutdown -- ever released one, so a host whose threads come and go
+    accumulated two file descriptors per thread for the life of the process, and eventually
+    failed every store access with "unable to open database file" until it was restarted.
+    `ctrlrun gateway` is that host: a `ThreadingHTTPServer` with one thread per TCP connection.
+
+    The connection is reached through the holder rather than kept directly in the thread-local
+    because it is the *holder's* lifetime the registry has to observe: a weak reference to a
+    `sqlite3.Connection` is not supported, and the thread-local is what the interpreter clears
+    on thread exit.
+    """
+
+    __slots__ = ("__weakref__", "_finalizer", "connection")
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self._finalizer = weakref.finalize(self, connection.close)
+
+    def close(self) -> None:
+        """Close the connection now. Idempotent: `weakref.finalize` runs at most once."""
+        self._finalizer()
+
+
 class SQLiteStateStore:
     """Approvals, effects and evidence in one SQLite file (ARCHITECTURE §5).
 
@@ -946,16 +1026,29 @@ class SQLiteStateStore:
                 f"{text!r} is per-connection and cannot reserve across processes; "
                 "use a file path, or InMemoryStateStore if that is what you meant"
             )
+        _require_sqlite()
         self._path = Path(text)
         self._clock = clock
         self._local = threading.local()
-        self._open: set[sqlite3.Connection] = set()
+        self._open: weakref.WeakSet[_HeldConnection] = weakref.WeakSet()
         self._open_lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # SPEC-v0.6 §3. The store's admission check: classify, then migrate or refuse. It runs
         # before any other table is read, and there is no argument, keyword or environment
         # variable that suppresses it (§3.6).
-        migrate(self._connection(), self._clock())
+        try:
+            migrate(self._connection(), self._clock())
+        except sqlite3.DatabaseError as exc:
+            # `sqlite3.DatabaseError: file is not a database` names neither the path nor the
+            # remedy, and is not a `CTRLRunError` -- so neither the CLI's error contract nor an
+            # application catching the kernel's own errors caught it. `$CTRLRUN_STATE` pointing
+            # at the wrong file is an ordinary misconfiguration and deserves an ordinary
+            # refusal.
+            raise InvalidArgument(
+                f"{str(self._path)!r} is not a CTRLRun state database: {exc}. Point "
+                "$CTRLRUN_STATE or --store-url at the database your agents write, or let "
+                "the agent process create one."
+            ) from exc
 
     @property
     def path(self) -> Path:
@@ -973,16 +1066,16 @@ class SQLiteStateStore:
         to arrange, as it is with any resource being torn down.
         """
         with self._open_lock:
-            connections, self._open = self._open, set()
-        for connection in connections:
-            connection.close()
+            held, self._open = list(self._open), weakref.WeakSet()
+        for holder in held:
+            holder.close()
 
     def _connection(self) -> sqlite3.Connection:
-        connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
-        if connection is not None:
+        held: _HeldConnection | None = getattr(self._local, "held", None)
+        if held is not None:
             with self._open_lock:
-                if connection in self._open:
-                    return connection
+                if held in self._open:
+                    return held.connection
             # `close()` tore this one down; open a fresh one rather than hand back a corpse.
         # `check_same_thread=False` because `close()` closes other threads' connections. Each
         # connection is still used by exactly one thread — that is what the thread-local is
@@ -1003,9 +1096,12 @@ class SQLiteStateStore:
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         _enable_wal(connection)
         connection.execute("PRAGMA synchronous=NORMAL")
-        self._local.connection = connection
+        held = _HeldConnection(connection)
+        # The thread-local is the only strong reference: the registry below is weak, so the
+        # interpreter dropping this on thread exit is what closes the connection.
+        self._local.held = held
         with self._open_lock:
-            self._open.add(connection)
+            self._open.add(held)
         return connection
 
     # --- evidence ---------------------------------------------------------------------
@@ -1020,7 +1116,9 @@ class SQLiteStateStore:
                 event.action_id,
                 event.effect_key,
                 event.approval_id,
-                json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":")),
+                # An event carries the same executor text the effect row does, so it needs
+                # the same guard: evidence about an action must never decide its fate.
+                _storable(json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":"))),
             ),
         )
         return replace(event, event_id=cursor.lastrowid)
@@ -1672,9 +1770,9 @@ class SQLiteStateStore:
                 record.attempt,
                 _iso(record.lease_expires_at) if record.lease_expires_at else None,
                 _result_json(record.result),
-                record.error,
+                _storable(record.error),
                 _iso(record.updated_at),
-                record.resolved_by,
+                _storable(record.resolved_by),
                 record.effect_key,
             ),
         )

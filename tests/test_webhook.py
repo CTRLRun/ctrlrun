@@ -544,3 +544,54 @@ def test_verification_tolerates_a_little_clock_skew():
 
     assert verify(signature, body, SECRET, timedelta(seconds=300))
     assert time.time() > 0
+
+
+# --- the MAC is over bytes, not over a string the bytes might not be ---------------------
+#
+# `sign` computed `f"{stamp}.{body.decode('utf-8')}".encode()`, round-tripping the body
+# through `str`. A body that is not UTF-8 raised `UnicodeDecodeError` out of both `sign` and
+# `verify` -- so an inbound POST to the approvals endpoint with arbitrary bytes crashed the
+# handler instead of being refused, and the client got a dropped connection rather than a 4xx.
+# A signature check must answer yes or no; raising is neither.
+
+NOT_UTF8 = b'\xff\xfe{"decision": "grant"}'
+
+
+def test_signing_a_non_utf8_body_does_not_raise():
+    from datetime import UTC, datetime
+
+    signature = sign(NOT_UTF8, SECRET, at=datetime.now(UTC))
+
+    assert signature
+
+
+def test_verifying_a_non_utf8_body_answers_rather_than_raising():
+    from datetime import UTC, datetime
+
+    good = sign(NOT_UTF8, SECRET, at=datetime.now(UTC))
+
+    window = timedelta(seconds=300)
+
+    assert verify(good, NOT_UTF8, SECRET, window) is True
+    assert verify("t=1,v1=nope", NOT_UTF8, SECRET, window) is False
+
+
+def test_the_signature_over_a_utf8_body_is_unchanged():
+    """The compatibility proof. The MAC is over the same bytes it always was for every body
+    that *is* UTF-8, so a receiver holding a signature from before this change still verifies:
+    `f"{stamp}.{body.decode()}".encode()` and `f"{stamp}.".encode() + body` are equal there.
+    """
+    import hashlib
+    import hmac
+    from datetime import UTC, datetime
+
+    body = b'{"decision": "grant"}'
+    at = datetime.now(UTC)
+    stamp = int(at.timestamp())
+    expected = hmac.new(
+        SECRET.encode("utf-8"),
+        f"{stamp}.{body.decode('utf-8')}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert expected in sign(body, SECRET, at=at)

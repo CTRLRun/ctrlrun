@@ -45,14 +45,17 @@ EXTRA_NAMES: tuple[tuple[str, str], ...] = (
 #: not the install line was browsable and not usable: nothing on
 #: `postgres-PostgresStateStore` or `otel-OTelEventSink` said `pip install "ctrlrun[postgres]"`,
 #: and none of the seventy-one pages carried an import line at all.
+#:
+#: Only modules that actually live behind an extra belong here. `ctrlrun.conformance` and
+#: `ctrlrun.conformance.store` were listed under a `conformance` extra that SPEC-v0.5 §12.1
+#: reversed and `pyproject.toml` never declared, so two pages published an install command
+#: that installs nothing and a `MissingDependency` that can never fire.
 EXTRA_FOR: dict[str, str] = {
     "ctrlrun.postgres": "postgres",
     "ctrlrun.otel": "otel",
     "ctrlrun.jwt_identity": "identity",
     "ctrlrun.acs": "gateway",
     "ctrlrun.gateway": "gateway",
-    "ctrlrun.conformance": "conformance",
-    "ctrlrun.conformance.store": "conformance",
 }
 
 

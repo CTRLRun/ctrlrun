@@ -21,7 +21,7 @@ from typing import Any, Final
 import click
 
 from ..action import Principal
-from ..approval import ApprovalRecord
+from ..approval import ApprovalRecord, LocalApprovalProvider
 from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
@@ -30,6 +30,7 @@ from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Policy
 from ..receipt import (
     Event,
     EventType,
+    JSONLEventSink,
     Receipt,
     iso_timestamp,
     verify_chain,
@@ -65,7 +66,10 @@ actions:
 
   # External communication: autonomous here. Add a rule on the recipient's domain
   # before an agent can reach anyone outside the building.
+  # `effect` because a send is a consequence: two attempts with the same message_id are
+  # one email, and `ctrlrun scan` says so if you leave it off.
   email.send:
+    effect: "email:{message_id}"
     decision: allow
 
   # Money: autonomy depends on the amount. First matching rule wins.
@@ -139,24 +143,53 @@ def _store(store_url: str | None = None) -> StateStore:
     with an instruction rather than an invitation.
     """
     if store_url is None:
-        return SQLiteStateStore(state_path())
+        # The same existence check the explicit `sqlite://` branch below has always had.
+        # Without it this branch did exactly what the docstring above forbids: `ctrlrun
+        # receipts` in any directory with no `ctrlrun.yaml` created `.ctrlrun/state.db`,
+        # migrated it, and answered "no receipts yet" -- telling an operator looking for
+        # evidence of an agent action that there was none, out of a store the command had
+        # just created one directory away.
+        try:
+            path = state_path()
+        except CTRLRunError as exc:
+            raise _fail(exc) from exc
+        return _opened(path)
     if store_url.startswith(SQLITE_SCHEME):
-        path = Path(store_url[len(SQLITE_SCHEME) :])
-        if not path.exists():
-            raise click.ClickException(
-                f"no database at {str(path)!r}. A read command does not create one; the store "
-                "is created by the process that runs your agents."
-            )
-        return SQLiteStateStore(path)
+        return _opened(Path(store_url[len(SQLITE_SCHEME) :]))
     if store_url.startswith(POSTGRES_SCHEMES):
-        from ..postgres import PostgresStateStore
+        # `MissingDependency` when psycopg is absent, `SchemaMismatch` when the fleet is
+        # mid-upgrade. Both are carefully worded refusals, and both reached the terminal as
+        # tracebacks from the five commands that opened the store outside their `try`.
+        # `MissingDependency`'s whole purpose is that an operator does not read a missing
+        # extra as a broken package, which is exactly what a stack trace says.
+        try:
+            from ..postgres import PostgresStateStore, _psycopg
 
-        bare, schema = _peel_schema(store_url)
-        _require_head(bare, schema)
-        return PostgresStateStore(bare, schema=schema)
+            bare, schema = _peel_schema(store_url)
+            _require_head(bare, schema)
+            return PostgresStateStore(bare, schema=schema)
+        except CTRLRunError as exc:
+            raise _fail(exc) from exc
+        except _psycopg().Error as exc:
+            # A mistyped host is a typo, and `psycopg.OperationalError` with a resolver stack
+            # under it reads as a broken package rather than as a URL to check.
+            raise click.ClickException(f"cannot reach {store_url!r}: {exc}") from exc
     raise click.ClickException(
         f"no store backend for {store_url!r}; expected a 'sqlite://' path or a 'postgresql://' URL"
     )
+
+
+def _opened(path: Path) -> StateStore:
+    """A SQLite store that is already there, or the refusal that says who creates one."""
+    if not path.exists():
+        raise click.ClickException(
+            f"no database at {str(path)!r}. A read command does not create one; the store "
+            "is created by the process that runs your agents."
+        )
+    try:
+        return SQLiteStateStore(path)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
 
 
 def _require_head(url: str, schema: str) -> None:
@@ -222,6 +255,38 @@ def _peel_schema(url: str) -> tuple[str, str]:
     schema = dict(pairs).get(SCHEMA_PARAM, "public")
     rest = [(key, value) for key, value in pairs if key != SCHEMA_PARAM]
     return urlunsplit(parts._replace(query=urlencode(rest))), schema
+
+
+def _control_on(store_url: str | None) -> Control:
+    """`Control.from_file()`, but on the store `--store-url`/`$CTRLRUN_STORE_URL` names.
+
+    `from_file` always opens `.ctrlrun/state.db` beside the policy, which is right for an
+    agent process and wrong for `ctrlrun delegate` and `ctrlrun revoke`: on Postgres they
+    wrote a delegation into a local SQLite file no agent reads, and reported success. Revoke
+    is the one that matters -- an operator cuts a chain in a hurry, is told it is cut, and it
+    is not.
+
+    Everything but the store is `from_file`'s composition, so the two cannot drift on what a
+    delegation is evaluated against.
+    """
+    from ..control import _optional_authority
+
+    policy = _loaded_policy()
+    # These two *write*, so the default path keeps `from_file`'s create-if-absent behaviour:
+    # an operator may delegate before any agent has run, and `_store`'s refusal is written for
+    # the read commands, which must not have a side effect on the database they read. What was
+    # broken is narrower than that -- the named store was ignored -- so that is all this
+    # changes.
+    store = (
+        _store(store_url) if store_url is not None else SQLiteStateStore(state_path(policy.source))
+    )
+    return Control(
+        policy,
+        store,
+        LocalApprovalProvider(store),
+        sinks=[JSONLEventSink(state_path(policy.source).parent)],
+        authority=_optional_authority(policy.source),
+    )
 
 
 def _loaded_policy() -> Policy:
@@ -665,7 +730,13 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
     No network, no aggregation service, no upload: this reads the SQLite file the process it
     is diagnosing has been writing (SPEC-v0.3 §6.4).
     """
-    policy = _loaded_policy()
+    # `_loaded_policy` documents that a `PolicyError` propagates, and every other caller is
+    # already inside a `try` that turns one into a clean message. This one was not, so a
+    # missing or malformed `ctrlrun.yaml` dumped a traceback out of `ctrlrun stats`.
+    try:
+        policy = _loaded_policy()
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
     try:
         boundary = since_boundary(since)
     except InvalidArgument as exc:
@@ -823,7 +894,10 @@ def verify(
     help="The delegating principal: AGENT or AGENT/USER. Split on the first '/'.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
-def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
+@STORE_URL_OPTION
+def delegate(
+    parent: str, grant_file: Path, as_who: str, as_json: bool, store_url: str | None
+) -> None:
     """Create a delegated grant beneath an existing one.
 
     `--as` is an **assertion**, not an authentication: it supplies the creating principal for
@@ -836,8 +910,7 @@ def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
     if not agent:
         raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
     try:
-        _loaded_policy()
-        control = Control.from_file()
+        control = _control_on(store_url)
         grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
         created = control._delegate(
             parent, grant, by=Principal(agent=agent, user=user or None), via="cli"
@@ -860,7 +933,8 @@ def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
 @main.command()
 @click.argument("delegation_id")
 @click.option("--by", "by", default=CLI_APPROVER, show_default=True, help="Who revoked it.")
-def revoke(delegation_id: str, by: str) -> None:
+@STORE_URL_OPTION
+def revoke(delegation_id: str, by: str, store_url: str | None) -> None:
     """Revoke a delegation, and with it every delegation beneath it.
 
     Transitive by structure and not reversible: there is no `unrevoke`, because the operation
@@ -868,8 +942,7 @@ def revoke(delegation_id: str, by: str) -> None:
     already-revoked delegation is idempotent and exits 0.
     """
     try:
-        _loaded_policy()
-        control = Control.from_file()
+        control = _control_on(store_url)
         before = control.store.get_delegation(delegation_id)
         control.revoke(delegation_id, by=by)
     except CTRLRunError as exc:

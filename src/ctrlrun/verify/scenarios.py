@@ -441,13 +441,20 @@ def _placeholders(policy: Policy, name: str) -> dict[str, Any]:
     Every value verify invents carries the prefix, so a value that ever appeared anywhere it
     should not have is recognizable on sight.
     """
-    from ..effect import template_placeholders
+    from ..effect import RESOURCE_PLACEHOLDER, template_placeholders
 
     values: dict[str, Any] = {}
     for template in (policy.effect_template(name), policy.resource_template(name)):
         if template is None:
             continue
         for placeholder in template_placeholders(template):
+            if placeholder == RESOURCE_PLACEHOLDER:
+                # `{resource}` names the action's `resource` field, not an argument
+                # (`effect.resolve_effect_key`). Inventing an argument of that name gave the
+                # action both, which is the ambiguity `resolve_effect_key` refuses -- so
+                # verify crashed on `effect: "refund:{resource}"`, a template the kernel
+                # resolves without complaint.
+                continue
             values.setdefault(placeholder, f"{reg.SYNTHETIC_PREFIX}-{placeholder}")
     return values
 
@@ -505,6 +512,8 @@ class Engine:
     """
 
     def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
+        #: Set by `select()` when the miss was on the authority axis (see `unselected`).
+        self._grant_miss: str | None = None
         self._loaded = loaded
         self._scratch = scratch
         self._store_url = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
@@ -663,6 +672,7 @@ class Engine:
         authority axis before the policy axis is ever reached (`v0.3 §4.3`), and a scenario
         built on one would exercise a different guarantee than the one it claims.
         """
+        self._grant_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
@@ -674,6 +684,11 @@ class Engine:
                 selection = self._bind(name, arguments, decision, reason, grant_filter)
                 if selection is not None:
                     return selection
+                # An action DID reach this decision and no grant covered it. Recorded so the
+                # caller's N/A reason can say so: a bare `None` here is indistinguishable from
+                # "no action reaches this decision", and every scenario used to resolve that
+                # ambiguity by asserting its own hardcoded sentence about the policy.
+                self._grant_miss = self._resource(name, arguments)
         return None
 
     def _bind(
@@ -696,7 +711,14 @@ class Engine:
                 environment=self._default_environment,
                 rule_reason=reason,
             )
-            return replace(selection, effect_key=self._effect_key(selection.build()))
+            try:
+                return replace(selection, effect_key=self._effect_key(selection.build()))
+            except CTRLRunError:
+                # `_checked` already skips an action whose *resource* cannot be built; an
+                # effect key verify cannot render is the same kind of "no candidate here",
+                # and letting it escape killed the whole run with exit 1 -- the code that
+                # means a guarantee FAILED.
+                return None
         for grant_id in sorted(self.authority.grants):
             grant = self.authority.grants[grant_id]
             if grant_filter is not None and not grant_filter(grant):
@@ -712,12 +734,16 @@ class Engine:
             )
             if not grant.matches_shape(action) or not grant.constraints_hold(action):
                 continue
+            try:
+                effect_key = self._effect_key(action)
+            except CTRLRunError:
+                continue
             selection = _Selection(
                 action=name,
                 arguments=arguments,
                 decision=decision,
                 resource=resource,
-                effect_key=self._effect_key(action),
+                effect_key=effect_key,
                 principal=principal,
                 environment=environment,
                 grant=grant,
@@ -827,6 +853,30 @@ class Engine:
         raise _Violation(expected, ran)
 
     # --- results ------------------------------------------------------------------------
+
+    def unselected_detail(self, note: str | None = None) -> dict[str, Any]:
+        """The `note` that belongs with `unselected`'s reason.
+
+        A note explaining a missing `effect:` template read as an explanation of the *grant*
+        miss when it travelled beside the grant reason, which is the same category error the
+        reason itself had.
+        """
+        if self._grant_miss is not None:
+            return {"note": reg.GRANT_RESOURCE_NOTE}
+        return {} if note is None else {"note": note}
+
+    def unselected(self, reason: str) -> str:
+        """Why the last `select()` found nothing (§2.1).
+
+        `select()` returns `None` for two unrelated reasons: no action reaches the requested
+        decision, or an action does and no grant covers it. Only the caller knows the first
+        sentence; only `select()` knows the second. Reporting the caller's sentence in both
+        cases is how `examples/authority/devops.yaml` came to be told "the policy lists no
+        action" about a document listing five, on a run that exited 0.
+        """
+        if self._grant_miss is None:
+            return reason
+        return f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
 
     def na(self, gid: str, reason: str, **detail: Any) -> GuaranteeResult:
         """`not_applicable`, with the reason that made it so (§1, §2.1).
@@ -972,7 +1022,7 @@ class Engine:
     def g1(self) -> GuaranteeResult:
         selection = self.select(decisions=(Decision.APPROVE,))
         if selection is None:
-            return self.na("G1", reg.NO_APPROVE_RULE)
+            return self.na("G1", self.unselected(reg.NO_APPROVE_RULE))
         mutated_arguments = self._mutation(selection)
         if mutated_arguments is None:
             raise VerifyInternalError(
@@ -1041,7 +1091,7 @@ class Engine:
     def g2(self) -> GuaranteeResult:
         selection = self.select(decisions=(Decision.APPROVE,))
         if selection is None:
-            return self.na("G2", reg.NO_APPROVE_RULE)
+            return self.na("G2", self.unselected(reg.NO_APPROVE_RULE))
         control, store, recorder, _ = self._control_for("G2", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -1089,7 +1139,11 @@ class Engine:
     def g3(self) -> GuaranteeResult:
         selection = self.select(needs_effect=True)
         if selection is None:
-            return self.na("G3", reg.NO_EFFECT_TEMPLATE, note=reg.EFFECT_TEMPLATE_NOTE)
+            return self.na(
+                "G3",
+                self.unselected(reg.NO_EFFECT_TEMPLATE),
+                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
+            )
         control, store, recorder, _ = self._control_for("G3", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -1145,7 +1199,11 @@ class Engine:
     def g4(self) -> GuaranteeResult:
         selection = self.select(needs_effect=True)
         if selection is None:
-            return self.na("G4", reg.NO_EFFECT_TEMPLATE, note=reg.EFFECT_TEMPLATE_NOTE)
+            return self.na(
+                "G4",
+                self.unselected(reg.NO_EFFECT_TEMPLATE),
+                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
+            )
         # §2.2 — the children run under the **real** clock, because a callable is not
         # picklable and `spawn` is the default start method on macOS and Windows. A grant that
         # lapsed before this run therefore cannot cover them, and that is a property of the
@@ -1272,7 +1330,11 @@ class Engine:
     def g5(self) -> GuaranteeResult:
         selection = self.select(needs_effect=True)
         if selection is None:
-            return self.na("G5", reg.NO_EFFECT_TEMPLATE, note=reg.EFFECT_TEMPLATE_NOTE)
+            return self.na(
+                "G5",
+                self.unselected(reg.NO_EFFECT_TEMPLATE),
+                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
+            )
         control, store, recorder, _ = self._control_for("G5", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -1509,7 +1571,7 @@ class Engine:
             # call inside `context()` runs", and there is no such call. T101b requires an empty
             # `actions:` to leave zero applicable guarantees, which settles it — this is a
             # statement about the document, so N/A, and never a silent pass.
-            return self.na("G7", reg.EVERY_ACTION_DENIED)
+            return self.na("G7", self.unselected(reg.EVERY_ACTION_DENIED))
         control, store, recorder, _ = self._control_for("G7", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -1859,7 +1921,7 @@ class Engine:
     def g10(self) -> GuaranteeResult:
         selection = self.select()
         if selection is None:
-            return self.na("G10", reg.EVERY_ACTION_DENIED)
+            return self.na("G10", self.unselected(reg.EVERY_ACTION_DENIED))
         control, store, recorder, _ = self._control_for("G10", selection)
 
         rows: tuple[tuple[str, BaseException, ReceiptResult, EffectState], ...] = (
@@ -1968,7 +2030,7 @@ class Engine:
         # found the second. A claim that a guarantee is never N/A has to be true of the code.
         selection = self.select(decisions=(Decision.ALLOW, Decision.APPROVE, Decision.DENY))
         if selection is None:
-            return self.na("G11", reg.NO_ACTIONS)
+            return self.na("G11", self.unselected(reg.NO_ACTIONS))
         control, store, recorder, _ = self._control_for("G11", selection)
 
         def body(detail: dict[str, Any]) -> None:

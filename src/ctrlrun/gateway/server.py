@@ -203,6 +203,16 @@ class GatewayConfig:
     def __post_init__(self) -> None:
         import re
 
+        # The one value the gateway cannot work without, and the only one that went
+        # unchecked. Without a scheme httpx raises `UnsupportedProtocol` on every request, so
+        # a typo started a listener that answered 502 for the life of the process and said
+        # nothing at startup. Refused here, beside `--alias` and `--path`, so it is a
+        # configuration error where the operator is looking.
+        if not self.upstream.startswith(("http://", "https://")):
+            raise InvalidArgument(
+                f"--upstream {self.upstream!r} must start with 'http://' or 'https://'; "
+                "without a scheme every forwarded request fails before it is sent"
+            )
         if not re.match(ALIAS_PATTERN, self.alias):
             raise InvalidArgument(
                 f"--alias {self.alias!r} must match {ALIAS_PATTERN} — no dots, so the alias "
@@ -899,9 +909,20 @@ class Gateway:
             "attempt": receipt.attempt if receipt is not None else 1,
         }
         if outcome is not None and outcome.relay and held.get("payload") is not None:
-            document = json.loads(held["payload"])
-            document.setdefault("_meta", {})[RECEIPT_META_KEY] = meta
-            return _Response(held["status"], _dump(document), held.get("headers", {}))
+            try:
+                document = json.loads(held["payload"])
+            except ValueError:
+                document = None
+            if isinstance(document, dict):
+                document.setdefault("_meta", {})[RECEIPT_META_KEY] = meta
+                return _Response(held["status"], _dump(document), held.get("headers", {}))
+            # Not a JSON object, so there is nowhere to put the receipt `_meta`. Relay the
+            # peer's own bytes rather than raising: a 401 bearer challenge carries an empty
+            # body by RFC 6750, and a CDN in front of a tool server answers with HTML. This
+            # used to be a `JSONDecodeError` out of the handler thread, so the agent read a
+            # dropped connection instead of the 401 it needed in order to refresh its token.
+            _LOG.debug("upstream payload is not a JSON object; relayed without receipt meta")
+            return _Response(held["status"], held["payload"] or b"", held.get("headers", {}))
         if outcome is None:
             code, token, status = AMBIGUOUS_EFFECT
             return _json(status, json_rpc_error(None, code, token, "no upstream outcome"))
@@ -987,7 +1008,7 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
         relayed = {
             key: value
             for key, value in headers.items()
-            if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
+            if key.lower() not in _HOP_BY_HOP and key.lower() not in _DESCRIBES_THE_UPSTREAM_BODY
         }
         relayed["Content-Type"] = "application/json"
         client = httpx.Client(timeout=config.upstream_timeout) if fresh else pooled
@@ -995,7 +1016,17 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
             response = client.post(config.upstream, content=body, headers=relayed)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             return Transport.NEVER_CONNECTED, None, 502, {}
-        except httpx.TransportError:
+        except Exception:
+            # Deliberately broad, and it must stay after the two clauses above: only those may
+            # claim non-execution. `httpx.DecodingError` (a mislabelled or truncated
+            # `Content-Encoding`) and `httpx.InvalidURL` inherit from `RequestError`, not
+            # `TransportError`, so neither used to be caught here and both escaped `do_POST`,
+            # dropping the client's connection with no response at all.
+            #
+            # §6.8's rule makes the honest mapping and the safe mapping the same one:
+            # every unknown client-side failure after the first byte is AMBIGUOUS, never
+            # FAILED, because the request may well have been executed.
+            _LOG.warning("forwarding to the upstream failed", exc_info=True)
             return Transport.AFTER_REQUEST_SENT, None, 502, {}
         finally:
             if fresh:
@@ -1036,6 +1067,14 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
     return forward
 
 
+#: Headers that describe the *transfer* of the upstream's body rather than the body the
+#: gateway relays. `content-encoding` is here with `content-length` for one reason: httpx has
+#: already decoded `response.content`, so relaying the upstream's encoding attached the wrong
+#: description to the right bytes and every client failed with `DecodingError: incorrect
+#: header check`. httpx sends `Accept-Encoding: gzip` by default, so an upstream doing nothing
+#: but honouring content negotiation made the gateway unusable.
+_DESCRIBES_THE_UPSTREAM_BODY: Final = frozenset({"content-length", "content-encoding"})
+
 _HOP_BY_HOP: Final = frozenset(
     {
         "connection",
@@ -1062,14 +1101,27 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
         protocol_version = "HTTP/1.1"
 
         def do_POST(self) -> None:
+            if self.path.startswith(APPROVALS_PATH):
+                # SPEC-v0.2 §7.2. `WebhookApprovalProvider` advertises this URL as
+                # `respond_to` in every APPROVAL_REQUESTED notification, and nothing routed
+                # it: the approver's system posted a signed grant, read an HTML 404, and the
+                # approval sat pending until it expired. `Gateway.handle_approval` had no
+                # caller in the package.
+                request_id = self.path[len(APPROVALS_PATH) :].strip("/")
+                if not request_id or "/" in request_id:
+                    self.send_error(404)
+                    return
+                body = self._read_body()
+                if body is None:
+                    return
+                self._respond(gateway.handle_approval(request_id, body, dict(self.headers.items())))
+                return
             if self.path.rstrip("/") != config.path.rstrip("/"):
                 self.send_error(404)
                 return
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > config.max_body_bytes:
-                self._respond(_Response(413))
+            body = self._read_body()
+            if body is None:
                 return
-            body = self.rfile.read(length)
             repeated = _repeated_identity_header(gateway.config, self.headers.items())
             if repeated is not None:
                 # SPEC-v0.3 §3.1 — `dict(...)` collapses a repeated field to one value, and
@@ -1089,10 +1141,39 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
                 return
             self._respond(gateway.handle(body, dict(self.headers.items())))
 
+        def _read_body(self) -> bytes | None:
+            """The request body, or `None` having already answered why not.
+
+            Both routes read through this, so the approvals endpoint gets the same limits as
+            the MCP one rather than a second, laxer copy of them.
+            """
+            declared = self.headers.get("Content-Length")
+            try:
+                length = int(declared) if declared else 0
+            except ValueError:
+                # A non-numeric value used to raise out of `do_POST`, killing the thread and
+                # dropping the connection: the gateway answered a malformed request by looking
+                # like a crashed server.
+                self.close_connection = True
+                self._respond(_Response(400))
+                return None
+            if length < 0:
+                # `rfile.read(-1)` reads to EOF, so a negative value bypassed the size limit
+                # entirely -- it is checked against the *declared* length -- and the process
+                # buffered as much as the client cared to send.
+                self.close_connection = True
+                self._respond(_Response(400))
+                return None
+            if length > config.max_body_bytes:
+                self.close_connection = True
+                self._respond(_Response(413))
+                return None
+            return self.rfile.read(length)
+
         def _respond(self, response: _Response) -> None:
             self.send_response(response.status)
             for key, value in response.headers.items():
-                if key.lower() in _HOP_BY_HOP or key.lower() == "content-length":
+                if key.lower() in _HOP_BY_HOP or key.lower() in _DESCRIBES_THE_UPSTREAM_BODY:
                     continue
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(response.body)))

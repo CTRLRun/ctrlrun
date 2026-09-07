@@ -258,6 +258,11 @@ class _Reconciler:
 # --- Control ---------------------------------------------------------------------------
 
 
+def _storable(text: str) -> str:
+    """`text` with any lone surrogate escaped, so a store and a hash can both take it."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class Control:
     """Policy, state and evidence composed around a single action (SPEC-v0.1 §8).
 
@@ -1072,7 +1077,15 @@ class Control:
             # FAILED, and "anything" means BaseException: a KeyboardInterrupt mid-request
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
-            error = f"{type(exc).__name__}: {exc}"
+            # The one place an executor's own text enters the system, so the one place to
+            # make it storable. SQLite encodes every str it stores as UTF-8 and the receipt
+            # chain canonicalizes what it hashes; a lone surrogate can do neither, so an
+            # exception message carrying one used to raise `UnicodeEncodeError` out of
+            # `mark_ambiguous` and strand the effect in EXECUTING -- neither outcome, and
+            # blocked until the lease expired. Evidence about an action must never be able to
+            # decide the action's fate. Lone surrogates arrive the ordinary way: from
+            # `json.loads('"\\ud800"')`, and from `os.fsdecode` of a non-UTF-8 filename.
+            error = _storable(f"{type(exc).__name__}: {exc}")
             recorded = effect_key is None
             if held_key is not None:
                 try:
@@ -2000,6 +2013,7 @@ def protect(
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
+        _reject_asynchronous(func, name)
         _reject_variadic(signature, name)
         _reject_reserved_parameters(signature, name)
         dangling: list[bool] = []
@@ -2189,6 +2203,42 @@ def _check_template(name: str, kwarg: str, template: str | None) -> None:
         template_placeholders(template)
     except InvalidArgument as exc:
         raise InvalidArgument(f"protect({name!r}, {kwarg}=...): {exc}") from exc
+
+
+def _reject_asynchronous(func: Callable[..., object], name: str) -> None:
+    """Refuse an `async def`, a generator or an async generator as a protected function.
+
+    SPEC-v0.1 §5.5 -- the wrapped function is the executor, and `wrapper` is synchronous: it
+    calls the executor, takes the return value as the result, and commits. Handed a coroutine
+    function, "the return value" is an un-awaited coroutine object, so the effect reached
+    `COMMITTED` and the receipt was written **before the body had run**, and the key being
+    committed, the legitimate retry was then refused with `DuplicateEffect` for ever. A
+    consequential action recorded as done that never happened is the one outcome this library
+    exists to prevent, and it arrived silently: no exception, only a `RuntimeWarning` about a
+    coroutine nobody awaited.
+
+    A generator function has the same shape for the same reason -- calling it runs no body.
+
+    Refused at **decoration** time, on `_reject_variadic`'s precedent: the mistake is in the
+    source, so it fails on import rather than on the first agent run. The test is the
+    function, not its return value: a plain function that returns an awaitable is a normal
+    executor and stays legal.
+    """
+    if inspect.iscoroutinefunction(func):
+        kind = "an `async def`"
+    elif inspect.isasyncgenfunction(func):
+        kind = "an async generator"
+    elif inspect.isgeneratorfunction(func):
+        kind = "a generator"
+    else:
+        return
+    raise InvalidArgument(
+        f"protect({name!r}): a protected function must be synchronous, and this is {kind}. "
+        "The decorator calls the executor and commits what it returns, so it would record "
+        "the effect as committed before the body had run. Wrap the synchronous work instead, "
+        "or call the protected function from your async code with a runner such as "
+        "`asyncio.to_thread`."
+    )
 
 
 def _reject_variadic(signature: inspect.Signature, name: str) -> None:

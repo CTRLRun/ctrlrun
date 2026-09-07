@@ -34,8 +34,6 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
-import yaml
-
 from .action import Action, PlainValue, Principal
 from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
 from .policy import (
@@ -44,6 +42,7 @@ from .policy import (
     parse_conditions,
     reject_nested_mode,
     require_v3,
+    strict_load,
 )
 from .policy import _equal as _type_strict_equal
 from .state import DelegationRecord, StateStore
@@ -1186,10 +1185,7 @@ def _optional_from_yaml(
     reader that can give it is private to the package: `Control.from_file` calls it, and a
     public name for it would be an addition to a frozen surface.
     """
-    try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
+    document = strict_load(text, source)
     if not isinstance(document, Mapping):
         raise PolicyError(
             f"{source}: an authority document must be a mapping, got {_type_name(document)}"
@@ -1264,10 +1260,7 @@ def grant_from_yaml(text: str, *, source: str = "<string>") -> Grant:
     chosen (§5.2). The returned grant carries `id=""`, which is legal only on the
     `Control.delegate` path and only until the call returns.
     """
-    try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
+    document = strict_load(text, source)
     if not isinstance(document, Mapping):
         raise PolicyError(
             f"{source}: a delegated grant must be a mapping of the keys of SPEC-v0.3 §4.2 "

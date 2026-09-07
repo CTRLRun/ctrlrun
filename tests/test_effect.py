@@ -1528,28 +1528,42 @@ def test_close_releases_every_thread_the_store_opened(tmp_path):
 
     A worker pool touches the store from many threads, and each gets its own connection
     (sqlite3 connections are not shareable). Closing only the caller's would leave one open
-    file handle per thread that ever ran an action. Deterministic on purpose: the worker
-    threads are joined before `close()`, so a leak fails red rather than sometimes.
+    file handle per thread still running an action.
+
+    The workers are held **alive** at a barrier while this asserts. They used to be joined
+    first, and counting the connections of four *dead* threads is how this test came to
+    assert the leak as though it were the contract: a thread's connection is now released
+    when the thread ends, so joining first would leave `close()` with nothing to prove.
+    What `close()` owns is the connections of threads that are still there.
     """
     store = SQLiteStateStore(tmp_path / "state.db")
-    threads = [
-        threading.Thread(target=lambda index=index: store.reserve_effect(f"e:{index}", "act_1"))
-        for index in range(4)
-    ]
+    workers = 4
+    reserved, release = threading.Barrier(workers + 1), threading.Event()
+
+    def run(index: int) -> None:
+        store.reserve_effect(f"e:{index}", "act_1")
+        reserved.wait(timeout=10)
+        release.wait(timeout=10)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(workers)]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
+    try:
+        reserved.wait(timeout=10)
+        opened = set(store._open)
 
-    opened = set(store._open)
-    assert len(opened) == 5  # four workers, plus the one this thread opened
+        assert len(opened) == workers + 1  # four live workers, plus the one this thread opened
 
-    store.close()
+        store.close()
 
-    assert store._open == set()
-    for connection in opened:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-            connection.execute("SELECT 1")
+        assert set(store._open) == set()
+        for holder in opened:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                holder.connection.execute("SELECT 1")
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=10)
 
 
 def test_the_store_is_usable_again_after_close(tmp_path):
@@ -1559,4 +1573,123 @@ def test_the_store_is_usable_again_after_close(tmp_path):
     store.close()
 
     assert store.get_effect("refund:txn_1").state is EffectState.RESERVED
+    store.close()
+
+
+# --- a lone surrogate must not strand an effect (SPEC-v0.1 §5.4) --------------------------
+#
+# `mark_ambiguous` writes the executor's error message, and SQLite encodes every str it stores
+# as UTF-8. A lone surrogate cannot be encoded, so the AMBIGUOUS transition itself raised
+# `UnicodeEncodeError` -- out of `Control.execute`, and not as a `CTRLRunError`, so an
+# application catching the kernel's own errors did not catch it. The effect was left in
+# EXECUTING, which is neither of the two outcomes and blocks the retry until the lease expires.
+#
+# Lone surrogates arrive the ordinary way: `json.loads('"\\ud800"')` yields one, and so does
+# `os.fsdecode` of any non-UTF-8 filename, which is what `errors="surrogateescape"` produces.
+
+LONE_SURROGATE = "\ud800"
+
+
+def test_an_error_message_with_a_lone_surrogate_still_records_ambiguous(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:1", "act_1")
+        store.begin_execution("pay:1", "act_1")
+
+        store.mark_ambiguous("pay:1", "act_1", f"remote said {LONE_SURROGATE}")
+
+        assert store.get_effect("pay:1").state is EffectState.AMBIGUOUS
+    finally:
+        store.close()
+
+
+def test_a_result_with_a_lone_surrogate_still_commits(tmp_path):
+    """`_result_json` already promises it never raises, because the effect *did* commit."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:2", "act_1")
+        store.begin_execution("pay:2", "act_1")
+
+        store.commit_effect("pay:2", "act_1", {"note": LONE_SURROGATE})
+
+        assert store.get_effect("pay:2").state is EffectState.COMMITTED
+    finally:
+        store.close()
+
+
+def test_a_resolver_name_with_a_lone_surrogate_still_resolves(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:3", "act_1")
+        store.begin_execution("pay:3", "act_1")
+        store.mark_ambiguous("pay:3", "act_1", "lost")
+
+        store.resolve_effect("pay:3", EffectState.FAILED, f"ops{LONE_SURROGATE}")
+
+        assert store.get_effect("pay:3").state is EffectState.FAILED
+    finally:
+        store.close()
+
+
+def test_an_executor_raising_a_lone_surrogate_gets_an_ambiguous_outcome(tmp_path):
+    """End to end: the caller sees the kernel's own refusal, not a `UnicodeEncodeError`, and
+    the effect reaches a recorded outcome rather than being stranded in EXECUTING."""
+    from ctrlrun import Control, Policy, context, protect
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        control = Control(
+            Policy.from_yaml("schema: ctrlrun.policy/v1\nactions:\n  pay:\n    decision: allow\n"),
+            store,
+        )
+
+        @protect("pay", effect="pay:{invoice}", control=control)
+        def pay(invoice: str) -> str:
+            raise RuntimeError(f"remote said {LONE_SURROGATE}")
+
+        # The executor's own exception propagates -- that is the contract, and it used to be
+        # masked by a `UnicodeEncodeError` raised while recording the outcome.
+        with context(agent="agent"), pytest.raises(RuntimeError):
+            pay(invoice="inv-1")
+
+        assert store.get_effect("pay:inv-1").state is EffectState.AMBIGUOUS
+    finally:
+        store.close()
+
+
+# --- the SQLite the store actually needs (SPEC-v0.6 §3) ----------------------------------
+#
+# `put_receipt` uses `UPDATE ... RETURNING`, which is SQLite 3.35 (March 2021). On Linux
+# CPython links the *system* libsqlite3, so `requires-python >= 3.11` does not imply it --
+# RHEL 8 ships 3.26. Nothing declared the minimum and nothing checked it, so the first receipt
+# write on such a host raised a raw `sqlite3.OperationalError` about a syntax error, naming
+# neither the real cause nor the remedy.
+
+
+def test_the_store_states_the_sqlite_version_it_needs():
+    from ctrlrun.state import MIN_SQLITE_VERSION
+
+    assert MIN_SQLITE_VERSION >= (3, 35), "UPDATE ... RETURNING needs SQLite 3.35"
+
+
+def test_a_store_on_an_older_sqlite_is_refused_naming_the_version(tmp_path, monkeypatch):
+    """Fail closed at open, where the message can name the version, rather than at the first
+    receipt write with a syntax error."""
+    import sqlite3 as _sqlite3
+
+    from ctrlrun.errors import InvalidArgument as _Refused
+
+    monkeypatch.setattr(_sqlite3, "sqlite_version_info", (3, 26, 0))
+    monkeypatch.setattr(_sqlite3, "sqlite_version", "3.26.0")
+
+    with pytest.raises(_Refused) as raised:
+        SQLiteStateStore(tmp_path / "state.db")
+
+    assert "3.26" in str(raised.value)
+    assert "3.35" in str(raised.value)
+
+
+def test_the_current_interpreter_satisfies_the_floor(tmp_path):
+    """The positive control: the check must not refuse a supported SQLite."""
+    store = SQLiteStateStore(tmp_path / "state.db")
     store.close()

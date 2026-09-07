@@ -392,7 +392,7 @@ def test_resolve_refuses_an_effect_that_is_not_ambiguous(control, store):
     assert store.get_effect("refund:txn_1").state is EffectState.COMMITTED
 
 
-def test_resolve_refuses_an_effect_key_nobody_reserved(workspace):
+def test_resolve_refuses_an_effect_key_nobody_reserved(store):
     result = _cli("resolve", "refund:nothing", "--failed")
 
     assert result.exit_code != 0
@@ -941,7 +941,11 @@ def test_receipts_last_shows_only_the_most_recent(control, store):
     assert json.loads(line)["effect_key"] == "refund:txn_2"
 
 
-def test_receipts_on_an_empty_store_says_so(workspace):
+def test_receipts_on_an_empty_store_says_so(store):
+    # `store`, not `workspace`: the `workspace` fixture writes a policy and no database, so
+    # this used to assert "no receipts" about a store the read command had just created --
+    # which is the behaviour `_store`'s docstring forbids and an operator misreads as "the
+    # evidence is gone". An empty store is a store that exists and holds nothing.
     output = _ok(_cli("receipts")).output
 
     assert "no receipts" in output.lower()
@@ -978,7 +982,7 @@ def test_effects_rejects_a_state_that_is_not_an_effect_state(workspace):
     assert _cli("effects", "--state", "nonsense").exit_code != 0
 
 
-def test_effects_on_an_empty_store_says_so(workspace):
+def test_effects_on_an_empty_store_says_so(store):
     output = _ok(_cli("effects")).output
 
     assert "no effects" in output.lower()
@@ -988,12 +992,26 @@ def test_effects_on_an_empty_store_says_so(workspace):
 
 
 def test_the_cli_reads_the_store_named_by_CTRLRUN_STATE(tmp_path, monkeypatch, workspace):
+    """`$CTRLRUN_STATE` names where the CLI looks -- and looking is all it does.
+
+    This asserted `elsewhere.exists()` after a *read* command, so it pinned the CLI creating
+    the database as though that were the contract, against `_store`'s own docstring. What
+    `CTRLRUN_STATE` is for is honoured either way, and the refusal naming the path proves it
+    just as well as a file appearing would.
+    """
     elsewhere = tmp_path / "elsewhere" / "state.db"
     monkeypatch.setenv("CTRLRUN_STATE", str(elsewhere))
 
-    _ok(_cli("effects"))
+    absent = _cli("effects")
 
-    assert elsewhere.exists()
+    assert absent.exit_code != 0
+    assert str(elsewhere) in absent.output
+    assert not elsewhere.exists(), "a read command created the store it was asked to read"
+
+    elsewhere.parent.mkdir(parents=True, exist_ok=True)
+    SQLiteStateStore(elsewhere).close()
+
+    _ok(_cli("effects"))
 
 
 def test_an_empty_CTRLRUN_STATE_is_refused(workspace, monkeypatch):

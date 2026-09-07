@@ -1374,3 +1374,70 @@ def test_T158b_every_backend_terminated_under_load_leaves_no_failed_effect(schem
     )
     checker.close()
     store.close()
+
+
+@postgres
+def test_a_lost_commit_on_a_RENEWAL_does_not_hand_back_an_unconsumed_approval(
+    proxy, schema, resolutions
+):
+    """§4.3.2 Table **A2 row 2**, carrying the approval -- `v0.1 §4.2 A2` failing open.
+
+    `_resolve_lost_insert` already carries this lesson in a comment: *"Retrying a narrower
+    operation was a double-spend: the effect was reserved, the caller was handed an `Approval`,
+    and the approval row was still `granted`, so the same approval then authorised a second
+    effect key. Found by review."* The fix was applied to the `INSERT` branch and not to the
+    `UPDATE` one, which re-issued with `None, None` where the approval id and action hash
+    belong -- while `consume_approval_and_reserve` still returned `approved.as_approval()` to
+    the caller, which then executed.
+
+    `test_T155g` drives this same branch and cannot see it: it reserves with no approval at
+    all, so the narrowing has nothing to drop. One human "yes" authorises two effects.
+    """
+    from ctrlrun.action import Action, Principal
+    from ctrlrun.approval import ApprovalRequest, ApprovalStatus
+
+    store = store_on(proxy.url(URL), schema)
+    key = "refund:renew-approved"
+    action = Action(
+        name="stripe.refund",
+        arguments={"payment_id": "p9", "amount": 9000},
+        principal=Principal(agent="a"),
+    )
+    store.put_approval_request(
+        ApprovalRequest(
+            request_id="apr_renewal",
+            action_hash=action.action_hash,
+            action=action,
+            created_at=T0,
+            expires_at=T0 + timedelta(hours=1),
+        )
+    )
+    store.grant_approval("apr_renewal", "cli:local")
+
+    # A renewal's pre-state is FAILED -- v0.1 §5.4's one automatic retry.
+    store.reserve_effect(key, "act_first", timedelta(minutes=5))
+    store.begin_execution(key, "act_first")
+    store.fail_effect(key, "act_first", "the remote refused before acting")
+    resolutions.clear()
+    proxy.reset_counters()
+
+    proxy.drop_before_commit = 1  # the renewal's COMMIT never arrives; it re-issues
+    approval, _ = store.consume_approval_and_reserve(
+        "apr_renewal", action.action_hash, key, "act_second", timedelta(minutes=5)
+    )
+
+    assert proxy.clients_killed == 1, "the window never opened"
+    assert branches(resolutions) == ["a2.row2.reissue"], branches(resolutions)
+
+    checker = store_on(URL, schema)
+    try:
+        record = checker.get_approval("apr_renewal")
+        # The caller was handed an Approval and executed on it. If the row is still `granted`,
+        # `find_granted_approval` hands the same one out again for a different effect key.
+        assert record.status is ApprovalStatus.CONSUMED, (
+            f"the approval is {record.status} after the caller was handed "
+            f"{approval!r} and executed on it: one human 'yes', two effects"
+        )
+    finally:
+        checker.close()
+        store.close()

@@ -84,6 +84,25 @@ EVERY_ACTION_DENIED: Final = "every action in the policy is denied"
 NO_AUTHORITY_SECTION: Final = "no authority section"
 NO_EXPIRES_AT: Final = "no grant declares an expires_at"
 NO_GRANT_MATCHES: Final = "no grant matches any action in the policy"
+
+#: The reason `select()` found nothing on the *authority* axis rather than the policy axis:
+#: an action did reach the requested decision, and no grant covered the action verify could
+#: synthesize -- typically because the grant constrains `resources:` to a pattern and verify
+#: renders the `resource:` template from `SYNTHETIC_PREFIX` values no pattern matches.
+#:
+#: Without it, every scenario fell back to its own hardcoded sentence about the policy, so
+#: `examples/authority/devops.yaml` reported "the policy lists no action" about a document
+#: listing five, and exited 0. A false N/A is a false green: it is excluded from the
+#: denominator, so the run reports "1/1 pass" for the one guarantee that survived.
+NO_GRANT_COVERS_SELECTION: Final = "no grant's `resources:` matches a resource verify can build"
+
+#: Printed once beneath the table, the way `EFFECT_TEMPLATE_NOTE` is: the reason above is
+#: short enough to read in a column, and this says what to do about it.
+GRANT_RESOURCE_NOTE: Final = (
+    "verify renders each `resource:` template from synthetic values, so a grant scoped to "
+    "concrete resources matches nothing it can build; scope a grant to a "
+    "`ctrlrun-verify-*` resource to make those guarantees applicable"
+)
 NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 
 #: G4's second N/A (§2.2). No backend in v0.4 reaches it — `SQLiteStateStore` refuses
@@ -115,6 +134,7 @@ __all__ = [
     "EFFECT_TEMPLATE_NOTE",
     "EVERY_ACTION_DENIED",
     "GRANT_ALREADY_EXPIRED",
+    "GRANT_RESOURCE_NOTE",
     "GUARANTEES",
     "NOT_SELECTED",
     "NO_ACTIONS",
@@ -123,6 +143,7 @@ __all__ = [
     "NO_DELEGABLE_GRANT",
     "NO_EFFECT_TEMPLATE",
     "NO_EXPIRES_AT",
+    "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
     "PER_CONNECTION_BACKEND",
     "PROCESSES",

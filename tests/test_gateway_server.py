@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1576,3 +1577,490 @@ authority:
     assert error["code"] == -41012, "the effect pre-check answered before authority did"
     assert error["data"]["reason"] == "authority_constraint"
     assert upstream.calls == []
+
+
+# --- a malformed request or an unhelpful upstream gets a response, never a dropped socket ---
+#
+# Three ways the handler thread died with no reply, so the client read
+# `RemoteProtocolError: Server disconnected without sending a response` and a traceback landed
+# on the gateway's stderr. The gateway's own comment says this must never happen -- "the client
+# learning that by having its connection dropped" -- because an agent that reads a transport
+# error retries a consequential call blind, instead of reading the 401 and refreshing its token.
+
+
+def test_a_401_with_a_non_json_body_still_answers_the_client(upstream, client):
+    """RFC 6750 bearer challenges normally carry an empty body, and a CDN in front of a tool
+    server answers with HTML. `json.loads` on either killed the thread."""
+    upstream.reply = None
+    upstream.status = 401
+    upstream.extra_headers = {"WWW-Authenticate": 'Bearer realm="acme"'}
+
+    response = _post(client, _call("create_refund", {"payment_id": "txn_401", "amount": 10}))
+
+    assert response.status_code in range(200, 600)
+    assert response.content is not None
+
+
+def test_a_403_with_an_html_body_still_answers_the_client(upstream, client):
+    upstream.reply = None
+    upstream.status = 403
+    upstream.extra_headers = {"Content-Type": "text/html"}
+
+    response = _post(client, _call("create_refund", {"payment_id": "txn_403", "amount": 10}))
+
+    assert response.status_code in range(200, 600)
+
+
+@pytest.mark.parametrize("declared", ["abc", "-1", "9x"])
+def test_a_malformed_content_length_is_answered_not_dropped(gateway, declared):
+    """`int(self.headers.get("Content-Length"))` raised `ValueError` on a non-numeric value,
+    and `rfile.read(-1)` on a negative one read to EOF -- bypassing `--max-body-bytes`, which
+    is checked against the *declared* length, so a few connections exhaust the process."""
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(
+                f"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n"
+                f"X-Agent: bot\r\n\r\n".encode()
+            )
+            sock.settimeout(10)
+            reply = sock.recv(4096)
+
+        assert reply.startswith(b"HTTP/1."), f"no status line for Content-Length: {declared!r}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_body_larger_than_the_declared_limit_is_refused_before_it_is_read(gateway):
+    """The limit must be enforced against what is actually read, not only what is declared."""
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            oversized = gateway.config.max_body_bytes + 1
+            sock.sendall(
+                f"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: {oversized}\r\n"
+                f"X-Agent: bot\r\n\r\n".encode()
+            )
+            sock.settimeout(10)
+            reply = sock.recv(4096)
+
+        assert b"413" in reply.split(b"\r\n")[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --- the advertised approvals endpoint is actually reachable (SPEC-v0.2 §7.2) --------------
+#
+# `WebhookApprovalProvider` advertises `respond_to: <public_url>/ctrlrun/approvals/<id>` in
+# every APPROVAL_REQUESTED notification, and `do_POST` compared `self.path` against
+# `config.path` alone -- so that URL answered an HTML 404 and `Gateway.handle_approval` had no
+# caller anywhere in the package. The approver's system posted, got a 404, and the pending
+# approval sat until it expired: the whole inbound half of §7.2 was unreachable.
+#
+# Reachability is a different claim from handler correctness, and only the second one had a
+# test: `tests/test_webhook.py` calls `handle_inbound` directly.
+
+
+def _approvals_server(store, secret="s" * 40):
+    import threading as _threading
+
+    config = GatewayConfig(
+        upstream="http://127.0.0.1:1/mcp",
+        alias="acme",
+        principal_header="X-Agent",
+        port=0,
+        webhook_secret=secret,
+    )
+    control = Control(Policy.from_yaml(POLICY), store)
+    server = build_server(Gateway(config, control, lambda *a, **k: (None, None, 502, {})))
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[1]
+
+
+def test_the_advertised_approvals_url_is_routed_and_not_a_404(store):
+    """The endpoint exists on the socket. What it decides is `handle_inbound`'s business and
+    is tested there; this asserts only that a request reaches it at all."""
+    server, port = _approvals_server(store)
+    try:
+        response = httpx.post(
+            f"http://127.0.0.1:{port}/ctrlrun/approvals/req_abc",
+            content=b"{}",
+            headers={"CTRLRun-Signature": "sha256=nope"},
+            timeout=10,
+        )
+
+        assert response.status_code != 404, "the advertised respond_to URL is unrouted"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_approvals_path_is_a_404_when_no_webhook_secret_is_configured(store):
+    """`handle_approval`'s own refusal, which was unreachable along with the route."""
+    import threading as _threading
+
+    config = GatewayConfig(
+        upstream="http://127.0.0.1:1/mcp", alias="acme", principal_header="X-Agent", port=0
+    )
+    control = Control(Policy.from_yaml(POLICY), store)
+    server = build_server(Gateway(config, control, lambda *a, **k: (None, None, 502, {})))
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = httpx.post(
+            f"http://127.0.0.1:{server.server_address[1]}/ctrlrun/approvals/req_abc",
+            content=b"{}",
+            timeout=10,
+        )
+
+        assert response.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_an_unknown_ctrlrun_path_is_still_a_404(store):
+    """The route must not swallow every path under the reserved prefix."""
+    server, port = _approvals_server(store)
+    try:
+        response = httpx.post(f"http://127.0.0.1:{port}/ctrlrun/nope", content=b"{}", timeout=10)
+
+        assert response.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_signed_grant_posted_to_the_advertised_url_lands_the_approval(store):
+    """The loop closes end to end, over a socket, the way an approver's system drives it.
+
+    The route test above only asserts "not 404". This is the claim an operator actually
+    depends on: a human said yes, and the pending approval becomes granted.
+    """
+    import json as _json
+    import threading as _threading
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from ctrlrun import Action, Principal
+    from ctrlrun.approval import ApprovalStatus
+    from ctrlrun.webhook import SIGNATURE_HEADER, WebhookApprovalProvider, sign
+
+    secret = "s" * 40  # `webhook.MIN_SECRET_BYTES`: a MAC is worth its key
+    received: list[bytes] = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    hook = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    _threading.Thread(target=hook.serve_forever, daemon=True).start()
+
+    server, port = _approvals_server(store, secret=secret)
+    try:
+        provider = WebhookApprovalProvider(
+            url=f"http://127.0.0.1:{hook.server_address[1]}/hook",
+            secret=secret,
+            store=store,
+            public_url=f"http://127.0.0.1:{port}",
+            allow_insecure=True,  # loopback, which `_checked_url` permits with the flag
+        )
+        request = provider.request(
+            Action(
+                name="mcp.acme.create_refund",
+                arguments={"payment_id": "txn_e2e", "amount": 10},
+                principal=Principal(agent="bot"),
+            )
+        )
+
+        # The URL the notification told the approver to use, taken from the notification.
+        advertised = _json.loads(received[0])["respond_to"]
+        assert advertised.endswith(f"/ctrlrun/approvals/{request.request_id}")
+
+        body = _json.dumps(
+            {
+                "request_id": request.request_id,
+                "action_hash": request.action_hash,
+                "decision": "grant",
+                "approver": "slack:U123",
+            }
+        ).encode()
+        response = httpx.post(
+            advertised,
+            content=body,
+            headers={SIGNATURE_HEADER: sign(body, secret, at=_datetime.now(_UTC))},
+            timeout=10,
+        )
+
+        assert response.status_code == 200, response.text
+        assert store.get_approval(request.request_id).status is ApprovalStatus.GRANTED
+    finally:
+        server.shutdown()
+        server.server_close()
+        hook.shutdown()
+        hook.server_close()
+
+
+# --- a decoded body must not carry the upstream's Content-Encoding -----------------------
+#
+# httpx decompresses `response.content`, and the forwarder relayed `dict(response.headers)`
+# verbatim -- `Content-Encoding: gzip` included, since `_HOP_BY_HOP` did not list it. The
+# client then tried to gunzip plain JSON: `DecodingError: incorrect header check`, on every
+# response. httpx sends `Accept-Encoding: gzip` by default, so an ordinary upstream that
+# honours content negotiation made the gateway unusable -- no special server behaviour needed.
+#
+# `Content-Length` was already stripped and recomputed for exactly this reason; the encoding
+# describes the same bytes and belongs with it.
+
+
+def _gzip_upstream():
+    import gzip as _gzip
+    import threading as _threading
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = _gzip.compress(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": []}}).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("method", ["tools/list", "tools/call"])
+def test_a_gzip_upstream_is_readable_by_the_client(store, method):
+    """Both paths: `tools/list` is relayed, `tools/call` is intercepted."""
+    import threading as _threading
+
+    upstream = _gzip_upstream()
+    config = GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_address[1]}/mcp",
+        alias="acme",
+        principal_header="X-Agent",
+        port=0,
+    )
+    forwarder = httpx_forwarder(config)
+    gateway = Gateway(config, Control(Policy.from_yaml(POLICY), store), forwarder)
+    server = build_server(gateway)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        params = {"name": "read_only", "arguments": {}} if method == "tools/call" else {}
+        response = httpx.post(
+            f"http://127.0.0.1:{server.server_address[1]}/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            headers={"X-Agent": "bot"},
+            timeout=10,
+        )
+
+        # The assertion is that reading the body works at all: before the fix this raised
+        # `httpx.DecodingError` on `.text`, because the header said gzip and the bytes did not.
+        assert response.status_code in range(200, 600)
+        assert "gzip" not in (response.headers.get("content-encoding") or "")
+        assert response.text is not None
+    finally:
+        server.shutdown()
+        server.server_close()
+        forwarder.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+# --- a malformed --upstream is refused at startup, not once per request -------------------
+#
+# `GatewayConfig.__post_init__` already refuses a bad `--alias` and a bad `--path`, and the
+# one value the gateway cannot work without went unchecked. `--upstream 127.0.0.1:8000/mcp`
+# -- a scheme left off, which is what a typo looks like -- started a listener that answered
+# 502 to every request for the life of the process, and told the operator nothing at startup.
+
+
+@pytest.mark.parametrize(
+    "upstream", ["127.0.0.1:8000/mcp", "example.com/mcp", "ftp://example.com/mcp", ""]
+)
+def test_an_upstream_without_an_http_scheme_is_refused_at_construction(upstream):
+    from ctrlrun.errors import InvalidArgument
+
+    with pytest.raises(InvalidArgument) as raised:
+        GatewayConfig(upstream=upstream, alias="acme", principal_header="X-Agent", port=0)
+
+    assert "--upstream" in str(raised.value)
+
+
+@pytest.mark.parametrize("upstream", ["http://127.0.0.1:8000/mcp", "https://example.com/mcp"])
+def test_an_upstream_with_a_scheme_is_accepted(upstream):
+    """The positive control: the check must not refuse the URLs the docs tell people to use."""
+    config = GatewayConfig(upstream=upstream, alias="acme", principal_header="X-Agent", port=0)
+
+    assert config.upstream == upstream
+
+
+# --- the startup block survives a pipe (SPEC-v0.3 §8.4) ----------------------------------
+#
+# Python block-buffers a stdout that is not a tty, so the whole startup block -- what identity
+# provider is in force, which store, which environment -- was still sitting in the buffer when
+# the process was signalled, and never reached the log. Every real deployment pipes stdout:
+# systemd, docker, kubernetes. The block that tells an operator what the gateway trusts was
+# invisible in exactly the deployments it is written for, and visible only at an interactive
+# terminal, which is the one place nobody runs a server.
+
+
+def test_the_gateway_startup_block_reaches_a_piped_stdout(tmp_path):
+    import subprocess
+    import sys
+
+    (tmp_path / "ctrlrun.yaml").write_text(
+        "schema: ctrlrun.policy/v2\nactions:\n  a.b:\n    decision: allow\n", encoding="utf-8"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "ctrlrun.cli.main",
+            "gateway",
+            "--upstream",
+            "http://127.0.0.1:9/mcp",
+            "--alias",
+            "acme",
+            "--principal",
+            "bot",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        # Bounded by construction: give the block a moment to be written, then kill the
+        # process and read whatever actually left it. Reading line by line first would block
+        # for ever on the unflushed case, which is the failure this is testing -- a test for a
+        # missing flush must not itself wait on a flush.
+        time.sleep(2)
+    finally:
+        process.kill()
+    printed, _ = process.communicate(timeout=15)
+
+    # `environment` and `identity` are §8.4's own first two lines. Asserting on the text the
+    # block actually writes, not on a line the *operator* server writes, which is a different
+    # command with a different block.
+    assert "environment" in printed, (
+        f"the startup block did not reach a piped stdout; got {printed!r}"
+    )
+    assert "identity" in printed
+
+
+# --- a refused request does not desynchronise a kept-alive connection ---------------------
+#
+# A **regression test for behaviour that is already correct**, kept because it was reported as
+# broken and the report was wrong. The claim was that `send_error(404)` leaves the request body
+# unread, so the server parses the leftover bytes as the next request line and a pooling client
+# reads the tail of the previous response.
+#
+# It does not: `BaseHTTPRequestHandler.send_error` sets `close_connection`, the 404 carries
+# `Connection: close`, and the socket is closed before anything can be misread. The first
+# measurement that appeared to show a desync was an artefact of the instrument -- a `recv(200)`
+# that truncated a longer 404 body, so what looked like a second reply was the remainder of the
+# first still sitting in the socket buffer. Reading the full response by Content-Length shows
+# the connection closing, which is the safe answer.
+#
+# The 400 and 413 paths set `close_connection` explicitly for the same reason.
+
+
+def _read_one_response(sock) -> bytes:
+    """Headers plus exactly `Content-Length` bytes, so nothing is left in the socket buffer.
+
+    A bare `recv(4096)` is not enough: under load it can return a partial response, and the
+    remainder then looks like the *next* reply. That artefact is what made the desync appear
+    real in the first place, and it made the first version of this test flaky for the same
+    reason.
+    """
+    buffered = b""
+    while b"\r\n\r\n" not in buffered:
+        chunk = sock.recv(1)
+        if not chunk:
+            return buffered
+        buffered += chunk
+    head, body = buffered.split(b"\r\n\r\n", 1)
+    length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":", 1)[1])
+    while len(body) < length:
+        chunk = sock.recv(length - len(body))
+        if not chunk:
+            break
+        body += chunk
+    return head
+
+
+@pytest.mark.parametrize("path", ["/wrong", "/ctrlrun/nope"])
+def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.settimeout(10)
+            sock.sendall(
+                b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n"
+                % (path.encode(), len(body))
+                + body
+            )
+            head = _read_one_response(sock)
+            assert head.startswith(b"HTTP/1."), head[:40]
+
+            try:
+                sock.sendall(
+                    b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Agent: bot\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(body) + body
+                )
+                second = sock.recv(4096)
+            except (TimeoutError, ConnectionError, OSError):
+                second = b""
+
+        # Either a proper status line or a closed connection. What must not happen is the
+        # client reading bytes that are not a response -- that would be the previous body.
+        assert second == b"" or second.startswith(b"HTTP/1."), (
+            f"the connection was left desynchronised; the client read {second[:80]!r}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
