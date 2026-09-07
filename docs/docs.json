@@ -13,18 +13,23 @@
     "href": "/"
   },
   "favicon": "/images/favicon.svg",
-  "description": "The execution safety layer for AI agents.",
+  "description": "Execution safety for AI agents. Control consequential actions before they affect real systems.",
   "navbar": {
     "links": [
       {
-        "label": "GitHub",
-        "href": "https://github.com/CTRLRun/ctrlrun"
+        "href": "/docs",
+        "label": "Documentation"
       },
       {
-        "label": "PyPI",
-        "href": "https://pypi.org/project/ctrlrun/"
+        "label": "GitHub",
+        "href": "https://github.com/CTRLRun/ctrlrun"
       }
-    ]
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Protect my agent",
+      "href": "/protect-my-agent"
+    }
   },
   "navigation": {
     "tabs": [
@@ -35,6 +40,7 @@
             "group": "Start",
             "pages": [
               "index",
+              "docs",
               "why",
               "not-only-agents"
             ]
