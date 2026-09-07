@@ -34,12 +34,19 @@
   "navigation": {
     "tabs": [
       {
+        "tab": "CTRLRun",
+        "pages": [
+          "index",
+          "risk-check",
+          "protect-my-agent"
+        ]
+      },
+      {
         "tab": "Documentation",
         "groups": [
           {
             "group": "Start",
             "pages": [
-              "index",
               "docs",
               "why",
               "not-only-agents"
