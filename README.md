@@ -37,7 +37,8 @@
 <p align="center">
   <em>A refund is the example, not the scope. The same boundary goes in front of a deployment,
   a deletion, an IAM grant, a message that leaves the building — any action an agent takes that
-  the world remembers.</em>
+  the world remembers. <a href="#the-same-shape-in-nine-domains">Nine domains, and how it
+  transfers</a>.</em>
 </p>
 
 ## The refund that happened twice
@@ -353,6 +354,49 @@ when its framework makes a breaking release, which is not a kernel event.
 [`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the three
 ways in and how to write one for a framework not listed here.
 
+## The same shape in nine domains
+
+Nothing in CTRLRun knows what a refund is. An action is a **name**, **canonical arguments**, an
+**effect key** and a **resource**, and the three questions asked of it are the same whichever
+domain it came from: how much autonomy does *this action* get, did a human approve *this exact*
+action, and has this effect already happened. A payout, a namespace and a change of dose are
+the same shape to the kernel. Two things carry the domain, and you write both:
+
+- **The effect key is the only domain knowledge in the system** — the string that says two calls
+  are the same real-world consequence. `refund:{payment_id}`, `namespace:{cluster}:{name}`,
+  `grant:{user_id}:{role}`, `prescription:{patient_id}:{drug}`. Name it well and a retry cannot
+  act twice; leave it out and there is nothing for *at most once* to be about, which is why the
+  gateway prints every action in your policy that has no `effect:` template on the line that
+  starts it.
+- **Conditions are arguments, not amounts.** `amount_lte` is not a money feature: the condition
+  language is `<argument>_<op>`, so the same operators read `replicas_lte: 10`,
+  `host_count_lte: 1`, `role_in: [reader, viewer]` and `to_domain_eq: acme.com`. Any integer
+  argument can be bounded and any argument can be matched, so a band is available to a domain
+  that has never issued an invoice.
+
+The nine files under
+[`examples/policies/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/policies) are that
+applied, one per domain. Adapt them; none is a drop-in.
+
+| Domain | Autonomous | A human decides | Never |
+|---|---|---|---|
+| [DevOps](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/devops.yaml) | `k8s.scale_deployment` to 10 replicas | `terraform.apply` | `k8s.delete_namespace` |
+| [Security operations](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/security.yaml) | `firewall.add_deny_rule` | `firewall.add_allow_rule` | `edr.disable_protection` |
+| [Healthcare](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/healthcare.yaml) | `appointment.reschedule` | `patient.export_record` | `prescription.change_dose` |
+| [Legal](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/legal.yaml) | `document.draft_internal` | `document.file_with_court` | `contract.execute` |
+| [HR](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/hr.yaml) | `pto.approve` within a band | `payroll.run` | `employee.delete_record` |
+| [Insurance](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/insurance.yaml) | `claim.request_documents` | `claim.approve_payout` above a band | `policyholder.delete` |
+| [E-commerce](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/e-commerce.yaml) | `inventory.adjust` within a band | `price.update` | `customer.delete` |
+| [Public services](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/government.yaml) | `eligibility.precheck` | `benefit.terminate` | `record.delete` |
+| [Payments](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/payments.yaml) | `stripe.refund` under €500 | `stripe.refund` above it | `stripe.delete_customer` |
+
+Read any row left to right and it is one rule wearing different nouns: cheap to undo is
+autonomous, anything that hands out power or leaves the building needs a human, and anything
+that destroys the evidence is not an agent action at any size. The security row is the one to
+read twice — adding a **deny** rule to a firewall is autonomous and adding an **allow** rule is
+not, which no amount threshold would have told you. The policy is where your judgement about
+your domain gets written down; CTRLRun is what makes it hold.
+
 ## Write down what the agent may do
 
 One file. The rule is the same in every domain: cheap to undo is autonomous, anything that
@@ -423,9 +467,7 @@ widened — a delegation must be provably a subset of its parent on every dimens
 and again at every evaluation, and omitting a dimension the parent constrains is rejected rather
 than inherited — and `ctrlrun revoke` cuts a chain of any depth with one write.
 [`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) has it in
-plain language, and the nine files under
-[`examples/policies/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/policies) are
-starting points for payments, devops, HR, legal and security. Adapt them; none is a drop-in.
+plain language.
 
 **Roll it out with `mode: observe` first.** One top-level line runs every real decision against
 real traffic and records what *would* have been blocked, without blocking anything, and

@@ -13,6 +13,7 @@ rather than on the reader's laptop.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -526,3 +527,68 @@ def test_no_sector_template_ships_an_authority_section(path):
     assert "authority" not in document
     assert "No `authority:` section, deliberately" in text
     assert Policy.from_yaml(text, source=str(path)).schema == POLICY_SCHEMA
+
+
+# --- The README's nine-domain table is a claim about these files ------------------------------
+
+#: The README's "The same shape in nine domains" table says, for each domain, one action that is
+#: autonomous, one a human decides, and one that is never allowed — each cited from the template
+#: linked in the same row. A table like that is prose the day it stops matching the files, and it
+#: is the table a reader trusts to decide whether this applies to *their* domain. So it is read
+#: back out of the README and checked against the parsed YAML.
+_TABLE_COLUMNS: tuple[str, ...] = ("allow", "approve", "deny")
+
+
+def _readme_domain_table() -> list[tuple[str, tuple[str, ...]]]:
+    """Return (template stem, three action names) for every row of the nine-domain table."""
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = text.index("## The same shape in nine domains")
+    end = text.index("## ", start + 1)
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    for line in text[start:end].splitlines():
+        if not line.startswith("| [") or "---" in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        stem = re.search(r"examples/policies/([a-z-]+)\.yaml", cells[0])
+        assert stem, f"the row's domain cell links to no template: {cells[0]}"
+        actions = []
+        for cell in cells[1:]:
+            name = re.search(r"`([a-z0-9_]+\.[a-z0-9_]+)`", cell)
+            assert name, f"the cell names no action: {cell!r}"
+            actions.append(name.group(1))
+        rows.append((stem.group(1), tuple(actions)))
+    return rows
+
+
+def _decisions(entry: object) -> set[str]:
+    assert isinstance(entry, dict)
+    if "decision" in entry:
+        return {str(entry["decision"])}
+    return {str(rule["decision"]) for rule in entry["rules"]}
+
+
+def test_the_readme_domain_table_has_a_row_per_template():
+    rows = _readme_domain_table()
+    assert len(rows) == 9, f"nine templates, {len(rows)} rows"
+    assert {stem for stem, _ in rows} == {path.stem for path in _templates()}
+
+
+@pytest.mark.parametrize("row", _readme_domain_table(), ids=lambda row: row[0])
+def test_every_action_the_readme_cites_carries_the_decision_it_is_cited_for(row):
+    """A cell in the autonomous column names an action the template really allows.
+
+    The check is that the claimed decision is *reachable* for that action, not that it is the
+    only one: three of the rows cite a banded action — `stripe.refund` is autonomous under €500
+    and a human's call above it — and the same name is honestly in two columns.
+    """
+    stem, actions = row
+    document = yaml.safe_load((TEMPLATES / f"{stem}.yaml").read_text(encoding="utf-8"))
+    for action, column in zip(actions, _TABLE_COLUMNS, strict=True):
+        assert action in document["actions"], (
+            f"README cites {action!r} in the {stem} row; {stem}.yaml does not define it"
+        )
+        reachable = _decisions(document["actions"][action])
+        assert column in reachable, (
+            f"README puts {action!r} in the {column!r} column of the {stem} row, "
+            f"but {stem}.yaml can only decide {sorted(reachable)}"
+        )
