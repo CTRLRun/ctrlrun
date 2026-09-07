@@ -22,7 +22,7 @@ proved, and updates itself.
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@v4
-          - uses: CTRLRun/ctrlrun@v0.6.0
+          - uses: CTRLRun/ctrlrun@v0.6.1
             id: verify
             with:
               policy: ctrlrun.yaml
@@ -34,7 +34,7 @@ proved, and updates itself.
     if a guarantee failed.
 
     The ref pins the action's steps and not the package they install: `install` defaults to
-    `ctrlrun`, unpinned. Add `install: ctrlrun==0.6.0` where you want the run reproducible.
+    `ctrlrun`, unpinned. Add `install: ctrlrun==0.6.1` where you want the run reproducible.
   </Step>
 
   <Step title="Publish the badge JSON">

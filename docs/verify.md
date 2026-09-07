@@ -14,7 +14,7 @@ what could not be tested at all.
 
 ```console
 $ ctrlrun verify
-CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+CTRLRun verify — ctrlrun 0.6.1, catalogue ctrlrun.guarantees/v2
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: CTRLRun/ctrlrun@v0.6.0
+      - uses: CTRLRun/ctrlrun@v0.6.1
         with:
           policy: ctrlrun.yaml
 ```
@@ -227,8 +227,8 @@ and the badge JSON **from that report** — not from a second run, so they canno
 uploads the three files as one artifact.
 
 **The ref pins the action's steps and not the package they install.** `install` defaults to
-`ctrlrun`, unpinned, so `@v0.6.0` runs whatever version PyPI serves on the day the job runs —
-pinning the action is not pinning the thing being verified with. Set `install: ctrlrun==0.6.0`
+`ctrlrun`, unpinned, so `@v0.6.1` runs whatever version PyPI serves on the day the job runs —
+pinning the action is not pinning the thing being verified with. Set `install: ctrlrun==0.6.1`
 where you want the run to be reproducible, and pin the action by commit rather than by tag
 where you want a ref that cannot be moved; this repository holds its own workflows to the
 commit form and a test enforces it.

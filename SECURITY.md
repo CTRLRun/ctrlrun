@@ -26,16 +26,16 @@ identity, so there is no signing key in this repository, in its secrets, or in a
 ### Verifying a release
 
 ```sh
-gh release download v0.6.0 --repo CTRLRun/ctrlrun
-gh attestation verify ctrlrun-0.6.0.tar.gz --repo CTRLRun/ctrlrun
+gh release download v0.6.1 --repo CTRLRun/ctrlrun
+gh attestation verify ctrlrun-0.6.1.tar.gz --repo CTRLRun/ctrlrun
 ```
 
 `gh attestation verify` fetches the attestation from GitHub. To check without a network round
 trip, point it at the bundle the release carries:
 
 ```sh
-gh attestation verify ctrlrun-0.6.0.tar.gz \
-  --repo CTRLRun/ctrlrun --bundle ctrlrun-0.6.0.sigstore.json
+gh attestation verify ctrlrun-0.6.1.tar.gz \
+  --repo CTRLRun/ctrlrun --bundle ctrlrun-0.6.1.sigstore.json
 ```
 
 Either way, what is verified is that these bytes were built by the `release.yml` workflow in
