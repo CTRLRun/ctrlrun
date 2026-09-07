@@ -101,6 +101,8 @@ that page's frontmatter, never here.
 | `compare/governance-toolkits` | AI agent oversight vs enforcement | A toolkit describes; CTRLRun refuses. |
 | `compare/durable-workflows` | temporal vs ctrlrun · durable execution agents | One drives work forward; the other decides whether the work may happen. |
 | `compare/idempotency-keys` | idempotency keys AI agents · stripe idempotency vs | An idempotency key deduplicates at one API; an effect key deduplicates at the agent, across every API it touches. |
+| `demos/index` | ctrlrun demo online · try agent safety library | Every demo here runs real Python in your tab. |
+| `demos/medical-affairs` | AI medical information letter review · agent citation drift · medical affairs LLM harness | A harness that retrieves biomedical evidence, reasons over it, cites it and drafts a reply is four problems, and CTRLRun solves none of them. |
 | `try-it` | try ctrlrun in browser · ctrlrun demo online | Press the button and `ctrlrun demo` runs in this tab: real Python, the released wheel. |
 | `verify/get-the-badge` | ctrlrun verified badge | Two minutes, three steps: verify on every push, publish the badge JSON, point Shields at it. |
 | `study/does-your-framework-double-execute` | does langgraph retry tool calls · agent framework double execution | When a remote commits a refund and the reply is lost, what does an agent framework do? |
