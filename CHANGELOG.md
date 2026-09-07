@@ -7,10 +7,86 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased]
+## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
+
+Everything found after `v0.6.0` was tagged: twenty-nine defects from an audit of the shipped
+code, the gateway's transport behaviour, and the documentation's first screen. No public API
+name changes and no schema change. Two behaviours become **stricter** and could refuse input
+that 0.6.0 accepted silently — `@protect` on an `async def`, and a duplicated mapping key in a
+policy or authority document — and both are listed below with what they did before.
 
 ### Fixed
 
+- **`@protect` on an `async def` recorded a consequential action as done that never happened.**
+  The wrapper is synchronous, so "the return value" was an un-awaited coroutine: the effect was
+  committed and a `committed` receipt written before the body ran, and the legitimate retry was
+  then refused with `DuplicateEffect` for ever. Async, generator and async-generator functions
+  are refused at decoration time.
+- **One human approval could authorise two effects on Postgres.** A lost `COMMIT` on a
+  *renewal* — a reservation over a `FAILED` record, v0.1 §5.4's one automatic retry — re-issued
+  the approval without consuming it, so `find_granted_approval` would hand the same "yes" out
+  again for a different effect key. `v0.1 §4.2 A2` requires single use consumed atomically with
+  the reservation. SQLite has no lost-commit resolution, so this was also a backend-switch
+  regression.
+- **`ctrlrun verify` reported false N/A reasons, which is a false green.** N/A is excluded from
+  the denominator, so a run that could exercise one guarantee reported "1/1 declared guarantees
+  pass" beside ten reasons that were each untrue of the operator's document. A miss on the
+  authority axis is now distinguished from a miss on the policy axis and named. Verify also
+  crashed, exit 1, on an `effect:` template containing `{resource}` — a code path `--help`
+  documents as "a guarantee FAILED" — because it invented an argument for a placeholder that
+  names the action's `resource` field. Every shipped example under `examples/` is verified in
+  CI now.
+- **Webhook approvals were never routed.** `WebhookApprovalProvider` advertises
+  `POST /ctrlrun/approvals/<id>` as `respond_to` in every `APPROVAL_REQUESTED` notification, and
+  `Gateway.handle_approval` had no caller: the approver's system posted its answer to that URL,
+  read an HTML 404, and the approval sat pending until it expired.
+- **A lone surrogate in an executor's exception message stranded the effect.**
+  `mark_ambiguous` raised `UnicodeEncodeError` from inside the transaction — not a
+  `CTRLRunError` — and left the record `EXECUTING`, which is neither outcome and blocks the
+  retry until the lease expires. Executor text is escaped with `backslashreplace` where it
+  enters, so the row, the event and the receipt carry the same value and the chain hashes.
+- **The SQLite store leaked two file descriptors per thread.** Connections were pinned in a set
+  only `close()` emptied, so a host whose threads come and go eventually failed every store
+  access with "unable to open database file". Measured on the gateway: 200 connections, 410
+  descriptors; now flat.
+- **A duplicated mapping key in a policy or authority document failed open.** `yaml.safe_load`
+  resolves one to the last silently, so a grant with `actions:` written twice during a narrowing
+  edit loaded as `("**",)`. Refused now, naming the key and the line, by the one loader policy
+  and authority share.
+- **`ctrlrun delegate` and `ctrlrun revoke` ignored the store.** Both called `Control.from_file()`,
+  which always opens `.ctrlrun/state.db` beside the policy, so on Postgres a delegation went
+  into a local file no agent reads and `revoke` reported success while the delegation stayed
+  live. Both take `--store-url` now.
+- **Read commands created the store they were reporting on.** `ctrlrun receipts` in a directory
+  without a `ctrlrun.yaml` created and migrated `.ctrlrun/state.db` and answered "no receipts
+  yet" — telling an operator looking for evidence that there was none, from a store the command
+  had just made. Five commands also reached the terminal as tracebacks where the identical input
+  printed one clean line elsewhere.
+- **The gateway dropped a client's connection with no reply**, which an agent reads as a
+  transport error and retries blind: a 401 or 403 whose body is not a JSON object (an RFC 6750
+  bearer challenge, or a CDN's HTML), a malformed `Content-Length` — where `-1` bypassed
+  `--max-body-bytes` entirely — and `httpx.DecodingError` and `httpx.InvalidURL`, which inherit
+  from `RequestError` and so matched neither `except`.
+- **The gateway relayed `Content-Encoding: gzip` with the decompressed bytes.** httpx sends
+  `Accept-Encoding: gzip` by default, so an upstream doing nothing but honouring content
+  negotiation made the gateway unusable with `DecodingError: incorrect header check`.
+- **`ctrlrun scan` failed the policy `ctrlrun init` had just written**, exit 1, on the two
+  actions the starter's own comment says need no effect. The rule asked "does the policy permit
+  this?" where it meant "does this have a consequence to reserve?".
+- **`data_scope_eq: [[phi]]` raised `TypeError` on every evaluation** of that action rather than
+  a `CTRLRunError`, so an application catching the kernel's errors did not catch it. Refused at
+  load.
+- **The gateway's startup block never reached a pipe.** Python block-buffers a non-tty stdout,
+  so SPEC-v0.3 §8.4's block — which identity provider, which store, which environment — was
+  still buffered when the process was signalled. Visible only at an interactive terminal, which
+  is the one place nobody runs a server.
+- **Both adapters pinned `ctrlrun>=0.5,<0.6` beside a 0.6.0 kernel**, so `pip install
+  ctrlrun-langgraph` either refused to resolve or silently downgraded `ctrlrun`. The framework
+  range was checked against the version CI installed; the kernel range was checked against
+  nothing.
+- **Two reference pages promised a `ctrlrun[conformance]` extra that does not exist** and a
+  `MissingDependency` that could not be raised. SPEC-v0.5 §12.1 reversed that extra and
+  `pyproject.toml` never declared it, so both halves of the sentence were false.
 - Validate upstream JSON-RPC response IDs before changing effect state. Missing, mismatched,
   and malformed responses remain ambiguous and cannot make an executed action retryable.
 - Forward MCP SSE progress incrementally, record the matching final response, and keep
@@ -20,6 +96,27 @@ any change to one appears here.
 - Preserve the original request ID in synthesized gateway errors and support IPv6 listeners.
 - Restore consumed approval attribution and original attempt timing on resumed receipts,
   including across database reopenings and multiple suspension rounds.
+
+### Changed
+
+- The README's first integration example runs end to end. It stopped at `ApprovalRequired` and
+  left the approval and the resumption in prose, so no reader could reach a completed protected
+  action by copying it; it now covers the policy, the decorator, `ctrlrun approve` from the
+  shell, `with_approval`, a mutated €5,000 refused and three receipts, in one domain throughout.
+- The README states each guarantee once. It stated the same six of them six times — a table
+  after the first example, the problem table, the pipeline steps, the generated matrix, the
+  bullet list and the readiness block. Prose is down from 3,205 words to 2,662, with the demo
+  transcript, the guarantee matrix, both receipt-chain disclaimers and the whole *It can't*
+  section untouched.
+- The documentation home page leads with what CTRLRun is rather than with its own name, and
+  says the promise once instead of twice above the fold. Its `title` is the category line and
+  its `description` the tagline, which is what `docs/IA.md` assigns to each; the browser tab no
+  longer reads *CTRLRun - CTRLRun*.
+- `try-it` puts its controls above its explanation, in a wide column, with the policy below
+  them rather than between the reader and the button.
+- Four badges: CodeQL, the documentation site, Ruff and `mypy --strict`. Downloads and stars
+  are deliberately absent — `docs/STYLE.md` forbids social proof that does not exist, and a
+  count published four days after the first release measures mirrors.
 
 ## [0.6.0] - 2026-09-07 — Durable runtime
 

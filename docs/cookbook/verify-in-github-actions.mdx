@@ -47,14 +47,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: CTRLRun/ctrlrun@v0.6.0
+      - uses: CTRLRun/ctrlrun@v0.6.1
         with:
           policy: ctrlrun.yaml
 ```
 
 The ref pins the action's steps and not the package they install: `install` defaults to
 `ctrlrun`, unpinned, so the job takes whatever PyPI serves that day. Add
-`install: ctrlrun==0.6.0` to pin the tool too, and pin `CTRLRun/ctrlrun` by commit rather than
+`install: ctrlrun==0.6.1` to pin the tool too, and pin `CTRLRun/ctrlrun` by commit rather than
 by tag where you want a ref nobody can move.
 
 ## What the agent sees
@@ -62,7 +62,7 @@ by tag where you want a ref nobody can move.
 The agent sees nothing; this is the operator's check. The build sees:
 
 ```text
-CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+CTRLRun verify — ctrlrun 0.6.1, catalogue ctrlrun.guarantees/v2
 policy     /home/runner/work/agent/agent/ctrlrun.yaml (ctrlrun.policy/v2, mode: enforce)
 authority  none
 store      sqlite, scratch (created and destroyed for this run)

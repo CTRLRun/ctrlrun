@@ -425,7 +425,7 @@ with fake executors, and no network. Your `.ctrlrun/state.db` is byte-identical 
 
 ```console
 $ ctrlrun verify
-CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+CTRLRun verify — ctrlrun 0.6.1, catalogue ctrlrun.guarantees/v2
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -462,13 +462,13 @@ you put the decorator, your deployment, and whether your policy is the right pol
 [GitHub Action](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#in-ci):
 
 ```yaml
-      - uses: CTRLRun/ctrlrun@v0.6.0
+      - uses: CTRLRun/ctrlrun@v0.6.1
         with:
           policy: ctrlrun.yaml
 ```
 
 The ref pins the action's steps and **not** the package they install: `install` defaults to
-`ctrlrun`, which is whatever PyPI has that day. Add `install: ctrlrun==0.6.0` to pin the tool
+`ctrlrun`, which is whatever PyPI has that day. Add `install: ctrlrun==0.6.1` to pin the tool
 as well as the workflow.
 
 ## What it guarantees, and what it can't
@@ -542,8 +542,8 @@ one URL, the same `StateStore` protocol extended by nothing, graded by the suite
 SQLite. Choose by how many machines write, not by how serious you are.
 
 <!-- generated from the suite, pyproject and the soak (readme) — run the generator -->
-- **Version 0.6.0**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
-- **4,163 tests**, every version specified before it was written and every requirement mutation-tested.
+- **Version 0.6.1**, on [PyPI](https://pypi.org/project/ctrlrun/), Python 3.11 and later.
+- **4,404 tests**, every version specified before it was written and every requirement mutation-tested.
 - **11 guarantees you can check in your own setup**, with `ctrlrun verify` against your policy, on your store's backend, in a scratch store it creates.
 - **One host: a file.** SQLite, no server, no ops. **Many hosts: Postgres**, the same guarantees, graded by the same suite.
 - **Soaked for 20m 0s on postgres**: 889,735 actions, 0 unattributed ambiguous outcomes, positive control fired. Nothing here establishes what only accumulates over days. [What it does not establish](https://ctrlrun.dev/production/soak).

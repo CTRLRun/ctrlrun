@@ -32,7 +32,7 @@ guarantees pass.
     ```
 
     ```text
-    CTRLRun verify — ctrlrun 0.6.0, catalogue ctrlrun.guarantees/v2
+    CTRLRun verify — ctrlrun 0.6.1, catalogue ctrlrun.guarantees/v2
     policy     /home/you/agent/ctrlrun.yaml (ctrlrun.policy/v2, mode: enforce)
     authority  none
     store      sqlite, scratch (created and destroyed for this run)
@@ -74,7 +74,7 @@ guarantees pass.
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@v4
-          - uses: CTRLRun/ctrlrun@v0.6.0
+          - uses: CTRLRun/ctrlrun@v0.6.1
             with:
               policy: ctrlrun.yaml
     ```
@@ -96,8 +96,8 @@ guarantees pass.
 
     Outputs: `passed`, `failed`, `applicable`, `not-applicable`, `badge-message`, `report-path`.
     The ref pins the action's steps and **not** the package they install: `install` is
-    unpinned by default, so `@v0.6.0` still takes whatever PyPI serves on the day. Pin both —
-    `install: ctrlrun==0.6.0` — where the run has to be reproducible, and pin the action by
+    unpinned by default, so `@v0.6.1` still takes whatever PyPI serves on the day. Pin both —
+    `install: ctrlrun==0.6.1` — where the run has to be reproducible, and pin the action by
     commit rather than by tag where the ref has to be immovable.
   </Step>
 
