@@ -1574,3 +1574,84 @@ def test_the_store_is_usable_again_after_close(tmp_path):
 
     assert store.get_effect("refund:txn_1").state is EffectState.RESERVED
     store.close()
+
+
+# --- a lone surrogate must not strand an effect (SPEC-v0.1 §5.4) --------------------------
+#
+# `mark_ambiguous` writes the executor's error message, and SQLite encodes every str it stores
+# as UTF-8. A lone surrogate cannot be encoded, so the AMBIGUOUS transition itself raised
+# `UnicodeEncodeError` -- out of `Control.execute`, and not as a `CTRLRunError`, so an
+# application catching the kernel's own errors did not catch it. The effect was left in
+# EXECUTING, which is neither of the two outcomes and blocks the retry until the lease expires.
+#
+# Lone surrogates arrive the ordinary way: `json.loads('"\\ud800"')` yields one, and so does
+# `os.fsdecode` of any non-UTF-8 filename, which is what `errors="surrogateescape"` produces.
+
+LONE_SURROGATE = "\ud800"
+
+
+def test_an_error_message_with_a_lone_surrogate_still_records_ambiguous(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:1", "act_1")
+        store.begin_execution("pay:1", "act_1")
+
+        store.mark_ambiguous("pay:1", "act_1", f"remote said {LONE_SURROGATE}")
+
+        assert store.get_effect("pay:1").state is EffectState.AMBIGUOUS
+    finally:
+        store.close()
+
+
+def test_a_result_with_a_lone_surrogate_still_commits(tmp_path):
+    """`_result_json` already promises it never raises, because the effect *did* commit."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:2", "act_1")
+        store.begin_execution("pay:2", "act_1")
+
+        store.commit_effect("pay:2", "act_1", {"note": LONE_SURROGATE})
+
+        assert store.get_effect("pay:2").state is EffectState.COMMITTED
+    finally:
+        store.close()
+
+
+def test_a_resolver_name_with_a_lone_surrogate_still_resolves(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        store.reserve_effect("pay:3", "act_1")
+        store.begin_execution("pay:3", "act_1")
+        store.mark_ambiguous("pay:3", "act_1", "lost")
+
+        store.resolve_effect("pay:3", EffectState.FAILED, f"ops{LONE_SURROGATE}")
+
+        assert store.get_effect("pay:3").state is EffectState.FAILED
+    finally:
+        store.close()
+
+
+def test_an_executor_raising_a_lone_surrogate_gets_an_ambiguous_outcome(tmp_path):
+    """End to end: the caller sees the kernel's own refusal, not a `UnicodeEncodeError`, and
+    the effect reaches a recorded outcome rather than being stranded in EXECUTING."""
+    from ctrlrun import Control, Policy, context, protect
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        control = Control(
+            Policy.from_yaml("schema: ctrlrun.policy/v1\nactions:\n  pay:\n    decision: allow\n"),
+            store,
+        )
+
+        @protect("pay", effect="pay:{invoice}", control=control)
+        def pay(invoice: str) -> str:
+            raise RuntimeError(f"remote said {LONE_SURROGATE}")
+
+        # The executor's own exception propagates -- that is the contract, and it used to be
+        # masked by a `UnicodeEncodeError` raised while recording the outcome.
+        with context(agent="agent"), pytest.raises(RuntimeError):
+            pay(invoice="inv-1")
+
+        assert store.get_effect("pay:inv-1").state is EffectState.AMBIGUOUS
+    finally:
+        store.close()

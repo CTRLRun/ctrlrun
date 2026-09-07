@@ -21,7 +21,7 @@ from typing import Any, Final
 import click
 
 from ..action import Principal
-from ..approval import ApprovalRecord
+from ..approval import ApprovalRecord, LocalApprovalProvider
 from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
@@ -30,6 +30,7 @@ from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Policy
 from ..receipt import (
     Event,
     EventType,
+    JSONLEventSink,
     Receipt,
     iso_timestamp,
     verify_chain,
@@ -247,6 +248,40 @@ def _peel_schema(url: str) -> tuple[str, str]:
     schema = dict(pairs).get(SCHEMA_PARAM, "public")
     rest = [(key, value) for key, value in pairs if key != SCHEMA_PARAM]
     return urlunsplit(parts._replace(query=urlencode(rest))), schema
+
+
+def _control_on(store_url: str | None) -> Control:
+    """`Control.from_file()`, but on the store `--store-url`/`$CTRLRUN_STORE_URL` names.
+
+    `from_file` always opens `.ctrlrun/state.db` beside the policy, which is right for an
+    agent process and wrong for `ctrlrun delegate` and `ctrlrun revoke`: on Postgres they
+    wrote a delegation into a local SQLite file no agent reads, and reported success. Revoke
+    is the one that matters -- an operator cuts a chain in a hurry, is told it is cut, and it
+    is not.
+
+    Everything but the store is `from_file`'s composition, so the two cannot drift on what a
+    delegation is evaluated against.
+    """
+    from ..control import _optional_authority
+
+    policy = _loaded_policy()
+    # These two *write*, so the default path keeps `from_file`'s create-if-absent behaviour:
+    # an operator may delegate before any agent has run, and `_store`'s refusal is written for
+    # the read commands, which must not have a side effect on the database they read. What was
+    # broken is narrower than that -- the named store was ignored -- so that is all this
+    # changes.
+    store = (
+        _store(store_url)
+        if store_url is not None
+        else SQLiteStateStore(state_path(policy.source))
+    )
+    return Control(
+        policy,
+        store,
+        LocalApprovalProvider(store),
+        sinks=[JSONLEventSink(state_path(policy.source).parent)],
+        authority=_optional_authority(policy.source),
+    )
 
 
 def _loaded_policy() -> Policy:
@@ -854,7 +889,10 @@ def verify(
     help="The delegating principal: AGENT or AGENT/USER. Split on the first '/'.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
-def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
+@STORE_URL_OPTION
+def delegate(
+    parent: str, grant_file: Path, as_who: str, as_json: bool, store_url: str | None
+) -> None:
     """Create a delegated grant beneath an existing one.
 
     `--as` is an **assertion**, not an authentication: it supplies the creating principal for
@@ -867,8 +905,7 @@ def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
     if not agent:
         raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
     try:
-        _loaded_policy()
-        control = Control.from_file()
+        control = _control_on(store_url)
         grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
         created = control._delegate(
             parent, grant, by=Principal(agent=agent, user=user or None), via="cli"
@@ -891,7 +928,8 @@ def delegate(parent: str, grant_file: Path, as_who: str, as_json: bool) -> None:
 @main.command()
 @click.argument("delegation_id")
 @click.option("--by", "by", default=CLI_APPROVER, show_default=True, help="Who revoked it.")
-def revoke(delegation_id: str, by: str) -> None:
+@STORE_URL_OPTION
+def revoke(delegation_id: str, by: str, store_url: str | None) -> None:
     """Revoke a delegation, and with it every delegation beneath it.
 
     Transitive by structure and not reversible: there is no `unrevoke`, because the operation
@@ -899,8 +937,7 @@ def revoke(delegation_id: str, by: str) -> None:
     already-revoked delegation is idempotent and exits 0.
     """
     try:
-        _loaded_policy()
-        control = Control.from_file()
+        control = _control_on(store_url)
         before = control.store.get_delegation(delegation_id)
         control.revoke(delegation_id, by=by)
     except CTRLRunError as exc:

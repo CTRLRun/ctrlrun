@@ -22,6 +22,8 @@ from click.testing import CliRunner
 
 from ctrlrun.cli import main as cli
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 READ_COMMANDS = ("receipts", "effects", "inspect", "stats")
 
 
@@ -106,3 +108,124 @@ def test_a_read_command_reads_a_store_that_exists(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
+
+
+# --- `delegate` and `revoke` write where the operator says (SPEC-v0.6 §4) -----------------
+#
+# Both called `Control.from_file()`, which always opens `.ctrlrun/state.db` beside the policy.
+# Neither took `--store-url`, so on the backend this milestone exists for, `ctrlrun delegate`
+# wrote a delegation into a local SQLite file no agent reads, and `ctrlrun revoke` reported
+# "revoked" while the delegation stayed live in Postgres. `_store`'s docstring names exactly
+# this failure for the read commands -- "on the backend this milestone exists for, `ctrlrun
+# resolve` could not reach a record" -- and the two write commands were left out of the fix.
+#
+# Revoke is the one that matters: an operator cuts a chain in a hurry, is told it is cut, and
+# it is not.
+
+WRITE_COMMANDS = ("delegate", "revoke")
+
+#: `^dlg_[0-9a-f]{32}$`, which `revoke` checks before it reaches the store.
+DELEGATION_ID = "dlg_" + "a" * 32
+
+
+@pytest.mark.parametrize("command", WRITE_COMMANDS)
+def test_the_authority_write_commands_accept_a_store_url(command):
+    """The option exists at all. Without it there is no way to name the store, and the
+    command silently uses a different one."""
+    from click.testing import CliRunner
+
+    result = CliRunner().invoke(cli.main, [command, "--help"])
+
+    assert "--store-url" in result.output, f"ctrlrun {command} cannot be pointed at a store"
+
+
+@pytest.mark.authority
+def test_revoke_acts_on_the_named_store_and_not_the_default_one(tmp_path):
+    """The routing itself, proved positively.
+
+    Asserting only "the default store was not written" passes for the wrong reason before the
+    fix: without the option click rejects the command outright, so nothing is written either
+    way. This puts a real delegation in a named store, revokes it through the CLI, and reads
+    the revocation back out of that same store -- which cannot happen unless the command
+    opened it.
+
+    The delegation is created through `Control._delegate`, the path `ctrlrun delegate` itself
+    uses, rather than by hand-writing a row: a hand-built `grant_json` drifts from what the
+    code writes, and the loader rightly refuses what it cannot read.
+    """
+    from ctrlrun import Control, Policy, SQLiteStateStore
+    from ctrlrun.authority import grant_from_yaml
+    from ctrlrun.control import _optional_authority
+
+    here = tmp_path / "empty"
+    here.mkdir(exist_ok=True)
+    policy_file = here / "ctrlrun.yaml"
+    policy_file.write_text(
+        (REPO_ROOT / "examples" / "authority" / "payments.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    named = tmp_path / "named.db"
+
+    store = SQLiteStateStore(named)
+    control = Control(
+        Policy.from_file(policy_file), store, authority=_optional_authority(str(policy_file))
+    )
+    parent = next(
+        gid for gid in sorted(control.authority.grants)
+        if control.authority.grants[gid].delegable
+    )
+    child = grant_from_yaml(
+        _delegable_child(control.authority.grants[parent]), source="<test>"
+    )
+    created = control._delegate(parent, child, by=_subject_principal(control, parent), via="cli")
+    store.close()
+
+    result, ran_in = _run(["revoke", created.delegation_id, "--store-url", f"sqlite://{named}"],
+                          tmp_path, env={})
+
+    reopened = SQLiteStateStore(named)
+    try:
+        record = reopened.get_delegation(created.delegation_id)
+    finally:
+        reopened.close()
+
+    assert result.exit_code == 0, result.output
+    assert record.revoked_at is not None, "the CLI did not revoke in the store it was given"
+    assert not (ran_in / ".ctrlrun" / "state.db").exists(), (
+        "the CLI created the default store while pointed at another"
+    )
+
+
+def _delegable_child(parent) -> str:
+    """A one-grant document the parent admits.
+
+    Every dimension the parent constrains is restated, because SPEC-v0.3 §5.4's containment is
+    structural: *omission never means unlimited*, so a child that simply left `resources:` out
+    would be an escalation, not a narrowing.
+    """
+    import yaml as _yaml
+
+    subject = {"agent": parent.subject.agent}
+    if parent.subject.user is not None:
+        subject["user"] = parent.subject.user
+    document: dict = {"subject": subject, "actions": list(parent.actions)}
+    if parent.resources is not None:
+        document["resources"] = list(parent.resources)
+    if parent.environments is not None:
+        document["environments"] = list(parent.environments)
+    if parent.constraints:
+        # `constraints` maps the condition key to a `Condition`; the document form is the
+        # operand it was written with.
+        document["constraints"] = {
+            key: condition.operand for key, condition in parent.constraints.items()
+        }
+    if parent.expires_at is not None:
+        document["expires_at"] = parent.expires_at.isoformat()
+    return _yaml.safe_dump(document)
+
+
+def _subject_principal(control, parent_id):
+    from ctrlrun import Principal
+
+    subject = control.authority.grants[parent_id].subject
+    return Principal(agent=subject.agent, user=subject.user)

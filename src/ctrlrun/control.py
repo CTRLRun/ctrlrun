@@ -258,6 +258,11 @@ class _Reconciler:
 # --- Control ---------------------------------------------------------------------------
 
 
+def _storable(text: str) -> str:
+    """`text` with any lone surrogate escaped, so a store and a hash can both take it."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class Control:
     """Policy, state and evidence composed around a single action (SPEC-v0.1 §8).
 
@@ -1072,7 +1077,15 @@ class Control:
             # FAILED, and "anything" means BaseException: a KeyboardInterrupt mid-request
             # leaves the same unknown outcome a timeout does. Narrowing this to Exception
             # is a regression, not a cleanup.
-            error = f"{type(exc).__name__}: {exc}"
+            # The one place an executor's own text enters the system, so the one place to
+            # make it storable. SQLite encodes every str it stores as UTF-8 and the receipt
+            # chain canonicalizes what it hashes; a lone surrogate can do neither, so an
+            # exception message carrying one used to raise `UnicodeEncodeError` out of
+            # `mark_ambiguous` and strand the effect in EXECUTING -- neither outcome, and
+            # blocked until the lease expired. Evidence about an action must never be able to
+            # decide the action's fate. Lone surrogates arrive the ordinary way: from
+            # `json.loads('"\\ud800"')`, and from `os.fsdecode` of a non-UTF-8 filename.
+            error = _storable(f"{type(exc).__name__}: {exc}")
             recorded = effect_key is None
             if held_key is not None:
                 try:

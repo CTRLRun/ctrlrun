@@ -220,13 +220,16 @@ Usage: ctrlrun delegate [OPTIONS]
   agent `a/b` acting alone and the agent `a` acting for `b`.
 
 Options:
-  --parent TEXT  The grant or delegation being narrowed.  [required]
-  --file FILE    A one-grant YAML document, with the keys of SPEC-v0.3 §4.2
-                 minus 'id'.  [required]
-  --as TEXT      The delegating principal: AGENT or AGENT/USER. Split on the
-                 first '/'.  [required]
-  --json         Emit one JSON object instead.
-  --help         Show this message and exit.
+  --parent TEXT     The grant or delegation being narrowed.  [required]
+  --file FILE       A one-grant YAML document, with the keys of SPEC-v0.3 §4.2
+                    minus 'id'.  [required]
+  --as TEXT         The delegating principal: AGENT or AGENT/USER. Split on the
+                    first '/'.  [required]
+  --json            Emit one JSON object instead.
+  --store-url TEXT  The store to open. Default: $CTRLRUN_STORE_URL, else the
+                    SQLite database beside the policy (.ctrlrun/state.db, or
+                    wherever $CTRLRUN_STATE points).
+  --help            Show this message and exit.
 ```
 
 ## ctrlrun revoke
@@ -241,8 +244,11 @@ Usage: ctrlrun revoke [OPTIONS] DELEGATION_ID
   §5.7). Revoking an already-revoked delegation is idempotent and exits 0.
 
 Options:
-  --by TEXT  Who revoked it.  [default: cli:local]
-  --help     Show this message and exit.
+  --by TEXT         Who revoked it.  [default: cli:local]
+  --store-url TEXT  The store to open. Default: $CTRLRUN_STORE_URL, else the
+                    SQLite database beside the policy (.ctrlrun/state.db, or
+                    wherever $CTRLRUN_STATE points).
+  --help            Show this message and exit.
 ```
 
 ## ctrlrun mcp-operator

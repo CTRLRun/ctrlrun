@@ -115,6 +115,28 @@ def _at(text: str | None) -> datetime | None:
     return None if text is None else datetime.fromisoformat(text)
 
 
+def _storable(text: str | None) -> str | None:
+    """`text` in a form SQLite can encode, escaping any lone surrogate.
+
+    Every str SQLite stores is encoded as UTF-8, and a lone surrogate cannot be: writing one
+    raises `UnicodeEncodeError` from inside the transaction. That turned the *recording* of an
+    outcome into a failure -- `mark_ambiguous` raised out of `Control.execute`, not as a
+    `CTRLRunError`, and left the effect in EXECUTING, which is neither outcome and blocks the
+    retry until the lease expires. An error message is evidence about an action; it must never
+    be able to decide the action's fate.
+
+    Lone surrogates arrive the ordinary way. `json.loads('"\\ud800"')` yields one, and so does
+    `os.fsdecode` of any non-UTF-8 filename -- that is what `errors="surrogateescape"` is.
+
+    `backslashreplace` rather than `replace`: `\\ud800` in a stored message says what the byte
+    was, where `?` throws it away, and this text is read by a human diagnosing an ambiguous
+    effect.
+    """
+    if text is None:
+        return None
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _result_json(result: Any) -> str | None:
     """Serialize an executor's return value. Never raises: the effect *did* commit.
 
@@ -124,9 +146,12 @@ def _result_json(result: Any) -> str | None:
     if result is None:
         return None
     try:
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=repr)
+        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=repr)
     except (TypeError, ValueError, RecursionError):
-        return json.dumps({"repr": repr(result)}, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps({"repr": repr(result)}, ensure_ascii=False, separators=(",", ":"))
+    # `json.dumps` is happy to emit a lone surrogate; SQLite is not. The promise above is
+    # that this never raises, and it is only kept as far as the value can actually be stored.
+    return _storable(text)
 
 
 def _result_value(text: str | None) -> Any:
@@ -1052,7 +1077,11 @@ class SQLiteStateStore:
                 event.action_id,
                 event.effect_key,
                 event.approval_id,
-                json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":")),
+                # An event carries the same executor text the effect row does, so it needs
+                # the same guard: evidence about an action must never decide its fate.
+                _storable(
+                    json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":"))
+                ),
             ),
         )
         return replace(event, event_id=cursor.lastrowid)
@@ -1704,9 +1733,9 @@ class SQLiteStateStore:
                 record.attempt,
                 _iso(record.lease_expires_at) if record.lease_expires_at else None,
                 _result_json(record.result),
-                record.error,
+                _storable(record.error),
                 _iso(record.updated_at),
-                record.resolved_by,
+                _storable(record.resolved_by),
                 record.effect_key,
             ),
         )
