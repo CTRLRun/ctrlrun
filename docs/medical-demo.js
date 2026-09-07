@@ -198,6 +198,22 @@
     "    return json.dumps(result)"
   ].join("\n");
 
+  var MONO = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;";
+
+  //: The reference the newer study brings in. The panel marks it so a reader can see which
+  //: line moved without diffing two revisions by eye.
+  var NEW_REFERENCE = "PMID 40219847";
+
+  // Built as nodes rather than markup. Nothing here is attacker-controlled -- every string
+  // comes from the module in this file -- but a page whose whole subject is a boundary does
+  // not hand strings to an HTML parser to make a bulleted list.
+  function el(tag, style, text) {
+    var node = document.createElement(tag);
+    node.setAttribute("style", style);
+    if (text) node.textContent = text;
+    return node;
+  }
+
   function ready(fn) {
     if (document.readyState !== "loading") fn();
     else document.addEventListener("DOMContentLoaded", fn);
@@ -299,23 +315,25 @@
     }
 
     function render(result) {
-      var references = (result.references || [])
-        .map(function (reference, index) {
-          var fresh = reference === "PMID 40219847";
-          return (
-            "<li style=\"font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;" +
-            (fresh ? "font-weight:600;" : "") +
-            "\">[" + (index + 1) + "] " + reference + (fresh ? "  ← new" : "") + "</li>"
-          );
-        })
-        .join("");
-      letter.innerHTML =
-        "<div style=\"font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:0.7;letter-spacing:0.04em;text-transform:uppercase\">" +
-        "Standard response letter · " + result.inquiry_id + " · revision " + result.revision +
-        " · evidence retrieved " + result.retrieved + "</div>" +
-        "<p style=\"font-size:16px;margin:12px 0 4px;font-weight:600\">" + result.recommendation + "</p>" +
-        "<div style=\"font-size:12px;opacity:0.7;margin-bottom:4px\">References</div>" +
-        "<ul style=\"margin:0;padding-left:20px\">" + references + "</ul>";
+      var made = document.createDocumentFragment();
+      made.appendChild(
+        el("div", MONO + "font-size:12px;opacity:0.7;letter-spacing:0.04em;text-transform:uppercase",
+          "Standard response letter · " + result.inquiry_id + " · revision " + result.revision +
+          " · evidence retrieved " + result.retrieved)
+      );
+      made.appendChild(el("p", "font-size:16px;margin:12px 0 4px;font-weight:600", result.recommendation));
+      made.appendChild(el("div", "font-size:12px;opacity:0.7;margin-bottom:4px", "References"));
+      var list = el("ul", "margin:0;padding-left:20px", "");
+      (result.references || []).forEach(function (reference, index) {
+        var fresh = reference === NEW_REFERENCE;
+        list.appendChild(
+          el("li", MONO + "font-size:13px;" + (fresh ? "font-weight:600;" : ""),
+            "[" + (index + 1) + "] " + reference + (fresh ? "  ← new" : ""))
+        );
+      });
+      made.appendChild(list);
+      letter.textContent = "";
+      letter.appendChild(made);
     }
 
     async function run(op, extra) {
@@ -394,7 +412,7 @@
         transcript.textContent = "";
         if (pyodide) pyodide.runPython(MODULE);
         stage("draft");
-        letter.innerHTML = "";
+        letter.textContent = "";
         say("A fresh store, a fresh policy, revision A. Press Retrieve and draft.");
       });
     }

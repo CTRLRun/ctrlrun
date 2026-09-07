@@ -163,7 +163,27 @@ def test_the_script_does_not_load_sqlite3_as_a_package():
 def test_the_page_and_the_script_name_one_pyodide_build():
     versions = set(re.findall(r"v?(\d+\.\d+\.\d+)", SCRIPT.split("PYODIDE =")[1].split("\n")[0]))
     assert len(versions) == 1, versions
-    assert versions.pop() in PAGE, "the page does not name the build the script loads"
+    version = versions.pop()
+    assert version in PAGE, "the page does not name the build the script loads"
+
+
+def test_the_reference_the_panel_marks_is_the_one_the_newer_study_brings_in():
+    """The panel marks the line that moved. A module that renamed the reference without the
+    script following would draw revision B with nothing marked, which is the page's whole
+    point going quietly missing."""
+    marked = SCRIPT.split('var NEW_REFERENCE = "', 1)[1].split('"', 1)[0]
+    revisions = re.findall(r'"references": \[([^\]]+)\]', MODULE)
+    assert len(revisions) == 2, "the module no longer holds two revisions of the letter"
+    assert marked not in revisions[0], f"{marked} is already in revision A"
+    assert marked in revisions[1], f"{marked} is not in revision B"
+
+
+def test_the_script_builds_the_letter_from_nodes_and_not_from_markup():
+    """`try-it.js` hands nothing to an HTML parser and neither does this. Not because a string
+    here is attacker-controlled -- every one comes from the module in the same file -- but
+    because a page about a boundary should not be the page that makes an exception."""
+    assert "innerHTML" not in SCRIPT
+    assert "insertAdjacentHTML" not in SCRIPT
 
 
 def test_the_script_names_every_outcome_the_module_can_return():
