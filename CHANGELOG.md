@@ -7,6 +7,20 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+### Fixed
+
+- Validate upstream JSON-RPC response IDs before changing effect state. Missing, mismatched,
+  and malformed responses remain ambiguous and cannot make an executed action retryable.
+- Forward MCP SSE progress incrementally, record the matching final response, and keep
+  interrupted streams ambiguous. Client cancellation closes the upstream connection.
+- Relay empty HTTP acknowledgements and MCP GET/DELETE requests, including session headers
+  and standalone streams. Recognize successful responses from accepted legacy revisions.
+- Preserve the original request ID in synthesized gateway errors and support IPv6 listeners.
+- Restore consumed approval attribution and original attempt timing on resumed receipts,
+  including across database reopenings and multiple suspension rounds.
+
 ## [0.6.0] - 2026-09-07 — Durable runtime
 
 **The soak criterion was amended on 2026-09-07, and it was amended downwards.** It read *a soak

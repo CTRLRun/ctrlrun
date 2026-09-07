@@ -1,0 +1,3 @@
+{"method": "GET", "status": 202, "forwarded_calls": 1}
+{"method": "DELETE", "status": 202, "forwarded_calls": 2}
+{"host": "::1", "configuration_accepted": true, "bound": true}

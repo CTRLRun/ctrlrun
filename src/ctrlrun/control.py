@@ -939,8 +939,8 @@ class Control:
         question this library exists to answer.
         """
         held = self._store.take_continuation(continuation)
-        started_at = self._clock()
         action = held.action
+        started_at, approval = self._resumed_context(action, held.record.created_at)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -950,6 +950,7 @@ class Control:
             action,
             {"round": held.rounds},
             held.effect_key,
+            approval=approval,
         )
         # SPEC: §6.9.2 — the policy is evaluated again for the *receipt*, not to re-decide.
         # The action was decided and reserved on the first leg; refusing here would strand a
@@ -989,12 +990,37 @@ class Control:
             executor,
             held.effect_key,
             held.record.attempt,
-            None,
+            approval,
             started_at,
             _Reconciler(None, False),
             held_key=held.effect_key,
             observation=observation,
         )
+
+    def _resumed_context(
+        self, action: Action, fallback: datetime
+    ) -> tuple[datetime, Approval | None]:
+        """Recover the original attempt's evidence, including after a process restart.
+
+        EXECUTION_STARTED durably binds the consumed approval to this action ID. Looking
+        up a grant by action hash instead could attribute a later, unrelated approval.
+        These events already exist in every supported store, including older databases;
+        no continuation schema change or in-process cache is needed.
+        """
+        proposed = fallback
+        started = fallback
+        approval_id = None
+        for event in self._store.events():
+            if event.action_id != action.action_id:
+                continue
+            if event.type is EventType.ACTION_PROPOSED:
+                proposed = event.ts
+            elif event.type is EventType.EXECUTION_STARTED:
+                started = proposed
+                approval_id = event.approval_id
+        record = None if approval_id is None else self._store.get_approval(approval_id)
+        approval = None if record is None else record.as_approval()
+        return started, approval
 
     def _outcome(
         self,

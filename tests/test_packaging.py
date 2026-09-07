@@ -536,7 +536,9 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
     from pathlib import Path as _Path
 
     unpackaged = [
-        name for name in names if any(part in {"research", "packs"} for part in _Path(name).parts)
+        name
+        for name in names
+        if any(part in {"research", "packs", "audit"} for part in _Path(name).parts)
     ]
     assert not unpackaged, unpackaged
 

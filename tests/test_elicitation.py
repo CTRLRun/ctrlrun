@@ -94,7 +94,13 @@ def upstream():
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             state.calls.append(json.loads(self.rfile.read(length)))
-            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": state.next_reply()}).encode()
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": state.calls[-1]["id"],
+                    "result": state.next_reply(),
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))

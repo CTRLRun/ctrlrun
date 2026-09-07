@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import select
+import socket
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -48,16 +50,20 @@ from ..identity import (
 )
 from ..policy import OBSERVE
 from ..receipt import Receipt
-from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
+from .mcp import (
+    ACCEPTED_REVISIONS,
+    DEFAULT_MAX_BODY_BYTES,
+    UNSUPPORTED_PROTOCOL_VERSION,
+    ParsedRequest,
+    Refusal,
+    parse_request,
+)
 from .outcome import (
     GatewayOutcome,
     Observed,
-    Transport,
-    UpstreamError,
-    UpstreamResult,
-    UpstreamStatus,
     classify,
 )
+from .transport import STREAM, forwarded_headers
 from .wire import (
     _dump,
     _header,
@@ -414,6 +420,25 @@ class Gateway:
             return _Response(502)
         return _Response(status, payload, response_headers)
 
+    def relay_method(self, method: str, body: bytes, headers: Mapping[str, str]) -> _Response:
+        """Relay GET/DELETE transport operations without inventing an action."""
+        origin = _header(headers, "origin")
+        if origin is not None and origin not in self._config.allow_origins:
+            return _Response(403)
+        revision = _header(headers, "mcp-protocol-version")
+        if revision is not None and revision not in ACCEPTED_REVISIONS:
+            return self._refusal(
+                Refusal(400, UNSUPPORTED_PROTOCOL_VERSION, "unsupported MCP-Protocol-Version"),
+                None,
+            )
+        if method not in {"GET", "DELETE"}:
+            return _Response(405)
+        request = getattr(self._forward, "request", None)
+        if request is None:
+            return _Response(502)
+        _, payload, status, response_headers = request(method, body, headers, fresh=False)
+        return _Response(502) if payload is None else _Response(status, payload, response_headers)
+
     def _intercept(self, parsed: ParsedRequest, headers: Mapping[str, str]) -> _Response:
         request_id = parsed.document.get("id")
         # §8.2 — the action name is resolved first because `IdentityContext.action` carries it:
@@ -556,7 +581,7 @@ class Gateway:
             return _json(status, json_rpc_error(request_id, code, token, str(refused)))
 
         options = self._control.policy.mcp_options(action.name)
-        held: dict[str, Any] = {}
+        held: dict[str, Any] = {"request_id": request_id}
         presented = parsed.document.get("params", {})
         presented = presented.get("requestState") if isinstance(presented, Mapping) else None
 
@@ -925,9 +950,11 @@ class Gateway:
             return _Response(held["status"], held["payload"] or b"", held.get("headers", {}))
         if outcome is None:
             code, token, status = AMBIGUOUS_EFFECT
-            return _json(status, json_rpc_error(None, code, token, "no upstream outcome"))
+            return _json(
+                status, json_rpc_error(held.get("request_id"), code, token, "no upstream outcome")
+            )
         document = json_rpc_error(
-            None,
+            held.get("request_id"),
             outcome.code or -41010,
             outcome.token or "ctrlrun.upstream_ambiguous",
             "the upstream's outcome is not known to this gateway",
@@ -988,106 +1015,11 @@ def _request_id(body: bytes) -> JsonRpcId:
 
 
 def httpx_forwarder(config: GatewayConfig) -> Any:
-    """Forward to the upstream, mapping the client's exceptions onto §6.8's `Transport`.
-
-    **A fresh connection for every intercepted call**, and this is not an optimization
-    oversight. "The connection was never established" is the only claim in §6.8 that asserts
-    non-execution, and it is provable only if no request byte can have been written — a
-    pooled connection the upstream closed while idle fails on *write*, which is
-    indistinguishable from a request that arrived. It costs a handshake per consequential
-    action, and it buys the only `FAILED` in the table that comes from the transport.
-    """
+    """Forward HTTP and SSE, using a fresh connection for every intercepted action."""
     from . import http_client
+    from .transport import HTTPForwarder
 
-    httpx = http_client()
-    pooled = httpx.Client(timeout=config.upstream_timeout)
-
-    def forward(
-        body: bytes, headers: Mapping[str, str], *, fresh: bool
-    ) -> tuple[Any, bytes | None, int, Mapping[str, str]]:
-        relayed = {
-            key: value
-            for key, value in headers.items()
-            if key.lower() not in _HOP_BY_HOP and key.lower() not in _DESCRIBES_THE_UPSTREAM_BODY
-        }
-        relayed["Content-Type"] = "application/json"
-        client = httpx.Client(timeout=config.upstream_timeout) if fresh else pooled
-        try:
-            response = client.post(config.upstream, content=body, headers=relayed)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            return Transport.NEVER_CONNECTED, None, 502, {}
-        except Exception:
-            # Deliberately broad, and it must stay after the two clauses above: only those may
-            # claim non-execution. `httpx.DecodingError` (a mislabelled or truncated
-            # `Content-Encoding`) and `httpx.InvalidURL` inherit from `RequestError`, not
-            # `TransportError`, so neither used to be caught here and both escaped `do_POST`,
-            # dropping the client's connection with no response at all.
-            #
-            # §6.8's rule makes the honest mapping and the safe mapping the same one:
-            # every unknown client-side failure after the first byte is AMBIGUOUS, never
-            # FAILED, because the request may well have been executed.
-            _LOG.warning("forwarding to the upstream failed", exc_info=True)
-            return Transport.AFTER_REQUEST_SENT, None, 502, {}
-        finally:
-            if fresh:
-                client.close()
-        return (*_observe(response), response.status_code, dict(response.headers))
-
-    def _observe(response: Any) -> tuple[Observed, bytes | None]:
-        challenge = "www-authenticate" in response.headers
-        if response.status_code == 401 or (response.status_code == 403 and challenge):
-            # §6.8 — the resource server validates the token before dispatch, so nothing
-            # reached the tool. This is checked ahead of the body because a peer may answer
-            # 401 with any payload it likes, and the status is the part that is load-bearing.
-            return UpstreamStatus(
-                response.status_code, has_www_authenticate=challenge
-            ), response.content
-        try:
-            document = json.loads(response.content)
-        except (ValueError, UnicodeDecodeError):
-            document = None
-        if not isinstance(document, dict) or document.get("jsonrpc") != "2.0":
-            return UpstreamStatus(response.status_code, has_www_authenticate=challenge), None
-        if "error" in document:
-            code = document["error"].get("code") if isinstance(document["error"], dict) else None
-            if not isinstance(code, int):
-                return Transport.UNREADABLE_RESPONSE, None
-            return UpstreamError(code), response.content
-        result = document.get("result")
-        if not isinstance(result, Mapping):
-            return Transport.UNREADABLE_RESPONSE, None
-        return (
-            UpstreamResult(
-                result_type=result.get("resultType"), is_error=bool(result.get("isError"))
-            ),
-            response.content,
-        )
-
-    forward.close = pooled.close  # type: ignore[attr-defined]
-    return forward
-
-
-#: Headers that describe the *transfer* of the upstream's body rather than the body the
-#: gateway relays. `content-encoding` is here with `content-length` for one reason: httpx has
-#: already decoded `response.content`, so relaying the upstream's encoding attached the wrong
-#: description to the right bytes and every client failed with `DecodingError: incorrect
-#: header check`. httpx sends `Accept-Encoding: gzip` by default, so an upstream doing nothing
-#: but honouring content negotiation made the gateway unusable.
-_DESCRIBES_THE_UPSTREAM_BODY: Final = frozenset({"content-length", "content-encoding"})
-
-_HOP_BY_HOP: Final = frozenset(
-    {
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-        "host",
-    }
-)
+    return HTTPForwarder(config.upstream, config.upstream_timeout, http_client())
 
 
 # --- the listening side (stdlib, per §6.11) ---------------------------------------------
@@ -1099,6 +1031,55 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self._relay_method("GET")
+
+        def do_DELETE(self) -> None:
+            self._relay_method("DELETE")
+
+        def _relay_method(self, method: str) -> None:
+            if self.path.rstrip("/") != config.path.rstrip("/"):
+                self.send_error(404)
+                return
+            # Consume any framed body before returning to HTTP/1.1 request parsing.
+            body = self._read_body()
+            if body is None:
+                return
+            self._dispatch(lambda: gateway.relay_method(method, body, dict(self.headers.items())))
+
+        def _dispatch(self, operation: Callable[[], _Response]) -> None:
+            self._stream_started = False
+            self._stream_intercepted = False
+            token = STREAM.set(self)
+            try:
+                self._respond(operation())
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            finally:
+                STREAM.reset(token)
+
+        def start(self, status: int, headers: Mapping[str, str], intercepted: bool) -> None:
+            self._stream_started = True
+            self._stream_intercepted = intercepted
+            self.close_connection = True
+            self.send_response(status)
+            for key, value in forwarded_headers(headers).items():
+                self.send_header(key, value)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+
+        def send(self, chunk: bytes) -> None:
+            self.wfile.write(chunk)
+            self.wfile.flush()
+
+        def disconnected(self) -> bool:
+            try:
+                ready, _, _ = select.select([self.connection], [], [], 0)
+                return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+            except OSError:
+                return True
 
         def do_POST(self) -> None:
             if self.path.startswith(APPROVALS_PATH):
@@ -1139,7 +1120,7 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
                     )
                 )
                 return
-            self._respond(gateway.handle(body, dict(self.headers.items())))
+            self._dispatch(lambda: gateway.handle(body, dict(self.headers.items())))
 
         def _read_body(self) -> bytes | None:
             """The request body, or `None` having already answered why not.
@@ -1171,10 +1152,15 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
             return self.rfile.read(length)
 
         def _respond(self, response: _Response) -> None:
+            if getattr(self, "_stream_started", False):
+                if response.body and not self.disconnected():
+                    chunk = response.body
+                    if self._stream_intercepted:
+                        chunk = b"event: message\ndata: " + chunk + b"\n\n"
+                    self.send(chunk)
+                return
             self.send_response(response.status)
-            for key, value in response.headers.items():
-                if key.lower() in _HOP_BY_HOP or key.lower() in _DESCRIBES_THE_UPSTREAM_BODY:
-                    continue
+            for key, value in forwarded_headers(response.headers).items():
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(response.body)))
             self.end_headers()
@@ -1189,6 +1175,7 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
     class Server(ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+        address_family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
 
     return Server((config.host, config.port), Handler)
 
