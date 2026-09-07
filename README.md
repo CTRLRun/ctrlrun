@@ -34,6 +34,13 @@
   <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
 </p>
 
+<p align="center">
+  <em>A refund is the example, not the scope. The same boundary goes in front of a deployment,
+  a deletion, an IAM grant, a message that leaves the building — any action an agent takes that
+  the world remembers. <a href="#the-same-shape-in-nine-domains">Nine domains, and how it
+  transfers</a>.</em>
+</p>
+
 ## The refund that happened twice
 
 An agent refunds €500. The call reaches the provider and commits. The reply is lost on the way
@@ -129,25 +136,33 @@ prints, and a test fails if the two drift apart.
 ## Protect your first action
 
 Wrap the call that has the consequence, and let one YAML file say how much autonomy it gets.
-Save this as `ctrlrun.yaml`. Amounts are integer minor units — cents, not euros — and both ends
-of every band are bound, because an upper bound alone lets a negative amount through, and a
-refund of a negative amount is a charge.
+The rule is the same in every domain: cheap to undo is autonomous, anything that hands out
+power or leaves the building needs a human, and anything that destroys the evidence is not an
+agent action at any size. Save this as `ctrlrun.yaml`.
 
 ```yaml runnable
 schema: ctrlrun.policy/v2
 
 actions:
-  stripe.refund:
-    effect: "refund:{payment_id}"
+  # Cheap to undo: the agent does it alone.
+  crm.update_record:
+    effect: "crm:{record_id}:{field}"
+    decision: allow
+
+  # Hands out power: read-only is autonomous, anything above it is a human's call.
+  iam.grant_role:
+    effect: "grant:{user_id}:{role}"
     rules:
-      - when: { amount_gte: 0, amount_lte: 50000 }      # up to €500: autonomous
+      - when: { role_in: [reader, viewer] }
         decision: allow
-      - when: { amount_gte: 0, amount_lte: 500000 }     # up to €5,000: a human decides
-        decision: approve
-      - decision: deny                                  # above that: never
+      - decision: approve
+
+  # Destroys the evidence: denied, whoever asks.
+  audit.log.delete:
+    decision: deny
 ```
 
-Anything not listed here is denied; there is no default-allow. Now `agent.py`, where `stripe`
+Anything not listed here is denied; there is no default-allow. Now `agent.py`, where `directory`
 is a stand-in that records calls instead of making them:
 
 ```python runnable file=agent.py
@@ -156,40 +171,40 @@ import sys
 import ctrlrun
 
 
-class FakeStripe:
-    calls: list[tuple[str, int]] = []
+class FakeDirectory:
+    calls: list[tuple[str, str]] = []
 
-    def refund(self, payment_id: str, amount: int) -> dict:
-        self.calls.append((payment_id, amount))
-        return {"id": f"re_{payment_id}", "status": "succeeded"}
-
-
-stripe = FakeStripe()
+    def grant(self, user_id: str, role: str) -> dict:
+        self.calls.append((user_id, role))
+        return {"user": user_id, "role": role, "status": "granted"}
 
 
-@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
-def refund(payment_id: str, amount: int) -> dict:
-    return stripe.refund(payment_id, amount)
+directory = FakeDirectory()
+
+
+@ctrlrun.protect("iam.grant_role", effect="grant:{user_id}:{role}")
+def grant_role(user_id: str, role: str) -> dict:
+    return directory.grant(user_id, role)
 
 
 if __name__ == "__main__":
-    with ctrlrun.context(agent="refund-agent"):
-        print("€100:", refund(payment_id="txn_1", amount=10000)["status"])
+    with ctrlrun.context(agent="onboarding-agent"):
+        print("reader:", grant_role(user_id="u_412", role="reader")["status"])
         try:
-            refund(payment_id="txn_2", amount=200000)
+            grant_role(user_id="u_412", role="admin")
         except ctrlrun.ApprovalRequired as pending:
-            print("€2,000: a human decides:", pending.request_id)
+            print("admin: a human decides:", pending.request_id)
             with open("request_id.txt", "w") as handle:
                 handle.write(pending.request_id)
         else:
-            sys.exit("the €2,000 refund ran without a human; the policy is not in force")
+            sys.exit("the admin grant ran without a human; the policy is not in force")
 ```
 
-The €100 refund runs on its own. The €2,000 one stops and names the request a human answers:
+The `reader` grant runs on its own. The `admin` one stops and names the request a human answers:
 
 ```text
-€100: succeeded
-€2,000: a human decides: apr_8b9942fd15fbecaa88ccac05c3a71e15
+reader: granted
+admin: a human decides: apr_649156806800a3545de597c028c9dae5
 ```
 
 The human answers from the shell. The grant names the action hash it authorizes, and when it
@@ -200,54 +215,58 @@ ctrlrun approve "$(cat request_id.txt)"
 ```
 
 ```text
-granted apr_8b9942fd15fbecaa88ccac05c3a71e15 for sha256:e8702b48316cdd7fd64d120fb2f41fc430d594c8e5c1999e9fa23765a161193c
-expires 2026-09-07T10:52:37.555Z
+granted apr_649156806800a3545de597c028c9dae5 for sha256:ade45e6f6f6d5ea32ca9ddc0a1806973a729c0c2b8b5da9d422f5501fd14f574
+expires 2026-09-07T11:59:30.626Z
 ```
 
-Now the agent presents that approval — and tries to spend it on a larger refund:
+Now the agent presents that approval — and tries to spend it on a bigger role:
 
 ```python runnable file=approved.py
 import sys
 
 import ctrlrun
 
-from agent import refund, stripe
+from agent import directory, grant_role
 
 request_id = open("request_id.txt").read().strip()
 
-with ctrlrun.context(agent="refund-agent"), ctrlrun.with_approval(request_id):
-    print("€2,000 with approval:", refund(payment_id="txn_2", amount=200000)["status"])
+with ctrlrun.context(agent="onboarding-agent"), ctrlrun.with_approval(request_id):
+    print("admin with approval:", grant_role(user_id="u_412", role="admin")["status"])
     try:
-        refund(payment_id="txn_2", amount=500000)
+        grant_role(user_id="u_412", role="owner")
     except ctrlrun.ApprovalMismatch:
-        print("€5,000 on the same approval: refused")
+        print("owner on the same approval: refused")
     else:
         sys.exit("a mutated action ran on a spent approval; that is the bug this exists to stop")
 
-print("remote refund calls:", len(stripe.calls))
+print("directory calls:", len(directory.calls))
 ```
 
 ```text
-granted apr_8b9942fd15fbecaa88ccac05c3a71e15 for sha256:e8702b48316cdd7fd64d120fb2f41fc430d594c8e5c1999e9fa23765a161193c
-expires 2026-09-07T10:52:37.555ZD
+admin with approval: granted
+owner on the same approval: refused
+directory calls: 1
 ```
 
-The approval was bound to the hash of the action the human saw, so it matched €2,000 on `txn_2`
-and nothing else. One call reached the fake remote in that process; the €5,000 never did. Every
-one of them left a receipt:
+The approval was bound to the hash of the action the human saw, so it matched `admin` on `u_412`
+and nothing else. One call reached the fake directory in that process; the `owner` grant never
+did. Every one of them left a receipt:
 
 ```bash runnable
 ctrlrun receipts --last 3
 ```
 
 ```text
-2026-09-07T10:37:37.555Z  ctr_3def0dae9e73ebe04e015fc8db101c21  stripe.refund  allow/committed    refund:txn_1  refund-agent
-2026-09-07T10:37:37.703Z  ctr_9c48f9b3395f81eca3b7567b1fda51d9  stripe.refund  approve/committed  refund:txn_2  refund-agent
-2026-09-07T10:37:37.704Z  ctr_0fc44e86ec81f649b707493d33e81c01  stripe.refund  approve/blocked    refund:txn_2  refund-agent
+2026-09-07T11:44:30.625Z  ctr_1faa628d5922874e8eb97f77f55c3d40  iam.grant_role  allow/committed  grant:u_412:reader  onboarding-agent
+2026-09-07T11:44:38.246Z  ctr_73314d54e87cd150de07444e989b793b  iam.grant_role  approve/committed  grant:u_412:admin  onboarding-agent
+2026-09-07T11:44:38.247Z  ctr_09a9fdec28dc034b23376ffc6a1a279d  iam.grant_role  approve/blocked  grant:u_412:owner  onboarding-agent
 ```
 
 That is the whole integration: a policy file, a decorator, a context, and `with_approval` to
-present a grant. [Protect your first action](https://ctrlrun.dev/get-started/quickstart) is the
+present a grant. Money is one more action with a rule — `amount_gte`/`amount_lte` in place of
+`role_in`, and both ends of every band bound, because an upper bound alone lets a negative
+amount through and a refund of a negative amount is a charge.
+[Protect your first action](https://ctrlrun.dev/get-started/quickstart) is the
 same walkthrough with every output explained · [Try it in your browser](https://ctrlrun.dev/try-it) ·
 [Policy YAML reference](https://ctrlrun.dev/reference/policy-yaml) ·
 [Cookbook](https://ctrlrun.dev/cookbook/index): refunds, deploys, IAM, deletions, email, MCP,
@@ -294,7 +313,7 @@ policy:
 
 ```bash
 pip install "ctrlrun[gateway]"
-ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal refund-agent
+ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal support-agent
 ```
 
 A tool call has no decorator to carry its effect and resource templates, so the policy declares
@@ -304,11 +323,11 @@ them:
 schema: ctrlrun.policy/v2
 
 actions:
-  mcp.acme.create_refund:
-    effect: "refund:{payment_id}"
-    resource: "payment:{payment_id}"
+  mcp.acme.delete_document:
+    effect: "document:{document_id}"
+    resource: "document:{document_id}"
     decision: approve
-  mcp.acme.list_payments:
+  mcp.acme.search_documents:
     decision: allow
 ```
 
@@ -334,6 +353,49 @@ their own version line, `adapters-langgraph-1.0` and never `0.6.1`, because an a
 when its framework makes a breaking release, which is not a kernel event.
 [`docs/adapters.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/adapters.md) has the three
 ways in and how to write one for a framework not listed here.
+
+## The same shape in nine domains
+
+Nothing in CTRLRun knows what a refund is. An action is a **name**, **canonical arguments**, an
+**effect key** and a **resource**, and the three questions asked of it are the same whichever
+domain it came from: how much autonomy does *this action* get, did a human approve *this exact*
+action, and has this effect already happened. A payout, a namespace and a change of dose are
+the same shape to the kernel. Two things carry the domain, and you write both:
+
+- **The effect key is the only domain knowledge in the system** — the string that says two calls
+  are the same real-world consequence. `refund:{payment_id}`, `namespace:{cluster}:{name}`,
+  `grant:{user_id}:{role}`, `prescription:{patient_id}:{drug}`. Name it well and a retry cannot
+  act twice; leave it out and there is nothing for *at most once* to be about, which is why the
+  gateway prints every action in your policy that has no `effect:` template on the line that
+  starts it.
+- **Conditions are arguments, not amounts.** `amount_lte` is not a money feature: the condition
+  language is `<argument>_<op>`, so the same operators read `replicas_lte: 10`,
+  `host_count_lte: 1`, `role_in: [reader, viewer]` and `to_domain_eq: acme.com`. Any integer
+  argument can be bounded and any argument can be matched, so a band is available to a domain
+  that has never issued an invoice.
+
+The nine files under
+[`examples/policies/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/policies) are that
+applied, one per domain. Adapt them; none is a drop-in.
+
+| Domain | Autonomous | A human decides | Never |
+|---|---|---|---|
+| [DevOps](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/devops.yaml) | `k8s.scale_deployment` to 10 replicas | `terraform.apply` | `k8s.delete_namespace` |
+| [Security operations](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/security.yaml) | `firewall.add_deny_rule` | `firewall.add_allow_rule` | `edr.disable_protection` |
+| [Healthcare](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/healthcare.yaml) | `appointment.reschedule` | `patient.export_record` | `prescription.change_dose` |
+| [Legal](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/legal.yaml) | `document.draft_internal` | `document.file_with_court` | `contract.execute` |
+| [HR](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/hr.yaml) | `pto.approve` within a band | `payroll.run` | `employee.delete_record` |
+| [Insurance](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/insurance.yaml) | `claim.request_documents` | `claim.approve_payout` above a band | `policyholder.delete` |
+| [E-commerce](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/e-commerce.yaml) | `inventory.adjust` within a band | `price.update` | `customer.delete` |
+| [Public services](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/government.yaml) | `eligibility.precheck` | `benefit.terminate` | `record.delete` |
+| [Payments](https://github.com/CTRLRun/ctrlrun/blob/main/examples/policies/payments.yaml) | `stripe.refund` under €500 | `stripe.refund` above it | `stripe.delete_customer` |
+
+Read any row left to right and it is one rule wearing different nouns: cheap to undo is
+autonomous, anything that hands out power or leaves the building needs a human, and anything
+that destroys the evidence is not an agent action at any size. The security row is the one to
+read twice — adding a **deny** rule to a firewall is autonomous and adding an **allow** rule is
+not, which no amount threshold would have told you. The policy is where your judgement about
+your domain gets written down; CTRLRun is what makes it hold.
 
 ## Write down what the agent may do
 
@@ -405,9 +467,7 @@ widened — a delegation must be provably a subset of its parent on every dimens
 and again at every evaluation, and omitting a dimension the parent constrains is rejected rather
 than inherited — and `ctrlrun revoke` cuts a chain of any depth with one write.
 [`docs/authority.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/authority.md) has it in
-plain language, and the nine files under
-[`examples/policies/`](https://github.com/CTRLRun/ctrlrun/tree/main/examples/policies) are
-starting points for payments, devops, HR, legal and security. Adapt them; none is a drop-in.
+plain language.
 
 **Roll it out with `mode: observe` first.** One top-level line runs every real decision against
 real traffic and records what *would* have been blocked, without blocking anything, and
