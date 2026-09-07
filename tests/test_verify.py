@@ -864,3 +864,160 @@ def test_the_v1_payments_template_reports_five_over_five_with_five_not_applicabl
     assert "6/6 declared guarantees pass." in text
     assert "5 not applicable: G3, G4, G5, G8, G9." in text
     assert "10/10" not in text
+
+
+# --- an N/A reason must be a true statement about the configuration (§2.1) ----------------
+#
+# `examples/authority/devops.yaml` -- shipped in this repository -- exited 0 with
+# "1/1 declared guarantees pass. 10 not applicable", and every one of those ten reasons was
+# false about the operator's own document: "the policy lists no action" (it lists five), "no
+# action declares an `effect:` template" (three do), "no action requires approval" (two do),
+# "every action in the policy is denied" (none is).
+#
+# The real cause was on the authority axis: verify renders the `resource:` template from
+# synthetic placeholders, no grant's `resources:` matched the string it invented, `_bind`
+# returned the same bare `None` that "no action reaches this decision" returns, and each
+# scenario then fell back to its hardcoded sentence about the policy. A green run with
+# fabricated excuses is the false green verify exists to prevent.
+#
+# The DoD named payments.yaml and never devops.yaml, so nothing ran it.
+
+AUTHORITY_DEVOPS = REPO_ROOT / "examples" / "authority" / "devops.yaml"
+
+EXAMPLE_CONFIGURATIONS = [
+    *sorted((REPO_ROOT / "examples").rglob("*.yaml")),
+    REPO_ROOT / "ctrlrun.example.yaml",
+]
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize(
+    "configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name
+)
+def test_every_shipped_example_verifies_without_crashing(configuration):
+    """Every configuration this repository ships is one an operator will copy. The DoD named
+    two of them, so a third crashed and a fourth reported a false green with nobody looking."""
+    try:
+        report = run(configuration)
+    except VerifyRefused:
+        # A refusal is a considered answer, not a crash: `mode: observe` enforces nothing, so
+        # there is nothing to verify and §3.8 says so rather than reporting guarantees.
+        return
+
+    assert report.exit_code in (0, 1), report.exit_code
+
+
+@pytest.mark.authority
+@pytest.mark.parametrize(
+    "configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name
+)
+def test_no_shipped_example_gets_an_na_reason_that_is_false(configuration):
+    """The positive control on verify's own reasons: each is a statement about the
+    configuration, so each is checkable against the configuration."""
+    from ctrlrun import Policy
+
+    try:
+        report = run(configuration)
+    except VerifyRefused:
+        return  # `mode: observe` -- a considered refusal, with no guarantees to reason about
+    policy = Policy.from_file(configuration)
+    reasons = {
+        result.reason for result in report.guarantees if result.status is Status.NOT_APPLICABLE
+    }
+
+    names = sorted(policy.actions)
+    templated = [name for name in names if policy.effect_template(name) is not None]
+
+    assert not (reg.NO_ACTIONS in reasons and names), (
+        f"{configuration.name}: N/A says {reg.NO_ACTIONS!r}, but the policy lists {names}"
+    )
+    assert not (reg.NO_EFFECT_TEMPLATE in reasons and templated), (
+        f"{configuration.name}: N/A says {reg.NO_EFFECT_TEMPLATE!r}, but {templated} declare one"
+    )
+
+
+@pytest.mark.authority
+def test_devops_example_does_not_report_a_green_run_it_did_not_earn():
+    """The reported case, pinned by name."""
+    report = run(AUTHORITY_DEVOPS)
+    results = _by_id(report)
+    na = {gid: r.reason for gid, r in results.items() if r.status is Status.NOT_APPLICABLE}
+
+    assert reg.NO_ACTIONS not in na.values(), na
+    assert reg.NO_EFFECT_TEMPLATE not in na.values(), na
+    assert reg.NO_APPROVE_RULE not in na.values(), na
+    assert reg.EVERY_ACTION_DENIED not in na.values(), na
+
+
+# --- a template verify cannot render is a skip, never a crash (§3.3) ---------------------
+#
+# `_placeholders` walked the *effect* template's placeholders and invented an argument for
+# each. `{resource}` is not an argument -- it names the action's `resource` field -- so on
+# `effect: "refund:{resource}"` verify synthesized an argument called `resource`, and
+# `resolve_effect_key` then refused the operator's own template as ambiguous: "stripe.refund
+# has both a resource field and an argument named 'resource'". The traceback escaped `run()`,
+# so `ctrlrun verify` died with exit 1 -- which its own --help documents as "a guarantee
+# FAILED" -- on a policy that is perfectly valid at runtime.
+
+RESOURCE_IN_EFFECT = (
+    V2
+    + """
+actions:
+  stripe.refund:
+    effect: "refund:{resource}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: deny
+"""
+)
+
+UNRENDERABLE_EFFECT = (
+    V2
+    + """
+actions:
+  data.export:
+    effect: "export:{tenant}:{full}"
+    rules:
+      - when: { full_eq: true }
+        decision: approve
+      - decision: allow
+"""
+)
+
+
+def test_a_resource_placeholder_in_an_effect_template_does_not_crash_verify(tmp_path):
+    """`{resource}` names the resource field, so verify must not invent an argument for it."""
+    report = run(_write(tmp_path, RESOURCE_IN_EFFECT))
+
+    assert report.exit_code in (0, 1)
+    assert any(result.status is Status.PASS for result in report.guarantees)
+
+
+def test_the_same_policy_resolves_its_effect_key_at_runtime(tmp_path):
+    """The positive control: this is verify's defect and not the operator's. If the template
+    were genuinely ambiguous the kernel would refuse it too, and it does not."""
+    from ctrlrun import Action, Policy, Principal
+    from ctrlrun.effect import resolve_effect_key
+
+    policy = Policy.from_yaml(RESOURCE_IN_EFFECT)
+    action = Action(
+        name="stripe.refund",
+        arguments={"payment_id": "pi_1", "amount": 100},
+        principal=Principal(agent="bot"),
+        resource="payment:pi_1",
+    )
+
+    template = policy.effect_template("stripe.refund")
+
+    assert resolve_effect_key(template, action) == "refund:payment:pi_1"
+
+
+def test_an_effect_template_verify_cannot_render_is_skipped_not_raised(tmp_path):
+    """The second trigger: a placeholder whose synthesized value is a bool, `null` or `""`.
+    `resolve_effect_key` refuses those, correctly -- and that refusal must land as a skipped
+    candidate, not as a traceback out of `run()`."""
+    report = run(_write(tmp_path, UNRENDERABLE_EFFECT))
+
+    assert report.exit_code in (0, 1)

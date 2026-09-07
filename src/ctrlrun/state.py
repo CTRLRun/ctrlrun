@@ -941,7 +941,7 @@ class _HeldConnection:
     on thread exit.
     """
 
-    __slots__ = ("connection", "_finalizer", "__weakref__")
+    __slots__ = ("__weakref__", "_finalizer", "connection")
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection

@@ -1528,28 +1528,42 @@ def test_close_releases_every_thread_the_store_opened(tmp_path):
 
     A worker pool touches the store from many threads, and each gets its own connection
     (sqlite3 connections are not shareable). Closing only the caller's would leave one open
-    file handle per thread that ever ran an action. Deterministic on purpose: the worker
-    threads are joined before `close()`, so a leak fails red rather than sometimes.
+    file handle per thread still running an action.
+
+    The workers are held **alive** at a barrier while this asserts. They used to be joined
+    first, and counting the connections of four *dead* threads is how this test came to
+    assert the leak as though it were the contract: a thread's connection is now released
+    when the thread ends, so joining first would leave `close()` with nothing to prove.
+    What `close()` owns is the connections of threads that are still there.
     """
     store = SQLiteStateStore(tmp_path / "state.db")
-    threads = [
-        threading.Thread(target=lambda index=index: store.reserve_effect(f"e:{index}", "act_1"))
-        for index in range(4)
-    ]
+    workers = 4
+    reserved, release = threading.Barrier(workers + 1), threading.Event()
+
+    def run(index: int) -> None:
+        store.reserve_effect(f"e:{index}", "act_1")
+        reserved.wait(timeout=10)
+        release.wait(timeout=10)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(workers)]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
+    try:
+        reserved.wait(timeout=10)
+        opened = set(store._open)
 
-    opened = set(store._open)
-    assert len(opened) == 5  # four workers, plus the one this thread opened
+        assert len(opened) == workers + 1  # four live workers, plus the one this thread opened
 
-    store.close()
+        store.close()
 
-    assert store._open == set()
-    for connection in opened:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-            connection.execute("SELECT 1")
+        assert set(store._open) == set()
+        for holder in opened:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                holder.connection.execute("SELECT 1")
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=10)
 
 
 def test_the_store_is_usable_again_after_close(tmp_path):
