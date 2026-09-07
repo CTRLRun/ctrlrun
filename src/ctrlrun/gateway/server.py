@@ -922,9 +922,7 @@ class Gateway:
             # used to be a `JSONDecodeError` out of the handler thread, so the agent read a
             # dropped connection instead of the 401 it needed in order to refresh its token.
             _LOG.debug("upstream payload is not a JSON object; relayed without receipt meta")
-            return _Response(
-                held["status"], held["payload"] or b"", held.get("headers", {})
-            )
+            return _Response(held["status"], held["payload"] or b"", held.get("headers", {}))
         if outcome is None:
             code, token, status = AMBIGUOUS_EFFECT
             return _json(status, json_rpc_error(None, code, token, "no upstream outcome"))
@@ -1010,8 +1008,7 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
         relayed = {
             key: value
             for key, value in headers.items()
-            if key.lower() not in _HOP_BY_HOP
-            and key.lower() not in _DESCRIBES_THE_UPSTREAM_BODY
+            if key.lower() not in _HOP_BY_HOP and key.lower() not in _DESCRIBES_THE_UPSTREAM_BODY
         }
         relayed["Content-Type"] = "application/json"
         client = httpx.Client(timeout=config.upstream_timeout) if fresh else pooled
@@ -1117,9 +1114,7 @@ def build_server(gateway: Gateway) -> ThreadingHTTPServer:
                 body = self._read_body()
                 if body is None:
                     return
-                self._respond(
-                    gateway.handle_approval(request_id, body, dict(self.headers.items()))
-                )
+                self._respond(gateway.handle_approval(request_id, body, dict(self.headers.items())))
                 return
             if self.path.rstrip("/") != config.path.rstrip("/"):
                 self.send_error(404)

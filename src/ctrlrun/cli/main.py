@@ -278,9 +278,7 @@ def _control_on(store_url: str | None) -> Control:
     # broken is narrower than that -- the named store was ignored -- so that is all this
     # changes.
     store = (
-        _store(store_url)
-        if store_url is not None
-        else SQLiteStateStore(state_path(policy.source))
+        _store(store_url) if store_url is not None else SQLiteStateStore(state_path(policy.source))
     )
     return Control(
         policy,

@@ -171,17 +171,15 @@ def test_revoke_acts_on_the_named_store_and_not_the_default_one(tmp_path):
         Policy.from_file(policy_file), store, authority=_optional_authority(str(policy_file))
     )
     parent = next(
-        gid for gid in sorted(control.authority.grants)
-        if control.authority.grants[gid].delegable
+        gid for gid in sorted(control.authority.grants) if control.authority.grants[gid].delegable
     )
-    child = grant_from_yaml(
-        _delegable_child(control.authority.grants[parent]), source="<test>"
-    )
+    child = grant_from_yaml(_delegable_child(control.authority.grants[parent]), source="<test>")
     created = control._delegate(parent, child, by=_subject_principal(control, parent), via="cli")
     store.close()
 
-    result, ran_in = _run(["revoke", created.delegation_id, "--store-url", f"sqlite://{named}"],
-                          tmp_path, env={})
+    result, ran_in = _run(
+        ["revoke", created.delegation_id, "--store-url", f"sqlite://{named}"], tmp_path, env={}
+    )
 
     reopened = SQLiteStateStore(named)
     try:
@@ -252,9 +250,7 @@ def test_a_state_path_that_is_not_a_database_is_one_clean_line(tmp_path):
 def test_an_unreachable_postgres_host_is_one_clean_line(tmp_path):
     """A mistyped `--store-url` is a typo, and `psycopg.OperationalError` with a resolver
     stack under it reads as a broken package."""
-    result, _ = _run(
-        ["receipts", "--store-url", "postgresql://nosuchhost.invalid/db"], tmp_path
-    )
+    result, _ = _run(["receipts", "--store-url", "postgresql://nosuchhost.invalid/db"], tmp_path)
 
     assert result.exit_code != 0
     assert "Traceback" not in result.output

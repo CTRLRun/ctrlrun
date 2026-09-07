@@ -1118,9 +1118,7 @@ class SQLiteStateStore:
                 event.approval_id,
                 # An event carries the same executor text the effect row does, so it needs
                 # the same guard: evidence about an action must never decide its fate.
-                _storable(
-                    json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":"))
-                ),
+                _storable(json.dumps(dict(event.data), ensure_ascii=False, separators=(",", ":"))),
             ),
         )
         return replace(event, event_id=cursor.lastrowid)

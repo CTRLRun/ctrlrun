@@ -554,7 +554,7 @@ def test_verification_tolerates_a_little_clock_skew():
 # handler instead of being refused, and the client got a dropped connection rather than a 4xx.
 # A signature check must answer yes or no; raising is neither.
 
-NOT_UTF8 = b"\xff\xfe{\"decision\": \"grant\"}"
+NOT_UTF8 = b'\xff\xfe{"decision": "grant"}'
 
 
 def test_signing_a_non_utf8_body_does_not_raise():

@@ -1880,9 +1880,7 @@ def test_a_gzip_upstream_is_readable_by_the_client(store, method):
     server = build_server(gateway)
     _threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        params = (
-            {"name": "read_only", "arguments": {}} if method == "tools/call" else {}
-        )
+        params = {"name": "read_only", "arguments": {}} if method == "tools/call" else {}
         response = httpx.post(
             f"http://127.0.0.1:{server.server_address[1]}/mcp",
             json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
@@ -1950,8 +1948,16 @@ def test_the_gateway_startup_block_reaches_a_piped_stdout(tmp_path):
     )
     process = subprocess.Popen(
         [
-            sys.executable, "-m", "ctrlrun.cli.main", "gateway",
-            "--upstream", "http://127.0.0.1:9/mcp", "--alias", "acme", "--principal", "bot",
+            sys.executable,
+            "-m",
+            "ctrlrun.cli.main",
+            "gateway",
+            "--upstream",
+            "http://127.0.0.1:9/mcp",
+            "--alias",
+            "acme",
+            "--principal",
+            "bot",
         ],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
@@ -2044,8 +2050,7 @@ def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
             try:
                 sock.sendall(
                     b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Agent: bot\r\n"
-                    b"Content-Length: %d\r\n\r\n" % len(body)
-                    + body
+                    b"Content-Length: %d\r\n\r\n" % len(body) + body
                 )
                 second = sock.recv(4096)
             except (TimeoutError, ConnectionError, OSError):

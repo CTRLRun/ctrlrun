@@ -1008,8 +1008,10 @@ def test_a_nested_data_scope_operand_is_refused_at_load(operand):
             "actions": {
                 "a.b": {
                     "data": {"pid": "phi"},
-                    "rules": [{"when": {"data_scope_eq": operand}, "decision": "deny"},
-                              {"decision": "allow"}],
+                    "rules": [
+                        {"when": {"data_scope_eq": operand}, "decision": "deny"},
+                        {"decision": "allow"},
+                    ],
                 }
             },
         }

@@ -891,9 +891,7 @@ EXAMPLE_CONFIGURATIONS = [
 
 
 @pytest.mark.authority
-@pytest.mark.parametrize(
-    "configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name
-)
+@pytest.mark.parametrize("configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name)
 def test_every_shipped_example_verifies_without_crashing(configuration):
     """Every configuration this repository ships is one an operator will copy. The DoD named
     two of them, so a third crashed and a fourth reported a false green with nobody looking."""
@@ -908,9 +906,7 @@ def test_every_shipped_example_verifies_without_crashing(configuration):
 
 
 @pytest.mark.authority
-@pytest.mark.parametrize(
-    "configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name
-)
+@pytest.mark.parametrize("configuration", EXAMPLE_CONFIGURATIONS, ids=lambda p: p.name)
 def test_no_shipped_example_gets_an_na_reason_that_is_false(configuration):
     """The positive control on verify's own reasons: each is a statement about the
     configuration, so each is checkable against the configuration."""
