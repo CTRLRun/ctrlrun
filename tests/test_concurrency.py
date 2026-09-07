@@ -553,3 +553,129 @@ def test_two_stores_on_one_file_see_the_same_effects(tmp_path):
 def test_a_lease_that_expires_immediately_is_refused(state_store):
     with pytest.raises(InvalidArgument):
         state_store.reserve_effect(EFFECT_KEY, "act_1", timedelta(0))
+
+
+# --- a dead thread's connection is released (SPEC-v0.1 §5.3) -----------------------------
+#
+# `_connection()` opens one SQLite connection per thread and pinned it in a store-level set
+# that only `close()` ever emptied. `close()` is documented as a whole-store shutdown, so a
+# host whose threads come and go -- which is exactly `ctrlrun gateway`, a `ThreadingHTTPServer`
+# with one thread per TCP connection -- accumulated two file descriptors per connection for
+# the life of the process. Measured against the real `build_server`: 200 connections, 410 fds,
+# 201 pinned connections, and under `RLIMIT_NOFILE` every later store access fails for good
+# with "unable to open database file", with no recovery short of a restart.
+#
+# The registry now holds the connections weakly, so a thread's connection is closed when the
+# thread ends and its thread-local values are dropped.
+
+DEAD_THREAD_ROUNDS = 40
+
+
+def _touch(store):
+    store.get_effect("no-such-key")
+
+
+def _connection_of(store):
+    """The connection object a fresh thread opens, captured after that thread has died."""
+    captured = []
+
+    def run():
+        _touch(store)
+        captured.append(store._local.held.connection)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=BARRIER_TIMEOUT_S)
+    assert not thread.is_alive()
+    return captured[0]
+
+
+def test_a_dead_threads_connection_is_closed_and_unregistered(tmp_path):
+    import gc
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        connection = _connection_of(store)
+        gc.collect()
+
+        assert len(store._open) == 1, "only the main thread's connection should still be held"
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+    finally:
+        store.close()
+
+
+def test_short_lived_threads_do_not_accumulate_connections(tmp_path):
+    """The leak itself, bounded so a regression fails red rather than hanging CI."""
+    import gc
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    try:
+        _touch(store)
+        for _ in range(DEAD_THREAD_ROUNDS):
+            thread = threading.Thread(target=_touch, args=(store,))
+            thread.start()
+            thread.join(timeout=BARRIER_TIMEOUT_S)
+            assert not thread.is_alive()
+        gc.collect()
+
+        assert len(store._open) <= 2, (
+            f"{len(store._open)} connections held after {DEAD_THREAD_ROUNDS} dead threads; "
+            "each one is two file descriptors that never come back"
+        )
+    finally:
+        store.close()
+
+
+def test_a_live_threads_connection_is_not_closed(tmp_path):
+    """The other half: releasing on thread death must not release a thread still using it."""
+    import gc
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    ready, release, seen = threading.Event(), threading.Event(), []
+
+    def run():
+        _touch(store)
+        seen.append(store._local.held.connection)
+        ready.set()
+        release.wait(timeout=BARRIER_TIMEOUT_S)
+        store.get_effect("still-usable")
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert ready.wait(timeout=BARRIER_TIMEOUT_S)
+        gc.collect()
+
+        assert len(store._open) == 2
+        assert seen[0].execute("SELECT 1").fetchone() is not None
+    finally:
+        release.set()
+        thread.join(timeout=BARRIER_TIMEOUT_S)
+        store.close()
+
+
+def test_close_still_closes_every_connection_including_other_threads(tmp_path):
+    """`close()`'s documented contract is unchanged: it is a whole-store shutdown."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _touch(store)
+    held = list(store._open)
+    assert held
+
+    store.close()
+
+    for holder in held:
+        with pytest.raises(sqlite3.ProgrammingError):
+            holder.connection.execute("SELECT 1")
+
+
+def test_a_thread_that_used_the_store_before_close_gets_a_fresh_connection(tmp_path):
+    """Also unchanged: `close()` says a later caller simply gets a new one."""
+    store = SQLiteStateStore(tmp_path / "state.db")
+    _touch(store)
+    store.close()
+
+    _touch(store)
+
+    assert len(store._open) == 1
+    store.close()

@@ -3,7 +3,7 @@
 Route a CTRLRun `APPROVE` through the **OpenAI Agents SDK's own tool-approval interruption**, so
 the human answers where this SDK's users already answer.
 
-- **Supported kernel range:** `ctrlrun>=0.5,<0.6`
+- **Supported kernel range:** `ctrlrun>=0.5,<0.7`
 - **Supported framework range:** `openai-agents>=0.20,<1.0`
 - **Primitive reused:** [`needs_approval`, `RunResult.interruptions`, `RunState.approve` / `reject`](https://openai.github.io/openai-agents-python/tools/). Read 2026-09-05.
 - **Framework shape:** decided before invocation (SPEC-v0.5 §3.5).

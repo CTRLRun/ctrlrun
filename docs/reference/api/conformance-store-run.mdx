@@ -11,8 +11,6 @@ description: "Drive every case against `backend` and report what each came to (S
 from ctrlrun.conformance.store import run
 ```
 
-Needs the `conformance` extra: `pip install "ctrlrun[conformance]"`. Importing it without that raises `MissingDependency` carrying the install command.
-
 
 ```python
 def run(backend: StoreBackend, *, only: Sequence[str] = (), processes: int = CONTENDERS) -> StoreReport

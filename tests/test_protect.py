@@ -968,3 +968,97 @@ def test_T16_an_action_with_no_effect_in_policy_gets_no_reservation():
 
     assert control.store.list_effects() == ()
     assert control.store.receipts()[-1].effect_key is None
+
+
+# --- a protected function must be synchronous -------------------------------------------
+#
+# The decorator is a synchronous wrapper: it calls the executor, takes what comes back as the
+# result, and commits. Handed an `async def`, "what comes back" is an un-awaited coroutine, so
+# the effect was recorded COMMITTED and the receipt written before the body had run at all --
+# and, the key being COMMITTED, the legitimate retry was then refused for ever. A silent false
+# record of a consequential action, which is the one outcome this library exists to prevent.
+#
+# Refused at decoration time on `_reject_variadic`'s precedent: the mistake is in the source.
+
+
+def _sync_control() -> Control:
+    return Control(Policy.from_yaml(POLICY), InMemoryStateStore())
+
+
+def test_a_protected_async_function_is_refused_at_decoration():
+    control = _sync_control()
+
+    with pytest.raises(InvalidArgument) as raised:
+
+        @protect("customer.read", control=control)
+        async def read(customer_id: str) -> str:
+            return "ok"
+
+    assert "synchronous" in str(raised.value)
+
+
+def test_a_protected_generator_function_is_refused_at_decoration():
+    control = _sync_control()
+
+    with pytest.raises(InvalidArgument):
+
+        @protect("customer.read", control=control)
+        def read(customer_id: str):
+            yield "ok"
+
+
+def test_a_protected_async_generator_function_is_refused_at_decoration():
+    control = _sync_control()
+
+    with pytest.raises(InvalidArgument):
+
+        @protect("customer.read", control=control)
+        async def read(customer_id: str):
+            yield "ok"
+
+
+def test_the_refusal_names_the_action_and_survives_functools_wraps():
+    """The message has to be actionable: it names the action, so an import-time failure in a
+    large module says which decorator to look at."""
+    control = _sync_control()
+
+    with pytest.raises(InvalidArgument) as raised:
+
+        @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+        async def refund(payment_id: str, amount: int) -> str:
+            return "ok"
+
+    assert "stripe.refund" in str(raised.value)
+
+
+def test_no_effect_is_reserved_or_committed_when_an_async_function_is_refused():
+    """The point of refusing at decoration: nothing reaches the store at all."""
+    control = _sync_control()
+
+    with pytest.raises(InvalidArgument):
+
+        @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+        async def refund(payment_id: str, amount: int) -> str:
+            return "ok"
+
+    assert control.store.list_effects() == ()
+    assert control.store.receipts() == ()
+
+
+def test_a_synchronous_function_returning_an_awaitable_still_works():
+    """Only the *function* is refused, not every awaitable result. A plain function that
+    happens to return a future-like object is a normal executor and stays legal -- the guard
+    is about the decorator never running the body, which `iscoroutinefunction` is exactly the
+    test for."""
+    control = _sync_control()
+
+    class Thenable:
+        def __await__(self):  # pragma: no cover - never awaited here
+            yield
+
+    @protect("customer.read", control=control)
+    def read(customer_id: str) -> Any:
+        return Thenable()
+
+    with context(agent="support-agent"):
+        assert isinstance(read(customer_id="cus_1"), Thenable)

@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -923,6 +924,34 @@ class InMemoryStateStore:
             )
 
 
+class _HeldConnection:
+    """One thread's SQLite connection, owned by an object that thread's locals hold.
+
+    `SQLiteStateStore` keeps only a **weak** reference to this, so when the owning thread ends
+    and CPython drops its thread-local values, the holder is collected and the finalizer closes
+    the connection. Before this, the registry held connections strongly and only `close()` --
+    a documented whole-store shutdown -- ever released one, so a host whose threads come and go
+    accumulated two file descriptors per thread for the life of the process, and eventually
+    failed every store access with "unable to open database file" until it was restarted.
+    `ctrlrun gateway` is that host: a `ThreadingHTTPServer` with one thread per TCP connection.
+
+    The connection is reached through the holder rather than kept directly in the thread-local
+    because it is the *holder's* lifetime the registry has to observe: a weak reference to a
+    `sqlite3.Connection` is not supported, and the thread-local is what the interpreter clears
+    on thread exit.
+    """
+
+    __slots__ = ("connection", "_finalizer", "__weakref__")
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self._finalizer = weakref.finalize(self, connection.close)
+
+    def close(self) -> None:
+        """Close the connection now. Idempotent: `weakref.finalize` runs at most once."""
+        self._finalizer()
+
+
 class SQLiteStateStore:
     """Approvals, effects and evidence in one SQLite file (ARCHITECTURE §5).
 
@@ -949,7 +978,7 @@ class SQLiteStateStore:
         self._path = Path(text)
         self._clock = clock
         self._local = threading.local()
-        self._open: set[sqlite3.Connection] = set()
+        self._open: weakref.WeakSet[_HeldConnection] = weakref.WeakSet()
         self._open_lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # SPEC-v0.6 §3. The store's admission check: classify, then migrate or refuse. It runs
@@ -973,16 +1002,16 @@ class SQLiteStateStore:
         to arrange, as it is with any resource being torn down.
         """
         with self._open_lock:
-            connections, self._open = self._open, set()
-        for connection in connections:
-            connection.close()
+            held, self._open = list(self._open), weakref.WeakSet()
+        for holder in held:
+            holder.close()
 
     def _connection(self) -> sqlite3.Connection:
-        connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
-        if connection is not None:
+        held: _HeldConnection | None = getattr(self._local, "held", None)
+        if held is not None:
             with self._open_lock:
-                if connection in self._open:
-                    return connection
+                if held in self._open:
+                    return held.connection
             # `close()` tore this one down; open a fresh one rather than hand back a corpse.
         # `check_same_thread=False` because `close()` closes other threads' connections. Each
         # connection is still used by exactly one thread — that is what the thread-local is
@@ -1003,9 +1032,12 @@ class SQLiteStateStore:
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         _enable_wal(connection)
         connection.execute("PRAGMA synchronous=NORMAL")
-        self._local.connection = connection
+        held = _HeldConnection(connection)
+        # The thread-local is the only strong reference: the registry below is weak, so the
+        # interpreter dropping this on thread exit is what closes the connection.
+        self._local.held = held
         with self._open_lock:
-            self._open.add(connection)
+            self._open.add(held)
         return connection
 
     # --- evidence ---------------------------------------------------------------------
