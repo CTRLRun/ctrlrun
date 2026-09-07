@@ -4,6 +4,29 @@ CTRLRun sits in the execution path of actions that move money, delete infrastruc
 grant permissions. The rules below exist so that a change to it is evidence rather than
 intention. They are short to state and long to live with.
 
+## Where to start
+
+Not every contribution carries every rule below. In rough order of what they ask of you:
+
+- **[`good first issue`](https://github.com/CTRLRun/ctrlrun/labels/good%20first%20issue)** is
+  the current list, and each issue says what *done* means for it rather than leaving you to
+  infer it from this file.
+- **Two of them want a comment, not a patch.** Running `ctrlrun scan` against a real
+  application tree and reporting what it got wrong is a measurement this project does not have
+  and cannot take for itself; so is telling us where the policy template for your sector is
+  wrong. Neither needs the suite installed.
+- **Documentation** — a cookbook recipe, a `ctrlrun verify` snippet for a CI that is not GitHub
+  Actions — is held to `docs/STYLE.md` and the audit below, and not to the mutation table.
+- **Anything under `src/`** is where the rest of this file applies in full, and a maintainer
+  reads it whatever CI says.
+
+Claim an issue in a comment before you start, so two people do not write the same page. An
+issue not on the list is welcome; say what you intend to change before you change it, because
+the specification comes first and a pull request that arrives without one has the harder half
+still ahead of it.
+
+A security problem is not an issue. Report it privately, per [SECURITY.md](SECURITY.md).
+
 ## Run the suite
 
 ```bash
