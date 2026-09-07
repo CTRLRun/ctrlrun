@@ -31,3 +31,8 @@ venv/
 
 # OS
 .DS_Store
+
+# Audit working output. The dated *results* under `audit/` are committed the way
+# `research/*/results/` are; the raw tool captures that produced them are not -- they are
+# the run, not the finding.
+audit/**/*.log

@@ -1,0 +1,1 @@
+{"transport": "real loopback HTTP", "store": "SQLite", "remote_effects": 1, "effect_state": "ambiguous", "attempts": 1, "response_ids": [42, 42]}

@@ -1,0 +1,6 @@
+{"observed": {"remote_effects": 2, "response_id": 999, "state": "failed"}, "probe": "mismatched_response_allows_duplicate"}
+{"observed": {"effect_state": "ambiguous", "http_status": 502}, "probe": "successful_sse_becomes_ambiguous"}
+{"observed": {"client_status": 502, "upstream_status": 202}, "probe": "accepted_notification_becomes_bad_gateway"}
+{"observed": {"client_status": 200, "effect_state": "ambiguous"}, "probe": "legacy_success_becomes_ambiguous"}
+{"observed": {"code": -41010, "request_id": 42, "response_id": null}, "probe": "synthesized_error_loses_request_id"}
+{"observed": {"approval_status": "consumed", "receipt_approval_id": null, "receipt_approver": null, "receipt_duration_seconds": 0.0, "receipt_result": "committed"}, "probe": "resumed_receipt_loses_approval"}

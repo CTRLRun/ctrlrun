@@ -341,3 +341,67 @@ def test_Suspended_is_a_ctrlrun_error():
     from ctrlrun import CTRLRunError
 
     assert issubclass(Suspended, CTRLRunError)
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+@pytest.mark.parametrize("outcome", ["committed", "failed", "ambiguous"])
+def test_resumed_receipt_keeps_consumed_approval_and_original_start(
+    state_store, fake_clock, rounds, outcome
+):
+    """Approval attribution survives multiple rounds and reopening the SQLite database."""
+    from ctrlrun import Action, Principal, SQLiteStateStore, with_approval
+
+    policy = Policy.from_yaml(
+        "schema: ctrlrun.policy/v1\nactions:\n  refund:\n    decision: approve"
+    )
+    control = Control(policy, state_store, clock=fake_clock, suspend_timeout=timedelta(hours=1))
+    action = Action("refund", {"amount": 2000}, Principal("refund-agent"))
+    request = control.approvals.request(action)
+    state_store.grant_approval(request.request_id, "human:alice")
+    started = fake_clock.now
+
+    def suspend():
+        raise Suspended("next-round")
+
+    with with_approval(request.request_id), pytest.raises(Suspended):
+        control.execute(action, suspend, "refund:txn_1")
+    reopened = state_store
+    if isinstance(state_store, SQLiteStateStore):
+        path = state_store.path
+        state_store.close()
+        reopened = SQLiteStateStore(path, clock=fake_clock)
+    try:
+        control = Control(policy, reopened, clock=fake_clock, suspend_timeout=timedelta(hours=1))
+        for _ in range(rounds - 1):
+            fake_clock.advance(timedelta(minutes=1))
+            with pytest.raises(Suspended):
+                control.resume("next-round", suspend)
+        # The consumed approval may have expired by resumption. It is evidence, not a new
+        # authorization to spend, and must still be attached to the completed attempt.
+        fake_clock.advance(timedelta(minutes=20))
+
+        def finish():
+            if outcome == "failed":
+                raise NotExecuted("no change")
+            if outcome == "ambiguous":
+                raise TimeoutError("reply lost")
+            return "refunded"
+
+        if outcome == "committed":
+            control.resume("next-round", finish)
+        else:
+            with pytest.raises(NotExecuted if outcome == "failed" else TimeoutError):
+                control.resume("next-round", finish)
+        receipt = reopened.receipts()[-1]
+        assert receipt.result.value == outcome
+        assert receipt.approval_id == request.request_id
+        assert receipt.approver == "human:alice"
+        assert receipt.started_at == started
+        assert receipt.finished_at == fake_clock.now
+        assert reopened.get_approval(request.request_id).status.value == "consumed"
+        resumed = [e for e in reopened.events() if e.type is EventType.EXECUTION_RESUMED]
+        assert len(resumed) == rounds
+        assert all(e.approval_id == request.request_id for e in resumed)
+    finally:
+        if reopened is not state_store:
+            reopened.close()

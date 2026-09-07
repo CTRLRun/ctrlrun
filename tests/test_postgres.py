@@ -31,6 +31,41 @@ postgres = pytest.mark.skipif(
 )
 
 
+@postgres
+def test_resumed_receipt_recovers_approval_after_reopening_postgres(backend, fake_clock):
+    from datetime import timedelta
+
+    from ctrlrun import Action, Control, Policy, Principal, Suspended, with_approval
+
+    policy = Policy.from_yaml(
+        "schema: ctrlrun.policy/v1\nactions:\n  refund:\n    decision: approve"
+    )
+    store = backend.open_with_clock(fake_clock)
+    control = Control(policy, store, clock=fake_clock)
+    action = Action("refund", {"amount": 2000}, Principal("refund-agent"))
+    request = control.approvals.request(action)
+    store.grant_approval(request.request_id, "human:alice")
+    started = fake_clock.now
+
+    def suspend():
+        raise Suspended("postgres-continuation")
+
+    with with_approval(request.request_id), pytest.raises(Suspended):
+        control.execute(action, suspend, "refund:txn_1")
+    store.close()
+    fake_clock.advance(timedelta(minutes=1))
+    reopened = backend.open_with_clock(fake_clock)
+    control = Control(policy, reopened, clock=fake_clock)
+    # A later approval for the same action hash must not replace the consumed one.
+    later = control.approvals.request(action)
+    reopened.grant_approval(later.request_id, "human:bob")
+    receipt = control.resume("postgres-continuation", lambda: "refunded")
+    assert receipt.approval_id == request.request_id and receipt.approver == "human:alice"
+    assert receipt.started_at == started and receipt.finished_at == fake_clock.now
+    assert reopened.get_approval(request.request_id).status.value == "consumed"
+    assert reopened.get_approval(later.request_id).status.value == "granted"
+
+
 @pytest.fixture
 def backend():
     """A backend, and its schemas dropped when the test is done.

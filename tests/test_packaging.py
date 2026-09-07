@@ -536,7 +536,9 @@ def test_T136_the_ctrlrun_distributions_contain_no_adapter():
     from pathlib import Path as _Path
 
     unpackaged = [
-        name for name in names if any(part in {"research", "packs"} for part in _Path(name).parts)
+        name
+        for name in names
+        if any(part in {"research", "packs", "audit"} for part in _Path(name).parts)
     ]
     assert not unpackaged, unpackaged
 
@@ -1048,8 +1050,6 @@ def test_no_adapter_source_file_states_a_stale_kernel_range(adapter):
     docstring -- and the first fix updated two of them. A range in prose that contradicts the
     metadata is the version somebody typed, which is what T137 refuses in the other direction.
     """
-    import tomllib
-
     manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
     if not manifest.exists():
         pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")

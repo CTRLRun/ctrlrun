@@ -1,0 +1,6 @@
+{"observed": {"remote_effects": 1, "response_id": 42, "state": "ambiguous"}, "probe": "mismatched_response_blocks_duplicate"}
+{"observed": {"effect_state": "committed", "http_status": 200}, "probe": "successful_sse_commits"}
+{"observed": {"client_status": 202, "upstream_status": 202}, "probe": "accepted_notification_is_relayed"}
+{"observed": {"client_status": 200, "effect_state": "committed"}, "probe": "legacy_success_commits"}
+{"observed": {"code": -41010, "request_id": 42, "response_id": 42}, "probe": "synthesized_error_keeps_request_id"}
+{"observed": {"approval_status": "consumed", "receipt_approval_id": "apr_644d0dfc6f08826705216aff4dfdcf43", "receipt_approver": "human:alice", "receipt_duration_seconds": 120.0, "receipt_result": "committed"}, "probe": "resumed_receipt_keeps_approval"}

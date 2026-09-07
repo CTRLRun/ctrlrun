@@ -171,11 +171,9 @@ def _result(observed: UpstreamResult, not_executed_on_error: bool) -> GatewayOut
     if observed.result_type == INPUT_REQUIRED:
         return _ELICITATION
     if observed.result_type != COMPLETE:
-        # Deliberately against the client rule: the revision tells *clients* to read an
-        # absent `resultType` as complete, for compatibility with servers implementing
-        # earlier versions. The gateway refuses those servers at the version check (§6.2), so
-        # on a response it accepts, absence means the response is malformed — and a malformed
-        # answer about a consequential action is an unknown outcome, not a success.
+        # The transport normalizes an absent resultType on accepted legacy revisions.
+        # On a current-revision response, or a custom forwarder that has not established
+        # legacy semantics, an absent or unknown value remains an unknown outcome.
         return _RELAY_AMBIGUOUS
     if not observed.is_error:
         return _RELAY_COMMITTED
