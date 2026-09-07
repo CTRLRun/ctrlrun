@@ -1040,3 +1040,29 @@ def test_the_cli_uses_the_click_8_api_this_floor_is_for():
     text = (REPO_ROOT / "src" / "ctrlrun" / "cli" / "main.py").read_text(encoding="utf-8")
 
     assert "path_type=" in text
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_no_adapter_source_file_states_a_stale_kernel_range(adapter):
+    """The range is written in three places per adapter -- pyproject, README, and the module
+    docstring -- and the first fix updated two of them. A range in prose that contradicts the
+    metadata is the version somebody typed, which is what T137 refuses in the other direction.
+    """
+    import tomllib
+
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    if not manifest.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+    with manifest.open("rb") as handle:
+        dependencies = tomllib.load(handle)["project"]["dependencies"]
+    declared = next(d for d in dependencies if d.startswith("ctrlrun"))
+
+    sources = (REPO_ROOT / "adapters" / adapter / "src").rglob("*.py")
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "ctrlrun>=" in line:
+                assert declared in line, (
+                    f"{source.relative_to(REPO_ROOT)} states a kernel range that "
+                    f"pyproject.toml does not: {line.strip()!r}"
+                )

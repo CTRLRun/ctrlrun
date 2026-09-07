@@ -1975,3 +1975,63 @@ def test_the_gateway_startup_block_reaches_a_piped_stdout(tmp_path):
         f"the startup block did not reach a piped stdout; got {printed!r}"
     )
     assert "identity" in printed
+
+
+# --- a refused request does not desynchronise a kept-alive connection ---------------------
+#
+# A **regression test for behaviour that is already correct**, kept because it was reported as
+# broken and the report was wrong. The claim was that `send_error(404)` leaves the request body
+# unread, so the server parses the leftover bytes as the next request line and a pooling client
+# reads the tail of the previous response.
+#
+# It does not: `BaseHTTPRequestHandler.send_error` sets `close_connection`, the 404 carries
+# `Connection: close`, and the socket is closed before anything can be misread. The first
+# measurement that appeared to show a desync was an artefact of the instrument -- a `recv(200)`
+# that truncated a longer 404 body, so what looked like a second reply was the remainder of the
+# first still sitting in the socket buffer. Reading the full response by Content-Length shows
+# the connection closing, which is the safe answer.
+#
+# The 400 and 413 paths set `close_connection` explicitly for the same reason.
+
+
+@pytest.mark.parametrize("path", ["/wrong", "/ctrlrun/nope"])
+def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(
+                b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n"
+                % (path.encode(), len(body))
+                + body
+            )
+            first = sock.recv(4096)
+            assert first.startswith(b"HTTP/1."), first[:40]
+
+            sock.settimeout(10)
+            try:
+                # The write itself can fail once the peer has closed, and that is the same
+                # safe answer as an empty read -- so both are inside the guard. Leaving
+                # `sendall` outside it made this flaky, which is worse than not testing it.
+                sock.sendall(
+                    b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Agent: bot\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(body)
+                    + body
+                )
+                second = sock.recv(4096)
+            except (TimeoutError, ConnectionError, OSError):
+                second = b""
+
+        # Either a proper response or a closed connection. What must not happen is the client
+        # reading bytes that are not a status line -- that is the previous body, misread.
+        assert second == b"" or second.startswith(b"HTTP/1."), (
+            f"the connection was left desynchronised; the client read {second[:80]!r}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
