@@ -36,8 +36,7 @@
             "pages": [
               "index",
               "why",
-              "not-only-agents",
-              "try-it"
+              "not-only-agents"
             ]
           },
           {
@@ -47,6 +46,14 @@
               "get-started/quickstart",
               "get-started/three-ways-in",
               "get-started/choosing"
+            ]
+          },
+          {
+            "group": "Demos",
+            "pages": [
+              "demos/index",
+              "try-it",
+              "demos/medical-affairs"
             ]
           },
           {
