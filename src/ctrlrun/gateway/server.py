@@ -1026,7 +1026,7 @@ def httpx_forwarder(config: GatewayConfig) -> Any:
             # `TransportError`, so neither used to be caught here and both escaped `do_POST`,
             # dropping the client's connection with no response at all.
             #
-            # CLAUDE.md's rule makes the honest mapping and the safe mapping the same one:
+            # §6.8's rule makes the honest mapping and the safe mapping the same one:
             # every unknown client-side failure after the first byte is AMBIGUOUS, never
             # FAILED, because the request may well have been executed.
             _LOG.warning("forwarding to the upstream failed", exc_info=True)
