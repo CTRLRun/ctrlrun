@@ -127,8 +127,10 @@ def test_the_social_preview_is_1280_by_640_and_rendered_from_its_svg():
     assert (width, height) == (1280, 640)
 
     svg = (ASSETS / "social-preview.svg").read_text(encoding="utf-8")
-    assert "The last check before an AI agent" in svg
-    assert "BLOCKED" in svg
+    assert "Execution safety" in svg
+    assert "for AI agents" in svg
+    assert "ctrlrun.dev" in svg
+    assert "stripe" not in svg.lower(), "the card should not read as payments-only"
     script = (ASSETS / "render-social-preview.sh").read_text(encoding="utf-8")
     assert "social-preview.svg" in script and "social-preview.png" in script
 

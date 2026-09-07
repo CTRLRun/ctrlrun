@@ -5,20 +5,25 @@ by hand: repository settings → *Social preview* → upload `docs/assets/social
 
 ## Specification
 
+Matches the ctrlrun.dev homepage redesign (light theme, `CTRLRun_` mark, "Execution safety for
+AI agents." headline) rather than the earlier dark GitHub-only card.
+
 | | |
 |---|---|
 | Size | 1280 × 640 px (GitHub's recommended size; rendered at 2:1 everywhere it is shown) |
 | Safe area | Keep text inside 72 px margins; previews are cropped to 1.91:1 on some services |
-| Background | `#14161b`, no photograph, no gradient |
-| Wordmark | `docs/assets/wordmark-dark.svg` at 58 px, top left: the amber keycap (`#F5A623`, edge `#B8730A`) and the name in `#f2f3f5` |
-| Line 1 | The tagline, two lines at 46 px bold, `#f2f3f5`: *The last check before an AI agent / does something it can't undo.* |
-| Line 2 | The principle at 26 px, `#a7abb4`: *Autonomy belongs to the action, not the agent.* |
-| Panel | A terminal panel with a 6 px amber left edge, carrying the demo's first scenario, three lines in monospace, the third being the demo's `✗ BLOCKED — effect may already have committed; blind retry refused` line in `#f28b82` |
-| Corner | `pip install ctrlrun` at 20 px monospace, bottom right, `#F5A623` |
+| Background | `#ffffff`, no photograph, no gradient |
+| Wordmark | The amber keycap (`#F5A623`, edge `#B8730A`) and `CTRLRun` in `#14161b`, top left, matching `docs/images/wordmark-light.svg` |
+| Eyebrow | `CONTROL THE ACTION. KEEP THE AUTONOMY.` at 20 px, letter-spaced, `#8a8f98` |
+| Headline | Two lines at 76 px bold, `#14161b`: *Execution safety / for AI agents.* — the final period in `#F5A623` |
+| Subheadline | The homepage's tagline at 28 px, `#6b7280`: *Let agents act. Keep control of what happens next.* |
+| Panel | A light `#f6f6f4` code panel with a 6 px amber left edge: `$ pip install ctrlrun`, a domain-neutral `@ctrlrun.protect(tool_name, effect=effect_key)` line (deliberately not a named vendor like Stripe, so the card doesn't read as payments-only), and "Refunds. Access changes. Deploys. Emails. One boundary." |
+| Corner | `ctrlrun.dev` at 20 px monospace, bottom right, `#14161b` |
 | Fonts | Inter / system sans / Helvetica / Arial; monospace SFMono / Menlo / Consolas. System fonts, so the render depends on the machine; the committed PNG is the reference |
 
-The share unit is a failure, not a feature list: the image shows an agent doing something wrong
-and CTRLRun refusing. No logos, no badges, no adopters, no stars.
+The share unit leads with the same promise as the homepage hero — execution safety without
+losing autonomy — backed by the one line of code that turns it on. No screenshots, no badges,
+no adopters, no stars.
 
 ## Regenerating
 
