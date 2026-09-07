@@ -940,6 +940,10 @@ def test_T85_no_other_command_prints_the_banner_or_loads_the_policy(cli, command
 
 def test_T85_the_banner_keeps_json_stdout_parseable(cli):
     _write_policy(cli, OBSERVE)
+    # The `cli` fixture points `$CTRLRUN_STATE` at a path and creates nothing there. `stats`
+    # is a read command, and a read command does not create the store it reads (`_store`),
+    # so an empty store has to be made rather than conjured by the command under test.
+    SQLiteStateStore(cli / "state.db").close()
 
     result = _run("stats", "--json")
 
@@ -1125,6 +1129,7 @@ def test_T86_since_filters_on_finished_at_and_the_boundary_is_included(seeded):
 
 def test_T86_an_empty_store_prints_zeros_and_exits_zero(cli):
     _write_policy(cli, OBSERVE)
+    SQLiteStateStore(cli / "state.db").close()
 
     result = _run("stats")
     document = json.loads(_run("stats", "--json").stdout)

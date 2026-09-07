@@ -1576,3 +1576,248 @@ authority:
     assert error["code"] == -41012, "the effect pre-check answered before authority did"
     assert error["data"]["reason"] == "authority_constraint"
     assert upstream.calls == []
+
+
+# --- a malformed request or an unhelpful upstream gets a response, never a dropped socket ---
+#
+# Three ways the handler thread died with no reply, so the client read
+# `RemoteProtocolError: Server disconnected without sending a response` and a traceback landed
+# on the gateway's stderr. The gateway's own comment says this must never happen -- "the client
+# learning that by having its connection dropped" -- because an agent that reads a transport
+# error retries a consequential call blind, instead of reading the 401 and refreshing its token.
+
+
+def test_a_401_with_a_non_json_body_still_answers_the_client(upstream, client):
+    """RFC 6750 bearer challenges normally carry an empty body, and a CDN in front of a tool
+    server answers with HTML. `json.loads` on either killed the thread."""
+    upstream.reply = None
+    upstream.status = 401
+    upstream.extra_headers = {"WWW-Authenticate": 'Bearer realm="acme"'}
+
+    response = _post(client, _call("create_refund", {"payment_id": "txn_401", "amount": 10}))
+
+    assert response.status_code in range(200, 600)
+    assert response.content is not None
+
+
+def test_a_403_with_an_html_body_still_answers_the_client(upstream, client):
+    upstream.reply = None
+    upstream.status = 403
+    upstream.extra_headers = {"Content-Type": "text/html"}
+
+    response = _post(client, _call("create_refund", {"payment_id": "txn_403", "amount": 10}))
+
+    assert response.status_code in range(200, 600)
+
+
+@pytest.mark.parametrize("declared", ["abc", "-1", "9x"])
+def test_a_malformed_content_length_is_answered_not_dropped(gateway, declared):
+    """`int(self.headers.get("Content-Length"))` raised `ValueError` on a non-numeric value,
+    and `rfile.read(-1)` on a negative one read to EOF -- bypassing `--max-body-bytes`, which
+    is checked against the *declared* length, so a few connections exhaust the process."""
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(
+                f"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n"
+                f"X-Agent: bot\r\n\r\n".encode()
+            )
+            sock.settimeout(10)
+            reply = sock.recv(4096)
+
+        assert reply.startswith(b"HTTP/1."), f"no status line for Content-Length: {declared!r}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_body_larger_than_the_declared_limit_is_refused_before_it_is_read(gateway):
+    """The limit must be enforced against what is actually read, not only what is declared."""
+    import socket
+    import threading as _threading
+
+    server = build_server(gateway)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            oversized = gateway.config.max_body_bytes + 1
+            sock.sendall(
+                f"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: {oversized}\r\n"
+                f"X-Agent: bot\r\n\r\n".encode()
+            )
+            sock.settimeout(10)
+            reply = sock.recv(4096)
+
+        assert b"413" in reply.split(b"\r\n")[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --- the advertised approvals endpoint is actually reachable (SPEC-v0.2 §7.2) --------------
+#
+# `WebhookApprovalProvider` advertises `respond_to: <public_url>/ctrlrun/approvals/<id>` in
+# every APPROVAL_REQUESTED notification, and `do_POST` compared `self.path` against
+# `config.path` alone -- so that URL answered an HTML 404 and `Gateway.handle_approval` had no
+# caller anywhere in the package. The approver's system posted, got a 404, and the pending
+# approval sat until it expired: the whole inbound half of §7.2 was unreachable.
+#
+# Reachability is a different claim from handler correctness, and only the second one had a
+# test: `tests/test_webhook.py` calls `handle_inbound` directly.
+
+
+def _approvals_server(store, secret="s" * 40):
+    import threading as _threading
+
+    config = GatewayConfig(
+        upstream="http://127.0.0.1:1/mcp",
+        alias="acme",
+        principal_header="X-Agent",
+        port=0,
+        webhook_secret=secret,
+    )
+    control = Control(Policy.from_yaml(POLICY), store)
+    server = build_server(Gateway(config, control, lambda *a, **k: (None, None, 502, {})))
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[1]
+
+
+def test_the_advertised_approvals_url_is_routed_and_not_a_404(store):
+    """The endpoint exists on the socket. What it decides is `handle_inbound`'s business and
+    is tested there; this asserts only that a request reaches it at all."""
+    server, port = _approvals_server(store)
+    try:
+        response = httpx.post(
+            f"http://127.0.0.1:{port}/ctrlrun/approvals/req_abc",
+            content=b"{}",
+            headers={"CTRLRun-Signature": "sha256=nope"},
+            timeout=10,
+        )
+
+        assert response.status_code != 404, "the advertised respond_to URL is unrouted"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_approvals_path_is_a_404_when_no_webhook_secret_is_configured(store):
+    """`handle_approval`'s own refusal, which was unreachable along with the route."""
+    import threading as _threading
+
+    config = GatewayConfig(
+        upstream="http://127.0.0.1:1/mcp", alias="acme", principal_header="X-Agent", port=0
+    )
+    control = Control(Policy.from_yaml(POLICY), store)
+    server = build_server(Gateway(config, control, lambda *a, **k: (None, None, 502, {})))
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = httpx.post(
+            f"http://127.0.0.1:{server.server_address[1]}/ctrlrun/approvals/req_abc",
+            content=b"{}",
+            timeout=10,
+        )
+
+        assert response.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_an_unknown_ctrlrun_path_is_still_a_404(store):
+    """The route must not swallow every path under the reserved prefix."""
+    server, port = _approvals_server(store)
+    try:
+        response = httpx.post(f"http://127.0.0.1:{port}/ctrlrun/nope", content=b"{}", timeout=10)
+
+        assert response.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_signed_grant_posted_to_the_advertised_url_lands_the_approval(store):
+    """The loop closes end to end, over a socket, the way an approver's system drives it.
+
+    The route test above only asserts "not 404". This is the claim an operator actually
+    depends on: a human said yes, and the pending approval becomes granted.
+    """
+    import json as _json
+    import threading as _threading
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from ctrlrun import Action, Principal
+    from ctrlrun.approval import ApprovalStatus
+    from ctrlrun.webhook import SIGNATURE_HEADER, WebhookApprovalProvider, sign
+
+    secret = "s" * 40  # `webhook.MIN_SECRET_BYTES`: a MAC is worth its key
+    received: list[bytes] = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    hook = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    _threading.Thread(target=hook.serve_forever, daemon=True).start()
+
+    server, port = _approvals_server(store, secret=secret)
+    try:
+        provider = WebhookApprovalProvider(
+            url=f"http://127.0.0.1:{hook.server_address[1]}/hook",
+            secret=secret,
+            store=store,
+            public_url=f"http://127.0.0.1:{port}",
+            allow_insecure=True,  # loopback, which `_checked_url` permits with the flag
+        )
+        request = provider.request(
+            Action(
+                name="mcp.acme.create_refund",
+                arguments={"payment_id": "txn_e2e", "amount": 10},
+                principal=Principal(agent="bot"),
+            )
+        )
+
+        # The URL the notification told the approver to use, taken from the notification.
+        advertised = _json.loads(received[0])["respond_to"]
+        assert advertised.endswith(f"/ctrlrun/approvals/{request.request_id}")
+
+        body = _json.dumps(
+            {
+                "request_id": request.request_id,
+                "action_hash": request.action_hash,
+                "decision": "grant",
+                "approver": "slack:U123",
+            }
+        ).encode()
+        response = httpx.post(
+            advertised,
+            content=body,
+            headers={SIGNATURE_HEADER: sign(body, secret, at=_datetime.now(_UTC))},
+            timeout=10,
+        )
+
+        assert response.status_code == 200, response.text
+        assert store.get_approval(request.request_id).status is ApprovalStatus.GRANTED
+    finally:
+        server.shutdown()
+        server.server_close()
+        hook.shutdown()
+        hook.server_close()

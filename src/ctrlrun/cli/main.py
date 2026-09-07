@@ -139,24 +139,49 @@ def _store(store_url: str | None = None) -> StateStore:
     with an instruction rather than an invitation.
     """
     if store_url is None:
-        return SQLiteStateStore(state_path())
+        # The same existence check the explicit `sqlite://` branch below has always had.
+        # Without it this branch did exactly what the docstring above forbids: `ctrlrun
+        # receipts` in any directory with no `ctrlrun.yaml` created `.ctrlrun/state.db`,
+        # migrated it, and answered "no receipts yet" -- telling an operator looking for
+        # evidence of an agent action that there was none, out of a store the command had
+        # just created one directory away.
+        try:
+            path = state_path()
+        except CTRLRunError as exc:
+            raise _fail(exc) from exc
+        return _opened(path)
     if store_url.startswith(SQLITE_SCHEME):
-        path = Path(store_url[len(SQLITE_SCHEME) :])
-        if not path.exists():
-            raise click.ClickException(
-                f"no database at {str(path)!r}. A read command does not create one; the store "
-                "is created by the process that runs your agents."
-            )
-        return SQLiteStateStore(path)
+        return _opened(Path(store_url[len(SQLITE_SCHEME) :]))
     if store_url.startswith(POSTGRES_SCHEMES):
-        from ..postgres import PostgresStateStore
+        # `MissingDependency` when psycopg is absent, `SchemaMismatch` when the fleet is
+        # mid-upgrade. Both are carefully worded refusals, and both reached the terminal as
+        # tracebacks from the five commands that opened the store outside their `try`.
+        # `MissingDependency`'s whole purpose is that an operator does not read a missing
+        # extra as a broken package, which is exactly what a stack trace says.
+        try:
+            from ..postgres import PostgresStateStore
 
-        bare, schema = _peel_schema(store_url)
-        _require_head(bare, schema)
-        return PostgresStateStore(bare, schema=schema)
+            bare, schema = _peel_schema(store_url)
+            _require_head(bare, schema)
+            return PostgresStateStore(bare, schema=schema)
+        except CTRLRunError as exc:
+            raise _fail(exc) from exc
     raise click.ClickException(
         f"no store backend for {store_url!r}; expected a 'sqlite://' path or a 'postgresql://' URL"
     )
+
+
+def _opened(path: Path) -> StateStore:
+    """A SQLite store that is already there, or the refusal that says who creates one."""
+    if not path.exists():
+        raise click.ClickException(
+            f"no database at {str(path)!r}. A read command does not create one; the store "
+            "is created by the process that runs your agents."
+        )
+    try:
+        return SQLiteStateStore(path)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
 
 
 def _require_head(url: str, schema: str) -> None:
@@ -665,7 +690,13 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
     No network, no aggregation service, no upload: this reads the SQLite file the process it
     is diagnosing has been writing (SPEC-v0.3 §6.4).
     """
-    policy = _loaded_policy()
+    # `_loaded_policy` documents that a `PolicyError` propagates, and every other caller is
+    # already inside a `try` that turns one into a clean message. This one was not, so a
+    # missing or malformed `ctrlrun.yaml` dumped a traceback out of `ctrlrun stats`.
+    try:
+        policy = _loaded_policy()
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
     try:
         boundary = since_boundary(since)
     except InvalidArgument as exc:

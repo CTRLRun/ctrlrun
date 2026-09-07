@@ -522,6 +522,56 @@ class _ActionPolicy:
         return Evaluation(Decision.DENY, NO_MATCHING_RULE, _in_registry_order(self.controls, order))
 
 
+class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # PyYAML ships no stubs
+    """`yaml.SafeLoader` that refuses a repeated mapping key instead of resolving it.
+
+    YAML says a duplicated key is an error and PyYAML resolves it to the last one anyway,
+    silently. That is a fail-**open** in the authority document: a grant written as
+
+        actions: ["payments.refund"]
+        actions: ["**"]
+
+    -- the shape of a half-finished narrowing edit -- loads as `("**",)` with no warning, and
+    `ctrlrun verify` reads this same loader, so nothing downstream catches it either. Every
+    other mistake in these documents is refused, the key sets being closed at every level, so
+    a clean load reads as "the document is what I meant".
+
+    The node carries the line, which is exactly what the message needs.
+    """
+
+    def construct_mapping(
+        self,
+        node: Any,  # noqa: ANN401 - PyYAML's node type, and PyYAML ships no stubs
+        deep: bool = False,
+    ) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            try:
+                duplicate = key in seen
+            except TypeError:  # an unhashable key; the base class refuses it below
+                continue
+            if duplicate:
+                mark = key_node.start_mark
+                raise yaml.constructor.ConstructorError(
+                    None,
+                    None,
+                    f"duplicate key {key!r} on line {mark.line + 1}, column {mark.column + 1}",
+                    mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)  # type: ignore[no-any-return]
+
+
+def strict_load(text: str, source: str) -> Any:  # noqa: ANN401 - any YAML scalar or node
+    """`yaml.safe_load`, refusing a repeated key. The one loader for every CTRLRun document."""
+    try:
+        # `_StrictLoader` derives from `SafeLoader`, so this constructs no arbitrary object.
+        return yaml.load(text, Loader=_StrictLoader)
+    except yaml.YAMLError as exc:
+        raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
+
+
 @dataclass(frozen=True)
 class Policy:
     """Action-level autonomy policy: which actions may run, and under which conditions.
@@ -587,11 +637,7 @@ class Policy:
     @classmethod
     def from_yaml(cls, text: str, *, source: str = "<string>") -> Policy:
         """Parse and validate a policy document. Anything malformed raises `PolicyError`."""
-        try:
-            document = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
-            raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
-        return cls._from_document(document, source)
+        return cls._from_document(strict_load(text, source), source)
 
     @classmethod
     def _from_document(cls, document: object, source: str) -> Policy:
@@ -1313,7 +1359,22 @@ def _parse_operand(op: str, operand: object, where: str, key: str) -> object:
                 f"{where}: condition {key!r}: '_in' needs a list operand, got {_type_name(operand)}"
             )
         return tuple(_checked_operand(item, where, key) for item in operand)
-    return _checked_operand(operand, where, key)
+    checked = _checked_operand(operand, where, key)
+    if op in {"eq", "neq"} and isinstance(checked, list | tuple):
+        # A derived, set-valued subject is compared with `frozenset(...)`, so every element
+        # has to be hashable. `data_scope_eq: [[phi]]` used to load clean and then raise
+        # `TypeError: unhashable type: 'list'` on every evaluation of the action -- out of
+        # `Control.execute`, and not as a `CTRLRunError`, so an application catching the
+        # kernel's own errors did not catch it. Refuse here, where the message can name the
+        # condition and the operator can find the line.
+        for item in checked:
+            if isinstance(item, list | tuple | Mapping):
+                raise PolicyError(
+                    f"{where}: condition {key!r}: a set-valued operand holds strings, "
+                    f"got {_type_name(item)}. Write the labels as a flat list "
+                    "(data_scope_eq: [phi, pci]), not nested"
+                )
+    return checked
 
 
 def _checked_operand(operand: object, where: str, key: str) -> object:
