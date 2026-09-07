@@ -14,7 +14,7 @@
 #   ways_in      decorator / gateway / adapter: true, false, or a short note for a qualified yes
 #   since        the version that shipped it, v0.1 … v0.6
 #   page         the docs-site path that owns it (docs/IA.md), without extension
-#   claim        the exact quoted text of the docs/CLAIMS.md row that proves it, or null with a
+#   claim        the exact quoted text of the docs/docs/CLAIMS.md row that proves it, or null with a
 #                claim_note saying which session adds the sentence and its row
 #
 # Entries are rendered in this order. The six guarantees come first because the README
@@ -30,7 +30,7 @@ capabilities:
       gateway: true
       adapter: prevention or attribution, per adapter
     since: v0.1
-    page: concepts/approval-binding
+    page: docs/concepts/approval-binding
     claim: An approval is bound to the exact action; a mutated or replayed one is refused.
 
   - id: one-effect-once
@@ -42,7 +42,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: concepts/effect-keys
+    page: docs/concepts/effect-keys
     claim: One logical effect happens at most once, across threads, processes and hosts.
 
   - id: ambiguous-outcomes
@@ -54,7 +54,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: concepts/outcomes-and-ambiguous
+    page: docs/concepts/outcomes-and-ambiguous
     claim: An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry.
 
   - id: fail-closed
@@ -66,7 +66,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: concepts/fail-closed
+    page: docs/concepts/fail-closed
     claim: An unknown action, a missing policy or a missing principal is denied.
 
   - id: authority-containment
@@ -78,7 +78,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.3
-    page: concepts/authority-and-delegation
+    page: docs/concepts/authority-and-delegation
     claim: provably a subset of its parent on every dimension, at creation and again at every evaluation
 
   - id: receipts
@@ -90,7 +90,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: concepts/receipts-and-evidence
+    page: docs/concepts/receipts-and-evidence
     claim: Every executed action leaves a portable JSON receipt
 
   - id: per-action-policy
@@ -102,7 +102,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: reference/policy-yaml
+    page: docs/reference/policy-yaml
     claim: cheap to undo is autonomous, anything that leaves the building needs a human, money is by amount with both ends bound
 
   - id: operator-cli
@@ -114,7 +114,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.1
-    page: reference/cli
+    page: docs/reference/cli
     claim: "`ctrlrun approve`, `deny`, `resolve`, `inspect`, `receipts` and `stats` work from the shell against any store"
 
   - id: mcp-gateway
@@ -126,7 +126,7 @@ capabilities:
       gateway: true
       adapter: false
     since: v0.2
-    page: guides/gateway-in-front-of-mcp
+    page: docs/guides/gateway-in-front-of-mcp
     claim: No agent changes
 
   - id: reconciliation
@@ -138,7 +138,7 @@ capabilities:
       gateway: false
       adapter: true
     since: v0.2
-    page: guides/reconcile-automatically
+    page: docs/guides/reconcile-automatically
     claim: the only thing besides a human permitted to move a record out of `AMBIGUOUS`
 
   - id: webhook-approvals
@@ -150,7 +150,7 @@ capabilities:
       gateway: true
       adapter: false
     since: v0.2
-    page: guides/approvals-in-slack
+    page: docs/guides/approvals-in-slack
     claim: "`WebhookApprovalProvider` sends an approval request to a webhook, such as Slack, and takes the answer back through the same grant calls"
 
   - id: otel-export
@@ -162,7 +162,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.2
-    page: guides/export-to-opentelemetry
+    page: docs/guides/export-to-opentelemetry
     claim: one OpenTelemetry span per action, one span event per step
 
   - id: identity
@@ -174,7 +174,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.3
-    page: concepts/authority-and-delegation
+    page: docs/concepts/authority-and-delegation
     claim: CTRLRun issues no credential and defines no identity format
 
   - id: delegation
@@ -186,7 +186,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.3
-    page: concepts/authority-and-delegation
+    page: docs/concepts/authority-and-delegation
     claim: "`ctrlrun revoke` cuts a chain of any depth with one write"
 
   - id: observe-mode
@@ -198,7 +198,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.3
-    page: concepts/observe-mode
+    page: docs/concepts/observe-mode
     claim: "`mode: observe` … records what *would* have been blocked, without blocking anything"
 
   - id: verify
@@ -210,7 +210,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.4
-    page: guides/verify-in-ci
+    page: docs/guides/verify-in-ci
     claim: Not applicable is not a pass
 
   - id: verify-badge
@@ -222,7 +222,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.4
-    page: verify/get-the-badge
+    page: docs/verify/get-the-badge
     claim: means the **declared guarantees pass**
 
   - id: framework-adapters
@@ -234,7 +234,7 @@ capabilities:
       gateway: false
       adapter: true
     since: v0.5
-    page: get-started/three-ways-in
+    page: docs/get-started/three-ways-in
     claim: There is never a second place to say yes
 
   - id: durable-runtime
@@ -246,7 +246,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: production/index
+    page: docs/production/index
     claim: Runs in production on a single file, or on Postgres across hosts
 
   - id: postgres
@@ -258,7 +258,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: production/postgres
+    page: docs/production/postgres
     claim: Same `StateStore` protocol, extended by nothing
 
   - id: migrations
@@ -270,7 +270,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: production/migrations
+    page: docs/production/migrations
     claim: migrations are automatic at open, forward-only
 
   - id: recovery
@@ -282,7 +282,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: production/recovery
+    page: docs/production/recovery
     claim: A crashed worker's effect stays `AMBIGUOUS` until a human runs `ctrlrun resolve` or a `reconcile` hook asks the remote what happened
 
   - id: receipt-chain
@@ -294,7 +294,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: security/receipt-chain
+    page: docs/security/receipt-chain
     claim: Each receipt carries the hash of the one before it
 
   - id: policy-versioning
@@ -306,7 +306,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: concepts/receipts-and-evidence
+    page: docs/concepts/receipts-and-evidence
     claim: every receipt records which policy decided it
 
   - id: control-registry
@@ -318,7 +318,7 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: reference/policy-yaml
+    page: docs/reference/policy-yaml
     claim: Receipts in a `ctrlrun.policy/v4` document can cite the `controls:` an action satisfies
 
   - id: data-scope
@@ -330,5 +330,5 @@ capabilities:
       gateway: true
       adapter: true
     since: v0.6
-    page: reference/policy-yaml
+    page: docs/reference/policy-yaml
     claim: a rule can condition on the `data:` labels present in an action's arguments

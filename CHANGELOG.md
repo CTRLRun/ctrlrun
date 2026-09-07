@@ -124,7 +124,7 @@ policy or authority document — and both are listed below with what they did be
 of at least one week with no unexplained `AMBIGUOUS`*; the week was removed rather than waited
 out, and the criterion is now a published run with no unattributed `AMBIGUOUS` and a positive
 control that fired — the two things a harness is allowed to decide about itself. `SPEC-v0.6.md`
-§8.1 carries the reasoning, what it costs and what did not change; `docs/ROADMAP.md` records it
+§8.1 carries the reasoning, what it costs and what did not change; `docs/docs/ROADMAP.md` records it
 in the milestone's own reconciliation. The short version: elapsed hours were a proxy for a
 question the injection ledger already answers, and what a week would actually have bought —
 whether anything **accumulates** over days — is unestablished by anything in this repository and
@@ -133,7 +133,7 @@ is now claimed by nothing rather than owed by a gate.
 The published run is twenty minutes, 889,735 actions, 133,393 ambiguous outcomes all attributed,
 0 unattributed, positive control fired. **The duration is printed on every surface that quotes
 the run** so a reader can discount it: the README's readiness block, the docs home, the
-production index, and `docs/production/soak.mdx`, which now recomputes the criterion from the
+production index, and `docs/docs/production/soak.mdx`, which now recomputes the criterion from the
 published counts instead of reading `exit_criterion_met` out of the same file.
 
 v0.5 asked *can somebody else implement this?* v0.6 asks: **does it still hold when the process
@@ -245,7 +245,7 @@ have recovered or retrying work nothing can.
   runs in its own store: a deliberately unrecorded ambiguity that the table must report. A soak
   with no unexplained `AMBIGUOUS` is a result; a soak whose harness could not have detected one
   is not.
-- **`docs/postgres.md`** — the operator's page: connection strings, what to grant, what happens
+- **`docs/docs/postgres.md`** — the operator's page: connection strings, what to grant, what happens
   on failover, the one row every receipt write serializes on, and what the store does **not** do
   for you.
 
@@ -357,12 +357,12 @@ have recovered or retrying work nothing can.
   database with no `continuations` and no `delegations` table. `docs/SPEC-v0.6.md` §9.6.1 records
   all twenty-one with where each landed.
 
-- **`docs/ROADMAP.md`'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the
+- **`docs/docs/ROADMAP.md`'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the
   slash was the problem.** A chain detects **alteration**; a signature proves **origin**, and
   proving origin brings key generation, rotation and revocation with it — which is issuing, and
   this project verifies what it is handed. Signing is out of scope for v0.6 (`SPEC-v0.6.md` §11).
   Corrected in the same commit as the specification, on the rule `SPEC-v0.4.md` §9.4 set.
-- **`docs/THREAT_MODEL.md`'s "Receipts are not signed; a database admin can alter history
+- **`docs/docs/THREAT_MODEL.md`'s "Receipts are not signed; a database admin can alter history
   (v0.6)"** promised something v0.6 does not deliver. Rewritten to say which half v0.6 closes —
   the partial tamper: an `UPDATE` on one row, a `DELETE` from the middle, a reordering — and
   which half it does not: **truncation at the end**, authorship, an adversary who can rewrite
@@ -515,7 +515,7 @@ exercise, not the two adapters, is what v0.5 is for.
   the same refusals as one driven through `@protect`?* Fifteen deliberately broken fixtures were
   written **first**, and each fails the suite named for it and no other.
 
-- **`docs/adapters.md`**, and a README section that opens by saying when you do **not** need an
+- **`docs/docs/adapters.md`**, and a README section that opens by saying when you do **not** need an
   adapter (T139) — `@protect` covers anything in this process and the gateway anything over MCP.
 
 - **The framework probe was run** against LangGraph 1.2.11 and openai-agents 0.22.0, five
@@ -596,7 +596,7 @@ reading a coarser answer as though it answered a finer question.
 
 ### Changed
 
-- **`docs/ROADMAP.md`'s v0.5 bullet was wrong and is corrected here**, not silently. It said
+- **`docs/docs/ROADMAP.md`'s v0.5 bullet was wrong and is corrected here**, not silently. It said
   the reference adapters map their frameworks' interrupts onto `Suspended` / `Control.resume`,
   "which v0.2 already ships for exactly this shape". It does not: `Suspended` exists for the
   remote asking a question *mid-execution*, where the reservation is already taken and must
@@ -677,7 +677,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   document structurally as well — a permissive schema is not a check. `xmlschema` joins the
   **dev** extra for that test and for nothing else.
 
-- **The GitHub Action, the badge and `docs/verify.md`** (SPEC-v0.4 §5). `action.yml` at the
+- **The GitHub Action, the badge and `docs/docs/verify.md`** (SPEC-v0.4 §5). `action.yml` at the
   repository root is a composite action: it installs `ctrlrun`, runs
   `ctrlrun verify --json --junit`, renders the job summary and the badge **from that report**
   rather than from a second run — so the badge, the summary and the uploaded artifact can never
@@ -692,14 +692,14 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   The badge is a Shields endpoint JSON the action **writes and never publishes**. Committing it
   would need `contents: write` in every consumer's workflow, and asking for write access to a
   repository as the price of a verification badge is a bad trade for a tool whose subject is
-  least privilege; `docs/verify.md` shows the one-job publishing pattern once, with its cost
+  least privilege; `docs/docs/verify.md` shows the one-job publishing pattern once, with its cost
   visible. Rendered, it reads exactly `CTRLRun verified N/M`, where `M` is **applicable**
   guarantees and never the catalogue size. A partial run and a run that exited 2 or 3 write no
   badge at all.
 
   The badge means **"declared guarantees pass"** — that phrase, on the badge's link target, and
   no other. Not secure, not safe, not compliant, not certified, not audited.
-  `docs/verify.md#what-the-badge-means` says it in its first sentence and, on the same screen,
+  `docs/docs/verify.md#what-the-badge-means` says it in its first sentence and, on the same screen,
   what verify cannot see: the operator's executors, their `reconcile` hooks, where they put the
   decorator, their deployment, and whether the policy is the right policy.
 
@@ -708,7 +708,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   so a change that made verify silently count N/As as passes is caught in CI rather than in a
   badge.
 
-- **`docs/OWASP-AGENTIC-TOP10.md`** (SPEC-v0.4 §6) — a reading of the OWASP Top 10 for Agentic
+- **`docs/docs/OWASP-AGENTIC-TOP10.md`** (SPEC-v0.4 §6) — a reading of the OWASP Top 10 for Agentic
   Applications (2026 edition, announced 2025-12-09) against the ten guarantees. Its first line,
   before any table, says what it is not: not a compliance claim, not a conformance claim, not a
   certification, and not a statement that CTRLRun covers the Top 10.
@@ -756,7 +756,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   request from a fork must not be able to write the badge, and a read-only fork token is a
   default rather than a refusal — and publishing the badge the `verify` job already produced,
   downloaded as an artifact rather than regenerated, so §5.1's one-run rule holds across the
-  job boundary. `docs/verify.md` shows the job and names the permission it costs.
+  job boundary. `docs/docs/verify.md` shows the job and names the permission it costs.
 
 - **`docs/SPEC-v0.4.md` gains a §12**, recording the readings the implementation had to take
   where the specification could not be satisfied as written. A specification that
@@ -782,7 +782,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
 - **`docs/SPEC-v0.3.md` §4.3.1 gains an informational row** for `ctrlrun.verify.run` (SPEC-v0.4
   §3.9, §9.4 item 3). Verify is not a new entry point: it proposes no action of its own and
   drives the rows already there. The row exists because a reader will look for one.
-- `docs/ARCHITECTURE.md` §6's module map gains `verify/`, above `control.py` and beside `cli/`.
+- `docs/docs/ARCHITECTURE.md` §6's module map gains `verify/`, above `control.py` and beside `cli/`.
 
 - **`docs/SPEC-v0.4.md`** — the v0.4 contract, a delta over v0.1, v0.2 and v0.3. v0.4 answers
   the question the first three releases could not: *does it hold in **my** setup?* Everything
@@ -845,11 +845,11 @@ a token rotation.
 - **`examples/authority/`** — a payments delegation chain and a DevOps chain, as complete
   documents to read rather than run, with a README that says in its first paragraph that every
   principal in them is invented.
-- **`docs/authority.md`** — grants, delegation and the omission rule in plain language,
+- **`docs/docs/authority.md`** — grants, delegation and the omission rule in plain language,
   including the two things it is worth knowing before you need them: an `Authority` is built at
   load time and is not hot-reloaded, and there is no way to list delegations, so cutting a
   chain of unknown width means `delegable: false` on the root and a restart.
-- **`docs/THREAT_MODEL.md` gains v0.3's boundary.** In scope: delegation escalation, omission
+- **`docs/docs/THREAT_MODEL.md` gains v0.3's boundary.** In scope: delegation escalation, omission
   as widening, expired and revoked authority, token forgery, cross-JWT confusion, and signing
   keys fetched from somewhere else. Out of scope, and stated rather than implied: a compromised
   identity provider, a `HeaderIdentityProvider` behind a proxy that does not overwrite, a
@@ -1085,7 +1085,7 @@ a token rotation.
   provider, `agent_id` is ignored — not merged, not a fallback, not compared — and a provider
   that names nobody is a denial with `reason_codes: ["no_principal"]`, never a fall back to the
   envelope. `handle()` gains an optional `headers=` for the transport's own headers, which is
-  what a provider reads. `docs/ACS.md`'s mapping table is amended in the same change.
+  what a provider reads. `docs/docs/ACS.md`'s mapping table is amended in the same change.
 - **All three v0.2 call sites now use the combined decision** (§8.3): the gateway's `tools/call`
   path, `ctrlrun.acs`'s request hook, and `Control.resume`. Left as `Policy.evaluate`, an action
   a grant forbids outright would still have its approval flow run, and a human would be paged
@@ -1281,7 +1281,7 @@ Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml
   and the policy disagree, the decorator wins and the mismatch is warned about once.
 - **ACS control hook** — `ctrlrun.acs.AcsControlHook`, in `ctrlrun[gateway]`. Answers the
   OWASP Agent Control Standard's `steps/toolCallRequest` and `steps/toolCallResult`. See
-  `docs/ACS.md` for the mapping and for the four places ACS is silent. **No compliance
+  `docs/docs/ACS.md` for the mapping and for the four places ACS is silent. **No compliance
   claim**: at the commit read there is no ACS reference implementation and no conformance
   suite, so there is nothing to be conformant with.
 - **`examples/`** — four standalone failure scenarios, an ACS integration example, and nine
@@ -1381,7 +1381,7 @@ First packaged release. The v0.1 kernel is complete: every acceptance test in
 - **Receipts and events** — portable JSONL evidence for every action.
 - **CLI** — `init`, `demo`, `approve`, `deny`, `receipts`, `effects`, `resolve`.
 - **`ctrlrun demo`** — four failure scenarios, in process, no network.
-- `SECURITY.md` and `docs/CLAIMS.md`, which maps every README claim to its code and test.
+- `SECURITY.md` and `docs/docs/CLAIMS.md`, which maps every README claim to its code and test.
 
 ### Config-breaking rules
 
@@ -1413,7 +1413,7 @@ until it gets one, which is the point.
   webhook provider in v0.2, and an id format cannot be widened after records exist.
 - Effect key templates do not escape placeholder values, so a crafted argument can make two
   distinct effects share one key. The result is a refusal rather than a double execution;
-  `docs/THREAT_MODEL.md` states the limit and the workaround.
+  `docs/docs/THREAT_MODEL.md` states the limit and the workaround.
 - Policy conditions address an action's arguments only. Scoping a rule by environment,
   resource or principal arrives with the authority model in v0.3.
 

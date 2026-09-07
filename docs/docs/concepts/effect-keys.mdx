@@ -1,0 +1,73 @@
+---
+title: "Effect keys"
+description: "An effect key names the real-world consequence of an action, such as refund:txn_1, so a retry meets the first attempt instead of the remote."
+---
+
+An effect key is the name of a consequence in the real world: `refund:txn_1`,
+`namespace:prod-eu:checkout`, `email:msg_8812`. It is declared as a template over the action's
+arguments, reserved in one atomic write before the executor runs, and held until the outcome is
+known, so that the same consequence proposed twice, by a retry, by a second agent or on a second
+host, executes at most once.
+
+This is the idempotency key idea, applied on the agent's side of the call and across every
+remote at once, and bound to the approval and the receipt rather than living in a header one
+API happens to honour.
+
+## Declaring one
+
+```python
+@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
+def refund(payment_id: str, amount: int) -> dict: ...
+```
+
+Or in the policy, for a tool call behind the gateway that has no decorator to carry it:
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  mcp.acme.create_refund:
+    effect: "refund:{payment_id}"
+    decision: approve
+```
+
+A template that cannot be resolved from the arguments fails the action before anything runs. A
+write with no `effect:` at all gets no reservation, which is right for a read and wrong for
+anything that changes the world; the gateway prints every such action on the line that starts
+it.
+
+## What the reservation does
+
+```text
+Agent A   reserve refund:txn_123  →  ACQUIRED  →  executes  →  COMMITTED
+Agent B   reserve refund:txn_123  →  ✗ DuplicateEffect: already reserved (in_progress)
+```
+
+The reservation is a row keyed by the effect key, written under SQLite's `BEGIN IMMEDIATE` or
+Postgres's unique index with compare-and-set updates, so it holds across threads, processes and
+hosts. It carries a lease. A worker that dies mid-call never releases its key: past the lease the
+effect is `AMBIGUOUS`, never free, because nobody knows what the dead worker did.
+
+Once the outcome is known the key stays in the store with its state, and a later attempt is
+answered from it: `COMMITTED` refuses a duplicate, `FAILED` permits a retry, `AMBIGUOUS` refuses
+a blind one.
+
+## The guarantee it supports
+
+One effect, once: G3 (duplicate effect refused) and G4 (one winner under concurrency, eight
+processes) in `ctrlrun verify`. It is verified only where the policy declares templates, and
+reported not applicable, with the reason, where it does not.
+
+## What it does not do
+
+An effect key deduplicates *intent*. It cannot know what the remote did after the reply was
+lost, which is why an `AMBIGUOUS` effect is not retried on its own. It does not span two
+different keys that happen to cause one consequence; naming the consequence well is the
+operator's job. And it is not a lock on the resource: a call that bypasses the decorator
+entirely is not reserved, which the threat model lists as out of scope.
+
+## Next
+
+- [Outcomes and AMBIGUOUS](/docs/concepts/outcomes-and-ambiguous): what happens when the reply is lost.
+- [Compare: idempotency keys](/docs/compare/idempotency-keys).
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

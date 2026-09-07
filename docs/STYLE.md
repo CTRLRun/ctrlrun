@@ -26,7 +26,7 @@ reviewer reads for.
 - **One idea per paragraph.** Two or three sentences is a paragraph; six is two.
 - **No exclamation marks.** No *we're excited*, no *simply*, no *just*, no *easy*.
 - **Plain claims.** A sentence either describes what the shipped code does, and has a row in
-  `docs/CLAIMS.md`, or it is marked *(design)*, or it is cut.
+  `docs/docs/CLAIMS.md`, or it is marked *(design)*, or it is cut.
 - **Numbers travel with their units.** Amounts are integer minor units and the page says so
   the first time one appears.
 
@@ -99,3 +99,7 @@ python tools/docs_audit/lint.py
 python tools/docs_audit/links.py
 python tools/docs_audit/render_capabilities.py --check
 ```
+
+## Product experience
+
+The `/`, `/risk-check`, and `/protect-my-agent` pages use Mintlify custom mode. The product brief governs their concise copy and layout; the documentation-only Next section, fixed-copy, and three-domain-list rules do not apply to these pages. Technical pages under `/docs` retain the rules above.

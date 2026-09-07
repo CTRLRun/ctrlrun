@@ -327,7 +327,7 @@ class PostgresStateStore:
         the schema got a raw `psycopg.errors.InsufficientPrivilege` out of the constructor, with
         the failing `CREATE TABLE` quoted verbatim, uncatchable by any `except CTRLRunError` in
         this codebase. A migration needs DDL rights at least on the first start after an upgrade,
-        and `docs/postgres.md` says so; an operator who has not granted them deserves to be told
+        and the Postgres guide says so; an operator who has not granted them deserves to be told
         which grant is missing, not which statement failed.
         """
         with connection.cursor() as cursor:

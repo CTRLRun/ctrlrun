@@ -16,7 +16,7 @@ warranted you will be credited in the release notes unless you ask not to be.
 Releases carry PyPI provenance attestations from GitHub Actions. Distributions are published
 through trusted publishing, so there is no API token to leak or replay, and each wheel and sdist
 carries an attestation naming the workflow that built it. Every GitHub Action the workflows use
-is pinned to a commit. `docs/how-this-is-built.md` says what has and has not been reviewed.
+is pinned to a commit. `docs/docs/how-this-is-built.md` says what has and has not been reviewed.
 
 From v0.6.0, every GitHub Release also carries signed SLSA build provenance for the same
 distributions — `ctrlrun-<version>.intoto.jsonl` (the DSSE envelopes) and
@@ -64,7 +64,7 @@ these as a security issue, not a bug:
 - An unknown execution outcome is recorded as `failed` rather than `ambiguous`.
 - A receipt does not reflect what happened.
 
-`docs/THREAT_MODEL.md` states what is deliberately out of scope — a compromised host, a
+`docs/docs/THREAT_MODEL.md` states what is deliberately out of scope — a compromised host, a
 malicious administrator with write access to the state database, a lying external service, or
 code that bypasses the decorator entirely. Those are documented limits rather than
 vulnerabilities, but if you think one is stated too generously, say so.

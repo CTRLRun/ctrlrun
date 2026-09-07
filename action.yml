@@ -49,7 +49,7 @@ inputs:
     description: >-
       Where to write the Shields endpoint JSON. The action writes it and never publishes it:
       publishing is your decision, in your own workflow, with whatever permissions you choose
-      (SPEC-v0.4 §5.2, `docs/verify.md`).
+      (SPEC-v0.4 §5.2, `docs/docs/verify.md`).
     required: false
     default: verify-badge.json
   upload-artifact:

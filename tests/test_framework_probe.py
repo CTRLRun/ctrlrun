@@ -543,7 +543,12 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
     """A sentence naming one of these four outside the harness's own directory is the shape of
     an overclaim, so there are none — and this test is what keeps it that way when somebody
     writes the release post."""
-    checked = ["README.md", "CHANGELOG.md", "docs/verify.md", "docs/OWASP-AGENTIC-TOP10.md"]
+    checked = [
+        "README.md",
+        "CHANGELOG.md",
+        "docs/docs/verify.md",
+        "docs/docs/OWASP-AGENTIC-TOP10.md",
+    ]
 
     offending = []
     for name in checked:

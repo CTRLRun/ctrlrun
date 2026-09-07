@@ -1,6 +1,6 @@
 """Extract every cookbook recipe's files from its page into `examples/cookbook/<name>/`.
 
-A recipe page under `docs/cookbook/` is the single source: its `yaml runnable` block is the
+A recipe page under `docs/docs/cookbook/` is the single source: its `yaml runnable` block is the
 recipe's `ctrlrun.yaml` and its `python runnable file=main.py` block is the script. This
 script writes those into `examples/cookbook/<name>/`, so the directory a reader clones runs
 exactly what the page shows, and `--check` refuses a copy that drifted either way.
@@ -18,16 +18,16 @@ import sys
 
 from _files import REPO_ROOT, fences, relative
 
-PAGES = REPO_ROOT / "docs" / "cookbook"
+PAGES = REPO_ROOT / "docs" / "docs" / "cookbook"
 EXAMPLES = REPO_ROOT / "examples" / "cookbook"
 HEADER = (
     "# Extracted by tools/docs_audit/render_cookbook.py from\n"
-    "# docs/cookbook/{name}.mdx — edit the page, never this file.\n"
+    "# docs/docs/cookbook/{name}.mdx — edit the page, never this file.\n"
 )
 
 
 def recipes() -> dict[str, dict[str, str]]:
-    """`{recipe name: {file name: content}}` for every page under `docs/cookbook/`."""
+    """`{recipe name: {file name: content}}` for every page under `docs/docs/cookbook/`."""
     out: dict[str, dict[str, str]] = {}
     for page in sorted(PAGES.glob("*.mdx")):
         if page.stem == "index":
@@ -60,7 +60,7 @@ def check(extracted: dict[str, dict[str, str]]) -> list[str]:
                 drift.append(f"{relative(target)} missing; run --write")
             elif target.read_text(encoding="utf-8") != content:
                 drift.append(
-                    f"{relative(target)} differs from docs/cookbook/{name}.mdx; run --write"
+                    f"{relative(target)} differs from docs/docs/cookbook/{name}.mdx; run --write"
                 )
     if EXAMPLES.exists():
         for existing in EXAMPLES.iterdir():
@@ -69,7 +69,9 @@ def check(extracted: dict[str, dict[str, str]]) -> list[str]:
                 and existing.name not in extracted
                 and existing.name != "__pycache__"
             ):
-                drift.append(f"{relative(existing)} has no page under docs/cookbook/; remove it")
+                drift.append(
+                    f"{relative(existing)} has no page under docs/docs/cookbook/; remove it"
+                )
     return drift
 
 

@@ -1,0 +1,83 @@
+---
+title: "Three ways in"
+description: "The @protect decorator covers anything in your Python process, the MCP gateway covers tools behind an MCP server in any language."
+---
+
+There are three ways to put CTRLRun in front of a consequential action, and only one of them is
+an adapter. Most readers need the decorator and should not look for an adapter.
+
+| | Covers | Needs |
+|---|---|---|
+| **`@protect`** | anything running in this process: a raw model call, a LangChain tool, a hand-rolled loop, a cron job | nothing; it is a decorator |
+| **The MCP gateway** | anything reaching its tools over MCP, in any language | `pip install "ctrlrun[gateway]"` |
+| **An adapter** | routing an `approve` decision through the framework's **own interrupt** instead of raising past it | the framework to have a human-in-the-loop primitive |
+
+## The decorator
+
+Wrap the function that acts. Name the action, name the consequence with `effect=`, and say who
+is acting with `context`. The policy beside your code decides.
+
+```python
+import ctrlrun
+
+
+@ctrlrun.protect("k8s.delete_namespace", effect="namespace:{cluster}:{name}")
+def delete_namespace(cluster: str, name: str) -> str:
+    return kubectl("delete", "namespace", name, "--context", cluster)
+
+
+with ctrlrun.context(agent="deploy-agent"):
+    delete_namespace(cluster="prod-eu", name="checkout")
+```
+
+`ApprovalRequired`, `ActionDenied`, `DuplicateEffect` and `AmbiguousEffect` are raised as
+themselves, before the function body runs. [Protect a function](/docs/guides/protect-a-function) is
+the full guide.
+
+## The gateway
+
+No agent changes and no server changes. Point the MCP client at the gateway instead of the tool
+server, and every `tools/call` is decided, approved, reserved, executed and recorded like a
+decorated call. Everything else on the wire is relayed untouched.
+
+```text
+before    agent  ──▶  MCP server
+after     agent  ──▶  CTRLRun gateway  ──▶  MCP server
+```
+
+```bash
+pip install "ctrlrun[gateway]"
+ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal refund-agent
+```
+
+Tools become actions named `mcp.<alias>.<tool>`. A tool call has no decorator to carry its
+effect template, so the template is declared in the policy, and the gateway prints on the line
+that starts it every action that has none.
+[Put the gateway in front of MCP](/docs/guides/gateway-in-front-of-mcp) is the guide.
+
+## Adapters
+
+An adapter exists for one reason: so that a human answers where they already answer. When the
+policy says `approve`, the request goes out through LangGraph's `interrupt()` or the OpenAI
+Agents SDK's tool-approval interruption instead of `ApprovalRequired` being raised past your
+graph. The adapter returns the answer; one core provider writes the grant through the same calls
+`ctrlrun approve` makes. There is never a second place to say yes.
+
+| | Reuses | Binding |
+|---|---|---|
+| `ctrlrun-langgraph` | `interrupt()` and the checkpointer | **prevention**: the resumption carries the arguments and core re-checks them against the hash |
+| `ctrlrun-openai-agents` | the SDK's tool-approval interruption | **attribution**: the SDK records *that* a call was approved, not what its arguments were |
+
+You build the `Control` with your policy, store, identity provider and authority document, and
+hand it over. An adapter never constructs one and never supplies a principal. Adapters ship on
+their own version line, `adapters-langgraph-1.0` and never a kernel version, because they break
+when their framework does.
+
+A framework with no human-in-the-loop primitive has nothing for an adapter to reuse and does not
+need one. The decorator already covers it.
+
+## Next
+
+- [Choosing between them](/docs/get-started/choosing): the decision table.
+- [Use the LangGraph adapter](/docs/guides/langgraph-adapter) · [Use the OpenAI Agents SDK adapter](/docs/guides/openai-agents-adapter).
+- [Why](/docs/why).

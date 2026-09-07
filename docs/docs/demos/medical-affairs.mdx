@@ -1,0 +1,111 @@
+---
+title: "The letter that changed after it was signed"
+sidebarTitle: "Medical affairs"
+description: "A medical information letter is drafted, reviewed and signed. New evidence lands, the recommendation flips, and the send is refused — in your browser."
+mode: "wide"
+---
+
+A harness that retrieves biomedical evidence, reasons over it, cites it and drafts a reply is
+four problems, and CTRLRun solves none of them. It solves the fifth: the letter that leaves the
+building is the letter a named human read, it goes out once, and there is a receipt. Press the
+buttons below and watch a signature stop matching.
+
+<div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "stretch", margin: "24px 0" }}>
+  {[
+    ["Retrieve", "your pipeline"],
+    ["Reason", "your pipeline"],
+    ["Cite", "your pipeline"],
+    ["Validate", "your pipeline"],
+  ].map(([step, who]) => (
+    <div key={step} style={{ flex: "1 1 0", minWidth: "102px", border: "1px solid currentColor", borderRadius: "8px", padding: "10px 12px", opacity: 0.55 }}>
+      <div style={{ fontSize: "15px", fontWeight: 600 }}>{step}</div>
+      <div style={{ fontSize: "12px" }}>{who}</div>
+    </div>
+  ))}
+  <div style={{ flex: "1 1 0", minWidth: "112px", border: "2px solid #B8730A", borderRadius: "8px", padding: "10px 12px" }}>
+    <div style={{ fontSize: "15px", fontWeight: 700, color: "#B8730A" }}>The gate</div>
+    <div style={{ fontSize: "12px" }}>this library</div>
+  </div>
+  <div style={{ flex: "1 1 0", minWidth: "102px", border: "1px solid currentColor", borderRadius: "8px", padding: "10px 12px", opacity: 0.55 }}>
+    <div style={{ fontSize: "15px", fontWeight: 600 }}>Send</div>
+    <div style={{ fontSize: "12px" }}>a physician reads it</div>
+  </div>
+</div>
+
+<div id="ctrlrun-medical-demo">
+  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }}>
+    <button type="button" name="draft" style={{ background: "#F5A623", color: "#14161b", border: "1px solid #B8730A", borderRadius: "8px", padding: "9px 16px", fontSize: "14px", cursor: "pointer" }}>Retrieve and draft</button>
+    <button type="button" name="send" style={{ background: "#F5A623", color: "#14161b", border: "1px solid #B8730A", borderRadius: "8px", padding: "9px 16px", fontSize: "14px", cursor: "pointer" }}>Send to the physician</button>
+    <button type="button" name="approve" style={{ background: "#14161b", color: "#8bd5a0", border: "1px solid #8bd5a0", borderRadius: "8px", padding: "9px 16px", fontSize: "14px", cursor: "pointer" }}>Approve, as the medical reviewer</button>
+    <button type="button" name="refresh" style={{ background: "transparent", color: "inherit", border: "1px solid currentColor", borderRadius: "8px", padding: "9px 16px", fontSize: "14px", cursor: "pointer" }}>A newer study lands</button>
+    <button type="button" name="reset" style={{ background: "transparent", color: "inherit", border: "1px dashed currentColor", borderRadius: "8px", padding: "9px 16px", fontSize: "14px", cursor: "pointer" }}>Start over</button>
+  </div>
+
+  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
+    <div name="letter" style={{ border: "1px solid currentColor", borderRadius: "8px", padding: "16px", minHeight: "200px" }} />
+    <pre name="transcript" style={{ background: "#14161b", color: "#c9ccd3", borderRadius: "8px", padding: "16px", margin: 0, minHeight: "200px", maxHeight: "340px", overflowY: "auto", fontSize: "13px", lineHeight: 1.5, whiteSpace: "pre-wrap" }} />
+  </div>
+
+  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", marginTop: "16px", fontSize: "13px" }}>
+    <button type="button" name="event" style={{ background: "transparent", color: "inherit", border: "1px solid currentColor", borderRadius: "8px", padding: "7px 14px", fontSize: "13px", cursor: "pointer" }}>File the safety case</button>
+    <label style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+      <input type="checkbox" name="lose_reply" />
+      lose the reply from the safety database
+    </label>
+    <button type="button" name="unapproved" style={{ background: "transparent", color: "inherit", border: "1px solid currentColor", borderRadius: "8px", padding: "7px 14px", fontSize: "13px", cursor: "pointer" }}>Cite an unapproved use</button>
+  </div>
+</div>
+
+The product, the physician's question and the three references are invented. Nothing on this
+page is medical information about a real medicine.
+
+## What refused you
+
+Revision A says no dose adjustment is needed. The reviewer reads that letter and signs for it,
+and the approval is bound to [the hash of that exact action](/docs/concepts/approval-binding) — its
+name, its arguments, its recommendation sentence, its reference list. Then a newer study
+supersedes reference 2 and the pipeline redrafts. Revision B recommends the opposite. The
+signature is still there, still valid, still unexpired, and it authorizes nothing, because the
+letter it covers no longer exists.
+
+The two side buttons are the other two failures. Filing a safety case with the reply lost leaves
+the effect [AMBIGUOUS rather than failed](/docs/concepts/outcomes-and-ambiguous), so the retry is
+refused and the case is filed once. An unapproved use is refused by the policy at any size, and
+an action nobody wrote down is refused for [not being in it](/docs/concepts/fail-closed).
+
+```yaml
+schema: ctrlrun.policy/v2
+actions:
+  literature.search:
+    effect: "search:{inquiry_id}:{revision}"
+    decision: allow
+  safety.report_icsr:
+    effect: "icsr:{inquiry_id}"
+    decision: allow
+  response.send_to_hcp:
+    effect: "mi_response:{inquiry_id}"
+    decision: approve
+  response.cite_unapproved_use:
+    effect: "unapproved_use:{inquiry_id}"
+    decision: deny
+```
+
+## What CTRLRun is not doing here
+
+It did not read the papers. It has no opinion on whether reference 2 supports the sentence that
+cites it, whether the newer study is the better one, or whether either letter is correct. Claim
+checking is the hard scientific half of the harness, and it is yours to build — the transferable
+idea is to make it a precondition of `response.send_to_hcp` rather than a line in a prompt, so a
+claim with no source behind it is a refusal with a receipt instead of a suggestion the model can
+talk itself out of.
+
+This page runs real Python: Pyodide 314.0.6 loads in your tab and micropip installs the
+released `ctrlrun` wheel from PyPI. The medical portal and the safety database are fakes in the
+same process, the store is in memory, and no socket is opened. Every refusal you read above came
+from the same wheel `pip install ctrlrun` gives you.
+
+## Next
+
+- [Why](/docs/why) — the 700-word version of the problem underneath this one
+- [Get started](/docs/get-started/quickstart) — the same guarantees around your own function
+- [Approval binding](/docs/concepts/approval-binding) — what an approval is bound to, and why

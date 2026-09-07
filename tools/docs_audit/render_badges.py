@@ -93,12 +93,12 @@ BADGES: tuple[Badge, ...] = (
     Badge(
         "Tests",
         f"https://img.shields.io/endpoint?url={BADGES_BRANCH}/tests-badge.json",
-        "https://ctrlrun.dev/how-this-is-built",
+        "https://ctrlrun.dev/docs/how-this-is-built",
     ),
     Badge(
         "CTRLRun verified",
         f"https://img.shields.io/endpoint?url={BADGES_BRANCH}/verify-badge.json",
-        "https://ctrlrun.dev/security/verify-guarantees",
+        "https://ctrlrun.dev/docs/security/verify-guarantees",
     ),
     Badge(
         "OpenSSF Scorecard",

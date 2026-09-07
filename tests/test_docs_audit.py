@@ -294,7 +294,7 @@ def test_the_allowlist_file_parses_and_names_only_known_keywords(tmp_path):
 
 
 def test_the_two_documents_the_rule_exempts_are_skipped(tmp_path):
-    """`docs/OWASP-AGENTIC-TOP10.md` and `docs/THREAT_MODEL.md` list what is *not* covered, so
+    """The OWASP mapping and threat-model pages list what is *not* covered, so
     they are allowed to name what they do not cover."""
     for name in lint.EXEMPT_BY_RULE:
         path = REPO_ROOT / name
@@ -358,7 +358,7 @@ def test_a_duplicate_heading_gets_a_numbered_anchor(tmp_path):
 def test_a_github_blob_url_into_this_repository_is_an_internal_link(tmp_path):
     page = tmp_path / "a.md"
     page.write_text(
-        "[ok](https://github.com/CTRLRun/ctrlrun/blob/main/docs/verify.md#what-the-badge-means)\n"
+        "[ok](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/verify.md#what-the-badge-means)\n"
         "[bad](https://github.com/CTRLRun/ctrlrun/blob/main/docs/nope.md)\n"
         "[external](https://example.com/anything)\n",
         encoding="utf-8",
@@ -373,10 +373,10 @@ def test_a_github_blob_url_into_this_repository_is_an_internal_link(tmp_path):
 
 def test_a_root_relative_docs_path_resolves_under_docs(tmp_path, monkeypatch):
     monkeypatch.setattr(links, "REPO_ROOT", tmp_path)
-    (tmp_path / "docs" / "concepts").mkdir(parents=True)
-    (tmp_path / "docs" / "concepts" / "effect-keys.mdx").write_text("# Effect keys\n")
+    (tmp_path / "docs" / "docs" / "concepts").mkdir(parents=True)
+    (tmp_path / "docs" / "docs" / "concepts" / "effect-keys.mdx").write_text("# Effect keys\n")
     page = tmp_path / "docs" / "index.mdx"
-    page.write_text('<Card href="/concepts/effect-keys" /> [x](/concepts/missing)\n')
+    page.write_text('<Card href="/docs/concepts/effect-keys" /> [x](/concepts/missing)\n')
 
     broken = links.check_text(page.read_text(), page)
 
@@ -389,16 +389,16 @@ def test_a_link_to_a_page_the_ia_plans_is_planned_not_broken(tmp_path, monkeypat
     monkeypatch.setattr(links, "_IA", tmp_path / "docs" / "IA.md")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "IA.md").write_text(
-        "Guides\n  ├─ Protect a function   guides/protect-a-function\n"
+        "Guides\n  ├─ Protect a function   docs/guides/protect-a-function\n"
     )
     page = tmp_path / "docs" / "index.mdx"
-    page.write_text("[a](/guides/protect-a-function) [b](/guides/never-planned)\n")
+    page.write_text("[a](/docs/guides/protect-a-function) [b](/guides/never-planned)\n")
     links.PLANNED.clear()
 
     broken = links.check_text(page.read_text(), page)
 
     assert [b.target for b in broken] == ["/guides/never-planned"]
-    assert [b.target for b in links.PLANNED] == ["/guides/protect-a-function"]
+    assert [b.target for b in links.PLANNED] == ["/docs/guides/protect-a-function"]
 
 
 @checkout_only
@@ -438,7 +438,7 @@ def test_every_page_a_capability_names_is_in_the_information_architecture():
 
 
 def test_every_claim_a_capability_names_is_a_row_in_claims_md():
-    claims = (REPO_ROOT / "docs" / "CLAIMS.md").read_text(encoding="utf-8")
+    claims = (REPO_ROOT / "docs" / "docs" / "CLAIMS.md").read_text(encoding="utf-8")
     for entry in capabilities.load():
         if entry.claim is None:
             assert entry.claim_note, entry.id

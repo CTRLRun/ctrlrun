@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS = REPO_ROOT / "docs"
 TOOLS = REPO_ROOT / "tools" / "docs_audit"
 
-if not (DOCS / "try-it.mdx").exists():  # pragma: no cover - not a checkout
+if not (DOCS / "docs" / "try-it.mdx").exists():  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)
 
 sys.path.insert(0, str(TOOLS))
@@ -35,10 +35,10 @@ needs_results = pytest.mark.skipif(
     reason="no research/framework-probe/results: the distributions prune it by design",
 )
 
-TRY_IT = (DOCS / "try-it.mdx").read_text(encoding="utf-8")
+TRY_IT = (DOCS / "docs" / "try-it.mdx").read_text(encoding="utf-8")
 SCRIPT = (DOCS / "try-it.js").read_text(encoding="utf-8")
 HARNESS = (DOCS / "assets" / "verify-browser-demo.mjs").read_text(encoding="utf-8")
-BADGE = (DOCS / "verify" / "get-the-badge.mdx").read_text(encoding="utf-8")
+BADGE = (DOCS / "docs" / "verify" / "get-the-badge.mdx").read_text(encoding="utf-8")
 
 
 # --- the browser demo ----------------------------------------------------------------------
@@ -184,7 +184,7 @@ def test_the_transcript_box_scrolls_down_rather_than_growing():
     and scrolls to 458.
     """
     style = re.search(r"<pre\s*\n\s*style=\{\{(.*?)\}\}", TRY_IT, re.S)
-    assert style, "docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
+    assert style, "docs/docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
     box = dict(re.findall(r"(\w+):\s*\"([^\"]*)\"", style.group(1)))
 
     assert "maxHeight" in box, "minHeight without maxHeight is a box that can only grow"
@@ -210,7 +210,7 @@ def test_the_transcript_does_not_depend_on_how_the_theme_lays_the_box_out():
     assert "output.appendChild(node)" not in SCRIPT, "a line appended straight into the <pre>"
 
     style = re.search(r"<pre\s*\n\s*style=\{\{(.*?)\}\}", TRY_IT, re.S)
-    assert style, "docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
+    assert style, "docs/docs/try-it.mdx: the transcript box is no longer a <pre> with inline style"
     box = dict(re.findall(r"(\w+):\s*\"([^\"]*)\"", style.group(1)))
     assert box.get("display") == "block", "the theme's flex would lay the lines out in a row"
 
@@ -502,6 +502,10 @@ def test_all_three_pages_are_in_the_navigation_and_the_search_plan():
                 walk(value)
 
     walk(document["navigation"])
-    for slug in ("try-it", "verify/get-the-badge", "study/does-your-framework-double-execute"):
+    for slug in (
+        "docs/try-it",
+        "docs/verify/get-the-badge",
+        "docs/study/does-your-framework-double-execute",
+    ):
         assert slug in found, f"{slug} is not in docs.json"
         assert f"`{slug}`" in plan, f"{slug} has no row in docs/SEO.md"

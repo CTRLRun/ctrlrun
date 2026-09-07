@@ -1,0 +1,143 @@
+---
+title: "Approve in Slack"
+description: "Route approval requests to a webhook with WebhookApprovalProvider: one signed POST per request, a human answers in Slack or any chat tool."
+---
+
+`WebhookApprovalProvider` sends one signed POST to a URL you own for every approval request,
+and takes the answer back through a signed POST to the gateway's `/ctrlrun/approvals/` endpoint.
+Your side is a small service that turns the request into a Slack message with two buttons and
+turns the click into the answer. The grant is written by the same call `ctrlrun approve` makes;
+there is no second approval path.
+
+**Prerequisites:** `pip install ctrlrun` (the outbound half is core); `pip install
+"ctrlrun[gateway]"` for the inbound endpoint, which the gateway serves; a shared secret; a
+URL that can receive the POST.
+
+<Steps>
+  <Step title="Configure the provider">
+    In a process using the decorator:
+
+    ```python
+    import os
+    from datetime import timedelta
+
+    from ctrlrun import Control, Policy, SQLiteStateStore, WebhookApprovalProvider
+
+    store = SQLiteStateStore(".ctrlrun/state.db")
+    control = Control(
+        Policy.from_file("ctrlrun.yaml"),
+        store,
+        approvals=WebhookApprovalProvider(
+            store,
+            url="https://approvals.example.com/ctrlrun",
+            secret=os.environ["CTRLRUN_WEBHOOK_SECRET"],
+            public_url="https://gateway.example.com",   # where the answer is POSTed back
+            timeout=timedelta(seconds=10),
+        ),
+    )
+    ```
+
+    With the gateway, the same thing is two flags:
+
+    ```bash
+    ctrlrun gateway --upstream http://localhost:8000/mcp --alias acme --principal refund-agent \
+      --webhook-url https://approvals.example.com/ctrlrun \
+      --webhook-secret-file /run/secrets/ctrlrun-webhook \
+      --public-url https://gateway.example.com
+    ```
+
+    The secret comes from `$CTRLRUN_WEBHOOK_SECRET` or a file, never from a flag value: a
+    secret on a command line is in every process listing on the host. An `http://` URL is
+    refused unless `--allow-insecure-webhook`, and then only on loopback.
+  </Step>
+
+  <Step title="Receive the request">
+    One POST per `APPROVAL_REQUESTED`, with a `CTRLRun-Signature` header. Verify it before you
+    read the body. The header is two comma-separated fields:
+
+    ```text
+    CTRLRun-Signature: t=1757142078,v1=6f1c…8ad2
+    ```
+
+    `t` is unix seconds and `v1` is the hex HMAC-SHA256, keyed on your secret, over the exact
+    bytes `f"{t}.{body}"` — the body as sent, not re-serialized. Compare it with a constant-time
+    comparison, and refuse a `t` outside your replay window (five minutes).
+
+    ```json
+    {
+      "schema": "ctrlrun.approval_request/v1",
+      "request_id": "apr_…",
+      "action": {
+        "name": "stripe.refund",
+        "arguments": {"amount": 200000, "payment_id": "txn_2"},
+        "principal": {"agent": "refund-agent", "user": null},
+        "resource": "payment:txn_2",
+        "environment": "production",
+        "action_hash": "sha256:…"
+      },
+      "expires_at": "2026-09-06T07:21:18.331Z",
+      "respond_to": "https://gateway.example.com/ctrlrun/approvals/apr_…"
+    }
+    ```
+
+    Show the human exactly what is in `action`: the name, every argument, who is asking. The
+    approval will be bound to that hash, so what they see is what will run.
+  </Step>
+
+  <Step title="Send the answer back">
+    POST to `respond_to`, signed the same way, with a timestamp within the replay window
+    (five minutes by default):
+
+    ```json
+    {
+      "request_id": "apr_…",
+      "action_hash": "sha256:…",
+      "decision": "grant",
+      "approver": "dana@example.com"
+    }
+    ```
+
+    **All four are required.** `request_id` must equal the one in the path, and `action_hash`
+    must equal the one on the stored request — echo back what the request gave you. A body
+    carrying only `decision` and `approver` is refused with *the path and the body name
+    different requests*, which is the shape of this guide's own earlier example.
+
+    `decision` is `grant` or `deny`; `approver` is a non-empty string recorded on the receipt.
+    A replayed grant inside the window is idempotent, because the record is already granted;
+    outside it, the timestamp check refuses. The endpoint answers 200 on success and a 4xx with
+    the reason on a bad signature, an unknown request id, a hash that does not match, an expired
+    request, or a request already answered the other way.
+  </Step>
+
+  <Step title="Watch it land">
+    ```bash
+    ctrlrun inspect act_…            # the action's history, proposal through grant
+    ctrlrun receipts --last 1 --json  # "approver": "dana@example.com"
+    ```
+
+    If the human never answers, the request expires at `expires_at` (the approval TTL, fifteen
+    minutes by default) and a waiting call raises `ApprovalTimeout`. Nothing runs.
+  </Step>
+</Steps>
+
+## What the provider does not do
+
+It does not build the Slack message or the buttons; that is your service, which knows your
+workspace. It does not authenticate the approver: `approver` is recorded as given, which is the
+threat model's stated limit. It does not retry into the future: delivery is two retries with a
+short backoff, and an undeliverable request is logged and left `pending` for `ctrlrun approve`.
+
+## If it didn't work
+
+- `signature does not verify`: the secret differs, or your side re-serialized the body before
+  signing. Sign the exact bytes.
+- `timestamp outside the replay window`: clocks differ by more than five minutes.
+- `ApprovalTimeout`: nobody answered within the TTL; the request is expired, not lost.
+- The webhook never fires: the provider is not on the `Control` the protected function uses.
+  With the decorator, pass `control=control`.
+
+## Next
+
+- [Approval binding](/docs/concepts/approval-binding): what the answer authorizes.
+- [Put the gateway in front of MCP](/docs/guides/gateway-in-front-of-mcp).
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

@@ -1,4 +1,4 @@
-// Does the Try-it page's Python run in Pyodide? The honest test behind docs/try-it.mdx:
+// Does the Try-it page's Python run in Pyodide? The honest test behind docs/docs/try-it.mdx:
 //
 //     npm install pyodide
 //     node docs/assets/verify-browser-demo.mjs

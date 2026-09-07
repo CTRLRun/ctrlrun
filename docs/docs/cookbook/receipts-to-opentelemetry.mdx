@@ -1,0 +1,128 @@
+---
+title: "Receipts into OpenTelemetry"
+description: "Attach OTelEventSink to the Control and every action becomes one span with one event per step in your tracing backend."
+---
+
+Your team already looks at traces. Put every protected action there: one span per action,
+named for it, one span event per step, an error status for `failed` and `ambiguous`, and no
+argument values unless you opt in, because a trace backend is not the receipt store.
+
+## The policy
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: deny
+```
+
+## The code
+
+```python runnable file=main.py
+import contextlib
+from pathlib import Path
+
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+import ctrlrun
+from ctrlrun import Control, Policy, SQLiteStateStore
+from ctrlrun.otel import OTelEventSink
+
+HERE = Path(__file__).resolve().parent
+STATE = HERE / ".ctrlrun"
+STATE.mkdir(exist_ok=True)
+for name in ("state.db", "state.db-wal", "state.db-shm"):
+    (STATE / name).unlink(missing_ok=True)
+
+exporter = InMemorySpanExporter()  # your OTLP exporter in production
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+store = SQLiteStateStore(STATE / "state.db")
+control = Control(
+    Policy.from_file(HERE / "ctrlrun.yaml"),
+    store,
+    sinks=[OTelEventSink(tracer_provider=provider)],
+)
+
+
+@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}", control=control)
+def refund(payment_id: str, amount: int) -> str:
+    if payment_id == "txn_lost":
+        raise TimeoutError("no response from api.stripe.com")
+    return "refunded"
+
+
+with ctrlrun.context(agent="support-agent"):
+    refund(payment_id="txn_1", amount=12000)
+    try:
+        refund(payment_id="txn_2", amount=900000)
+    except ctrlrun.ActionDenied:
+        pass
+    else:
+        raise SystemExit("a €9,000 refund ran")
+    with contextlib.suppress(TimeoutError):
+        refund(payment_id="txn_lost", amount=12000)
+
+for span in exporter.get_finished_spans():
+    events = [event.name for event in span.events]
+    result = span.attributes.get("ctrlrun.result")
+    print(
+        f"{span.name}  status={span.status.status_code.name}  result={result}  events={len(events)}"
+    )
+    if any("12000" in str(value) for value in span.attributes.values()):
+        raise SystemExit("an argument value leaked into the span attributes")
+print("argument values in attributes: none")
+```
+
+## What the agent sees
+
+The agent sees nothing different; the sink never blocks and never changes an outcome. The
+trace backend sees:
+
+```text
+stripe.refund  status=OK  result=committed  events=5
+stripe.refund  status=UNSET  result=denied  events=3
+stripe.refund  status=ERROR  result=ambiguous  events=5
+argument values in attributes: none
+```
+
+A refusal is `UNSET`, not an error: CTRLRun doing its job is not a fault in the trace.
+
+## The receipt
+
+```bash runnable
+ctrlrun receipts --last 3
+```
+
+The receipts are still in the store and the JSONL file, chained; the spans carry the receipt
+id so a trace can be joined back to the evidence. Deleting a trace deletes nothing CTRLRun
+relies on.
+
+## When an AMBIGUOUS appears
+
+The span's status is `ERROR` and its result attribute is `ambiguous`, which is the alert to
+build: a span whose result is ambiguous is an effect waiting for `ctrlrun resolve`. The
+resolution is a later event, not a change to the span.
+
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/receipts-to-opentelemetry
+pip install ctrlrun && python main.py
+```
+
+## Next
+
+- [Export to OpenTelemetry](/docs/guides/export-to-opentelemetry): the OTLP exporter and the gateway's `--otel`.
+- [Receipts and evidence](/docs/concepts/receipts-and-evidence) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

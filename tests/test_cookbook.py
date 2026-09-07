@@ -20,7 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS = REPO_ROOT / "tools" / "docs_audit"
 COOKBOOK = REPO_ROOT / "examples" / "cookbook"
-PAGES = REPO_ROOT / "docs" / "cookbook"
+PAGES = REPO_ROOT / "docs" / "docs" / "cookbook"
 
 if not (TOOLS.exists() and PAGES.exists()):  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)

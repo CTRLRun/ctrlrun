@@ -18,7 +18,7 @@ body:
     id: expected
     attributes:
       label: What the documentation says should happen
-      description: Quote the sentence, with a link. Every sentence in the README has a row in `docs/CLAIMS.md`; if you found the row, name it.
+      description: Quote the sentence, with a link. Every sentence in the README has a row in `docs/docs/CLAIMS.md`; if you found the row, name it.
     validations:
       required: true
   - type: textarea

@@ -11,7 +11,7 @@ every number in it comes from something that measures itself:
 And it carries a **Not yet** list, inside the block and never below it: no external security
 audit, no third-party review of the kernel, no sector packs. The honest half is why the first
 half is believed. A line leaves only when the thing it names has become true, in its own pull
-request, and `docs/CLAIMS.md` changes in the same one.
+request, and `docs/docs/CLAIMS.md` changes in the same one.
 
     python tools/docs_audit/render_readiness.py --write   # refresh, re-counting the suite
     python tools/docs_audit/render_readiness.py --check    # what CI runs
@@ -143,9 +143,9 @@ def _lines(data: dict, *, full: bool) -> list[str]:
         route to the page that qualifies it travels with it.
         """
         if full:
-            return f"{text} [Read more](/{page})."
+            return f"{text} [Read more](/docs/{page})."
         if page == "production/soak":
-            return f"{text} [What it does not establish](https://ctrlrun.dev/{page})."
+            return f"{text} [What it does not establish](https://ctrlrun.dev/docs/{page})."
         return text
 
     lines = [

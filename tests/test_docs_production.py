@@ -28,7 +28,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS = REPO_ROOT / "docs"
-PRODUCTION = DOCS / "production"
+PRODUCTION = DOCS / "docs" / "production"
 TOOLS = REPO_ROOT / "tools" / "docs_audit"
 
 if not (DOCS / "docs.json").exists():  # pragma: no cover - not a checkout
@@ -369,7 +369,7 @@ def test_production_is_a_top_level_group_between_get_started_and_guides():
         group["group"]
         for tab in document["navigation"]["tabs"]
         if tab["tab"] == "Documentation"
-        for group in tab["groups"]
+        for group in tab.get("groups", [])
     ]
     assert "Production" in groups, groups
     assert groups.index("Get started") < groups.index("Production") < groups.index("Guides")
@@ -380,17 +380,17 @@ def test_every_production_page_is_in_the_production_group():
     listed = [
         page
         for tab in document["navigation"]["tabs"]
-        for group in tab["groups"]
+        for group in tab.get("groups", [])
         if group["group"] == "Production"
         for page in group["pages"]
     ]
-    expected = {f"production/{page.stem}" for page in PAGES} | {"postgres"}
+    expected = {f"docs/production/{page.stem}" for page in PAGES} | {"docs/postgres"}
     assert set(listed) == expected, listed
     assert len(listed) == len(expected), f"a page is listed twice: {listed}"
-    assert listed[0] == "production/index", "the section's front door comes first"
+    assert listed[0] == "docs/production/index", "the section's front door comes first"
 
 
-READINESS_HOMES = ("README.md", "docs/index.mdx", "docs/production/index.mdx")
+READINESS_HOMES = ("README.md", "docs/docs.mdx", "docs/docs/production/index.mdx")
 
 
 @pytest.mark.parametrize("home", READINESS_HOMES)
@@ -663,9 +663,9 @@ def test_the_readme_says_where_it_runs_before_the_badges():
 
 
 def test_the_home_page_offers_to_run_it_for_real():
-    home = (DOCS / "index.mdx").read_text(encoding="utf-8")
+    home = (DOCS / "docs.mdx").read_text(encoding="utf-8")
     assert "Run it for real" in home
-    assert "/production/index" in home
+    assert "/docs/production/index" in home
 
 
 def test_capabilities_names_the_two_stores_and_what_each_is_for():
@@ -675,12 +675,12 @@ def test_capabilities_names_the_two_stores_and_what_each_is_for():
 
 
 def test_the_faq_answers_the_two_questions_this_section_provokes():
-    faq = (DOCS / "faq.mdx").read_text(encoding="utf-8")
+    faq = (DOCS / "docs" / "faq.mdx").read_text(encoding="utf-8")
     assert "Is SQLite really enough" in faq
     assert "production-ready" in faq.lower()
 
 
 def test_claims_carries_a_row_for_the_readiness_block():
-    claims = (DOCS / "CLAIMS.md").read_text(encoding="utf-8")
+    claims = (DOCS / "docs" / "CLAIMS.md").read_text(encoding="utf-8")
     assert "readiness" in claims.lower()
     assert "production" in claims.lower()

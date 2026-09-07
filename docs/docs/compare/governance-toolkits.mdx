@@ -1,0 +1,52 @@
+---
+title: "CTRLRun and agent oversight toolkits"
+sidebarTitle: "vs oversight toolkits"
+description: "Oversight toolkits catalogue agents, monitor their behaviour and report on it. CTRLRun refuses, in the execution path, per action, and emits the evidence."
+---
+
+An oversight toolkit answers questions about a fleet: which agents exist, what they are allowed
+to touch, what they did last week, and whether anything looks unusual. CTRLRun answers one
+question about one action, in the moment before it happens: may this run, has it already run,
+and what is recorded. A toolkit describes; CTRLRun refuses.
+
+## What oversight toolkits are good at
+
+An inventory of agents and their owners. Central configuration across teams. Dashboards,
+anomaly detection and reporting over what agents did. Mapping activity to internal control
+frameworks. Answering someone who asks what runs in production. These are real problems, they
+are organisational rather than per-call, and CTRLRun does none of them.
+
+## What they do not do
+
+| | Oversight toolkits | CTRLRun |
+|---|---|---|
+| Where it sits | beside the agent, reading its activity | in the call path, between the decision and the effect |
+| When it acts | after, or at configuration time | before the executor runs |
+| Granularity | the agent, the tool, the team | one action, with its arguments |
+| A human's approval | routed and tracked | bound to the exact action's hash, used once, expiring |
+| The same effect twice | reported, if noticed | refused |
+| A lost reply | an error in a chart | `AMBIGUOUS`, and the retry is refused |
+| Output | dashboards and reports | a portable JSON receipt per action, chained |
+| Scope of the claim | the fleet | the boundary |
+
+## When to use both
+
+A fleet needs both kinds of answer. Use the toolkit for the inventory, the reporting and the
+organisational questions, and put CTRLRun in the path of the actions that cannot be undone. The
+receipts are portable JSON and go wherever your reporting lives; the OpenTelemetry sink puts
+each action in the same traces your platform already collects.
+
+## What CTRLRun will not claim
+
+CTRLRun makes no standards claim and does not map itself to a control framework as a product
+feature. `controls:` in a policy lets *you* name the house control an action satisfies and cites
+it on the receipt, uninterpreted. The reading of the OWASP Top 10 for Agentic Applications in
+this repository names the four entries it does not address. Enforcement in the path and evidence
+out of it is what is on offer; the argument that this satisfies a given framework is yours to
+make.
+
+## Next
+
+- [Receipts and evidence](/docs/concepts/receipts-and-evidence) · [Policy YAML reference](/docs/reference/policy-yaml).
+- [How this is built](/docs/how-this-is-built): what the guarantees rest on.
+- [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

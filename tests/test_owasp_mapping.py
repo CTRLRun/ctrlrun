@@ -1,4 +1,4 @@
-"""`docs/OWASP-AGENTIC-TOP10.md`. SPEC-v0.4 §6; T121.
+"""`docs/docs/OWASP-AGENTIC-TOP10.md`. SPEC-v0.4 §6; T121.
 
 The mapping is complete in **both** directions, and the second direction is the one that makes
 the first credible: every entry with no guarantee is listed by name under "Not covered by
@@ -15,9 +15,9 @@ import pytest
 from ctrlrun.verify import guarantees as reg
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAPPING = REPO_ROOT / "docs" / "OWASP-AGENTIC-TOP10.md"
+MAPPING = REPO_ROOT / "docs" / "docs" / "OWASP-AGENTIC-TOP10.md"
 README = REPO_ROOT / "README.md"
-VERIFY_DOC = REPO_ROOT / "docs" / "verify.md"
+VERIFY_DOC = REPO_ROOT / "docs" / "docs" / "verify.md"
 
 #: The edition this document is written against, as recorded in it. Derived from the
 #: OWASP-owned `OWASP/secure-agent-playbook` repository and corroborated against two

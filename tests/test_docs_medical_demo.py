@@ -17,10 +17,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS = REPO_ROOT / "docs"
 
-if not (DOCS / "demos" / "medical-affairs.mdx").exists():  # pragma: no cover - not a checkout
+if not (
+    DOCS / "docs" / "demos" / "medical-affairs.mdx"
+).exists():  # pragma: no cover - not a checkout
     pytest.skip("no repository checkout", allow_module_level=True)
 
-PAGE = (DOCS / "demos" / "medical-affairs.mdx").read_text(encoding="utf-8")
+PAGE = (DOCS / "docs" / "demos" / "medical-affairs.mdx").read_text(encoding="utf-8")
 SCRIPT = (DOCS / "medical-demo.js").read_text(encoding="utf-8")
 
 

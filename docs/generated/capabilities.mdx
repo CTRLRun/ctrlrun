@@ -1,84 +1,84 @@
 {/* generated from docs/capabilities.yaml (mdx) — edit the YAML, never this grid */}
 <Columns cols={2}>
-  <Card title="Approval binding" href="/concepts/approval-binding">
+  <Card title="Approval binding" href="/docs/concepts/approval-binding">
     An approval is bound to the exact action; a mutated or replayed one is refused. Since v0.1.
   </Card>
-  <Card title="One effect, once" href="/concepts/effect-keys">
+  <Card title="One effect, once" href="/docs/concepts/effect-keys">
     One logical effect happens at most once, across threads, processes and hosts. Since v0.1.
   </Card>
-  <Card title="Unknown is not failed" href="/concepts/outcomes-and-ambiguous">
+  <Card title="Unknown is not failed" href="/docs/concepts/outcomes-and-ambiguous">
     An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. Since v0.1.
   </Card>
-  <Card title="Fail closed" href="/concepts/fail-closed">
+  <Card title="Fail closed" href="/docs/concepts/fail-closed">
     An unknown action, a missing policy or a missing principal is denied. Since v0.1.
   </Card>
-  <Card title="Authority and delegation" href="/concepts/authority-and-delegation">
+  <Card title="Authority and delegation" href="/docs/concepts/authority-and-delegation">
     With authority on, every principal needs a grant, and delegation cannot widen one. Since v0.3.
   </Card>
-  <Card title="Receipts" href="/concepts/receipts-and-evidence">
+  <Card title="Receipts" href="/docs/concepts/receipts-and-evidence">
     Every executed action leaves a portable JSON receipt of who, what and outcome. Since v0.1.
   </Card>
 </Columns>
 <Accordion title="Everything else it does (20 more)">
   <Columns cols={2}>
-    <Card title="Per-action policy" href="/reference/policy-yaml">
+    <Card title="Per-action policy" href="/docs/reference/policy-yaml">
       One YAML file decides allow, approve or deny per action and argument. Since v0.1.
     </Card>
-    <Card title="Operator CLI" href="/reference/cli">
+    <Card title="Operator CLI" href="/docs/reference/cli">
       Approve, deny, resolve, inspect and count from the shell, against any store. Since v0.1.
     </Card>
-    <Card title="MCP gateway" href="/guides/gateway-in-front-of-mcp">
+    <Card title="MCP gateway" href="/docs/guides/gateway-in-front-of-mcp">
       Every guarantee in front of an MCP tool server, with no agent changes. Since v0.2.
     </Card>
-    <Card title="Reconciliation" href="/guides/reconcile-automatically">
+    <Card title="Reconciliation" href="/docs/guides/reconcile-automatically">
       A reconcile hook asks the remote what happened and resolves an AMBIGUOUS effect. Since v0.2.
     </Card>
-    <Card title="Webhook approvals" href="/guides/approvals-in-slack">
+    <Card title="Webhook approvals" href="/docs/guides/approvals-in-slack">
       Approval requests go to a webhook, such as Slack, and the answer comes back. Since v0.2.
     </Card>
-    <Card title="OpenTelemetry export" href="/guides/export-to-opentelemetry">
+    <Card title="OpenTelemetry export" href="/docs/guides/export-to-opentelemetry">
       One span per action, one span event per step; argument values are opt-in. Since v0.2.
     </Card>
-    <Card title="Consumed identity" href="/concepts/authority-and-delegation">
+    <Card title="Consumed identity" href="/docs/concepts/authority-and-delegation">
       A principal comes from a verified header or JWT; CTRLRun issues nothing. Since v0.3.
     </Card>
-    <Card title="Runtime delegation" href="/concepts/authority-and-delegation">
+    <Card title="Runtime delegation" href="/docs/concepts/authority-and-delegation">
       A principal narrows its own grant at runtime; one revocation cuts the chain. Since v0.3.
     </Card>
-    <Card title="Observe mode" href="/concepts/observe-mode">
+    <Card title="Observe mode" href="/docs/concepts/observe-mode">
       Records what enforcement would have blocked, blocks nothing, and counts it. Since v0.3.
     </Card>
-    <Card title="Verify" href="/guides/verify-in-ci">
+    <Card title="Verify" href="/docs/guides/verify-in-ci">
       Runs the guarantee catalogue against your policy and store; N/A is not a pass. Since v0.4.
     </Card>
-    <Card title="The verified badge" href="/verify/get-the-badge">
+    <Card title="The verified badge" href="/docs/verify/get-the-badge">
       A GitHub Action and a badge that means the declared guarantees pass. Since v0.4.
     </Card>
-    <Card title="Framework adapters" href="/get-started/three-ways-in">
+    <Card title="Framework adapters" href="/docs/get-started/three-ways-in">
       An approval routed through the framework's own interrupt; never a second path. Since v0.5.
     </Card>
-    <Card title="Runs on one host or many" href="/production/index">
+    <Card title="Runs on one host or many" href="/docs/production/index">
       SQLite on one host, Postgres across hosts, the same guarantees either way. Since v0.6.
     </Card>
-    <Card title="Postgres store" href="/production/postgres">
+    <Card title="Postgres store" href="/docs/production/postgres">
       The same store on Postgres, graded by the suite written for SQLite. Since v0.6.
     </Card>
-    <Card title="Versioned schema" href="/production/migrations">
+    <Card title="Versioned schema" href="/docs/production/migrations">
       Migrations run at open, forward only, and an unknown schema is refused. Since v0.6.
     </Card>
-    <Card title="Recovery on restart" href="/production/recovery">
+    <Card title="Recovery on restart" href="/docs/production/recovery">
       A dead worker's effect stays AMBIGUOUS until a human or a hook resolves it. Since v0.6.
     </Card>
-    <Card title="Receipt chain" href="/security/receipt-chain">
+    <Card title="Receipt chain" href="/docs/security/receipt-chain">
       Each receipt carries the hash of the one before; alteration is detected and named. Since v0.6.
     </Card>
-    <Card title="Policy versioning" href="/concepts/receipts-and-evidence">
+    <Card title="Policy versioning" href="/docs/concepts/receipts-and-evidence">
       Every receipt names the policy hash and version that decided it. Since v0.6.
     </Card>
-    <Card title="Control registry" href="/reference/policy-yaml">
+    <Card title="Control registry" href="/docs/reference/policy-yaml">
       Name the house controls an action satisfies, and receipts cite them. Since v0.6.
     </Card>
-    <Card title="Data scope" href="/reference/policy-yaml">
+    <Card title="Data scope" href="/docs/reference/policy-yaml">
       Label arguments by data class and condition a rule on the labels present. Since v0.6.
     </Card>
   </Columns>

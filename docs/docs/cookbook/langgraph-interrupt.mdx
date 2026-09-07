@@ -1,0 +1,99 @@
+---
+title: "LangGraph with interrupt()"
+description: "Route a refund's approval through LangGraph's own interrupt(): the operator builds the Control."
+---
+
+A LangGraph agent issues refunds from a node. When the policy says a human must approve, the
+request should surface as the graph's own interrupt, where your operators already answer, and
+the yes must not be reusable for a different amount. The adapter buys exactly that and nothing
+else; `@protect` alone already covers the node.
+
+## The policy
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - decision: approve
+```
+
+## The code
+
+This is the adapter's own example. It needs `pip install ctrlrun-langgraph` and a LangGraph
+install, which the harness that runs the other recipes does not have; the adapter's tests run
+this shape against a real `langgraph` in this repository's CI, and the adapter's README carries
+the conformance results.
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.types import Command
+
+from ctrlrun import Control, InterruptApprovalProvider, Policy, SQLiteStateStore, context, protect
+from ctrlrun_langgraph import LangGraphInterrupt
+
+store = SQLiteStateStore(".ctrlrun/state.db")
+control = Control(
+    Policy.from_file("ctrlrun.yaml"),
+    store,
+    approvals=InterruptApprovalProvider(store, LangGraphInterrupt(carries_approved_arguments=True)),
+)
+
+
+@protect("stripe.refund", effect="refund:{payment_id}", wait=True, control=control)
+def issue_refund(payment_id: str, amount: int) -> str:
+    return stripe.Refund.create(payment_intent=payment_id, amount=amount).status
+
+
+def refund_node(state: dict) -> dict:
+    with context(agent="refund-agent"):
+        return {"status": issue_refund(payment_id=state["payment_id"], amount=state["amount"])}
+
+
+graph = StateGraph(dict).add_node("refund", refund_node).add_edge(START, "refund").compile(
+    checkpointer=InMemorySaver()
+)
+config = {"configurable": {"thread_id": "ticket-4471"}}
+
+result = graph.invoke({"payment_id": "txn_2", "amount": 250000}, config)
+if "__interrupt__" in result:
+    pending = graph.get_state(config).tasks[0].interrupts[0].value
+    # `pending` is JSON: request_id, action_id, action, action_hash, arguments, resource,
+    # environment, agent, user, created_at, expires_at. Show it to a human.
+    result = graph.invoke(
+        Command(resume={"approved": True, "approver": "ada@example.com", "arguments": pending["arguments"]}),
+        config,
+    )
+print(result["status"])
+```
+
+## What the agent sees
+
+The €2,500 refund interrupts the graph with a payload naming the action and its arguments.
+Resuming with `approved: True` and the arguments the human saw runs it once. Resuming with
+different arguments is refused with `ApprovalMismatch`, the approval is left grantable, and
+nothing runs. Resuming with `approved: False` refuses and records who said no.
+
+## The receipt
+
+The receipt is the same shape as one from `ctrlrun approve`: `approve/committed`, approver
+`ada@example.com`. The node ran twice, once to ask and once on resume, so the log holds two
+`action_id`s and two approval requests for one refund; the `action_hash` is continuous, which is
+why the binding is about content and never about an id.
+
+## When an AMBIGUOUS appears
+
+If Stripe's reply is lost inside the resumed node, the effect is `AMBIGUOUS` and the graph's
+retry, or a re-run of the thread, is refused. Resolve it with `ctrlrun resolve refund:txn_2
+--committed` or `--failed`; the approval was spent on the execution, so a retry after `--failed`
+needs a new interrupt.
+
+## Next
+
+- [Use the LangGraph adapter](/docs/guides/langgraph-adapter): prevention versus attribution, and where LangGraph shows through.
+- [Approval binding](/docs/concepts/approval-binding) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

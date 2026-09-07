@@ -3,10 +3,10 @@ title: "Execution safety for AI agents"
 sidebarTitle: "CTRLRun"
 description: "Control AI agent actions before they affect real systems. Prevent duplicate actions, require exact approval, and stop unsafe retries."
 mode: "custom"
-og:title: "CTRLRun — Execution safety for AI agents"
-twitter:title: "CTRLRun — the execution safety layer for AI agents"
+"og:title": "CTRLRun — Execution safety for AI agents"
+"twitter:title": "CTRLRun — Execution safety for AI agents"
 canonical: "https://ctrlrun.dev/"
-og:url: "https://ctrlrun.dev/"
+"og:url": "https://ctrlrun.dev/"
 ---
 
 import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
@@ -14,34 +14,31 @@ import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
 <div className="cr-site">
   <section className="cr-hero" aria-labelledby="cr-title">
     <p className="cr-eyebrow">CONTROL THE ACTION. KEEP THE AUTONOMY.</p>
-    <h1 id="cr-title">Execution safety<br />for AI agents<span className="cr-dot">.</span></h1>
+    <h1 id="cr-title">Execution safety <br />for AI agents<span className="cr-dot">.</span></h1>
     <p className="cr-lede">Let agents act. Keep control of what happens next.</p>
     <p className="cr-intro">CTRLRun checks consequential actions before they reach real systems. Stop duplicate actions, require human approval, and pause unsafe retries.</p>
-
     <div className="cr-actions">
       <a className="cr-button" href="#try-ctrlrun" data-cr-event="try_clicked">Try CTRLRun <span aria-hidden="true">↗</span></a>
       <a className="cr-button cr-secondary" href="/docs" data-cr-event="documentation_clicked">Documentation <span aria-hidden="true">→</span></a>
     </div>
-
     <p className="cr-caption">Open source. Your agent. Your systems. Your rules.</p>
   </section>
 
   <section className="cr-boundary" aria-label="CTRLRun sits between an AI agent and the real system">
     <div className="cr-boundary-node"><span className="cr-step">01 / PROPOSE</span><strong>AI agent</strong><span>Decides what to do</span></div>
     <span className="cr-flow-arrow" aria-hidden="true">→</span>
-    <div className="cr-boundary-node cr-control"><span className="cr-step">02 / CHECK</span><strong>CTRLRun<span className="cr-dot">\_</span></strong><span>The control point before execution</span><ul><li>Is this allowed?</li><li>Is this exactly what was approved?</li><li>Has this already happened?</li><li>Is it safe to continue?</li></ul></div>
+    <div className="cr-boundary-node cr-control"><span className="cr-step">02 / CHECK</span><strong>CTRLRun<span className="cr-dot">_</span></strong><span>The control point before execution</span><ul><li>Is this allowed?</li><li>Is this exactly what was approved?</li><li>Has this already happened?</li><li>Is it safe to continue?</li></ul></div>
     <span className="cr-flow-arrow" aria-hidden="true">→</span>
     <div className="cr-boundary-node"><span className="cr-step">03 / ACT</span><strong>Real system</strong><span>Move money. Change access.<br />Send email. Deploy software.</span></div>
   </section>
 
   <section className="cr-section cr-failure" aria-labelledby="cr-failure-title">
-    <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">“Try again” can cost $500.</h2><p>An agent refunds $500. The provider processes it, but the response is lost. The agent thinks it failed.</p></div>
-    <div className="cr-comparison"><div><span className="cr-step">WITHOUT AN EXECUTION CHECK</span><p>Retry the refund <span aria-hidden="true">→</span> another $500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Pause the retry.</strong> Confirm what happened before trying again.</p></div></div>
+    <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">“Try again” can cost &#36;500.</h2><p>An agent refunds &#36;500. The provider processes it, but the response is lost. The agent thinks it failed.</p></div>
+    <div className="cr-comparison"><div><span className="cr-step">WITHOUT AN EXECUTION CHECK</span><p>Retry the refund <span aria-hidden="true">→</span> another &#36;500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Pause the retry.</strong> Confirm what happened before trying again.</p></div></div>
   </section>
 
   <section className="cr-section" id="try-ctrlrun" aria-labelledby="cr-try-title">
     <div className="cr-section-heading"><div><p className="cr-eyebrow">MAKE IT RELEVANT TO YOU</p><h2 id="cr-try-title">Your industry. Your action.</h2></div><p className="cr-caption">No login. No API key. No setup.</p></div>
-
     <ScenarioExplorer />
   </section>
 
@@ -54,5 +51,5 @@ import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
     <div><p className="cr-eyebrow">WHEN THE ACTIONS ARE REAL</p><h2 id="cr-commercial-title">Protect my agent.</h2><p>Have an agent taking real actions? Get engineering help deciding what can run automatically, what needs approval, and when to stop and confirm.</p><p className="cr-caption">Paid architecture reviews, integration sprints, and ongoing production support. CTRLRun OSS stays free.</p></div><div className="cr-commercial-links"><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Review my architecture <span aria-hidden="true">↗</span></a><a className="cr-text-link" href="/risk-check">Take the free execution risk check →</a></div>
   </section>
 
-  <footer className="cr-footer"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="#try-ctrlrun" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a></div></footer>
+  <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="#try-ctrlrun" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a></div></div>
 </div>

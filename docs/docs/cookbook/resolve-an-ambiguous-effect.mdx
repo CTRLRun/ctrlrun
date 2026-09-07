@@ -1,0 +1,136 @@
+---
+title: "Resolve an ambiguous effect"
+description: "An effect nobody knows the outcome of blocks its own retry; a human asks the remote, records the answer with ctrlrun resolve."
+---
+
+A worker died mid-call, or a reply was lost, and an effect sits at `AMBIGUOUS`. The agent's
+retry is refused, an alert fires, and someone has to look. This recipe makes two such effects,
+resolves one each way, and shows what the evidence says afterwards.
+
+## The policy
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  dns.update_record:
+    effect: "dns:{zone}:{name}"
+    decision: allow
+  stripe.refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+```
+
+## The code
+
+```python runnable file=main.py
+from pathlib import Path
+
+import ctrlrun
+from ctrlrun import Control, EffectState, Policy, SQLiteStateStore
+
+HERE = Path(__file__).resolve().parent
+STATE = HERE / ".ctrlrun"
+STATE.mkdir(exist_ok=True)
+for name in ("state.db", "state.db-wal", "state.db-shm"):
+    (STATE / name).unlink(missing_ok=True)
+
+store = SQLiteStateStore(STATE / "state.db")
+control = Control(Policy.from_file(HERE / "ctrlrun.yaml"), store)
+remote_calls: list[str] = []
+
+
+@ctrlrun.protect("dns.update_record", effect="dns:{zone}:{name}", control=control)
+def update_record(zone: str, name: str, value: str) -> str:
+    remote_calls.append(f"dns {name}")
+    raise ConnectionResetError("connection reset by peer")
+
+
+@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}", control=control)
+def refund(payment_id: str, amount: int) -> str:
+    remote_calls.append(f"refund {payment_id}")
+    if len(remote_calls) == 2:
+        raise TimeoutError("no response from api.stripe.com after 30s")
+    return "refunded"
+
+
+with ctrlrun.context(agent="ops-agent"):
+    for call in (
+        lambda: update_record(zone="example.com", name="api", value="203.0.113.7"),
+        lambda: refund(payment_id="txn_7", amount=50000),
+    ):
+        try:
+            call()
+        except (ConnectionResetError, TimeoutError) as lost:
+            print("the executor saw:", lost)
+
+    ambiguous = [record.effect_key for record in store.list_effects(EffectState.AMBIGUOUS)]
+    print("ambiguous effects:", ambiguous)
+
+    # A human asks the DNS provider: the record was updated. Asks Stripe: no refund exists.
+    # This is what `ctrlrun resolve <key> --committed` and `--failed` do.
+    store.resolve_effect("dns:example.com:api", EffectState.COMMITTED, "human:ops")
+    store.resolve_effect("refund:txn_7", EffectState.FAILED, "human:ops")
+
+    try:
+        update_record(zone="example.com", name="api", value="203.0.113.7")
+    except ctrlrun.DuplicateEffect:
+        print("DNS update again: refused, it committed")
+    else:
+        raise SystemExit("a committed update ran again")
+
+    print("refund again:", refund(payment_id="txn_7", amount=50000))
+
+for record in store.list_effects():
+    print(f"{record.effect_key}: {record.state.value}, resolved by {record.resolved_by}")
+print("remote calls:", remote_calls)
+```
+
+## What the agent sees
+
+```text
+the executor saw: connection reset by peer
+the executor saw: no response from api.stripe.com after 30s
+ambiguous effects: ['dns:example.com:api', 'refund:txn_7']
+DNS update again: refused, it committed
+refund again: refunded
+dns:example.com:api: committed, resolved by human:ops
+refund:txn_7: committed, resolved by None
+remote calls: ['dns api', 'refund txn_7', 'refund txn_7']
+```
+
+The refund that was resolved `--failed` was retried and committed on its own; its record no
+longer names a resolver, because the retry was the agent's action, not the human's. The DNS
+update, resolved `--committed`, refuses its retry as a duplicate.
+
+## The receipt
+
+```bash runnable
+ctrlrun effects
+ctrlrun receipts --last 2
+```
+
+From the shell, the same steps are `ctrlrun effects --state ambiguous`, then
+`ctrlrun resolve dns:example.com:api --committed` and `ctrlrun resolve refund:txn_7 --failed`,
+and `ctrlrun inspect <action_id>` shows the `EFFECT_RESOLVED` event with `resolved_by`.
+
+## When an AMBIGUOUS appears
+
+This recipe is what to do. Two rules: never resolve from memory or from a cache, ask the
+remote; and resolve `--failed` only when the remote is authoritative for the absence, because
+`--failed` licenses a second execution.
+
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/resolve-an-ambiguous-effect
+pip install ctrlrun && python main.py
+```
+
+## Next
+
+- [Reconcile against the remote](/docs/cookbook/reconcile-against-the-remote): the same answer from a hook.
+- [Resolve an AMBIGUOUS effect](/docs/guides/resolve-an-ambiguous-effect) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).

@@ -36,4 +36,4 @@ dimension the subject can set is not one.
 
 For the delegation chain these documents anticipate, run
 [`examples/authority-escalation/`](../authority-escalation/), and read
-[`docs/authority.md`](../../docs/authority.md) for the model in plain language.
+[`docs/docs/authority.md`](../../docs/docs/authority.md) for the model in plain language.

@@ -1,0 +1,136 @@
+---
+title: "A database-migration agent"
+description: "An agent runs schema migrations: forward migrations on staging run on their own, every production migration waits for a human, a rollback is refused."
+---
+
+An agent applies schema migrations from a migrations directory. Forward migrations on staging
+are routine; every production migration is a human decision; a rollback that drops data is
+not an agent action. The interesting case is the migration whose connection dropped: it may
+have applied, and the agent must not run it again on a guess.
+
+## The policy
+
+```yaml runnable
+schema: ctrlrun.policy/v2
+
+actions:
+  db.migrate:
+    effect: "migration:{database}:{version}"
+    rules:
+      - when: { database_eq: staging }
+        decision: allow
+      - decision: approve
+  db.rollback:
+    decision: deny
+```
+
+## The code
+
+```python runnable file=main.py
+from pathlib import Path
+
+import ctrlrun
+from ctrlrun import Control, Policy, SQLiteStateStore
+
+HERE = Path(__file__).resolve().parent
+STATE = HERE / ".ctrlrun"
+STATE.mkdir(exist_ok=True)
+for name in ("state.db", "state.db-wal", "state.db-shm"):
+    (STATE / name).unlink(missing_ok=True)
+
+applied: dict[str, list[str]] = {"staging": [], "production": []}
+
+
+def run_migration(database: str, version: str, drop_connection: bool = False) -> str:
+    applied[database].append(version)  # the DDL ran
+    if drop_connection:
+        raise ConnectionResetError("connection reset by peer")  # ...and the reply was lost
+    return "applied"
+
+
+store = SQLiteStateStore(STATE / "state.db")
+control = Control(Policy.from_file(HERE / "ctrlrun.yaml"), store)
+
+
+@ctrlrun.protect("db.migrate", effect="migration:{database}:{version}", control=control)
+def migrate(database: str, version: str, drop_connection: bool = False) -> str:
+    return run_migration(database, version, drop_connection)
+
+
+@ctrlrun.protect("db.rollback", control=control)
+def rollback(database: str, version: str) -> str:
+    return "rolled back"
+
+
+with ctrlrun.context(agent="migration-agent"):
+    print("0042 on staging:", migrate(database="staging", version="0042"))
+
+    try:
+        migrate(database="production", version="0042")
+    except ctrlrun.ApprovalRequired as pending:
+        print("0042 on production: a human decides:", pending.request_id)
+    else:
+        raise SystemExit("a production migration ran without a human")
+
+    try:
+        rollback(database="production", version="0041")
+    except ctrlrun.ActionDenied:
+        print("rollback on production: refused")
+    else:
+        raise SystemExit("a rollback ran")
+
+    try:
+        migrate(database="staging", version="0043", drop_connection=True)
+    except ConnectionResetError:
+        print("0043 on staging: the connection dropped; outcome unknown")
+    try:
+        migrate(database="staging", version="0043")
+    except ctrlrun.AmbiguousEffect:
+        print("0043 on staging again: refused; a human checks the schema first")
+    else:
+        raise SystemExit("a migration of unknown outcome was re-run")
+
+print("migrations applied on staging:", applied["staging"])
+```
+
+## What the agent sees
+
+```text
+0042 on staging: applied
+0042 on production: a human decides: apr_…
+rollback on production: refused
+0043 on staging: the connection dropped; outcome unknown
+0043 on staging again: refused; a human checks the schema first
+migrations applied on staging: ['0042', '0043']
+```
+
+`0043` ran once. The agent's retry would have run it a second time; the effect key
+`migration:staging:0043` in the `AMBIGUOUS` state is what stopped it.
+
+## The receipt
+
+```bash runnable
+ctrlrun receipts --last 3
+ctrlrun effects --state ambiguous
+```
+
+## When an AMBIGUOUS appears
+
+Query the migrations table in the database itself: if `0043` is recorded,
+`ctrlrun resolve migration:staging:0043 --committed`; if not, `--failed`, and the agent's next
+attempt runs. A `reconcile` hook that runs that query is the automatic form.
+
+## Run it
+
+The policy and the code above are also a directory in the repository, extracted from this page
+and run in CI against a fake remote:
+
+```bash
+git clone https://github.com/CTRLRun/ctrlrun && cd ctrlrun/examples/cookbook/database-migration-agent
+pip install ctrlrun && python main.py
+```
+
+## Next
+
+- [A deploy agent](/docs/cookbook/deploy-agent).
+- [Outcomes and AMBIGUOUS](/docs/concepts/outcomes-and-ambiguous) · [Get started](/docs/get-started/quickstart) · [Why](/docs/why).
