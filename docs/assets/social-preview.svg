@@ -1,16 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="CTRLRun — the last check before an AI agent does something it can't undo">
-  <rect width="1280" height="640" fill="#14161b"/>
-  <rect x="72" y="78" width="74" height="70" rx="17" fill="#B8730A"/>
-  <rect x="72" y="72" width="74" height="70" rx="17" fill="#F5A623"/>
-  <path d="M100 91 L124 107 L100 123 Z" fill="#14161b" stroke="#14161b" stroke-width="6" stroke-linejoin="round"/>
-  <text x="166" y="130" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.5" fill="#f2f3f5">CTRL<tspan font-weight="400" letter-spacing="-0.5">Run</tspan></text>
-  <text x="72" y="248" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">The last check before an AI agent</text>
-  <text x="72" y="304" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#f2f3f5">does something it can't undo.</text>
-  <text x="72" y="356" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="26" fill="#a7abb4">Autonomy belongs to the action, not the agent.</text>
-  <rect x="72" y="412" width="1136" height="156" rx="12" fill="#1e2128" stroke="#2c3038" stroke-width="2"/>
-  <rect x="72" y="412" width="6" height="156" rx="3" fill="#F5A623"/>
-  <text x="104" y="462" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#a7abb4">refund €500  →  remote commits  →  response lost  →  effect: AMBIGUOUS</text>
-  <text x="104" y="500" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#a7abb4">agent retries the same refund</text>
-  <text x="104" y="538" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="700" fill="#f28b82">✗ BLOCKED — effect may already have committed; blind retry refused</text>
-  <text x="1208" y="608" text-anchor="end" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="20" fill="#F5A623">pip install ctrlrun</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="CTRLRun — Execution safety for AI agents">
+  <rect width="1280" height="640" fill="#ffffff"/>
+  <rect x="72" y="70" width="60" height="56" rx="14" fill="#B8730A"/>
+  <rect x="72" y="65" width="60" height="56" rx="14" fill="#F5A623"/>
+  <path d="M92 82 L112 93 L92 104 Z" fill="#14161b" stroke="#14161b" stroke-width="5" stroke-linejoin="round"/>
+  <text x="146" y="112" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="42" font-weight="800" letter-spacing="-1" fill="#14161b">CTRL<tspan font-weight="400">Run</tspan></text>
+  <text x="72" y="196" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" letter-spacing="3" fill="#8a8f98">CONTROL THE ACTION. KEEP THE AUTONOMY.</text>
+  <text x="70" y="278" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="76" font-weight="800" letter-spacing="-2" fill="#14161b">Execution safety</text>
+  <text x="70" y="360" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="76" font-weight="800" letter-spacing="-2" fill="#14161b">for AI agents<tspan fill="#F5A623">.</tspan></text>
+  <text x="72" y="412" font-family="Inter, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="28" fill="#6b7280">Let agents act. Keep control of what happens next.</text>
+  <rect x="72" y="458" width="1136" height="118" rx="12" fill="#f6f6f4" stroke="#e6e6e2" stroke-width="2"/>
+  <rect x="72" y="458" width="6" height="118" rx="3" fill="#F5A623"/>
+  <text x="104" y="500" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="23" font-weight="700" fill="#B8730A">$ pip install ctrlrun</text>
+  <text x="104" y="534" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="22" fill="#14161b">@ctrlrun.protect(tool_name, effect=effect_key)</text>
+  <text x="104" y="562" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18" fill="#8a8f98">Refunds. Access changes. Deploys. Emails. One boundary.</text>
+  <text x="1208" y="608" text-anchor="end" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="700" fill="#14161b">ctrlrun.dev</text>
 </svg>
