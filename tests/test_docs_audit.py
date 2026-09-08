@@ -391,7 +391,7 @@ def test_a_query_string_is_not_part_of_the_page_path(tmp_path, monkeypatch):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "try.mdx").write_text("---\ntitle: Try\n---\n")
     page = tmp_path / "docs" / "index.mdx"
-    page.write_text('[a](/try?situation=uncertain) [b](/nope?situation=uncertain)\n')
+    page.write_text("[a](/try?situation=uncertain) [b](/nope?situation=uncertain)\n")
 
     broken = links.check_text(page.read_text(), page)
 
