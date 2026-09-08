@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "examples/medical-affairs/workbench.py"
+SOURCE = ROOT / "examples/medical_workbench.py"
 
 
 @pytest.fixture

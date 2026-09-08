@@ -36,7 +36,7 @@ The browser harness requires Playwright and the preview server. It covers the de
 ## Scenario and conversion behavior
 
 The Medical Affairs workbench uses `medical-workbench.js`, styles scoped to
-`#cr-medical-workbench`, and `examples/medical-affairs/workbench.py`. Keep its embedded `MODULE`
+`#cr-medical-workbench`, and `examples/medical_workbench.py`. Keep its embedded `MODULE`
 equivalent to the Python source; `tests/test_medical_workbench.py` checks the copy. The browser
 loads CTRLRun 0.6.1 on demand. Evidence and synthesis are synthetic; release decisions and
 receipts execute in Python. `assets/verify-medical-workbench.cjs` exports a Playwright check

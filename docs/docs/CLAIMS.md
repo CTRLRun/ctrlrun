@@ -302,7 +302,7 @@ They do not describe biomedical retrieval, LLM synthesis or clinical validation 
 
 | Claim | Code | Proof |
 | --- | --- | --- |
-| Unsupported fixture claims are denied before release, even with a client-supplied pass flag. | `validate` and `invoke` in `examples/medical-affairs/workbench.py`; the `medical.brief.release` policy | `test_invalid_evidence_is_denied_even_with_a_client_pass_flag` |
+| Unsupported fixture claims are denied before release, even with a client-supplied pass flag. | `validate` and `invoke` in `examples/medical_workbench.py`; the `medical.brief.release` policy | `test_invalid_evidence_is_denied_even_with_a_client_pass_flag` |
 | The reviewed action binds document content, evidence versions, validation version and destination. | `invoke` serializes the document into protected action arguments. | `test_edited_document_cannot_use_original_approval`, `test_reviewed_document_releases_and_produces_real_receipts` |
 | Approval reuse and an already committed effect do not create another archive write. | The example calls the real `@protect` boundary and records simulated writes in `deliveries`. | `test_approval_reuse_and_duplicate_effect_never_write_twice` |
 | An unknown delivery remains `AMBIGUOUS` until the simulated destination confirms receipt. | `release` raises after recording a write; `step` resolves only an existing ambiguous effect with a recorded delivery. | `test_unknown_delivery_remains_ambiguous_until_destination_confirmation`, `test_reconciliation_never_invents_a_delivery` |
