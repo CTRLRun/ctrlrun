@@ -5,8 +5,8 @@ description: "A reading of somebody else's taxonomy against the guarantees CTRLR
 
 This is a **reading** of somebody else's taxonomy against the guarantees CTRLRun tests. It is
 not a compliance claim, a conformance claim, a certification, or a statement that CTRLRun
-covers the OWASP Top 10 for Agentic Applications. Four of the ten entries are not addressed by
-CTRLRun at all, and they are listed by name below.
+covers the OWASP Top 10 for Agentic Applications. Three of the ten entries are not addressed
+by CTRLRun at all, and they are listed by name below.
 
 Every row maps a guarantee to an entry, and every guarantee is backed by a passing acceptance
 test — so each row points at code and at a test. A row whose test disappears is a row that
@@ -62,12 +62,12 @@ mechanism, not the entry.
 
 | Guarantee | Invariant | Entries | How |
 |---|---|---|---|
-| **G1** mutated approval refused | An approval is bound to one `action_hash`; presenting it for any other action is refused, and the approval is not consumed. | `ASI09:2026`, `ASI01:2026` (partly) | The approval a human granted is bound to the exact canonical form of the action they were shown, so an action that changed after the approval — by a hijacked goal or by anything else — has no approval to present. |
+| **G1** mutated approval refused | An approval is bound to one `action_hash`; presenting it for any other action is refused, and the approval is not consumed. | `ASI09:2026`, `ASI01:2026` (partly), `ASI06:2026` (partly) | The approval a human granted is bound to the exact canonical form of the action they were shown, so an action that changed after the approval — by a hijacked goal or by anything else — has no approval to present. |
 | **G2** replayed approval refused | An approval is single-use; the second presentation is refused and does not execute. | `ASI09:2026` | The approval record is consumed in the same transaction that admits it, so one human decision authorizes exactly one execution and a loop cannot spend it twice. |
 | **G3** duplicate effect refused | A second attempt on an effect key whose record is `COMMITTED` is refused, and the remote is not called. | `ASI08:2026`, `ASI02:2026` | Effects are identified by a key derived from the action's own arguments, and a committed key is refused rather than retried — so a retry loop cannot turn one intended effect into several. |
 | **G4** one winner under concurrency | Reservation is atomic across processes, not merely across threads. | `ASI08:2026` | The reservation is taken inside a `BEGIN IMMEDIATE` against a unique constraint on the effect key, so two agents that picked up the same task produce one effect and one refusal. |
 | **G5** ambiguous blocks a blind retry | An executor that raises anything other than `NotExecuted` leaves the effect `AMBIGUOUS`, and the retry is refused rather than executed. | `ASI08:2026` | A lost response is recorded as an *unknown* outcome rather than a failure, and an unknown outcome is a state only a human or a reconciliation hook may leave — so the failure does not cascade into a second execution of something that may already have happened. |
-| **G6** unknown action refused | Unknown action → DENY. There is no default-allow. | `ASI02:2026`, `ASI01:2026` (partly) | The policy is the list of what an agent may do; anything not written in it is refused, so a tool an agent was talked into reaching for is refused whether or not the reasoning that reached for it was sound. |
+| **G6** unknown action refused | Unknown action → DENY. There is no default-allow. | `ASI02:2026`, `ASI01:2026` (partly), `ASI06:2026` (partly) | The policy is the list of what an agent may do; anything not written in it is refused, so a tool an agent was talked into reaching for is refused whether or not the reasoning that reached for it was sound. |
 | **G7** no principal refused | An action proposed with no principal is refused, and no receipt and no events are written. | `ASI03:2026` | Every action carries a principal or it does not run, so there is no path on which an action executes with nobody attributable to it. |
 | **G8** expired authority refused | A grant is authority only until its `expires_at`; after that the action it covered is denied, by name. | `ASI03:2026`, `ASI10:2026` | Authority is evaluated on every action against the clock, not at the start of a session, so an agent still running after its grant lapsed is denied on its next proposal. |
 | **G9** delegation cannot escalate | A delegated grant is valid only if it is provably a subset of its parent on every dimension — and a child that **drops** a dimension its parent constrains is rejected rather than treated as unconstrained. | `ASI03:2026`, `ASI10:2026` | Containment is checked at creation and again on every evaluation by walking the chain to its root, and omission is never inheritance — so an agent handed authority cannot mint itself more of it, and a revocation anywhere in the chain cuts everything beneath it. |
@@ -84,14 +84,14 @@ The half that makes the table above credible. One honest sentence each; nothing 
 |---|---|---|
 | `ASI04:2026` | Agentic Supply Chain Vulnerabilities | Out of scope. CTRLRun never inspects a package, a model, a tool registry or an MCP server's provenance; it decides actions, and a poisoned dependency reaches it as an ordinary caller. |
 | `ASI05:2026` | Unexpected Code Execution | Out of scope. Nothing here sandboxes an interpreter or constrains what a process may run. CTRLRun sits between an agent and one remote effect, not between an agent and its own runtime. |
-| `ASI06:2026` | Memory & Context Poisoning | Out of scope, and deliberately so: CTRLRun never reads a model's memory, its context or its prompt. It sees a proposed action and its arguments, which is the point at which a poisoned context has already become a concrete request. |
 | `ASI07:2026` | Insecure Inter-Agent Communication | Not yet. Authority does not propagate across agent hops in this release — a grant is evaluated where the action is proposed, and there is no A2A model. `docs/docs/ROADMAP.md` puts that in v0.8; until then, an agent handing work to another agent is outside what these guarantees say anything about. |
 
-And the two entries where the mapping above is **partial**, with the part that is not covered
+And the three entries where the mapping above is **partial**, with the part that is not covered
 stated here rather than left implied:
 
 | Entry | Title | Covered | Not covered |
 |---|---|---|---|
+| `ASI06:2026` | Memory & Context Poisoning | G6 and G1 constrain what an agent acting on a poisoned context can *do*: the action must still be named in the policy, so a belief an attacker planted cannot reach a tool the agent was never entitled to use, and an approval granted for one action cannot be spent on another. This is the same downstream constraint that makes `ASI01` partial, and it is here for the same reason. | CTRLRun never reads a model's memory, its context or its prompt, so it neither detects nor prevents the poisoning. And the shape poisoning most often takes is the one the kernel has least to say about: **corrupted arguments to an action the agent is entitled to take** — the right operation against the wrong record. Policy conditions, resource patterns and v0.6 data scope bite on part of that; nothing bites on an identifier an attacker chose. |
 | `ASI01:2026` | Agent Goal Hijack | G1 and G6 constrain what a hijacked agent can *do*: it still meets the policy, and it still cannot present an approval granted for a different action. | CTRLRun does not detect or prevent the hijack. It never sees the prompt, the plan or the reasoning, so an agent whose goal was replaced proposes actions exactly as a healthy one would — and every action inside its policy and its grants will run. |
 | `ASI09:2026` | Human-Agent Trust Exploitation | G1 and G2 close the shape where an approval a human gave for one action is spent on another, or spent twice. | CTRLRun does not authenticate the *approver*, does not model separation of duties, and has no opinion on whether the human was misled into approving. A human persuaded to approve the right action for the wrong reason gets a valid approval, and the receipt records it as one. |
 

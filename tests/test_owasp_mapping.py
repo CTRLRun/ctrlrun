@@ -75,6 +75,18 @@ def _sections() -> tuple[str, str]:
     return text[:split], text[split:]
 
 
+def _guarantee_table() -> str:
+    """Just the `Guarantee -> entries mitigated` table.
+
+    Narrower than `_sections()[0]` on purpose. That half opens with the enumeration of all ten
+    entries, so every code is in it and a membership test against it says nothing. What says
+    something is whether a code is cited by a guarantee row.
+    """
+    text = _document()
+    start = text.index("## Guarantee")
+    return text[start : text.index("## Not covered by CTRLRun")]
+
+
 # --- T121: the mapping is complete in both directions --------------------------------------
 
 
@@ -103,23 +115,32 @@ def test_T121_every_entry_in_the_cited_edition_appears_in_one_half_or_the_other(
         assert code in mapping or code in not_covered, code
 
 
-def test_T121_the_four_uncovered_entries_are_listed_by_name():
-    """§6.1's disclaimer says four of the ten are not addressed at all, and this is the test
-    that keeps that sentence true rather than merely written."""
+def test_T121_the_three_uncovered_entries_are_listed_by_name():
+    """§6.1's disclaimer says three of the ten are not addressed at all, and this is the test
+    that keeps that sentence true rather than merely written.
+
+    `code in not_covered` on its own does not say it: a *partly* addressed entry appears in
+    that half too, by the design the next test asserts, so the membership check cannot tell
+    the two apart and the sentence was carrying this test alone. What separates them is that a
+    fully uncovered entry is cited by **no guarantee row** — which is a test against the
+    guarantee table and not against the half containing it, since that half opens by
+    enumerating all ten.
+    """
     _, not_covered = _sections()
 
-    fully_uncovered = {"ASI04:2026", "ASI05:2026", "ASI06:2026", "ASI07:2026"}
+    fully_uncovered = {"ASI04:2026", "ASI05:2026", "ASI07:2026"}
     for code in fully_uncovered:
         assert code in not_covered, code
         assert ENTRIES[code] in not_covered, code
-    assert "Four of the ten entries are not addressed by CTRLRun at all" in _flat()
+        assert code not in _guarantee_table(), code
+    assert "Three of the ten entries are not addressed by CTRLRun at all" in _flat()
 
 
 def test_T121_a_partly_addressed_entry_appears_in_both_halves():
     """§6.2 item 4 — the honest place for a hedge is next to the thing it qualifies."""
     mapping, not_covered = _sections()
 
-    for code in ("ASI01:2026", "ASI09:2026"):
+    for code in ("ASI01:2026", "ASI06:2026", "ASI09:2026"):
         assert code in mapping, code
         assert code in not_covered, code
     assert "Not covered" in not_covered
