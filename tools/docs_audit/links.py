@@ -119,6 +119,10 @@ def _resolve(target: str, source: Path) -> tuple[Path | None, str | None] | None
         return None
     path_part, _, anchor = target.partition("#")
     anchor = unquote(anchor) or None
+    # A query string is not part of the path. `/try?situation=uncertain` is the same page as
+    # `/try`, and the site serves it that way; a checker that kept the query looked for a file
+    # named after the whole string and reported a working link as broken.
+    path_part = path_part.partition("?")[0]
     if path_part.startswith(("http://", "https://")):
         matched = _GITHUB.match(path_part)
         if matched is None:
@@ -157,7 +161,7 @@ def check_text(text: str, source: Path) -> list[Broken]:
         if path is None:
             continue
         if not path.exists():
-            site_path = target.partition("#")[0].lstrip("/")
+            site_path = target.partition("#")[0].partition("?")[0].lstrip("/")
             if target.startswith("/") and site_path in planned_pages():
                 planned.append(
                     Broken(name, number, target, "planned in docs/IA.md, not written yet")

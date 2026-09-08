@@ -383,6 +383,21 @@ def test_a_root_relative_docs_path_resolves_under_docs(tmp_path, monkeypatch):
     assert [b.target for b in broken] == ["/concepts/missing"]
 
 
+def test_a_query_string_is_not_part_of_the_page_path(tmp_path, monkeypatch):
+    """`/try?situation=uncertain` is the `/try` page. The checker looked for a file named after
+    the whole string and called a working link broken -- and the strip must not swallow a
+    genuinely missing page that happens to carry a query."""
+    monkeypatch.setattr(links, "REPO_ROOT", tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "try.mdx").write_text("---\ntitle: Try\n---\n")
+    page = tmp_path / "docs" / "index.mdx"
+    page.write_text("[a](/try?situation=uncertain) [b](/nope?situation=uncertain)\n")
+
+    broken = links.check_text(page.read_text(), page)
+
+    assert [b.target for b in broken] == ["/nope?situation=uncertain"]
+
+
 @checkout_only
 def test_a_link_to_a_page_the_ia_plans_is_planned_not_broken(tmp_path, monkeypatch):
     monkeypatch.setattr(links, "REPO_ROOT", tmp_path)
