@@ -84,7 +84,7 @@ The half that makes the table above credible. One honest sentence each; nothing 
 |---|---|---|
 | `ASI04:2026` | Agentic Supply Chain Vulnerabilities | Out of scope. CTRLRun never inspects a package, a model, a tool registry or an MCP server's provenance; it decides actions, and a poisoned dependency reaches it as an ordinary caller. |
 | `ASI05:2026` | Unexpected Code Execution | Out of scope. Nothing here sandboxes an interpreter or constrains what a process may run. CTRLRun sits between an agent and one remote effect, not between an agent and its own runtime. |
-| `ASI07:2026` | Insecure Inter-Agent Communication | Not yet. Authority does not propagate across agent hops in this release — a grant is evaluated where the action is proposed, and there is no A2A model. `docs/docs/ROADMAP.md` puts that in v0.7; until then, an agent handing work to another agent is outside what these guarantees say anything about. |
+| `ASI07:2026` | Insecure Inter-Agent Communication | Not yet. Authority does not propagate across agent hops in this release — a grant is evaluated where the action is proposed, and there is no A2A model. `docs/docs/ROADMAP.md` puts that in v0.8; until then, an agent handing work to another agent is outside what these guarantees say anything about. |
 
 And the three entries where the mapping above is **partial**, with the part that is not covered
 stated here rather than left implied:

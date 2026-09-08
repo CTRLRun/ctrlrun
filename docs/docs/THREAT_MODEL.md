@@ -75,7 +75,7 @@ they entitled to?* Everything above still holds; these are the threats the secon
 - **A `HeaderIdentityProvider` behind a proxy that does not overwrite the header.** It is worth exactly what the thing setting it is worth, and RFC 7239 §8.1 says the same of the header it standardizes. If the agent can set the header, the agent chooses its own authority. It warns at construction and it is still the operator's call.
 - **A revoked token before its `exp`.** There is no revocation channel: a verified token is valid until it expires, which is why one with no `exp` is refused. Shared-signals mechanisms exist and v0.3 implements none of them. Short lifetimes are the whole of the story.
 - **A tenant-templated issuer.** `issuer` is matched as an exact string, so a multi-tenant endpoint cannot be configured correctly here. Pointing it at one without pinning the tenant makes every tenant on that platform a valid issuer — stated because the fail-open is inviting.
-- **Authority across an agent-to-agent hop.** A grant covers the principal CTRLRun resolved for *this* call. Propagating attenuated authority across hops is v0.7.
+- **Authority across an agent-to-agent hop.** A grant covers the principal CTRLRun resolved for *this* call. Propagating attenuated authority across hops is v0.8.
 - **Approving an authority change.** `ctrlrun delegate --as` is an assertion typed at a shell, not an authentication; the record keeps `created_via` so a reader can tell an act from an assertion. Authenticating the *approver* remains out of scope, as in v0.1.
 
 ## Known v0.4 limitations — what `ctrlrun verify` does not see
