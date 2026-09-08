@@ -191,3 +191,83 @@ body:has(.cr-site) { --topbar-tabs-height:0px; }
 .cr-site .cr-form-error { color:#a13d32; margin-top:16px; font-size:14px; }
 .dark .cr-site .cr-form-error { color:#f5a198; }
 .cr-site .cr-form-fields { margin:0; padding:0; }
+
+/* Medical Affairs evidence workbench */
+
+    #cr-medical-workbench{--cr-bg:light-dark(#f6f7f9,#171b23);--cr-panel:light-dark(#ffffff,#202630);--cr-fg:light-dark(#192334,#edf1f7);--cr-muted:light-dark(#576579,#b2bdcd);--cr-line:light-dark(#d9e0e9,#3b4656);--cr-accent:light-dark(#805400,#ffc970);--cr-tint:light-dark(#fff1d5,#3b3020);--cr-ok:light-dark(#17654c,#86dfba);--cr-ok-bg:light-dark(#eaf7f0,#193a30);--cr-bad:light-dark(#a62f37,#ffadb4);--cr-bad-bg:light-dark(#fff0f0,#44292d);--cr-space:20px;--cr-round:10px;color:var(--cr-fg);background:var(--cr-bg);border:1px solid var(--cr-line);border-radius:12px;font-family:Inter,ui-sans-serif,system-ui,sans-serif;font-size:14px;line-height:1.5;overflow-wrap:anywhere;isolation:isolate}
+    #cr-medical-workbench *{box-sizing:border-box}
+    #cr-medical-workbench button,#cr-medical-workbench select,#cr-medical-workbench input{font:inherit}
+    #cr-medical-workbench button{cursor:pointer}
+    #cr-medical-workbench button:disabled{cursor:default;opacity:.5}
+    #cr-medical-workbench .cr-top{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:16px 22px;background:var(--cr-panel);border-radius:12px 12px 0 0;border-bottom:1px solid var(--cr-line)}
+    #cr-medical-workbench .cr-brand{display:flex;align-items:center;gap:12px;font-weight:500;letter-spacing:-.3px}
+    #cr-medical-workbench .cr-logo{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:7px;background:var(--cr-tint);color:var(--cr-accent)}
+    #cr-medical-workbench .cr-sep{color:var(--cr-line)}
+    #cr-medical-workbench .cr-small{font-size:12px;color:var(--cr-muted)}
+    #cr-medical-workbench .cr-badge{font-size:12px;padding:3px 8px;border-radius:5px;background:var(--cr-tint);color:var(--cr-accent);display:inline-block;font-weight:500}
+    #cr-medical-workbench .cr-badge.ok{background:var(--cr-ok-bg);color:var(--cr-ok)}
+    #cr-medical-workbench .cr-badge.bad{background:var(--cr-bad-bg);color:var(--cr-bad)}
+    #cr-medical-workbench .cr-body{padding:22px}
+    #cr-medical-workbench .cr-title{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+    #cr-medical-workbench h2{font-size:23px;font-weight:500;line-height:1.25;margin:5px 0 6px;letter-spacing:-.55px}
+    #cr-medical-workbench h3{font-size:16px;font-weight:500;margin:0 0 14px;line-height:1.4}
+    #cr-medical-workbench h4{font-size:14px;font-weight:500;margin:0 0 8px}
+    #cr-medical-workbench p{margin:0 0 14px}
+    #cr-medical-workbench .cr-steps{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px;padding:5px;border:1px solid var(--cr-line);background:var(--cr-panel);border-radius:var(--cr-round);margin-bottom:18px}
+    #cr-medical-workbench .cr-step{border:0;background:transparent;color:var(--cr-muted);border-radius:6px;padding:10px 5px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+    #cr-medical-workbench .cr-step[aria-current="step"]{background:var(--cr-tint);color:var(--cr-accent)}
+    #cr-medical-workbench .cr-num{font-size:12px;opacity:.8}
+    #cr-medical-workbench .cr-stage-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:20px 0 12px;flex-wrap:wrap}
+    #cr-medical-workbench .cr-stage-head h3{margin:0}
+    #cr-medical-workbench .cr-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
+    #cr-medical-workbench .cr-panel{background:var(--cr-panel);border:1px solid var(--cr-line);border-radius:var(--cr-round);padding:var(--cr-space);min-width:0}
+    #cr-medical-workbench .cr-stack{display:grid;gap:12px;min-width:0}
+    #cr-medical-workbench .cr-source{display:block;width:100%;text-align:left;padding:14px;background:var(--cr-panel);color:var(--cr-fg);border:1px solid var(--cr-line);border-radius:7px}
+    #cr-medical-workbench .cr-source[aria-pressed="true"],#cr-medical-workbench .cr-claim[aria-pressed="true"]{border-color:var(--cr-accent);background:var(--cr-tint)}
+    #cr-medical-workbench .cr-row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    #cr-medical-workbench .cr-source strong{display:block;font-weight:500;margin:7px 0 3px}
+    #cr-medical-workbench .cr-quote{padding:15px;border-left:3px solid var(--cr-accent);margin:12px 0;background:var(--cr-tint);border-radius:0 6px 6px 0}
+    #cr-medical-workbench .cr-meta{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:18px}
+    #cr-medical-workbench .cr-meta span{display:block}
+    #cr-medical-workbench .cr-claim{display:block;width:100%;text-align:left;background:var(--cr-panel);color:var(--cr-fg);padding:13px;border:1px solid var(--cr-line);border-radius:7px;margin:10px 0}
+    #cr-medical-workbench .cr-claim.cr-error{border-color:var(--cr-bad)}
+    #cr-medical-workbench .cr-ref{display:block;font-size:12px;color:var(--cr-accent);font-weight:500;margin-top:7px}
+    #cr-medical-workbench .cr-rule{border-top:1px solid var(--cr-line);margin:16px 0}
+    #cr-medical-workbench .cr-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px}
+    #cr-medical-workbench .cr-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--cr-line);border-radius:6px;background:var(--cr-panel);color:var(--cr-fg);padding:8px 12px;font-weight:500}
+    #cr-medical-workbench .cr-button.primary{background:var(--cr-fg);color:var(--cr-panel);border-color:var(--cr-fg)}
+    #cr-medical-workbench .cr-button.warn{color:var(--cr-bad);border-color:var(--cr-bad)}
+    #cr-medical-workbench .cr-facts{margin:0;display:grid;gap:13px}
+    #cr-medical-workbench .cr-facts div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px}
+    #cr-medical-workbench dt{color:var(--cr-muted)}
+    #cr-medical-workbench dd{margin:0}
+    #cr-medical-workbench .cr-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+    #cr-medical-workbench .cr-table th{text-align:left;font-size:12px;color:var(--cr-muted);font-weight:400}
+    #cr-medical-workbench .cr-table th,#cr-medical-workbench .cr-table td{padding:11px 8px;border-bottom:1px solid var(--cr-line);vertical-align:top}
+    #cr-medical-workbench .cr-table th:first-child,#cr-medical-workbench .cr-table td:first-child{padding-left:0}
+    #cr-medical-workbench .cr-check{display:grid;grid-template-columns:22px 1fr auto;gap:8px;padding:13px 0;border-bottom:1px solid var(--cr-line);align-items:start}
+    #cr-medical-workbench .cr-check:last-child{border:0}
+    #cr-medical-workbench .cr-good{color:var(--cr-ok)}
+    #cr-medical-workbench .cr-danger{color:var(--cr-bad)}
+    #cr-medical-workbench .cr-label{display:flex;align-items:flex-start;gap:9px;margin:16px 0}
+    #cr-medical-workbench .cr-label input{margin:4px 0 0;accent-color:var(--cr-accent);flex-shrink:0}
+    #cr-medical-workbench .cr-letter p{margin-top:15px}
+    #cr-medical-workbench .cr-status{border-radius:7px;padding:15px;background:var(--cr-tint);color:var(--cr-accent);margin:15px 0}
+    #cr-medical-workbench .cr-status.bad{background:var(--cr-bad-bg);color:var(--cr-bad)}
+    #cr-medical-workbench .cr-status.ok{background:var(--cr-ok-bg);color:var(--cr-ok)}
+    #cr-medical-workbench .cr-status strong{font-weight:500;display:block;margin-bottom:4px}
+    #cr-medical-workbench .cr-status span{font-size:12px}
+    #cr-medical-workbench .cr-log{display:grid;gap:10px;margin:10px 0 0;padding:0;list-style:none}
+    #cr-medical-workbench .cr-log li{display:grid;grid-template-columns:25px 1fr;gap:9px;padding:10px 0;border-bottom:1px solid var(--cr-line)}
+    #cr-medical-workbench .cr-next{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:18px}
+    #cr-medical-workbench .cr-footer{border-top:1px solid var(--cr-line);padding:13px 22px;background:var(--cr-panel);border-radius:0 0 12px 12px}
+    #cr-medical-workbench details>summary{cursor:pointer;font-weight:500;font-size:12px;color:var(--cr-muted)}
+    #cr-medical-workbench .cr-map{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin:18px 0 8px}
+    #cr-medical-workbench .cr-map ul{margin:8px 0;padding-left:18px;font-size:12px;color:var(--cr-muted)}
+    #cr-medical-workbench .cr-mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;overflow-wrap:anywhere}
+    #cr-medical-workbench .cr-note{margin:16px 0 0;font-size:12px;color:var(--cr-muted)}
+    @media(max-width:720px){#cr-medical-workbench .cr-body{padding:16px}#cr-medical-workbench .cr-grid{grid-template-columns:1fr}#cr-medical-workbench .cr-steps{grid-template-columns:repeat(3,minmax(0,1fr))}#cr-medical-workbench .cr-map{grid-template-columns:1fr}#cr-medical-workbench .cr-top{padding:14px 16px}#cr-medical-workbench h2{font-size:21px}}
+    @media(max-width:400px){#cr-medical-workbench .cr-body{padding:12px}#cr-medical-workbench .cr-panel{padding:14px}#cr-medical-workbench .cr-meta{grid-template-columns:1fr}#cr-medical-workbench .cr-facts div{grid-template-columns:1fr;gap:2px}#cr-medical-workbench .cr-step{gap:5px}#cr-medical-workbench .cr-check{grid-template-columns:18px 1fr}#cr-medical-workbench .cr-check>.cr-badge{grid-column:2;width:max-content}}
+    @media(pointer:coarse){#cr-medical-workbench button{min-height:44px}#cr-medical-workbench .cr-label{min-height:44px}}
+
+#cr-medical-workbench [hidden]{display:none!important}

@@ -1,36 +1,70 @@
 ---
-title: "The letter that changed after it was signed"
+title: "Medical Affairs: evidence to reviewed work"
 sidebarTitle: "Medical affairs"
-description: "A medical information letter is drafted, reviewed and signed. New evidence lands, the recommendation flips, and the send is refused — in your browser."
+description: "Explore source-linked evidence, draft validation, medical review and controlled release in an interactive Medical Affairs demonstration."
 mode: "wide"
 ---
 
-A harness that retrieves biomedical evidence, reasons over it, cites it and drafts a reply is
-four problems, and CTRLRun solves none of them. It solves the fifth: the letter that leaves the
-building is the letter a named human read, it goes out once, and there is a receipt. Press the
-buttons below and watch a signature stop matching.
+Build a reviewable Medical Affairs brief from evidence, inspect the source behind each claim,
+and see what happens when an unsupported claim or an edited approval reaches the release step.
+The workbench uses invented evidence and prewritten synthesis; its release decisions run the
+real CTRLRun Python library in your browser.
 
-<div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "stretch", margin: "24px 0" }}>
-  {[
-    ["Retrieve", "your pipeline"],
-    ["Reason", "your pipeline"],
-    ["Cite", "your pipeline"],
-    ["Validate", "your pipeline"],
-  ].map(([step, who]) => (
-    <div key={step} style={{ flex: "1 1 0", minWidth: "102px", border: "1px solid currentColor", borderRadius: "8px", padding: "10px 12px", opacity: 0.55 }}>
-      <div style={{ fontSize: "15px", fontWeight: 600 }}>{step}</div>
-      <div style={{ fontSize: "12px" }}>{who}</div>
-    </div>
-  ))}
-  <div style={{ flex: "1 1 0", minWidth: "112px", border: "2px solid #B8730A", borderRadius: "8px", padding: "10px 12px" }}>
-    <div style={{ fontSize: "15px", fontWeight: 700, color: "#B8730A" }}>The gate</div>
-    <div style={{ fontSize: "12px" }}>this library</div>
-  </div>
-  <div style={{ flex: "1 1 0", minWidth: "102px", border: "1px solid currentColor", borderRadius: "8px", padding: "10px 12px", opacity: 0.55 }}>
-    <div style={{ fontSize: "15px", fontWeight: 600 }}>Send</div>
-    <div style={{ fontSize: "12px" }}>a physician reads it</div>
-  </div>
+The product, condition, studies and findings are invented. Nothing on this page is medical
+information about a real medicine. This is a demonstration of an application design, not a live
+literature search or a clinically validated evidence service.
+
+<div id="medical-workbench-mount">
+  <p>The evidence workbench loads here when JavaScript is enabled. It includes six stages:
+  retrieve, reason, cite, validate, review and release.</p>
 </div>
+
+## What can you demonstrate?
+
+1. **Retrieve and reason.** Inspect three synthetic records. Keep the randomized trial and
+   extension; exclude the protocol from outcome claims. Compare the trial arms while retaining
+   adverse events, follow-up and study limitations.
+2. **Cite and validate.** Select a sentence to open its supporting passage. Inject an unsupported
+   progression claim, then open Validate. Remove the claim to prepare a new version for review.
+3. **Review and release.** Confirm that you reviewed the evidence and approve the current version.
+   Simulate an edit after approval, then attempt release. The original approval no longer matches.
+   Return to review to approve the revised version.
+4. **Recover a lost reply.** Before release, select the lost-reply scenario. The simulated archive
+   receives the brief, but CTRLRun records `AMBIGUOUS`. A used approval cannot authorize a retry.
+   Check the simulated destination to confirm the original receipt without another write.
+
+Use **Start a new case** between independent demonstrations. Download the review brief as
+Markdown, or the evidence and audit record as JSON. Downloads retain the synthetic-data label,
+current document version and review status; the audit download includes actual CTRLRun receipts.
+Starting a new case clears this browser session's records.
+
+## What is real, and what is illustrative?
+
+| Component | This demonstration | A working biomedical application |
+| --- | --- | --- |
+| Retrieval | Three fixed, explicitly synthetic source records | Search connectors, permitted full text, deduplication and dated source snapshots |
+| Reasoning | Prewritten findings that preserve comparators and limitations | Evidence extraction and LLM-assisted synthesis evaluated by medical specialists |
+| Citations | Claim-to-passage inspection | Stable source identifiers, locations and versioned evidence |
+| Validation | Python checks the curated claim text, source mapping, versions and numerical fixture | Independent numerical checks, source-support evaluation and review of conflicting evidence |
+| Review | A visitor acts as the demo medical reviewer | Authenticated reviewers, scientific judgment and an organizational review process |
+| Release | Real CTRLRun policy, approval binding and effect records; an in-memory destination | The same controls around an authorized document or delivery service |
+
+The validator recomputes its result before release. It does not trust a client-supplied “passed”
+flag. Unsupported fixture content is denied by policy. Passing these narrow checks does not
+establish scientific correctness, completeness or clinical suitability.
+
+Approval covers the serialized document, evidence versions, validation version and destination.
+A receipt records the action and outcome; it does not prove the medical reviewer was correct.
+In production, keep the reviewed content immutable and enforce validation and reviewer identity
+in a trusted service. The browser demonstration is inspectable and is not an authorization service.
+
+## How does the original letter example work?
+
+<Accordion title="Run the letter-change and safety-report examples">
+
+A reviewer signs revision A of a fictional response letter. New evidence changes the
+recommendation in revision B. Attempt delivery to see the real library refuse the changed action.
+The safety-report example separately shows an ambiguous effect blocking a blind retry.
 
 <div id="ctrlrun-medical-demo">
   <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }}>
@@ -56,22 +90,8 @@ buttons below and watch a signature stop matching.
   </div>
 </div>
 
-The product, the physician's question and the three references are invented. Nothing on this
-page is medical information about a real medicine.
-
-## What refused you
-
-Revision A says no dose adjustment is needed. The reviewer reads that letter and signs for it,
-and the approval is bound to [the hash of that exact action](/docs/concepts/approval-binding) — its
-name, its arguments, its recommendation sentence, its reference list. Then a newer study
-supersedes reference 2 and the pipeline redrafts. Revision B recommends the opposite. The
-signature is still there, still valid, still unexpired, and it authorizes nothing, because the
-letter it covers no longer exists.
-
-The two side buttons are the other two failures. Filing a safety case with the reply lost leaves
-the effect [AMBIGUOUS rather than failed](/docs/concepts/outcomes-and-ambiguous), so the retry is
-refused and the case is filed once. An unapproved use is refused by the policy at any size, and
-an action nobody wrote down is refused for [not being in it](/docs/concepts/fail-closed).
+The following is this letter example's policy. Denying the illustrative unapproved-use action
+is a configured example rule, not a universal Medical Affairs requirement.
 
 ```yaml
 schema: ctrlrun.policy/v2
@@ -90,22 +110,23 @@ actions:
     decision: deny
 ```
 
-## What CTRLRun is not doing here
+</Accordion>
 
-It did not read the papers. It has no opinion on whether reference 2 supports the sentence that
-cites it, whether the newer study is the better one, or whether either letter is correct. Claim
-checking is the hard scientific half of the harness, and it is yours to build — the transferable
-idea is to make it a precondition of `response.send_to_hcp` rather than a line in a prompt, so a
-claim with no source behind it is a refusal with a receipt instead of a suggestion the model can
-talk itself out of.
+## How would you build this for your team?
 
-This page runs real Python: Pyodide 314.0.6 loads in your tab and micropip installs the
-released `ctrlrun` wheel from PyPI. The medical portal and the safety database are fakes in the
-same process, the store is in memory, and no socket is opened. Every refusal you read above came
-from the same wheel `pip install ctrlrun` gives you.
+Start with one therapeutic area, one internal evidence-brief template and a medically reviewed
+source set. Add retrieval and structured extraction, retain uncertainty and contradictory
+findings, then connect claim checking to the release preconditions. Expand to medical-information
+response drafts, MSL briefings or literature updates after the evidence and review process works.
+
+The [workbench Python example](https://github.com/CTRLRun/ctrlrun/blob/main/examples/medical-affairs/workbench.py)
+contains the executable fixture validator and protected release action. Both demonstrations load
+Pyodide 314.0.6 and CTRLRun from PyPI on demand. Runtime downloads require a connection; document
+content stays in the tab and the destinations are in-memory fakes. There is no LLM request and no
+message is delivered to a physician.
 
 ## Next
 
-- [Why](/docs/why) — the 700-word version of the problem underneath this one
-- [Get started](/docs/get-started/quickstart) — the same guarantees around your own function
-- [Approval binding](/docs/concepts/approval-binding) — what an approval is bound to, and why
+- [Why](/docs/why): the execution problem underneath this workflow
+- [Get started](/docs/get-started/quickstart): protect your application's release action
+- [Approval binding](/docs/concepts/approval-binding): what the reviewer's decision authorizes

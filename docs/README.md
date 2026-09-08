@@ -35,6 +35,15 @@ The browser harness requires Playwright and the preview server. It covers the de
 
 ## Scenario and conversion behavior
 
+The Medical Affairs workbench uses `medical-workbench.js`, styles scoped to
+`#cr-medical-workbench`, and `examples/medical-affairs/workbench.py`. Keep its embedded `MODULE`
+equivalent to the Python source; `tests/test_medical_workbench.py` checks the copy. The browser
+loads CTRLRun 0.6.1 on demand. Evidence and synthesis are synthetic; release decisions and
+receipts execute in Python. `assets/verify-medical-workbench.cjs` exports a Playwright check
+function accepting a page and an optional preview base URL. It exercises browser Python, both
+downloads, error recovery and all six stages at three viewport widths. The letter demo remains
+independent.
+
 The homepage explorer contains 48 domains and 238 actions. All rules are illustrative, client-side simulations. The original Python runtime demos remain at `/docs/try-it` and `/docs/demos/medical-affairs`; they load their runtime only when invoked.
 
 The risk check stores no answers and sends no form data until the visitor submits an architecture review. Its result distinguishes indicated patterns from unknown answers and explains the scoring rule.
