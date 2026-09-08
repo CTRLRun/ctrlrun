@@ -8,7 +8,7 @@
  * What it does: load Pyodide from the jsDelivr CDN, install `ctrlrun` from PyPI with micropip,
  * and run real CTRLRun in the reader's own browser -- the same arrangement docs/try-it.js uses,
  * over a different policy. Nothing is sent anywhere: the medical portal and the safety database
- * are fakes in the same process, the state store is in memory, and no socket is opened.
+ * are fakes in the same process, the state store is in memory, and no clinical data is transmitted.
  *
  * MODULE is a JSON array of lines so the test suite can read it out rather than carrying a
  * copy. `tests/test_docs_medical_demo.py` runs it natively through the whole sequence the page
@@ -63,13 +63,13 @@
     "        \"revision\": \"A\",",
     "        \"retrieved\": \"2026-09-01\",",
     "        \"recommendation\": \"No dose adjustment is required in moderate hepatic impairment.\",",
-    "        \"references\": [\"PMID 37884120\", \"PMID 38119042\", \"PMID 38446701\"],",
+    "        \"references\": [\"DEMO-LABEL-01\", \"DEMO-STUDY-02\", \"DEMO-REVIEW-03\"],",
     "    },",
     "    {",
     "        \"revision\": \"B\",",
     "        \"retrieved\": \"2026-09-07\",",
     "        \"recommendation\": \"A 50% dose reduction is recommended in moderate hepatic impairment.\",",
-    "        \"references\": [\"PMID 37884120\", \"PMID 40219847\", \"PMID 38446701\"],",
+    "        \"references\": [\"DEMO-LABEL-01\", \"DEMO-STUDY-04\", \"DEMO-REVIEW-03\"],",
     "    },",
     "]",
     "",
@@ -152,7 +152,7 @@
     "            elif op == \"refresh\":",
     "                draft_index[0] = 1",
     "                result[\"outcome\"] = \"refreshed\"",
-    "                result[\"superseded\"] = \"PMID 38119042 superseded by PMID 40219847\"",
+    "                result[\"superseded\"] = \"DEMO-STUDY-02 superseded by DEMO-STUDY-04\"",
     "            elif op == \"send\":",
     "                _send(request.get(\"approval_id\"))",
     "                result[\"outcome\"] = \"executed\"",
@@ -202,7 +202,7 @@
 
   //: The reference the newer study brings in. The panel marks it so a reader can see which
   //: line moved without diffing two revisions by eye.
-  var NEW_REFERENCE = "PMID 40219847";
+  var NEW_REFERENCE = "DEMO-STUDY-04";
 
   // Built as nodes rather than markup. Nothing here is attacker-controlled -- every string
   // comes from the module in this file -- but a page whose whole subject is a boundary does
