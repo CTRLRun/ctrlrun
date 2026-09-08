@@ -150,5 +150,6 @@ not needed; the assistants that do read `llms.txt` get Mintlify's.
 | Page | Search intent |
 |---|---|
 | `index` | Execution safety for AI agents |
+| `try` | try AI agent guardrails demo · what stops an agent action |
 | `risk-check` | AI agent execution risk assessment |
 | `protect-my-agent` | AI agent architecture review and integration help |

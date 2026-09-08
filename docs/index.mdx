@@ -35,12 +35,24 @@ import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
 
   <section className="cr-section cr-failure" aria-labelledby="cr-failure-title">
     <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">The refund succeeded. The agent thinks it failed.</h2><p>An agent refunds &#36;500. The provider processes it, but the response is lost. The agent sees an error and tries again.</p></div>
-    <div className="cr-comparison"><div><span className="cr-step">WITHOUT CTRLRUN</span><p>Retry <span aria-hidden="true">→</span> another &#36;500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Outcome uncertain</strong> → pause → confirm what happened → only then continue.</p></div></div>
+    <div className="cr-comparison"><div><span className="cr-step">WITHOUT CTRLRUN</span><p>Retry <span aria-hidden="true">→</span> another &#36;500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Outcome uncertain</strong> → pause → confirm what happened → only then continue.</p></div><p className="cr-caption"><a href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=uncertain">Walk through this exact case in the demo →</a></p></div>
   </section>
 
   <section className="cr-section" id="try-ctrlrun" aria-labelledby="cr-try-title">
-    <div className="cr-section-heading"><div><p className="cr-eyebrow">TRY THE EXECUTION BOUNDARY</p><h2 id="cr-try-title">Choose an action. See what CTRLRun stops.</h2></div><p className="cr-caption">No login. No API key. No setup.</p></div>
+    <div className="cr-section-heading"><div><p className="cr-eyebrow">TRY THE EXECUTION BOUNDARY</p><h2 id="cr-try-title">Choose an action. See what CTRLRun stops.</h2><p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain, pick the moment it goes wrong, and read which check refused it.</p></div><p className="cr-caption">No login. No API key. No setup.<br />48 domains, 7 ways an action goes wrong.<br /><a href="/try" data-cr-event="try_clicked">Open the demo on its own page ↗</a></p></div>
     <ScenarioExplorer />
+  </section>
+
+  <section className="cr-section cr-how" id="how-it-works" aria-labelledby="cr-how-title">
+    <div className="cr-section-heading"><div><p className="cr-eyebrow">HOW IT WORKS</p><h2 id="cr-how-title">Where CTRLRun sits,<br />in plain English.</h2></div><p className="cr-caption">A library inside your process.<br />Not a service in front of it.</p></div>
+    <p className="cr-intro">Your agent decides what to do. Somewhere after that, your code calls something that changes the real world: charges a card, deletes a user, sends the email. CTRLRun goes in that one gap, and only that gap. It never sees the prompt, the reasoning or the conversation.</p>
+    <div className="cr-how-steps">
+      <div><span className="cr-step">01 / YOU NAME THE ACTION</span><h3>Wrap the function that causes the effect</h3><p>You give it a name and an effect key: the identity of the business action, like <code>refund:txn_4821</code>. Two attempts at the same business action carry the same key, whether they come from a retry, a second worker, or a process that restarted.</p></div>
+      <div><span className="cr-step">02 / IT CHECKS BEFORE THE CALL</span><h3>Four questions, every time</h3><p>Is this agent entitled to act at all? Does policy allow these exact arguments, require a person, or deny them? If a human approved something, was it this exact action? Could this action already have happened? Anything unclear stops the call.</p></div>
+      <div><span className="cr-step">03 / IT RESERVES FIRST</span><h3>The claim is written before the effect</h3><p>The effect is reserved in a database before your function runs, not after it returns. That ordering is the whole trick: if the process dies mid-call, the reservation is still there, so the retry meets a claim instead of an empty table.</p></div>
+      <div><span className="cr-step">04 / IT RECORDS WHAT HAPPENED</span><h3>Including “we do not know”</h3><p>Committed, failed, or unknown. A timeout is not a failure, it is an unknown outcome, and CTRLRun holds it that way until something confirms it. A receipt records the action, the decision behind it, the approval and the result.</p></div>
+    </div>
+    <div className="cr-how-close"><p><strong>What it is not.</strong> It does not read prompts, choose models, rank tools, or judge whether the agent's reasoning was any good. It is not an LLM, and it does not call one. It checks the action, not the thinking.</p><a className="cr-text-link" href="/docs/ARCHITECTURE">Read the architecture: the modules, the store, the receipt chain →</a></div>
   </section>
 
   <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">

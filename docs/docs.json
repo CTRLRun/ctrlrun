@@ -37,6 +37,7 @@
         "tab": "CTRLRun",
         "pages": [
           "index",
+          "try",
           "risk-check",
           "protect-my-agent"
         ]

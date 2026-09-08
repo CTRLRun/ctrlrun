@@ -1,0 +1,47 @@
+---
+title: "Try the execution boundary"
+description: "Pick an agent action in your own domain and watch which check refuses it: policy, approval binding, effect reservation, or an unknown outcome."
+canonical: "https://ctrlrun.dev/try"
+"og:url": "https://ctrlrun.dev/try"
+"og:title": "Try the execution boundary — CTRLRun"
+"twitter:title": "Try the execution boundary — CTRLRun"
+mode: "custom"
+---
+
+import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
+
+<div className="cr-site">
+  <section className="cr-hero" aria-labelledby="cr-try-page-title">
+    <a className="cr-text-link" href="/">← CTRLRun</a>
+    <p className="cr-eyebrow" style={{ marginTop: "34px" }}>TRY THE EXECUTION BOUNDARY</p>
+    <h1 id="cr-try-page-title">Choose an action.<br />See what CTRLRun stops<span className="cr-dot">.</span></h1>
+    <p className="cr-lede">Your model chooses the action. CTRLRun decides whether it may execute.</p>
+    <p className="cr-intro">Pick your domain — there are 48 — then pick the moment it goes wrong: a lost reply, an approval the agent edited, a retry of something that already happened. You get the decision, the check that produced it, and the line your own code would see.</p>
+    <p className="cr-caption">No login. No API key. No setup. Nothing here executes.<br />Every scenario has its own link, so you can send someone straight to the one that matters.</p>
+  </section>
+
+  <section className="cr-section" aria-label="Execution boundary scenario explorer">
+    <ScenarioExplorer standalone={true} />
+  </section>
+
+  <section className="cr-section cr-failure" aria-labelledby="cr-try-real-title">
+    <div><p className="cr-eyebrow">THIS PAGE IS AN ILLUSTRATION</p><h2 id="cr-try-real-title">Then go and break the real thing.</h2><p>Nothing on this page runs CTRLRun. It draws the decisions so you can see where they land in a domain you recognise. One page further, real Python and the released wheel load into your tab, and every refusal you read there is the library's own.</p></div>
+    <div className="cr-comparison">
+      <div><span className="cr-step">HERE</span><p>An illustration of the checks, with example rules that are not industry defaults. No code runs, no request is sent.</p></div>
+      <div className="cr-safe"><span className="cr-step">ONE PAGE FURTHER</span><p><strong>Real Python, the released <code>ctrlrun</code> wheel, in your browser.</strong> Change a refund after approving it and read the exception the library raises. <a href="/docs/try-it">Run it in your browser →</a></p></div>
+    </div>
+  </section>
+
+  <section className="cr-section" aria-labelledby="cr-try-next-title">
+    <div className="cr-section-heading"><div><p className="cr-eyebrow">WHERE TO GO NEXT</p><h2 id="cr-try-next-title">From the demo to your own code.</h2></div><p className="cr-caption">Apache-2.0 · Runs in your environment</p></div>
+    <div className="cr-how-steps">
+      <div><span className="cr-step">UNDERSTAND IT</span><h3>How it works</h3><p>Where CTRLRun sits, what it checks, and what it deliberately does not do. <a href="/#how-it-works">The plain-English version</a>, then <a href="/docs/ARCHITECTURE">the architecture</a>.</p></div>
+      <div><span className="cr-step">RUN IT</span><h3>Protect your first action</h3><p><code>pip install ctrlrun</code>, then wrap the function that causes the effect. <a href="/docs/get-started/quickstart">The quickstart</a> adds your policy, identity and approval flow.</p></div>
+      <div><span className="cr-step">READ THE CASES</span><h3>Concepts behind each refusal</h3><p><a href="/docs/concepts/approval-binding">Approval binding</a>, <a href="/docs/concepts/effect-keys">effect keys</a>, and <a href="/docs/concepts/outcomes-and-ambiguous">outcomes and AMBIGUOUS</a> — the three the demo leans on hardest.</p></div>
+      <div><span className="cr-step">SEE IT IN A DOMAIN</span><h3>A worked application</h3><p>The <a href="/docs/demos/medical-affairs">medical affairs workbench</a> puts the same kernel under a document release instead of a payment.</p></div>
+    </div>
+    <div className="cr-how-close"><p><strong>Not sure where the controls belong in your architecture?</strong> A focused review maps which of your agent's actions can run automatically, which need a person, and which must stop until the outcome is known.</p><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Get an execution-safety review →</a></div>
+  </section>
+
+  <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="/">CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a></div></div>
+</div>
