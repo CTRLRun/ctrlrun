@@ -9,8 +9,12 @@ canonical: "https://ctrlrun.dev/"
 "og:url": "https://ctrlrun.dev/"
 ---
 
-<div className="cr-site">
-  <section className="cr-hero" aria-labelledby="cr-title">
+import { DeckNav } from "/snippets/deck-nav.jsx";
+
+<div className="cr-site cr-deck">
+  <section className="cr-slide cr-slide-1" aria-label="Execution safety for AI agents">
+  <div className="cr-slide-inner">
+  <div className="cr-hero" aria-labelledby="cr-title">
     <p className="cr-eyebrow">CONTROL THE ACTION. KEEP THE AUTONOMY.</p>
     <h1 id="cr-title">Execution safety <br />for AI agents<span className="cr-dot">.</span></h1>
     <p className="cr-lede">Control what AI agents can do in your systems, what needs human approval, and what must never happen.</p>
@@ -20,9 +24,9 @@ canonical: "https://ctrlrun.dev/"
       <a className="cr-button cr-github-badge" href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked"><svg aria-hidden="true" focusable="false" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .75a11.25 11.25 0 0 0-3.558 21.923c.563.104.77-.244.77-.542 0-.267-.01-.975-.015-1.913-3.13.68-3.79-1.508-3.79-1.508-.513-1.303-1.252-1.65-1.252-1.65-1.023-.7.077-.686.077-.686 1.132.08 1.727 1.162 1.727 1.162 1.006 1.724 2.64 1.226 3.283.938.102-.73.394-1.226.715-1.508-2.498-.284-5.124-1.25-5.124-5.563 0-1.228.44-2.233 1.162-3.02-.116-.285-.504-1.43.11-2.98 0 0 .945-.303 3.094 1.154a10.786 10.786 0 0 1 5.625 0c2.148-1.457 3.09-1.154 3.09-1.154.617 1.55.23 2.695.113 2.98.724.787 1.16 1.792 1.16 3.02 0 4.323-2.63 5.276-5.136 5.555.404.35.765 1.043.765 2.1 0 1.515-.014 2.737-.014 3.11 0 .3.203.65.774.54A11.252 11.252 0 0 0 12 .75Z" /></svg><span>Open source on GitHub</span><span aria-hidden="true">↗</span></a>
     </div>
     <p className="cr-caption">Apache-2.0 · Runs in your environment<br />SQLite on one host · Postgres across hosts</p>
-  </section>
+  </div>
 
-  <section className="cr-section cr-failure-chain" aria-labelledby="cr-failure-title">
+  <div className="cr-failure-chain" aria-labelledby="cr-failure-title">
     <div className="cr-section-heading">
       <div><p className="cr-eyebrow">THE TOOL WAS IN ITS LIST. THAT IS NOT PERMISSION.</p><h2 id="cr-failure-title">The agent was certain.<br />The agent was wrong.</h2></div>
       <p className="cr-caption">CTRLRun checks the action, not the reasoning.<br />It reads the arguments about to leave your process, and answers whether they may go.</p>
@@ -41,6 +45,12 @@ canonical: "https://ctrlrun.dev/"
         </ol>
       </div>
     </div>
+  </div>
+  </div>
+  </section>
+
+  <section className="cr-slide cr-slide-2" aria-label="How CTRLRun works">
+  <div className="cr-slide-inner">
     <div className="cr-chain-cta">
       <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick one of 48 domains, then pick the moment it goes wrong: an approval the agent edited, a retry of something that already happened, a reply that never came back.<span className="cr-caption"> No login. No API key. No setup.</span></p>
       <div className="cr-try-actions">
@@ -48,9 +58,8 @@ canonical: "https://ctrlrun.dev/"
         <a className="cr-text-link" href="/try" data-cr-event="try_clicked">Or pick your own domain ↗</a>
       </div>
     </div>
-  </section>
 
-  <section className="cr-section cr-how" id="how-it-works" aria-labelledby="cr-how-title">
+    <div className="cr-how" id="how-it-works" aria-labelledby="cr-how-title">
     <div className="cr-section-heading">
       <div><p className="cr-eyebrow">HOW IT WORKS</p><h2 id="cr-how-title">Set limits. Check actions.<br />Know what happened.</h2></div>
       <p className="cr-caption">A library inside your process.<br />Not a service in front of it.</p>
@@ -71,17 +80,25 @@ canonical: "https://ctrlrun.dev/"
       </div>
     </div>
     <div className="cr-how-close"><p><strong>What it is not.</strong> It does not read prompts, choose models, rank tools, or judge whether the agent's reasoning was any good. It is not an LLM, and it does not call one. It checks the action, not the thinking.</p><a className="cr-text-link" href="/docs/ARCHITECTURE">Read the architecture →</a></div>
+    </div>
+  </div>
   </section>
 
-  <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">
+  <section className="cr-slide cr-slide-3" aria-label="Start integrating">
+  <div className="cr-slide-inner">
+    <div className="cr-integration" aria-labelledby="cr-integrate-title">
     <div><p className="cr-eyebrow">FOR THE PEOPLE BUILDING IT</p><h2 id="cr-integrate-title">Start at the function<br />that takes action.</h2><p>Wrap the call that causes the real-world effect. Policy decides whether it can run, needs approval, or must stop. Execution state survives restarts, so an uncertain outcome still blocks a blind retry.</p><a className="cr-text-link" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Start integrating <span aria-hidden="true">→</span></a></div>
     <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"stripe.refund\",\n    effect=\"refund:{payment_id}\"\n)\ndef refund(payment_id, amount):\n    ..."}</code></pre><ul className="cr-outcomes" aria-label="Execution outcomes"><li><code>allow</code> → execute</li><li><code>approve</code> → wait for exact approval</li><li><code>deny</code> → do not execute</li><li><code>unknown outcome</code> → do not retry blindly</li></ul></div>
     <p className="cr-caption cr-integration-scope">Python, agent frameworks, or an MCP gateway: the execution boundary stays the same, and it protects workers, webhooks and scheduled jobs too. <a href="/docs/not-only-agents">Not only agents →</a></p>
-  </section>
+    </div>
 
-  <section className="cr-section cr-commercial" aria-labelledby="cr-commercial-title">
+    <div className="cr-commercial" aria-labelledby="cr-commercial-title">
     <div><p className="cr-eyebrow">FOR AGENTS MOVING INTO PRODUCTION</p><h2 id="cr-commercial-title">Know which actions are safe to automate.</h2><p>Leave with a concrete execution-control map: what can run automatically, what needs a person, and what must stop until the outcome is known.</p></div><div className="cr-commercial-links"><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Get an execution-safety review <span aria-hidden="true">→</span></a><a className="cr-text-link" href="/risk-check">Take the free risk check →</a><a className="cr-text-link" href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Or just email me: contact@arpanghoshal.com ↗</a><p className="cr-caption">Architecture reviews · Integration sprints · Production support<br />CTRLRun OSS remains Apache-2.0 and free.</p></div>
+    </div>
+
+    <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="/try" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a><a href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Contact ↗</a></div></div>
+  </div>
   </section>
 
-  <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="/try" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a><a href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Contact ↗</a></div></div>
+  <DeckNav labels={["Execution safety for AI agents", "How CTRLRun works", "Start integrating"]} />
 </div>

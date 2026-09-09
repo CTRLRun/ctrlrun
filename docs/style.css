@@ -29,6 +29,44 @@
 .cr-site .cr-caption { font-size:12px; line-height:1.7; color:var(--cr-muted); }
 .cr-flow-arrow { font-size:26px; color:var(--cr-muted); text-align:center; }
 .cr-section { padding:64px 0; border-bottom:1px solid var(--cr-line); scroll-margin-top:100px; }
+/* Homepage deck: three slides, one viewport each, no resting point between. */
+.cr-deck { --cr-chrome:64px; height:calc(100dvh - var(--cr-chrome)); overflow-y:auto; overflow-x:hidden; scroll-snap-type:y mandatory; scroll-behavior:smooth; overscroll-behavior:contain; scrollbar-width:none; max-width:none; padding:0; }
+.cr-deck::-webkit-scrollbar { display:none; }
+.cr-slide { height:calc(100dvh - var(--cr-chrome)); overflow:hidden; scroll-snap-align:start; scroll-snap-stop:always; display:flex; align-items:center; padding:34px 32px 44px; }
+.cr-slide-inner { width:100%; max-width:1120px; margin:0 auto; display:flex; flex-direction:column; justify-content:center; gap:clamp(26px,3.8vh,48px); transform:scale(var(--cr-slide-scale,1)); transform-origin:center center; }
+.cr-deck .cr-hero { padding:0; max-width:830px; }
+.cr-deck .cr-how,.cr-deck .cr-integration,.cr-deck .cr-commercial { padding:0; border:0; }
+.cr-deck .cr-chain-cta { margin-top:0; padding-top:0; border-top:0; }
+.cr-deck .cr-how-close { margin-top:0; }
+.cr-deck .cr-pillars { margin-top:0; }
+.cr-deck .cr-failure-chain .cr-section-heading { margin-bottom:clamp(22px,3.2vh,34px); }
+.cr-deck .cr-integration { display:grid; grid-template-columns:1fr 1fr; gap:clamp(34px,4vw,64px); align-items:center; }
+.cr-deck .cr-commercial { display:grid; grid-template-columns:1.3fr 1fr; gap:clamp(34px,4vw,64px); align-items:center; padding-top:clamp(20px,2.6vh,30px); border-top:1px solid var(--cr-line); }
+.cr-deck .cr-footer { padding:0; border-top:1px solid var(--cr-line); padding-top:20px; }
+.cr-deck .cr-slide-3 .cr-slide-inner { gap:clamp(18px,2.4vh,28px); }
+.cr-deck .cr-hero h1 { font-size:clamp(40px,5.4vw,68px); margin-bottom:20px; }
+.cr-deck h2+p { margin-top:14px; }
+.cr-deck .cr-section-heading h2+p { margin-top:0; }
+.cr-deck .cr-code pre { padding:16px 22px; line-height:1.6; }
+.cr-deck .cr-code .cr-outcomes { padding:12px 22px; line-height:1.65; }
+.cr-deck .cr-install { padding:12px 22px; }
+
+/* The deck's only visible control: position dots down the right edge. */
+.cr-deck-dots { position:fixed; right:24px; top:50%; transform:translateY(-50%); z-index:40; display:flex; flex-direction:column; gap:12px; }
+.cr-dot-btn { width:9px; height:9px; padding:0; border:1px solid var(--cr-muted); border-radius:50%; background:transparent; opacity:.5; transition:opacity .15s,background .15s; }
+.cr-dot-btn[aria-current=true] { background:var(--cr-accent); border-color:var(--cr-accent); opacity:1; }
+@media (max-width:900px) {
+  .cr-deck .cr-integration,.cr-deck .cr-commercial { grid-template-columns:1fr; }
+}
+/* Below the deck's comfortable size, fall back to an ordinary page. */
+@media (max-width:800px),(max-height:620px) {
+  .cr-deck { height:auto; overflow:visible; scroll-snap-type:none; }
+  .cr-slide { height:auto; min-height:0; overflow:visible; display:block; padding:38px 24px; }
+  .cr-slide-inner { transform:none; }
+  .cr-slide+.cr-slide { border-top:1px solid var(--cr-line); }
+  .cr-slide-inner { gap:32px; }
+  .cr-deck-dots { display:none; }
+}
 .cr-section h2+p { margin-top:18px; }
 .cr-failure { display:grid; grid-template-columns:1fr 1fr; gap:64px; align-items:center; }
 .cr-comparison { display:grid; gap:22px; }
@@ -363,3 +401,7 @@ body:has(.cr-site) { --topbar-tabs-height:0px; }
   .cr-chain-steps li { padding:11px 10px; font-size:12.5px; }
   .cr-chain-steps li:not(:last-child)::after { content:"↓"; right:auto; left:50%; top:auto; bottom:-14px; transform:translateX(-50%); }
 }
+
+/* The wordmark carries the brand on every page; give it room to read. */
+#navbar img.nav-logo { height:40px; }
+@media (max-width:600px) { #navbar img.nav-logo { height:32px; } }
