@@ -17,6 +17,10 @@
   "navbar": {
     "links": [
       {
+        "href": "/#how-it-works",
+        "label": "How it works"
+      },
+      {
         "href": "/docs",
         "label": "Documentation"
       },

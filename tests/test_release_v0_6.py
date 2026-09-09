@@ -89,13 +89,12 @@ def _load(name: str) -> set[str]:
 #: Sentences that **disclaim** one of the words. §8's T180 describes the whole
 #: list this way, and this half of it is.
 DISCLAIMS: dict[str, tuple[str, ...]] = {
+    # The 2026-09-09 rewrite cut the README to what CTRLRun does, how to use it and how it
+    # works, and the two paragraphs that used to carry this are now one bullet in "What it does
+    # not do". Both halves survived the cut, which is the half §6.4 cares about: the chain
+    # detects alteration, and the same sentence says alteration is not authorship.
     "README.md": (
-        "- The receipt chain detects alteration, and alteration is not authorship. Receipts are not",  # noqa: E501
-        "signed, the chain is no evidence of who wrote one, and it is not tamper-proof: it does not",  # noqa: E501
-        # The "New in 0.6" section, which says what the release added and therefore has to say
-        # what the chain is not in the same breath -- a release note listing "receipt integrity"
-        # with the disclaimer left downpage is the half-sentence §6.4 exists to stop.
-        "  **alteration**, which is not authorship: receipts are not signed.",
+        "is detected. They are not signed: alteration is not authorship. The badge above means the",
     ),
     "CHANGELOG.md": (
         '- **`docs/docs/ROADMAP.md`\'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the',  # noqa: E501

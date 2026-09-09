@@ -110,9 +110,21 @@ def test_every_expected_line_is_one_the_demo_prints():
     assert missing == [], f"the recording ends on lines the demo does not print: {missing}"
 
 
+#: The README carries the transcript inside a collapsed block rather than a section of its own,
+#: since the 2026-09-09 rewrite cut the page to what it does, how to use it, and how it works.
+#: The guard is unchanged and only its anchor moved: the block is still in the file, and every
+#: line the recording ends on still has to be a line the README quotes.
+DEMO_BLOCK_ANCHOR = "<summary>What <code>ctrlrun demo</code> shows"
+
+
+def readme_demo_block() -> str:
+    text = README.read_text(encoding="utf-8")
+    assert DEMO_BLOCK_ANCHOR in text, "the README no longer carries the demo transcript"
+    return text.split(DEMO_BLOCK_ANCHOR, 1)[1].split("</details>", 1)[0]
+
+
 def test_every_expected_line_is_one_the_readme_quotes():
-    section = README.read_text(encoding="utf-8").split("## What `ctrlrun demo` shows")[1]
-    quoted = {_RUN_VARYING.sub("*", line.rstrip()) for line in section.splitlines()}
+    quoted = {_RUN_VARYING.sub("*", line.rstrip()) for line in readme_demo_block().splitlines()}
 
     missing = [
         line for line in _expected_lines() if _RUN_VARYING.sub("*", line.rstrip()) not in quoted
@@ -145,16 +157,23 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     requirement is inverted rather than deleted — no table above the first H2, the marker
     still in the file, and the first section named — because a header that quietly grew a
     table again would otherwise pass.
+
+    The copy was rewritten on 2026-09-09 to match ctrlrun.dev's, which leads with the category
+    and the claim rather than three slogans, and the page was cut the same day to three
+    questions: what it does, how to use it, how it works. What this test requires is unchanged:
+    the fixed lines are pinned so the header cannot drift untested, the category noun is still
+    asserted, and the first section is still the failure itself.
     """
     text = README.read_text(encoding="utf-8")
     head = text.split("\n## ", 1)[0]
 
-    assert "The last check before an AI agent does something it can't undo." in head
-    assert "Autonomy belongs to the action, not the agent." in head
+    assert "Execution safety for AI agents." in head
+    assert "The model guesses. CTRLRun does not." in head
     assert (
         "A consequential action happens at most once, exactly as approved, and leaves a "
-        "receipt — and when the outcome is unknown, CTRLRun says so instead of guessing." in head
+        "receipt." in head
     )
+    assert "When the outcome is unknown, CTRLRun says so instead of guessing." in head
     # The category noun, which the hero went without until 0.6: a reader had to reverse-engineer
     # what CTRLRun *is* from three slogans. `docs/docs.mdx` carried it and the README did not.
     assert "A Python library that sits between the decision to act and the call that acts." in head
@@ -170,4 +189,4 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     assert marker not in head, "the capability matrix is not the first screen"
     assert marker in text, "the capability matrix was moved, not dropped"
     assert head.count("\n|---|") == 0, "no table above the first H2"
-    assert text.split("\n## ", 2)[1].startswith("The refund nobody approved")
+    assert text.split("\n## ", 2)[1].startswith("What it does")
