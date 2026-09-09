@@ -24,27 +24,27 @@ canonical: "https://ctrlrun.dev/"
 
   <section className="cr-section cr-failure-chain" aria-labelledby="cr-failure-title">
     <div className="cr-section-heading">
-      <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">The refund succeeded.<br />The agent thinks it failed.</h2></div>
-      <p className="cr-caption">Nothing below is a bug in the agent.<br />Every step is a system behaving normally.</p>
+      <div><p className="cr-eyebrow">THE TOOL WAS IN ITS LIST. THAT IS NOT PERMISSION.</p><h2 id="cr-failure-title">The agent was certain.<br />The agent was wrong.</h2></div>
+      <p className="cr-caption">CTRLRun cannot tell that the agent made it up.<br />It can tell the action is not one this agent may take.</p>
     </div>
     <div className="cr-chain">
       <div className="cr-chain-row">
         <span className="cr-chain-label">Without controls</span>
         <ol className="cr-chain-steps">
-          <li>&#36;500 refund issued</li><li>Succeeds at the provider</li><li>The response is lost</li><li>The agent retries</li><li className="cr-end cr-bad">&#36;1,000 paid</li>
+          <li>The ticket says: check a refund</li><li>The agent invents a &#36;50,000 payout</li><li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;50,000 gone</li>
         </ol>
       </div>
       <div className="cr-chain-row">
         <span className="cr-chain-label cr-good">With CTRLRun</span>
         <ol className="cr-chain-steps">
-          <li>&#36;500 refund issued</li><li>Succeeds at the provider</li><li>The response is lost</li><li>CTRLRun holds the retry</li><li className="cr-end cr-good">&#36;500 paid, once</li>
+          <li>The ticket says: check a refund</li><li>The agent invents a &#36;50,000 payout</li><li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 paid. Nobody is asked.</li>
         </ol>
       </div>
     </div>
     <div className="cr-chain-cta">
-      <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain — there are 48 — then pick the moment it goes wrong.<span className="cr-caption"> No login. No API key. No setup.</span></p>
+      <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain — there are 48 — then pick the moment it goes wrong: an approval the agent edited, a retry of something that already happened, a reply that never came back.<span className="cr-caption"> No login. No API key. No setup.</span></p>
       <div className="cr-try-actions">
-        <a className="cr-button" href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=uncertain" data-cr-event="try_clicked">Walk through this case <span aria-hidden="true">→</span></a>
+        <a className="cr-button" href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=blocked" data-cr-event="try_clicked">Walk through this refusal <span aria-hidden="true">→</span></a>
         <a className="cr-text-link" href="/try" data-cr-event="try_clicked">Or pick your own domain ↗</a>
       </div>
     </div>
