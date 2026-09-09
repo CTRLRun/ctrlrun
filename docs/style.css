@@ -414,23 +414,25 @@ body:has(.cr-try-page) #search-bar-entry-mobile,body:has(.cr-try-page) #assistan
 
 /* Preserve the original hallucination example, aligned for direct comparison. */
 .cr-home .cr-failure-chain { min-width:0; padding:24px; border:1px solid var(--cr-line); border-radius:10px; background:var(--cr-paper); }
-.cr-home .cr-failure-chain .cr-section-heading { display:block; margin-bottom:22px; }
-.cr-home .cr-failure-chain h2 { font-size:28px; }
-.cr-home .cr-failure-chain .cr-eyebrow { font-size:12px; }
-.cr-home .cr-failure-chain .cr-caption { margin-top:14px; }
+.cr-home .cr-failure-chain h2 { font-size:26px; }
+/* Both endings share a premise: state it once, then fork. */
+.cr-chain-setup { margin:16px 0 20px; padding:12px 14px; border:1px solid var(--cr-line); border-radius:8px; background:var(--cr-panel); }
+.cr-site .cr-chain-setup p { display:flex; justify-content:space-between; align-items:baseline; gap:16px; font-size:14px; font-weight:550; color:var(--cr-ink); }
+.cr-site .cr-chain-setup p+p { margin-top:7px; padding-top:7px; border-top:1px solid var(--cr-line); }
+.cr-chain-setup span { font-weight:400; color:var(--cr-muted); }
 .cr-home .cr-chain { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
 .cr-home .cr-chain-row { display:flex; flex-direction:column; gap:12px; }
 .cr-home .cr-chain-label { font-size:12px; letter-spacing:.05em; }
-.cr-home .cr-chain-steps { display:grid; grid-template-rows:repeat(5,minmax(62px,auto)); gap:16px; }
+.cr-home .cr-chain-steps { display:grid; grid-template-rows:repeat(3,minmax(56px,auto)); gap:16px; }
 .cr-home .cr-chain-steps li { font-size:14px; padding:12px 8px; line-height:1.4; color:var(--cr-ink); }
 .cr-home .cr-chain-steps li:not(:last-child)::after { content:"↓"; right:auto; left:50%; top:auto; bottom:-15px; transform:translateX(-50%); }
 .cr-home .cr-home-how { border-top:1px solid var(--cr-line); }
 @media (max-width:600px) {
   .cr-home .cr-failure-chain { padding:18px 14px; }
-  .cr-home .cr-failure-chain h2 { font-size:27px; }
+  .cr-home .cr-failure-chain h2 { font-size:25px; }
   .cr-home .cr-chain { gap:12px; }
   .cr-home .cr-chain-label { font-size:12px; letter-spacing:0; }
-  .cr-home .cr-chain-steps { grid-template-rows:repeat(5,minmax(76px,auto)); }
+  .cr-home .cr-chain-steps { grid-template-rows:repeat(3,minmax(68px,auto)); }
   .cr-home .cr-chain-steps li { padding:10px 6px; }
 }
 @media (max-width:600px) {

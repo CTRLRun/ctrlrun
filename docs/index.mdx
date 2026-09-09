@@ -24,21 +24,22 @@ canonical: "https://ctrlrun.dev/"
     <div className="cr-example-wrap">
       <p className="cr-example-label">ONE EXAMPLE / A HALLUCINATED REFUND</p>
       <div className="cr-failure-chain" aria-labelledby="cr-failure-title">
-        <div className="cr-section-heading">
-          <div><h2 id="cr-failure-title">The agent was certain.<br />The agent was wrong.</h2></div>
-          <p className="cr-caption">The tool was in its list. That is not permission. CTRLRun reads the arguments about to leave your process, and answers whether they may go.</p>
+        <h2 id="cr-failure-title">The tool was allowed.<br />The amount was not.</h2>
+        <div className="cr-chain-setup">
+          <p><span>The ticket says</span>refund &#36;500</p>
+          <p><span>The agent asks for</span>&#36;5,000</p>
         </div>
         <div className="cr-chain">
           <div className="cr-chain-row">
             <span className="cr-chain-label">Without CTRLRun</span>
             <ol className="cr-chain-steps">
-              <li>The ticket says: refund &#36;500</li><li>The agent asks for &#36;5,000</li><li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;4,500 too much</li>
+              <li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;4,500 too much</li>
             </ol>
           </div>
           <div className="cr-chain-row">
             <span className="cr-chain-label cr-good">With CTRLRun</span>
             <ol className="cr-chain-steps">
-              <li>The ticket says: refund &#36;500</li><li>The agent asks for &#36;5,000</li><li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 wrongly paid</li>
+              <li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 wrongly paid</li>
             </ol>
           </div>
         </div>
