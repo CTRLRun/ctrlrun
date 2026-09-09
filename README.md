@@ -43,15 +43,16 @@
 
 ## The refund nobody approved
 
-An agent reads a ticket and decides the customer is owed €50,000. The tool is in its list, the
-arguments are well-formed, and the model is completely confident. Nothing above the call
-disagrees, because nothing above the call is a check: a tool being callable is not permission to
-call it with those arguments.
+A ticket asks for a €500 refund. The agent calls the refund tool with €5,000 — one extra zero.
+The tool is in its list, the arguments are well-formed, and the model is completely confident.
+Nothing above the call disagrees, because nothing above the call is a check: a tool being
+callable is not permission to call it with those arguments.
 
-CTRLRun is that check. It reads the arguments about to leave your process and answers whether
-this agent may send them. €50,000 is past the ceiling policy gives the agent, so the call never
-leaves. Have a human approve €2,000 and then execute €5,000, and the approval authorises
-nothing: it was bound to the action the human actually read.
+CTRLRun is that check. It reads the arguments about to leave your process and answers what may
+happen to them. Under the demo's policy €500 is autonomous and €5,000 is not, so the extra zero
+meets a human instead of the provider. Nor does an approval travel: the demo's second scenario
+approves €2,000, executes €5,000 under that approval, and it authorises nothing, because it was
+bound to the action the human actually read.
 
 That is the half people expect. The other half is the same agent making a *correct* €500 refund
 that commits at the provider while the reply is lost coming back. The agent sees an error and

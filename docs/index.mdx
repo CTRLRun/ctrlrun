@@ -35,13 +35,13 @@ import { DeckNav } from "/snippets/deck-nav.jsx";
       <div className="cr-chain-row">
         <span className="cr-chain-label">Without CTRLRun</span>
         <ol className="cr-chain-steps">
-          <li>The ticket says: check a refund</li><li>The agent invents a &#36;50,000 payout</li><li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;50,000 gone</li>
+          <li>The ticket says: refund &#36;500</li><li>The agent asks for &#36;5,000</li><li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;4,500 too much</li>
         </ol>
       </div>
       <div className="cr-chain-row">
         <span className="cr-chain-label cr-good">With CTRLRun</span>
         <ol className="cr-chain-steps">
-          <li>The ticket says: check a refund</li><li>The agent invents a &#36;50,000 payout</li><li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 paid. Nobody is asked.</li>
+          <li>The ticket says: refund &#36;500</li><li>The agent asks for &#36;5,000</li><li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 wrongly paid</li>
         </ol>
       </div>
     </div>
