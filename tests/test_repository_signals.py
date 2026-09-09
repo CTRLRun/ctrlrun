@@ -174,7 +174,11 @@ def test_the_community_files_exist_and_say_what_they_must():
         "scripts/check.sh",
         "Specification first",
         "mutation-tested",
-        "docs/docs/CLAIMS.md",
+        # Named rather than linked: a contributor has to know the claims table exists and
+        # which repository holds it, and a bare URL in this list would still pass if the
+        # sentence around it stopped saying what the table is for.
+        "CLAIMS.md",
+        "CTRLRun/ctrlrun-docs",
         "tools/docs_audit",
         "trusted publishing",
     ):
@@ -231,11 +235,16 @@ def test_the_citation_names_the_repository_the_version_and_the_tagline():
 
 
 def test_how_this_is_built_states_the_review_gap_and_the_tooling_once():
-    page = (REPO_ROOT / "docs" / "docs" / "how-this-is-built.md").read_text(encoding="utf-8")
-    assert "no external security audit" in page
-    assert 1 <= page.count("AI coding agents") <= 3, "stated plainly, not hyped"
+    """What the *page* says -- that there was no external audit, and how plainly it says who
+    wrote the code -- is asserted in `CTRLRun/ctrlrun-docs`, by
+    `test_how_this_is_built_states_the_review_gap_and_the_tooling_once` there. The page is a
+    page now, and this repository's CI runs that suite against this commit.
+
+    What is left here is what this repository ships: the README sends a reader to it, and the
+    provenance sentence appears in both the README and `SECURITY.md`.
+    """
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "docs/docs/how-this-is-built.md" in readme
+    assert "https://ctrlrun.dev/docs/how-this-is-built" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in (
         REPO_ROOT / "SECURITY.md"

@@ -84,9 +84,9 @@ def test_the_wordmark_ships_for_both_themes_and_the_readme_uses_both():
         "favicon.svg",
     ):
         assert "#F5A623" in (ASSETS / name).read_text(encoding="utf-8"), f"{name} lacks the accent"
-    for name in ("wordmark-light.svg", "wordmark-dark.svg", "favicon.svg"):
-        site = (REPO_ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
-        assert site == (ASSETS / name).read_text(encoding="utf-8"), f"docs/images/{name} drifted"
+    # That the site's copies are byte-identical to these is checked in CTRLRun/ctrlrun-docs,
+    # by `test_the_sites_wordmarks_are_the_librarys`. It is the only checkout that has both,
+    # and the check went there whole rather than being weakened to fit here.
     head = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
     assert 'srcset="' + RAW + 'docs/assets/wordmark-dark.svg"' in head
     assert 'src="' + RAW + 'docs/assets/wordmark-light.svg"' in head
@@ -175,7 +175,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     )
     assert "When the outcome is unknown, CTRLRun says so instead of guessing." in head
     # The category noun, which the hero went without until 0.6: a reader had to reverse-engineer
-    # what CTRLRun *is* from three slogans. `docs/docs.mdx` carried it and the README did not.
+    # what CTRLRun *is* from three slogans. The documentation root carried it; the README did not.
     assert "A Python library that sits between the decision to act and the call that acts." in head
     for badge in (
         "pypi/v/ctrlrun",
@@ -185,7 +185,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
         "pypi/l/ctrlrun",
     ):
         assert badge in head, badge
-    marker = "generated from docs/capabilities.yaml (readme)"
+    marker = "generated from capabilities.yaml (readme)"
     assert marker not in head, "the capability matrix is not the first screen"
     assert marker in text, "the capability matrix was moved, not dropped"
     assert head.count("\n|---|") == 0, "no table above the first H2"

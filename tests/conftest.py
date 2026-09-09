@@ -1,8 +1,15 @@
-"""Fixtures shared by tests that must hold for *every* StateStore.
+"""Fixtures shared across the suite.
 
 `state_store` is parametrized over both shipped implementations. A reservation test written
 once therefore runs against `InMemoryStateStore` and `SQLiteStateStore`, which is how the
 double is kept from drifting into refusing less than the real store (SPEC-v0.1 §5.3).
+
+`no_network` is the other shared double, and it is here for the same reason. "Runs with no
+network" is a claim until something takes the network away, and the guard that takes it away
+was written twice -- once in `test_examples.py`, once in the documentation tools -- which is
+two chances for one copy to refuse less than the other and make one suite's claim quietly
+weaker. The documentation tools are a separate repository now; this is the library's one
+definition, and both suites that need it take it from here.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -100,3 +107,43 @@ def authority_events_are_declared(request, monkeypatch):
         declared=request.node.get_closest_marker("authority") is not None,
         nodeid=request.node.nodeid,
     )
+
+
+_REFUSE_EVERY_SOCKET = '''\
+"""Imported by `site` at startup: nothing under examples/ may open a socket."""
+
+import socket
+
+_real = socket.socket
+
+
+class _Refusing(_real):
+    """A socket that exists but will not connect, which is what a cut cable looks like.
+
+    Replacing the *type* with a function breaks anything that subclasses it — `ssl` does —
+    so the refusal goes on the operations instead.
+    """
+
+    def connect(self, *args, **kwargs):
+        raise RuntimeError("an example tried to connect; examples must run with no network")
+
+    def connect_ex(self, *args, **kwargs):
+        raise RuntimeError("an example tried to connect; examples must run with no network")
+
+
+def _refuse(*args, **kwargs):
+    raise RuntimeError("an example tried to resolve a name; examples run with no network")
+
+
+socket.socket = _Refusing
+socket.create_connection = _refuse
+socket.getaddrinfo = _refuse
+'''
+
+
+@pytest.fixture(scope="session")
+def no_network(tmp_path_factory):
+    """A `PYTHONPATH` entry whose `sitecustomize` refuses every socket (SPEC-v0.2 §1.1)."""
+    directory = tmp_path_factory.mktemp("no-network")
+    (directory / "sitecustomize.py").write_text(_REFUSE_EVERY_SOCKET, encoding="utf-8")
+    return directory

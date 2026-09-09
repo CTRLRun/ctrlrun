@@ -78,20 +78,6 @@ jobs:
           CTRLRUN_REQUIRE_RELEASE_FIXTURES: "1"
         run: ./scripts/check.sh
 
-      # The badge is written **after** `check.sh`, and the order is the whole claim: a count
-      # produced before the run would be the size of a suite that might be red. It is uploaded
-      # from one matrix leg only — two would race for the same artifact name — and published by
-      # the `badge` job, which runs on a push to `main` and on nothing else.
-      - name: The test-count badge
-        if: matrix.python-version == '3.11'
-        run: python tools/docs_audit/render_badges.py --write-count tests-badge.json
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.python-version == '3.11'
-        with:
-          name: ctrlrun-tests-badge
-          path: tests-badge.json
-
   # SPEC-v0.4 §5, T118. The composite action, run against this repository's own
   # configurations, with `install: .` so it dogfoods the checkout rather than the last
   # release. Two runs, because the second is the one that matters: the N/A path has to be
@@ -157,7 +143,10 @@ jobs:
   #     rather than regenerated. §5.1's rule holds across the job boundary: the badge, the job
   #     summary and the uploaded report all come from one verify run.
   badge:
-    needs: [verify, check]
+    # `docs` as well as the two it always needed: the test-count artifact is produced there
+    # now, and a `badge` job that did not wait for it would download nothing and publish a
+    # stale count -- or fail on a race, which is the same bug on a good day.
+    needs: [verify, check, docs]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -258,22 +247,35 @@ jobs:
           assert skipped == 0, f"{skipped} adapter tests skipped; the frameworks did not install"
           PY
 
-  # The documentation audit (docs/STYLE.md). One job of its own so a docs PR gets a docs answer,
-  # and every step in it is now a hard failure:
+  # The documentation audit, and the test-count badge that only a green suite may produce.
   #
-  #   - nine generators, each with `--check`, so no rendered table, reference page, recipe
-  #     directory, readiness block, badge row or study table can be hand-edited;
-  #   - runnable snippets, the forbidden-words lint and the link check.
+  # The pages moved to `CTRLRun/ctrlrun-docs`, and the checks moved with them -- but what they
+  # check is *this* commit, so the job runs them there against a checkout of here. One
+  # implementation of every rule, two triggers: this job on a change to the library, and that
+  # repository's own CI on a change to a page.
   #
-  # The last three carried `continue-on-error: true` from session 0 to session 6. They were
-  # wired in against the documentation as it stood, and the findings they raised that day were
-  # the baseline the writing sessions had to clear; a job that was red on arrival would have
-  # taught everyone to ignore it. The baseline is clear, so the flags are gone -- a red step
-  # that is allowed to be red is documentation, not a guard.
+  # Every step is a hard failure. Three of them carried `continue-on-error: true` from session
+  # 0 to session 6, while a baseline nobody had cleared yet would have made the job red on
+  # arrival and taught everyone to ignore it. The baseline is clear, so the flags are gone: a
+  # red step that is allowed to be red is documentation, not a guard.
   docs:
+    # **The badge below is the reason for this dependency, and the dependency is the claim.**
+    # `--write-count` publishes the size of the suite, and a count produced before the suite
+    # ran would be the size of a run that might be red. It used to be a later *step* in the
+    # same job as `check.sh`; the audit lives in another repository now, so the ordering is a
+    # job dependency instead -- which is the stronger form, because a step's ordering is a
+    # convention and `needs:` is enforced.
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ctrlrun
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CTRLRun/ctrlrun-docs
+          path: ctrlrun-docs
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -285,47 +287,80 @@ jobs:
         # sample nobody ran.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,gateway,otel,identity]"
+          pip install -e "./ctrlrun[dev,gateway,otel,identity]"
+          pip install griffe pyyaml
 
-      - name: Rendered capability tables match docs/capabilities.yaml
-        run: python tools/docs_audit/render_capabilities.py --check
+      # `_core.py` raises when it cannot find the library, so this prints a path or the job
+      # stops here. A documentation check that ran against no source would be green and
+      # would have verified nothing.
+      - name: The audit can see this checkout
+        working-directory: ctrlrun-docs
+        env:
+          CTRLRUN_SOURCE: ${{ github.workspace }}/ctrlrun
+        run: python -c "import sys; sys.path.insert(0, 'tools/docs_audit'); from _core import CORE_ROOT; print(CORE_ROOT)"
 
-      - name: The CLI reference matches click's help text
-        run: python tools/docs_audit/render_cli.py --check
+      # Nine generators, each with `--check`, so no rendered table, reference page, recipe
+      # directory, readiness block, badge row or study table can be hand-edited; then the
+      # runnable snippets, the forbidden-words lint and the link check.
+      - name: The audit
+        working-directory: ctrlrun-docs
+        env:
+          CTRLRUN_SOURCE: ${{ github.workspace }}/ctrlrun
+        run: |
+          set -eu
+          python tools/docs_audit/render_capabilities.py --check
+          python tools/docs_audit/render_cli.py --check
+          python tools/docs_audit/render_schemas.py --check
+          python tools/docs_audit/render_api.py --check
+          python tools/docs_audit/render_cookbook.py --check
+          python tools/docs_audit/render_probe.py --check
+          python tools/docs_audit/render_soak.py --check
+          python tools/docs_audit/render_readiness.py --check
+          python tools/docs_audit/render_badges.py --check
+          python tools/docs_audit/snippets.py
+          python tools/docs_audit/lint.py
+          python tools/docs_audit/links.py
 
-      - name: The receipt, event and error references match the code
-        run: python tools/docs_audit/render_schemas.py --check
+      # Uploaded from here and published by the `badge` job, which runs on a push to `main`
+      # and on nothing else.
+      - name: The test-count badge
+        working-directory: ctrlrun-docs
+        env:
+          CTRLRUN_SOURCE: ${{ github.workspace }}/ctrlrun
+        run: python tools/docs_audit/render_badges.py --write-count "$GITHUB_WORKSPACE/tests-badge.json"
 
-      - name: The Python API reference matches the docstrings
-        run: python tools/docs_audit/render_api.py --check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ctrlrun-tests-badge
+          path: tests-badge.json
 
-      - name: The cookbook directories are what their pages show
-        run: python tools/docs_audit/render_cookbook.py --check
-
-      - name: The framework-probe page is the render of the published results
-        run: python tools/docs_audit/render_probe.py --check
-
-      - name: The soak page is the render of the published results
-        run: python tools/docs_audit/render_soak.py --check
-
-      - name: The readiness block is the same in all three places
-        run: python tools/docs_audit/render_readiness.py --check
-
-      - name: The badge row matches the generator
-        run: python tools/docs_audit/render_badges.py --check
-
-      # The three audits landed `continue-on-error` in session 0, because a baseline nobody had
-      # cleared yet would have made the job red on arrival and taught everyone to ignore it.
-      # The baseline is clear -- 96 runnable blocks, 182 documents, 0 findings and 0 broken
-      # links -- so the flags come off here. An audit that cannot fail is an audit nobody runs.
-      - name: Runnable snippets execute offline
-        run: python tools/docs_audit/snippets.py
-
-      - name: Forbidden words
-        run: python tools/docs_audit/lint.py
-
-      - name: Internal links and anchors resolve
-        run: python tools/docs_audit/links.py
+  # A change here can make a page there wrong without anything there changing, so a push to
+  # `main` tells that repository to re-run its checks against this commit.
+  #
+  # **It needs `DOCS_DISPATCH_TOKEN`**, a token with `contents: write` on CTRLRun/ctrlrun-docs;
+  # `GITHUB_TOKEN` cannot reach another repository. Without the secret this step warns and does
+  # nothing, and that is a gap rather than a design -- the backstop is the weekly `schedule:`
+  # run in `ctrlrun-docs/.github/workflows/ci.yml`, which turns a dispatch that stopped
+  # arriving into a red run within a week instead of into silence.
+  notify-docs:
+    needs: [check, docs]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tell ctrlrun-docs the library changed
+        env:
+          TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::DOCS_DISPATCH_TOKEN is not set; ctrlrun-docs re-checks on its weekly schedule instead"
+            exit 0
+          fi
+          curl -sS -f -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            https://api.github.com/repos/CTRLRun/ctrlrun-docs/dispatches \
+            -d "{\"event_type\":\"library-changed\",\"client_payload\":{\"sha\":\"$GITHUB_SHA\"}}"
 
   # The definition of done says the demo runs with no network and the README quick start
   # works verbatim. Both were only ever checked by hand, which is how a README stops being

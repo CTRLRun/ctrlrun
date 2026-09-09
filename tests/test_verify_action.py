@@ -1,9 +1,9 @@
-"""The composite action, the badge and `docs/docs/verify.md`. SPEC-v0.4 §5; T118-T120.
+"""The composite action, the badge and `https://ctrlrun.dev/docs/verify`. SPEC-v0.4 §5; T118-T120.
 
 The badge is the shortest sentence this project makes, and the one most likely to be read
 without the report behind it. So its text is asserted as a *concatenation* and against a
 regex rather than a word list — no adjective can be appended to it later — and the vocabulary
-it is not allowed to use is asserted against the badge, the job summary and `docs/docs/verify.md`
+it is not allowed to use is asserted against the badge, the job summary and `https://ctrlrun.dev/docs/verify`
 together.
 
 T118's substance runs in this repository's CI, where the action actually executes. What is
@@ -34,7 +34,6 @@ from ctrlrun.verify.report import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACTION = REPO_ROOT / "action.yml"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-VERIFY_DOC = REPO_ROOT / "docs" / "docs" / "verify.md"
 README = REPO_ROOT / "README.md"
 AUTHORITY_PAYMENTS = REPO_ROOT / "examples" / "authority" / "payments.yaml"
 V1_PAYMENTS = REPO_ROOT / "examples" / "policies" / "payments.yaml"
@@ -220,39 +219,23 @@ def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
     assert failing.badge["color"] == BADGE_FAIL_COLOR
 
 
-def test_T119_the_link_target_carries_the_exact_phrase():
-    page = _repository_file(VERIFY_DOC)
-
-    assert "declared guarantees pass" in page
-    # And it is the anchor the badge links to, not a phrase buried somewhere else.
-    heading = page.index("## What the badge means")
-    assert "declared guarantees pass" in page[heading : heading + 600]
-
-
 @pytest.mark.parametrize("word", FORBIDDEN)
 def test_T119_no_claim_uses_the_forbidden_vocabulary(tmp_path, word):
-    """Asserted against the badge, its JSON, the job summary and `docs/docs/verify.md` together.
+    """Asserted against the badge and its JSON, and against the job summary.
 
-    `docs/docs/verify.md` names the words in order to refuse them, and the sentence that does is the
-    only place any of them may appear on the page.
+    **The page's half of this is in `CTRLRun/ctrlrun-docs`**, as
+    `test_T119_the_page_uses_no_forbidden_word_as_a_claim`. `verify.md` is a page now, and
+    reading it from here would mean skipping when it is absent -- which is what the sdist
+    guard below already does for `action.yml`, and would have been wrong here: absent means
+    moved, not pruned, and a skip would have made this whole test disappear quietly. The five
+    words are the same five in both halves, and between them every place one could appear is
+    covered.
     """
     report = run(_write(tmp_path, ALL_APPLICABLE))
     document = json.loads(report.to_json())
 
     assert word not in json.dumps(badge_from_document(document)).lower()
     assert word not in summary_from_document(document).lower()
-
-    # On the page, each of these words appears only inside a sentence that refuses it. The
-    # unit is the paragraph rather than the line, because the refusal and the word it refuses
-    # are often on different lines of the same wrapped sentence.
-    page = _repository_file(VERIFY_DOC)
-    offending = [
-        paragraph
-        for paragraph in page.split("\n\n")
-        if word in paragraph.lower()
-        and not any(marker in paragraph.lower() for marker in ("not ", "never", "no "))
-    ]
-    assert not offending, f"{word!r} used as a claim: {offending}"
 
 
 def test_T119_the_action_and_the_workflow_make_no_forbidden_claim():
@@ -368,13 +351,13 @@ def test_the_readme_carries_the_badge_and_links_it_to_what_it_means():
 
     assert "img.shields.io/endpoint" in readme
     assert "verify-badge.json" in readme
-    assert "docs/docs/verify.md#what-the-badge-means" in readme
+    assert "https://ctrlrun.dev/docs/verify#what-the-badge-means" in readme
 
 
 def test_the_readme_documentation_table_links_the_verify_page():
     readme = _repository_file(README)
 
-    assert "docs/docs/verify.md" in readme
+    assert "https://ctrlrun.dev/docs/verify" in readme
     assert "declared guarantees pass" in readme
 
 
@@ -394,57 +377,9 @@ def test_the_job_summary_carries_the_not_applicable_rows_in_full():
 
 #: The README carried a copy of this report until 2026-09-09, when the page was cut to what
 #: CTRLRun does, how to use it and how it works, and the report went with the rest of the
-#: verify section. The guard moved rather than went: `docs/docs/verify.md` is now the single
+#: verify section. The guard moved rather than went: the verify page is now the single
 #: home of the verbatim output, so the "two copies can drift" test below has nothing left to
 #: compare and is gone, and this one reads the page instead of the README.
-
-
-def _quoted_report() -> list[str]:
-    block = _repository_file(VERIFY_DOC).split("```console")[1].split("```")[0]
-    return [line for line in block.splitlines() if line.strip() and not line.startswith("$")]
-
-
-@pytest.mark.authority
-def test_the_verify_page_quotes_the_real_verify_output():
-    """The demo transcript has had this guard since v0.1; the verify report gets the same one.
-
-    Every line the page quotes has to be a line `ctrlrun verify` actually prints, so a change
-    to the report that nobody carried across fails here rather than shipping a page that lies.
-    The version line is normalised: it moves at every release, and a document is not the place
-    that number is kept honest — `pyproject.toml` is.
-    """
-
-    report = run(AUTHORITY_PAYMENTS)
-    printed = {
-        re.sub(r"ctrlrun \S+,", "ctrlrun <version>,", line)
-        for line in report.to_text().splitlines()
-    }
-    # The page quotes a path relative to the repository root; the report prints the path it
-    # was given. Compare on the same footing rather than on how the test invoked it.
-    printed = {
-        line.replace(str(AUTHORITY_PAYMENTS), "examples/authority/payments.yaml")
-        for line in printed
-    }
-
-    missing = [
-        line
-        for line in _quoted_report()
-        if re.sub(r"ctrlrun \S+,", "ctrlrun <version>,", line) not in printed
-    ]
-
-    assert not missing, f"the page quotes lines verify does not print: {missing}"
-
-
-def test_the_verify_page_says_what_not_applicable_means():
-    """The N/A semantics, on the page the badge links to. Asserted with the line wrapping
-    removed: a sentence that reads correctly and wraps across two lines is still the sentence,
-    and a test that could not see it would push prose onto one long line."""
-    page = " ".join(_repository_file(VERIFY_DOC).split())
-
-    assert "Not applicable is not a pass" in page
-    assert "never `11/11`" in page
-    assert "no flag that folds an N/A into the count" in page
-    assert "declared guarantees pass" in page
 
 
 def test_the_readme_says_what_the_badge_does_not_mean():
@@ -494,11 +429,12 @@ def test_the_badge_job_publishes_the_badge_the_verify_job_produced():
     ]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    # Two upstreams since the test-count badge joined it: the verify run that produced the
-    # guarantee badge, and the `check` job whose suite the count is the size of. Both are
-    # downloaded rather than regenerated, for the same reason -- a number this job computed
-    # itself would be a number no run stands behind.
-    assert set(badge["needs"]) == {"verify", "check"}
+    # Three upstreams. The verify run that produced the guarantee badge; the `check` job whose
+    # suite the count is the size of; and `docs`, which is where the count is now written, the
+    # generator having moved to CTRLRun/ctrlrun-docs. Both artifacts are downloaded rather than
+    # regenerated, for the same reason -- a number this job computed itself would be a number
+    # no run stands behind.
+    assert set(badge["needs"]) == {"verify", "check", "docs"}
     assert downloads, "the badge job regenerates the badge instead of downloading it"
     assert {step["with"]["name"] for step in downloads} == {
         "ctrlrun-verify-authority",
@@ -517,14 +453,6 @@ def test_the_readme_badge_points_at_the_branch_the_job_publishes():
     assert "raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" in readme
     assert "origin badges" in script
     assert "verify-badge.json" in script
-
-
-def test_the_verify_page_documents_the_permission_the_publish_costs():
-    """§5.2 — the cost is shown once, where the reader can see it, and not buried."""
-    page = " ".join(_repository_file(VERIFY_DOC).split())
-
-    assert "contents: write" in page
-    assert "least privilege" in page
 
 
 def _publish_script() -> str:
@@ -703,14 +631,3 @@ def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
         check=True,
     )
     assert len(log.stdout.strip().splitlines()) == 1, log.stdout
-
-
-def test_the_verify_page_is_honest_about_what_branch_protection_buys():
-    """A badge is a claim, and a branch nobody guards is a claim anybody can write. The page
-    says which half is protected rather than implying both: deletion and force pushes are
-    blocked, and a fast-forward push by anyone with write access is not."""
-    page = " ".join(_repository_file(VERIFY_DOC).split())
-
-    assert "It does **not** restrict who may push" in page
-    assert "silently dropped" in page
-    assert "self-healing" in page
