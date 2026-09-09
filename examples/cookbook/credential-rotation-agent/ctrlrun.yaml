@@ -1,5 +1,5 @@
-# Extracted by tools/docs_audit/render_cookbook.py from
-# docs/docs/cookbook/credential-rotation-agent.mdx — edit the page, never this file.
+# Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
+# docs/cookbook/credential-rotation-agent.mdx — edit the page, never this file.
 schema: ctrlrun.policy/v2
 
 actions:

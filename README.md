@@ -127,8 +127,8 @@ refuses to *knowingly* act twice, and it rolls nothing back. Receipts are chaine
 is detected. They are not signed: alteration is not authorship. The badge above means the
 **declared guarantees pass** in the setup they ran against, and it does not mean secure, safe,
 compliant, certified or audited:
-[what the badge means](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/verify.md#what-the-badge-means)
-· [`OWASP-AGENTIC-TOP10.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/OWASP-AGENTIC-TOP10.md)
+[what the badge means](https://ctrlrun.dev/docs/verify#what-the-badge-means)
+· [`OWASP-AGENTIC-TOP10.md`](https://ctrlrun.dev/docs/OWASP-AGENTIC-TOP10)
 names the four entries this does not address.
 
 If an agent only reads and answers, you do not need CTRLRun. The moment it can **send, pay,
@@ -257,7 +257,7 @@ host writes: `pip install "ctrlrun[postgres]"`, one URL, the same guarantees gra
 suite. Prove it in your own setup with `ctrlrun verify`, which runs the kernel's own failure
 scenarios against *your* policy in a scratch store, with no network.
 
-<!-- generated from docs/capabilities.yaml (readme) — edit the YAML, never this table -->
+<!-- generated from capabilities.yaml (readme) — edit the YAML, never this table -->
 | Guarantee | `@protect` | Gateway | Adapter |
 |---|---|---|---|
 | **Approval binding** — An approval is bound to the exact action; a mutated or replayed one is refused. | yes | yes | prevention or attribution, per adapter |
@@ -335,7 +335,7 @@ full reference, and a browser demo that runs with no install.
 | MCP | [Overview](https://ctrlrun.dev/docs/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/docs/mcp/gateway-in-5-minutes) |
 | Running it for real | [Production](https://ctrlrun.dev/docs/production/index) · [Postgres](https://ctrlrun.dev/docs/production/postgres) · [Recovery](https://ctrlrun.dev/docs/production/recovery) · [Operations](https://ctrlrun.dev/docs/production/operations) |
 | Every key, flag and error | [Reference](https://ctrlrun.dev/docs/reference/policy-yaml) · [FAQ](https://ctrlrun.dev/docs/faq) |
-| What holds, and what does not | [Threat model](https://ctrlrun.dev/docs/THREAT_MODEL) · [What `verify` proves](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/verify.md) · [`CLAIMS.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/CLAIMS.md), every sentence mapped to its test · [How this is built](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/how-this-is-built.md) |
+| What holds, and what does not | [Threat model](https://ctrlrun.dev/docs/THREAT_MODEL) · [What `verify` proves](https://ctrlrun.dev/docs/verify) · [`CLAIMS.md`](https://ctrlrun.dev/docs/CLAIMS), every sentence mapped to its test · [How this is built](https://ctrlrun.dev/docs/how-this-is-built) |
 
 ## Contributing
 
@@ -347,7 +347,7 @@ working agreement, and
 vulnerability. Every claim in this file has a test behind it, so a change to the prose usually
 means a change to the suite.
 [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) and
-[`docs/docs/ROADMAP.md`](https://github.com/CTRLRun/ctrlrun/blob/main/docs/docs/ROADMAP.md) say
+[`https://ctrlrun.dev/docs/ROADMAP`](https://ctrlrun.dev/docs/ROADMAP) say
 where it is going. Releases carry PyPI provenance attestations from GitHub Actions.
 
 ## License

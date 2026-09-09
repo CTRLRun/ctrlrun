@@ -1,5 +1,5 @@
-# Extracted by tools/docs_audit/render_cookbook.py from
-# docs/docs/cookbook/manager-and-worker.mdx — edit the page, never this file.
+# Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
+# docs/cookbook/manager-and-worker.mdx — edit the page, never this file.
 from pathlib import Path
 
 from ctrlrun import (

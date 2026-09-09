@@ -1,5 +1,5 @@
-# Extracted by tools/docs_audit/render_cookbook.py from
-# docs/docs/cookbook/protect-an-mcp-server.mdx — edit the page, never this file.
+# Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
+# docs/cookbook/protect-an-mcp-server.mdx — edit the page, never this file.
 import json
 from collections.abc import Mapping
 from pathlib import Path

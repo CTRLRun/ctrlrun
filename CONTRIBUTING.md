@@ -16,7 +16,7 @@ Not every contribution carries every rule below. In rough order of what they ask
   and cannot take for itself; so is telling us where the policy template for your sector is
   wrong. Neither needs the suite installed.
 - **Documentation** — a cookbook recipe, a `ctrlrun verify` snippet for a CI that is not GitHub
-  Actions — is held to `docs/STYLE.md` and the audit below, and not to the mutation table.
+  Actions — is held to `CTRLRun/ctrlrun-docs`'s `STYLE.md` and the audit below, and not to the mutation table.
 - **Anything under `src/`** is where the rest of this file applies in full, and a maintainer
   reads it whatever CI says.
 
@@ -103,8 +103,8 @@ mutants (say so in the table instead of claiming to have closed one).
 
 ## Every claim maps to a test
 
-`docs/docs/CLAIMS.md` maps every sentence in the README to the code that implements it and the
-test that proves it. A sentence with no row is cut. A row whose test disappears takes its
+`CLAIMS.md`, in [CTRLRun/ctrlrun-docs](https://github.com/CTRLRun/ctrlrun-docs), maps every sentence in
+the README to the code that implements it and the test that proves it. A sentence with no row is cut. A row whose test disappears takes its
 sentence with it in the same commit. A test resolves every `file.py:NNN` in the table against
 the line it cites and fails if the named symbol is not on it.
 
@@ -124,7 +124,14 @@ downgraded from prevention to attribution is renamed everywhere it was called a 
 
 ## How documentation pull requests are checked
 
-The words are held to the same standard as the code, by `tools/docs_audit/`:
+The documentation is [CTRLRun/ctrlrun-docs](https://github.com/CTRLRun/ctrlrun-docs), and the words
+there are held to the same standard as the code here, by that repository's `tools/docs_audit/`.
+The checks read **both** trees -- a page that says the CLI prints X is only true if the CLI
+prints X -- so they run in two places: on a pull request there, and from the `docs` job of
+this repository's CI against the commit you are proposing. A change to the code that makes a
+page wrong is red here.
+
+What they check:
 
 - every fenced block marked `runnable` is executed offline, with a socket guard, and must
   exit 0; a sample either runs or is not marked;
@@ -132,9 +139,9 @@ The words are held to the same standard as the code, by `tools/docs_audit/`:
   proof that does not exist, with an allowlist that carries a reason per entry;
 - internal links and anchors must resolve;
 - the capability tables in the README and the docs are rendered from
-  `docs/capabilities.yaml`, and a hand edit to a rendered copy fails CI.
+  `CTRLRun/ctrlrun-docs`'s `capabilities.yaml`, and a hand edit to a rendered copy fails CI.
 
-`docs/STYLE.md` has the writing rules. Run the four checks from its last section before
+`CTRLRun/ctrlrun-docs`'s `STYLE.md` has the writing rules. Run the four checks from its last section before
 opening the pull request.
 
 ## Pull requests

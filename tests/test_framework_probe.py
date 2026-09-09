@@ -546,8 +546,8 @@ def test_no_top_level_document_claims_the_harness_was_run_against_a_framework():
     checked = [
         "README.md",
         "CHANGELOG.md",
-        "docs/docs/verify.md",
-        "docs/docs/OWASP-AGENTIC-TOP10.md",
+        "https://ctrlrun.dev/docs/verify",
+        "https://ctrlrun.dev/docs/OWASP-AGENTIC-TOP10",
     ]
 
     offending = []

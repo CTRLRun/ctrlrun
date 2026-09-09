@@ -4,7 +4,7 @@ Read against the Agent Control Standard v0.1.0 schemas in
 `GenAI-Security-Project/agent-control-standard` at commit `c7ad162` (2026-08-11):
 `specification/v0.1.0/request-envelope.json`, `response-envelope.json`,
 `hooks/tool-call-request.json`, `hooks/tool-call-result.json` and `ask-details.json`.
-`docs/docs/ACS.md` records what was read and where the two models disagree.
+`https://ctrlrun.dev/docs/ACS` records what was read and where the two models disagree.
 
 **ACS is advisory; CTRLRun is executing.** A Guardian returns a decision and the *platform*
 runs the tool, which is the opposite way round from `@protect`. So one action is split across
@@ -59,7 +59,7 @@ DENY: Final = "deny"
 ASK: Final = "ask"
 
 #: `tool-call-result.json` — the four statuses ACS defines, and nothing about what any of
-#: them means for the side effect. See `docs/docs/ACS.md`.
+#: them means for the side effect. See `https://ctrlrun.dev/docs/ACS`.
 SUCCESS: Final = "success"
 FAILURE: Final = "failure"
 TIMEOUT: Final = "timeout"
