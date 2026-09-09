@@ -13,8 +13,7 @@ canonical: "https://ctrlrun.dev/"
   <section className="cr-hero" aria-labelledby="cr-title">
     <p className="cr-eyebrow">CONTROL THE ACTION. KEEP THE AUTONOMY.</p>
     <h1 id="cr-title">Execution safety <br />for AI agents<span className="cr-dot">.</span></h1>
-    <p className="cr-lede">Let agents act. Keep control of what happens next.</p>
-    <p className="cr-intro">CTRLRun sits at the execution boundary before an AI agent changes a real system. It prevents duplicate effects, binds approval to the exact action, and stops blind retries when the outcome is uncertain.</p>
+    <p className="cr-lede">Control what AI agents can do in your systems, what needs human approval, and what must never happen.</p>
     <div className="cr-actions">
       <a className="cr-button" href="/try" data-cr-event="try_clicked">Try CTRLRun <span aria-hidden="true">↗</span></a>
       <a className="cr-button cr-secondary" href="/docs" data-cr-event="documentation_clicked">Documentation <span aria-hidden="true">→</span></a>
@@ -23,51 +22,65 @@ canonical: "https://ctrlrun.dev/"
     <p className="cr-caption">Apache-2.0 · Runs in your environment<br />SQLite on one host · Postgres across hosts</p>
   </section>
 
-  <section className="cr-boundary" aria-label="CTRLRun sits between an AI agent and the real system">
-    <div className="cr-boundary-node"><span className="cr-step">01 / PROPOSE</span><strong>AI agent</strong><span>Decides what to do</span></div>
-    <span className="cr-flow-arrow" aria-hidden="true">→</span>
-    <div className="cr-boundary-node cr-control"><span className="cr-step">02 / CHECK</span><strong>CTRLRun<span className="cr-dot">_</span></strong><span>The control point before execution</span><ul><li>Is this action allowed?</li><li>Is this exactly what was approved?</li><li>Could this action already have happened?</li><li>Do we know enough to continue safely?</li></ul></div>
-    <span className="cr-flow-arrow" aria-hidden="true">→</span>
-    <div className="cr-boundary-node"><span className="cr-step">03 / ACT</span><strong>Real system</strong><span>Move money. Change access.<br />Send email. Deploy software.</span></div>
-  </section>
-
-  <section className="cr-section cr-failure" aria-labelledby="cr-failure-title">
-    <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">The refund succeeded. The agent thinks it failed.</h2><p>An agent refunds &#36;500. The provider processes it, but the response is lost. The agent sees an error and tries again.</p></div>
-    <div className="cr-comparison"><div><span className="cr-step">WITHOUT CTRLRUN</span><p>Retry <span aria-hidden="true">→</span> another &#36;500 may go out.</p></div><div className="cr-safe"><span className="cr-step">WITH CTRLRUN</span><p><strong>Outcome uncertain</strong> → pause → confirm what happened → only then continue.</p></div></div>
-  </section>
-
-  <section className="cr-section" id="try-ctrlrun" aria-labelledby="cr-try-title">
-    <div className="cr-section-heading"><div><p className="cr-eyebrow">TRY THE EXECUTION BOUNDARY</p><h2 id="cr-try-title">Choose an action. See what CTRLRun stops.</h2></div></div>
-    <div className="cr-try-card">
-      <div><p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain — there are 48 — then pick the moment it goes wrong: a lost reply, an approval the agent edited, a retry of something that already happened. You get the decision, the check that produced it, and the line your own code would see.</p><p className="cr-caption">No login. No API key. No setup.</p></div>
+  <section className="cr-section cr-failure-chain" aria-labelledby="cr-failure-title">
+    <div className="cr-section-heading">
+      <div><p className="cr-eyebrow">ONE LOST RESPONSE. TWO REFUNDS.</p><h2 id="cr-failure-title">The refund succeeded.<br />The agent thinks it failed.</h2></div>
+      <p className="cr-caption">Nothing below is a bug in the agent.<br />Every step is a system behaving normally.</p>
+    </div>
+    <div className="cr-chain">
+      <div className="cr-chain-row">
+        <span className="cr-chain-label">Without controls</span>
+        <ol className="cr-chain-steps">
+          <li>&#36;500 refund issued</li><li>Succeeds at the provider</li><li>The response is lost</li><li>The agent retries</li><li className="cr-end cr-bad">&#36;1,000 paid</li>
+        </ol>
+      </div>
+      <div className="cr-chain-row">
+        <span className="cr-chain-label cr-good">With CTRLRun</span>
+        <ol className="cr-chain-steps">
+          <li>&#36;500 refund issued</li><li>Succeeds at the provider</li><li>The response is lost</li><li>CTRLRun holds the retry</li><li className="cr-end cr-good">&#36;500 paid, once</li>
+        </ol>
+      </div>
+    </div>
+    <div className="cr-chain-cta">
+      <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain — there are 48 — then pick the moment it goes wrong.<span className="cr-caption"> No login. No API key. No setup.</span></p>
       <div className="cr-try-actions">
-        <a className="cr-button" href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=uncertain" data-cr-event="try_clicked">Walk through the refund case <span aria-hidden="true">→</span></a>
+        <a className="cr-button" href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=uncertain" data-cr-event="try_clicked">Walk through this case <span aria-hidden="true">→</span></a>
         <a className="cr-text-link" href="/try" data-cr-event="try_clicked">Or pick your own domain ↗</a>
-        <a className="cr-text-link" href="/docs/try-it">Run the real library in your browser →</a>
       </div>
     </div>
   </section>
 
   <section className="cr-section cr-how" id="how-it-works" aria-labelledby="cr-how-title">
-    <div className="cr-section-heading"><div><p className="cr-eyebrow">HOW IT WORKS</p><h2 id="cr-how-title">Where CTRLRun sits,<br />in plain English.</h2></div><p className="cr-caption">A library inside your process.<br />Not a service in front of it.</p></div>
-    <p className="cr-intro">Your agent decides what to do. Somewhere after that, your code calls something that changes the real world: charges a card, deletes a user, sends the email. CTRLRun goes in that one gap, and only that gap. It never sees the prompt, the reasoning or the conversation.</p>
-    <div className="cr-how-steps">
-      <div><span className="cr-step">01 / YOU NAME THE ACTION</span><h3>Wrap the function that causes the effect</h3><p>You give it a name and an effect key: the identity of the business action, like <code>refund:txn_4821</code>. A retry, a second worker and a restarted process all carry the same key.</p></div>
-      <div><span className="cr-step">02 / IT CHECKS BEFORE THE CALL</span><h3>Four questions, every time</h3><p>Is this agent entitled to act at all? Does policy allow these exact arguments? If a human approved something, was it this exact action? Could this action already have happened? Anything unclear stops the call.</p></div>
-      <div><span className="cr-step">03 / IT RESERVES FIRST</span><h3>The claim is written before the effect</h3><p>The effect is reserved in a database before your function runs, not after it returns. If the process dies mid-call, the reservation is still there, so the retry meets a claim instead of an empty table.</p></div>
-      <div><span className="cr-step">04 / IT RECORDS WHAT HAPPENED</span><h3>Including “we do not know”</h3><p>Committed, failed, or unknown. A timeout is not a failure, and CTRLRun holds it that way until something confirms it. A receipt records the action, the decision, the approval and the result.</p></div>
+    <div className="cr-section-heading">
+      <div><p className="cr-eyebrow">HOW IT WORKS</p><h2 id="cr-how-title">Set limits. Check actions.<br />Know what happened.</h2></div>
+      <p className="cr-caption">A library inside your process.<br />Not a service in front of it.</p>
+    </div>
+    <p className="cr-intro">Models will be wrong sometimes. CTRLRun decides whether being wrong can reach your systems.</p>
+    <div className="cr-pillars">
+      <div className="cr-pillar">
+        <span className="cr-step">01 / SET LIMITS</span><h3>Your rules define what AI may reach</h3>
+        <ul><li><b>Action rules</b>Allow, require approval or block, before an action runs.</li><li><b>Agent permissions</b>Each agent's limits. Delegating work cannot widen them.</li><li><b>Data-use rules</b>Control actions by the data labels your team supplies.</li></ul>
+      </div>
+      <div className="cr-pillar">
+        <span className="cr-step">02 / CHECK ACTIONS</span><h3>A wrong request need not become a costly action</h3>
+        <ul><li><b>Exact approvals</b>Approve the precise action. Changed details need a new one.</li><li><b>Duplicate prevention</b>Block repeats, even when different agents try.</li><li><b>Outcome checks</b>Hold retries until the outcome is confirmed.</li></ul>
+      </div>
+      <div className="cr-pillar">
+        <span className="cr-step">03 / KNOW WHAT HAPPENED</span><h3>Trust backed by a record of what AI did</h3>
+        <ul><li><b>Action history</b>Trace requests, decisions and results, including refusals.</li><li><b>Control testing</b>Preview what rules would block before enforcing them.</li></ul>
+      </div>
     </div>
     <div className="cr-how-close"><p><strong>What it is not.</strong> It does not read prompts, choose models, rank tools, or judge whether the agent's reasoning was any good. It is not an LLM, and it does not call one. It checks the action, not the thinking.</p><a className="cr-text-link" href="/docs/ARCHITECTURE">Read the architecture →</a></div>
   </section>
 
   <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">
-    <div><p className="cr-eyebrow">FOR THE PEOPLE BUILDING IT</p><h2 id="cr-integrate-title">Start at the function<br />that takes action.</h2><p>Wrap the call that causes the real-world effect. Policy decides whether it can run, needs approval, or must stop. CTRLRun protects the effect and records what happened.</p><p className="cr-caption">Python, agent frameworks, or an MCP gateway — the execution boundary stays the same. Execution state survives restarts, so an uncertain outcome still blocks a blind retry. <a href="/docs/production/recovery">How recovery works →</a></p><a className="cr-text-link" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Start integrating <span aria-hidden="true">→</span></a></div>
-    <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"stripe.refund\",\n    effect=\"refund:{payment_id}\"\n)\ndef refund(payment_id, amount):\n    ..."}</code></pre><p>Illustrative wrapper. The quickstart adds your policy, identity, and approval flow.</p><ul className="cr-outcomes" aria-label="Execution outcomes"><li><code>allow</code> → execute</li><li><code>approve</code> → wait for exact approval</li><li><code>deny</code> → do not execute</li><li><code>unknown outcome</code> → do not retry blindly</li></ul></div>
-    <p className="cr-caption cr-integration-scope"><strong>Not only agents.</strong> The same execution boundary protects workers, webhooks, scheduled jobs, and other systems that can retry a consequential action. <a href="/docs/not-only-agents">Learn why →</a></p>
+    <div><p className="cr-eyebrow">FOR THE PEOPLE BUILDING IT</p><h2 id="cr-integrate-title">Start at the function<br />that takes action.</h2><p>Wrap the call that causes the real-world effect. Policy decides whether it can run, needs approval, or must stop. Execution state survives restarts, so an uncertain outcome still blocks a blind retry.</p><a className="cr-text-link" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Start integrating <span aria-hidden="true">→</span></a></div>
+    <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"stripe.refund\",\n    effect=\"refund:{payment_id}\"\n)\ndef refund(payment_id, amount):\n    ..."}</code></pre><ul className="cr-outcomes" aria-label="Execution outcomes"><li><code>allow</code> → execute</li><li><code>approve</code> → wait for exact approval</li><li><code>deny</code> → do not execute</li><li><code>unknown outcome</code> → do not retry blindly</li></ul></div>
+    <p className="cr-caption cr-integration-scope">Python, agent frameworks, or an MCP gateway — the execution boundary stays the same, and it protects workers, webhooks and scheduled jobs too. <a href="/docs/not-only-agents">Not only agents →</a></p>
   </section>
 
   <section className="cr-section cr-commercial" aria-labelledby="cr-commercial-title">
-    <div><p className="cr-eyebrow">FOR AGENTS MOVING INTO PRODUCTION</p><h2 id="cr-commercial-title">Know which actions are safe to automate.</h2><p>Get a focused review of your agent's actions, permissions, approval paths, duplicate-execution risks, and retry behavior. Leave with a concrete execution-control map: what can run automatically, what needs a person, and what must stop until the outcome is known.</p></div><div className="cr-commercial-links"><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Get an execution-safety review <span aria-hidden="true">→</span></a><a className="cr-text-link" href="/risk-check">Take the free risk check →</a><a className="cr-text-link" href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Or just email me: contact@arpanghoshal.com ↗</a><p className="cr-caption">Architecture reviews · Integration sprints · Production support<br />CTRLRun OSS remains Apache-2.0 and free.</p></div>
+    <div><p className="cr-eyebrow">FOR AGENTS MOVING INTO PRODUCTION</p><h2 id="cr-commercial-title">Know which actions are safe to automate.</h2><p>Leave with a concrete execution-control map: what can run automatically, what needs a person, and what must stop until the outcome is known.</p></div><div className="cr-commercial-links"><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Get an execution-safety review <span aria-hidden="true">→</span></a><a className="cr-text-link" href="/risk-check">Take the free risk check →</a><a className="cr-text-link" href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Or just email me: contact@arpanghoshal.com ↗</a><p className="cr-caption">Architecture reviews · Integration sprints · Production support<br />CTRLRun OSS remains Apache-2.0 and free.</p></div>
   </section>
 
   <div className="cr-footer" role="contentinfo"><span>Give agents autonomy.<br /><strong>Keep control of their actions.</strong></span><div><a href="/try" data-cr-event="try_clicked">Try CTRLRun ↗</a><a href="/docs" data-cr-event="documentation_clicked">Read the docs →</a><a href="https://github.com/CTRLRun/ctrlrun" data-cr-event="github_clicked">GitHub ↗</a><a href="mailto:contact@arpanghoshal.com?subject=CTRLRun" data-cr-event="contact_email_clicked">Contact ↗</a></div></div>
