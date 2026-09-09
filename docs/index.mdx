@@ -3,8 +3,8 @@ title: "Execution safety for AI agents"
 sidebarTitle: "CTRLRun"
 description: "Execution safety for AI agents: prevent duplicate effects, bind approval to the exact action, and stop blind retries when the outcome is uncertain."
 mode: "custom"
-"og:title": "CTRLRun — Execution safety for AI agents"
-"twitter:title": "CTRLRun — Execution safety for AI agents"
+"og:title": "CTRLRun: execution safety for AI agents"
+"twitter:title": "CTRLRun: execution safety for AI agents"
 canonical: "https://ctrlrun.dev/"
 "og:url": "https://ctrlrun.dev/"
 ---
@@ -25,11 +25,11 @@ canonical: "https://ctrlrun.dev/"
   <section className="cr-section cr-failure-chain" aria-labelledby="cr-failure-title">
     <div className="cr-section-heading">
       <div><p className="cr-eyebrow">THE TOOL WAS IN ITS LIST. THAT IS NOT PERMISSION.</p><h2 id="cr-failure-title">The agent was certain.<br />The agent was wrong.</h2></div>
-      <p className="cr-caption">CTRLRun cannot tell that the agent made it up.<br />It can tell the action is not one this agent may take.</p>
+      <p className="cr-caption">CTRLRun checks the action, not the reasoning.<br />It reads the arguments about to leave your process, and answers whether they may go.</p>
     </div>
     <div className="cr-chain">
       <div className="cr-chain-row">
-        <span className="cr-chain-label">Without controls</span>
+        <span className="cr-chain-label">Without CTRLRun</span>
         <ol className="cr-chain-steps">
           <li>The ticket says: check a refund</li><li>The agent invents a &#36;50,000 payout</li><li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;50,000 gone</li>
         </ol>
@@ -42,7 +42,7 @@ canonical: "https://ctrlrun.dev/"
       </div>
     </div>
     <div className="cr-chain-cta">
-      <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick a domain — there are 48 — then pick the moment it goes wrong: an approval the agent edited, a retry of something that already happened, a reply that never came back.<span className="cr-caption"> No login. No API key. No setup.</span></p>
+      <p>Your model chooses the action. CTRLRun decides whether it may execute. Pick one of 48 domains, then pick the moment it goes wrong: an approval the agent edited, a retry of something that already happened, a reply that never came back.<span className="cr-caption"> No login. No API key. No setup.</span></p>
       <div className="cr-try-actions">
         <a className="cr-button" href="/try?domain=Payments&amp;action=Refund%20payment&amp;situation=blocked" data-cr-event="try_clicked">Walk through this refusal <span aria-hidden="true">→</span></a>
         <a className="cr-text-link" href="/try" data-cr-event="try_clicked">Or pick your own domain ↗</a>
@@ -76,7 +76,7 @@ canonical: "https://ctrlrun.dev/"
   <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">
     <div><p className="cr-eyebrow">FOR THE PEOPLE BUILDING IT</p><h2 id="cr-integrate-title">Start at the function<br />that takes action.</h2><p>Wrap the call that causes the real-world effect. Policy decides whether it can run, needs approval, or must stop. Execution state survives restarts, so an uncertain outcome still blocks a blind retry.</p><a className="cr-text-link" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Start integrating <span aria-hidden="true">→</span></a></div>
     <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"stripe.refund\",\n    effect=\"refund:{payment_id}\"\n)\ndef refund(payment_id, amount):\n    ..."}</code></pre><ul className="cr-outcomes" aria-label="Execution outcomes"><li><code>allow</code> → execute</li><li><code>approve</code> → wait for exact approval</li><li><code>deny</code> → do not execute</li><li><code>unknown outcome</code> → do not retry blindly</li></ul></div>
-    <p className="cr-caption cr-integration-scope">Python, agent frameworks, or an MCP gateway — the execution boundary stays the same, and it protects workers, webhooks and scheduled jobs too. <a href="/docs/not-only-agents">Not only agents →</a></p>
+    <p className="cr-caption cr-integration-scope">Python, agent frameworks, or an MCP gateway: the execution boundary stays the same, and it protects workers, webhooks and scheduled jobs too. <a href="/docs/not-only-agents">Not only agents →</a></p>
   </section>
 
   <section className="cr-section cr-commercial" aria-labelledby="cr-commercial-title">

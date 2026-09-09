@@ -26,12 +26,12 @@ export const ArchitectureReview = () => {
     if (['High', 'Needs review', 'Lower indicated risk', 'Planning'].includes(level)) {
       const count = Math.max(0, Math.min(5, Number(params.get('patterns')) || 0));
       const unknowns = Math.max(0, Math.min(5, Number(params.get('unknowns')) || 0));
-      setRisk(level + ' — ' + count + ' patterns, ' + unknowns + ' unknowns (self-reported)');
+      setRisk(level + ': ' + count + ' patterns, ' + unknowns + ' unknowns (self-reported)');
     }
   }, []);
   useEffect(() => { if (prepared && reviewRef.current) reviewRef.current.focus(); }, [prepared]);
   const brief = ['Architecture review request', '', 'Company: ' + company, 'Reply email: ' + emailAddress, domain && 'Domain: ' + domain, 'Agent purpose: ' + purpose, 'Actions it can execute: ' + actions, 'Production status: ' + status, 'Primary concerns: ' + (concerns.join(', ') || 'Discuss during review'), risk && 'Execution risk check: ' + risk].filter(line => line !== false).join('\n');
-  const email = 'mailto:contact@arpanghoshal.com?subject=' + encodeURIComponent('CTRLRun architecture review — ' + company) + '&body=' + encodeURIComponent(brief);
+  const email = 'mailto:contact@arpanghoshal.com?subject=' + encodeURIComponent('CTRLRun architecture review: ' + company) + '&body=' + encodeURIComponent(brief);
   const sendReview = async () => {
     if (sendingRef.current || sent) return;
     sendingRef.current = true; setSending(true); setError('');

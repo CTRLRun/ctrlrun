@@ -3,8 +3,8 @@ title: "Try the execution boundary"
 description: "Pick an agent action in your own domain and watch which check refuses it: policy, approval binding, effect reservation, or an unknown outcome."
 canonical: "https://ctrlrun.dev/try"
 "og:url": "https://ctrlrun.dev/try"
-"og:title": "Try the execution boundary — CTRLRun"
-"twitter:title": "Try the execution boundary — CTRLRun"
+"og:title": "Try the execution boundary | CTRLRun"
+"twitter:title": "Try the execution boundary | CTRLRun"
 mode: "custom"
 ---
 
@@ -16,7 +16,7 @@ import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
     <p className="cr-eyebrow" style={{ marginTop: "34px" }}>TRY THE EXECUTION BOUNDARY</p>
     <h1 id="cr-try-page-title">Choose an action.<br />See what CTRLRun stops<span className="cr-dot">.</span></h1>
     <p className="cr-lede">Your model chooses the action. CTRLRun decides whether it may execute.</p>
-    <p className="cr-intro">Pick your domain — there are 48 — then pick the moment it goes wrong: a lost reply, an approval the agent edited, a retry of something that already happened. You get the decision, the check that produced it, and the line your own code would see.</p>
+    <p className="cr-intro">Pick one of 48 domains, then pick the moment it goes wrong: an action the agent was never allowed to take, an approval the agent edited, a retry of something that already happened, a reply that never came back. You get the decision, the check that produced it, and the line your own code would see.</p>
     <p className="cr-caption">No login. No API key. No setup. Nothing here executes.<br />Every scenario has its own link, so you can send someone straight to the one that matters.</p>
   </section>
 
@@ -37,7 +37,7 @@ import { ScenarioExplorer } from "/snippets/scenario-explorer.jsx";
     <div className="cr-how-steps">
       <div><span className="cr-step">UNDERSTAND IT</span><h3>How it works</h3><p>Where CTRLRun sits, what it checks, and what it deliberately does not do. <a href="/#how-it-works">The plain-English version</a>, then <a href="/docs/ARCHITECTURE">the architecture</a>.</p></div>
       <div><span className="cr-step">RUN IT</span><h3>Protect your first action</h3><p><code>pip install ctrlrun</code>, then wrap the function that causes the effect. <a href="/docs/get-started/quickstart">The quickstart</a> adds your policy, identity and approval flow.</p></div>
-      <div><span className="cr-step">READ THE CASES</span><h3>Concepts behind each refusal</h3><p><a href="/docs/concepts/approval-binding">Approval binding</a>, <a href="/docs/concepts/effect-keys">effect keys</a>, and <a href="/docs/concepts/outcomes-and-ambiguous">outcomes and AMBIGUOUS</a> — the three the demo leans on hardest.</p></div>
+      <div><span className="cr-step">READ THE CASES</span><h3>Concepts behind each refusal</h3><p><a href="/docs/concepts/approval-binding">Approval binding</a>, <a href="/docs/concepts/effect-keys">effect keys</a>, and <a href="/docs/concepts/outcomes-and-ambiguous">outcomes and AMBIGUOUS</a>: the three the demo leans on hardest.</p></div>
       <div><span className="cr-step">SEE IT IN A DOMAIN</span><h3>A worked application</h3><p>The <a href="/docs/demos/medical-affairs">medical affairs workbench</a> puts the same kernel under a document release instead of a payment.</p></div>
     </div>
     <div className="cr-how-close"><p><strong>Not sure where the controls belong in your architecture?</strong> A focused review maps which of your agent's actions can run automatically, which need a person, and which must stop until the outcome is known.</p><a className="cr-button" href="/protect-my-agent" data-cr-event="protect_clicked">Get an execution-safety review →</a></div>

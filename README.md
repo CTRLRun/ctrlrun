@@ -41,18 +41,24 @@
   transfers</a>.</em>
 </p>
 
-## The refund that happened twice
+## The refund nobody approved
 
-An agent refunds €500. The call reaches the provider and commits. The reply is lost on the way
-back, so the agent sees an error — and does what every retrying client does. The customer is
-refunded twice, and nothing in the stack noticed.
+An agent reads a ticket and decides the customer is owed €50,000. The tool is in its list, the
+arguments are well-formed, and the model is completely confident. Nothing above the call
+disagrees, because nothing above the call is a check: a tool being callable is not permission to
+call it with those arguments.
 
-The bug is not the retry. It is that the agent had no way to tell *this failed* from *I do not
-know what happened*. Retry libraries, agent frameworks and tool loops collapse those two into
-one, and a write that may already have committed is retried as though it certainly had not.
+CTRLRun is that check. It reads the arguments about to leave your process and answers whether
+this agent may send them. €50,000 is past the ceiling policy gives the agent, so the call never
+leaves. Have a human approve €2,000 and then execute €5,000, and the approval authorises
+nothing: it was bound to the action the human actually read.
 
-CTRLRun does not collapse them. A lost reply is `AMBIGUOUS`, never `FAILED`, and a retry against
-an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says what happened.
+That is the half people expect. The other half is the same agent making a *correct* €500 refund
+that commits at the provider while the reply is lost coming back. The agent sees an error and
+retries, because retry libraries, agent frameworks and tool loops collapse *this failed* into *I
+do not know what happened*. CTRLRun keeps them apart: a lost reply is `AMBIGUOUS`, never
+`FAILED`, and a retry against an `AMBIGUOUS` effect is refused until a human, or a `reconcile`
+hook, says what happened.
 
 ```bash
 pip install ctrlrun && ctrlrun demo
