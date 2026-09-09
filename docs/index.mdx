@@ -9,6 +9,8 @@ canonical: "https://ctrlrun.dev/"
 "og:url": "https://ctrlrun.dev/"
 ---
 
+import { DemoFilm } from "/snippets/demo-film.jsx";
+
 <div className="cr-site cr-home">
   <section className="cr-home-hero" aria-labelledby="cr-title">
     <div className="cr-home-pitch">
@@ -22,9 +24,9 @@ canonical: "https://ctrlrun.dev/"
       <a className="cr-text-link cr-hero-quickstart" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Read the quickstart ↗</a>
     </div>
     <div className="cr-example-wrap">
-      <p className="cr-example-label">ONE EXAMPLE / A HALLUCINATED REFUND</p>
+      <p className="cr-example-label">ONE EXAMPLE / THE MODEL HALLUCINATES AN AMOUNT</p>
       <div className="cr-failure-chain" aria-labelledby="cr-failure-title">
-        <h2 id="cr-failure-title">The tool was allowed.<br />The amount was not.</h2>
+        <h2 id="cr-failure-title">The model guesses.<br />CTRLRun does not.</h2>
         <div className="cr-chain-setup">
           <p><span>The ticket says</span>refund &#36;500</p>
           <p><span>The agent asks for</span>&#36;5,000</p>
@@ -33,13 +35,13 @@ canonical: "https://ctrlrun.dev/"
           <div className="cr-chain-row">
             <span className="cr-chain-label">Without CTRLRun</span>
             <ol className="cr-chain-steps">
-              <li>The tool is in its list</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;4,500 too much</li>
+              <li>Nothing checks the amount</li><li>The call goes through</li><li className="cr-end cr-bad">&#36;4,500 too much</li>
             </ol>
           </div>
           <div className="cr-chain-row">
             <span className="cr-chain-label cr-good">With CTRLRun</span>
             <ol className="cr-chain-steps">
-              <li>Policy denies these arguments</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 wrongly paid</li>
+              <li>Your rule checks the amount</li><li>The call never leaves</li><li className="cr-end cr-good">&#36;0 wrongly paid</li>
             </ol>
           </div>
         </div>
@@ -72,9 +74,18 @@ canonical: "https://ctrlrun.dev/"
     <p className="cr-not-llm">CTRLRun does not read prompts, choose models, rank tools, or judge whether the agent&rsquo;s reasoning was any good. It is not an LLM, and it does not call one. <strong>It checks the action, not the thinking.</strong> <a className="cr-text-link" href="/docs/ARCHITECTURE">Read the architecture →</a></p>
   </section>
 
+  <section className="cr-section cr-demo-film" aria-labelledby="cr-film-title">
+    <div className="cr-section-heading"><div><p className="cr-eyebrow">FORTY-NINE SECONDS</p><h2 id="cr-film-title">One policy file, and the refusals it produces.</h2></div><a className="cr-text-link" href="/try" data-cr-event="try_clicked">Or drive it yourself ↗</a></div>
+    <DemoFilm src="/images/demo.mp4" poster="/images/demo-poster.jpg" label="A terminal recording of a CTRLRun policy file and the decisions it produces. Captions are shown in the video." />
+    <p className="cr-caption">Plays muted with captions. Use the controls for sound.</p>
+  </section>
+
   <section className="cr-section cr-integration" aria-labelledby="cr-integrate-title">
-    <div><p className="cr-eyebrow">A LIBRARY INSIDE YOUR PROCESS</p><h2 id="cr-integrate-title">Wrap the action.<br />Set the rules.</h2><p>Protect the function that changes the world.</p><a className="cr-button" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Protect your first action →</a><div className="cr-proof-links"><a href="/docs/try-it">Run real Python ↗</a><a href="/docs/ARCHITECTURE">Architecture ↗</a><a href="/docs/THREAT_MODEL">Limits ↗</a></div></div>
+    <div><p className="cr-eyebrow">A LIBRARY INSIDE YOUR PROCESS</p><h2 id="cr-integrate-title">Wrap the action.<br />Set the rules.</h2><p>Protect the function that changes the world.</p><a className="cr-button" href="/docs/get-started/quickstart" data-cr-event="integration_clicked">Protect your first action →</a><ul className="cr-surfaces" aria-label="Where the boundary sits"><li><b>Python</b>The decorator, around the call that causes the effect.</li><li><b>MCP gateway</b>Point <code>ctrlrun gateway</code> at an existing MCP server. <a href="/docs/mcp/gateway-in-5-minutes">Five minutes ↗</a></li><li><b>Agent frameworks</b>LangGraph and OpenAI Agents, as separate packages. <a href="/docs/adapters">Adapters ↗</a></li><li><b>Not only agents</b>Workers, webhooks and scheduled jobs, same boundary. <a href="/docs/not-only-agents">How ↗</a></li><li className="cr-surface-planned"><b>HTTP API <span>PLANNED</span></b>Not built yet. The boundary is in-process today.</li></ul></div>
+    <div className="cr-code-col">
     <div className="cr-code"><div className="cr-install"><span aria-hidden="true">$ </span><code>pip install ctrlrun</code></div><pre aria-label="Python integration example"><code>{"import ctrlrun\n\n@ctrlrun.protect(\n    \"cloud.deploy\",\n    effect=\"deploy:{release_id}\"\n)\ndef deploy(release_id):\n    return cloud.deploy(release_id)"}</code></pre><div className="cr-code-context"><p>Connect your policy and identity. <a href="/docs/get-started/quickstart">Full setup →</a></p></div></div>
+    <div className="cr-proof-links"><a href="/docs/try-it">Run real Python ↗</a><a href="/docs/ARCHITECTURE">Architecture ↗</a><a href="/docs/THREAT_MODEL">Limits ↗</a></div>
+    </div>
   </section>
 
   <div className="cr-review-strip"><strong>Taking an agent into production?</strong><div><a href="https://adopt.ctrlrun.dev/" data-cr-event="adopt_clicked">How teams adopt CTRLRun ↗</a><a href="/protect-my-agent" data-cr-event="protect_clicked">Get a safety review ↗</a><a href="/risk-check">Free risk check ↗</a></div></div>
