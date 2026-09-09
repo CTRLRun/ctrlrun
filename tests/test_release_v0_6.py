@@ -94,7 +94,7 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
     # not do". Both halves survived the cut, which is the half §6.4 cares about: the chain
     # detects alteration, and the same sentence says alteration is not authorship.
     "README.md": (
-        "is detected. They are not signed: alteration is not authorship. The badge above means the",  # noqa: E501
+        "is detected. They are not signed: alteration is not authorship. The badge above means the",
     ),
     "CHANGELOG.md": (
         '- **`docs/docs/ROADMAP.md`\'s v0.6 bullet said "receipt integrity (hash chain / signatures)", and the',  # noqa: E501
