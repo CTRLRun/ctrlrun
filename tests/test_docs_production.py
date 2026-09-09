@@ -390,7 +390,11 @@ def test_every_production_page_is_in_the_production_group():
     assert listed[0] == "docs/production/index", "the section's front door comes first"
 
 
-READINESS_HOMES = ("README.md", "docs/docs.mdx", "docs/docs/production/index.mdx")
+#: The README carried the readiness block until 2026-09-09, when the page was cut to what
+#: CTRLRun does, how to use it and how it works. The block has two homes on the site, where a
+#: reader who wants the numbers goes, and the generator still refuses a shrunken suite: what
+#: was dropped is one embedding, not the guard.
+READINESS_HOMES = ("docs/docs.mdx", "docs/docs/production/index.mdx")
 
 
 @pytest.mark.parametrize("home", READINESS_HOMES)

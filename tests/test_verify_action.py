@@ -390,28 +390,28 @@ def test_the_job_summary_carries_the_not_applicable_rows_in_full():
     assert report.summary_line() in summary
 
 
-# --- the README quotes the real output (SPEC-v0.4 §4.1; the CLAIMS.md standard) -------------
+# --- the verify page quotes the real output (SPEC-v0.4 §4.1; the CLAIMS.md standard) --------
 
-
-def _readme_verify_section() -> str:
-    readme = _repository_file(README)
-    section = readme.split("## Prove it holds in your setup")[1]
-    return section.split("\n## ")[0]
+#: The README carried a copy of this report until 2026-09-09, when the page was cut to what
+#: CTRLRun does, how to use it and how it works, and the report went with the rest of the
+#: verify section. The guard moved rather than went: `docs/docs/verify.md` is now the single
+#: home of the verbatim output, so the "two copies can drift" test below has nothing left to
+#: compare and is gone, and this one reads the page instead of the README.
 
 
 def _quoted_report() -> list[str]:
-    block = _readme_verify_section().split("```console")[1].split("```")[0]
+    block = _repository_file(VERIFY_DOC).split("```console")[1].split("```")[0]
     return [line for line in block.splitlines() if line.strip() and not line.startswith("$")]
 
 
 @pytest.mark.authority
-def test_the_readme_quotes_the_real_verify_output():
-    """The demo section has had this guard since v0.1; the verify section gets the same one.
+def test_the_verify_page_quotes_the_real_verify_output():
+    """The demo transcript has had this guard since v0.1; the verify report gets the same one.
 
-    Every line the README quotes has to be a line `ctrlrun verify` actually prints, so a
-    change to the report that nobody carried across fails here rather than shipping a README
-    that lies. The version line is normalised: it moves at every release, and the README is
-    not the place that number is kept honest — `pyproject.toml` is.
+    Every line the page quotes has to be a line `ctrlrun verify` actually prints, so a change
+    to the report that nobody carried across fails here rather than shipping a page that lies.
+    The version line is normalised: it moves at every release, and a document is not the place
+    that number is kept honest — `pyproject.toml` is.
     """
 
     report = run(AUTHORITY_PAYMENTS)
@@ -419,7 +419,7 @@ def test_the_readme_quotes_the_real_verify_output():
         re.sub(r"ctrlrun \S+,", "ctrlrun <version>,", line)
         for line in report.to_text().splitlines()
     }
-    # The README quotes a path relative to the repository root; the report prints the path it
+    # The page quotes a path relative to the repository root; the report prints the path it
     # was given. Compare on the same footing rather than on how the test invoked it.
     printed = {
         line.replace(str(AUTHORITY_PAYMENTS), "examples/authority/payments.yaml")
@@ -432,30 +432,28 @@ def test_the_readme_quotes_the_real_verify_output():
         if re.sub(r"ctrlrun \S+,", "ctrlrun <version>,", line) not in printed
     ]
 
-    assert not missing, f"the README quotes lines verify does not print: {missing}"
+    assert not missing, f"the page quotes lines verify does not print: {missing}"
 
 
-def test_the_readme_and_the_verify_page_quote_the_same_report():
-    """Two copies of one output is two things that can drift. They are asserted equal here so
-    the drift is a test failure rather than a reader's discovery."""
-    page = _repository_file(VERIFY_DOC)
-    quoted = page.split("```console")[1].split("```")[0]
+def test_the_verify_page_says_what_not_applicable_means():
+    """The N/A semantics, on the page the badge links to. Asserted with the line wrapping
+    removed: a sentence that reads correctly and wraps across two lines is still the sentence,
+    and a test that could not see it would push prose onto one long line."""
+    page = " ".join(_repository_file(VERIFY_DOC).split())
 
-    from_page = [line for line in quoted.splitlines() if line.strip() and not line.startswith("$")]
+    assert "Not applicable is not a pass" in page
+    assert "never `11/11`" in page
+    assert "no flag that folds an N/A into the count" in page
+    assert "declared guarantees pass" in page
 
-    assert from_page == _quoted_report()
 
+def test_the_readme_says_what_the_badge_does_not_mean():
+    """What the README keeps of the verify section: the badge, and the sentence that stops a
+    reader reading it as more than it is. The report itself lives on the page above."""
+    readme = " ".join(_repository_file(README).split())
 
-def test_the_readme_says_what_not_applicable_means():
-    """One sentence on N/A semantics, on the same screen as the badge. Asserted with the line
-    wrapping removed: a sentence that reads correctly and wraps across two lines is still the
-    sentence, and a test that could not see it would push prose onto one long line."""
-    section = " ".join(_readme_verify_section().split())
-
-    assert "Not applicable is not a pass" in section
-    assert "never `11/11`" in section
-    assert "There is no flag that folds one into the count" in section
-    assert "declared guarantees pass" in section
+    assert "declared guarantees pass" in readme
+    assert "does not mean secure, safe, compliant, certified or audited" in readme
 
 
 # --- publishing the badge: the one place this repository asks for write access ---------------

@@ -22,6 +22,11 @@ include docs/.mintignore
 recursive-include tools *.py *.txt
 # The README's header assets, and the sources they are rendered from.
 recursive-include docs/assets *.svg *.png *.gif *.tape *.sh *.txt
+# The website's media. Mintlify deploys from `docs/`, so a page's video has to live under it,
+# and `test_the_sdist_carries_everything_the_tests_read` then requires it to ship. That test
+# is checked against `git ls-files`, so the only way out would be to untrack the file, which
+# would take it off the site. The sdist carries the megabyte.
+recursive-include docs/images *.mp4 *.jpg
 recursive-include tests *.py
 # SPEC-v0.4 §4.3 — T115 validates `--junit` against a checked-in schema, and reads the README
 # beside it for the schema's provenance and licence. A test that ships without its data is a

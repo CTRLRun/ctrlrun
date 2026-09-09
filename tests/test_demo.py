@@ -698,12 +698,19 @@ def test_a_path_outside_the_run_directory_is_printed_whole(tmp_path):
 _RUN_VARYING = re.compile(r"(?:apr|dlg)_[0-9a-f]+")
 
 
+#: The transcript moved into a collapsed block when the README was cut to three questions on
+#: 2026-09-09. The guard did not move: every line the demo prints is still quoted there, and a
+#: missing block is a failure rather than an empty string that would pass this vacuously.
+_DEMO_BLOCK_ANCHOR = "<summary>What <code>ctrlrun demo</code> shows"
+
+
 def _readme_demo_section() -> str:
     readme = Path(__file__).resolve().parents[1] / "README.md"
     if not readme.exists():  # installed without the source tree
         pytest.skip("no repository checkout")
-    section = readme.read_text(encoding="utf-8").split("## What `ctrlrun demo` shows")[1]
-    return section.split("\n## ")[0]
+    text = readme.read_text(encoding="utf-8")
+    assert _DEMO_BLOCK_ANCHOR in text, "the README no longer carries the demo transcript"
+    return text.split(_DEMO_BLOCK_ANCHOR, 1)[1].split("</details>", 1)[0]
 
 
 def test_the_readme_demo_section_quotes_the_demo_output_verbatim(demo_run):
