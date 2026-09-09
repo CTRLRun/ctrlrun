@@ -212,26 +212,6 @@ export const ScenarioExplorer = ({ standalone = false }) => {
   const reviewQuestion = money ? 'Letting agents move or refund money?' : domain === 'DevOps' || domain === 'Cloud Infrastructure' || domain === 'CI/CD' ? 'Letting agents change production infrastructure?' : domain === 'Customer Support' ? 'Letting agents refund, cancel, or change customer accounts?' : domain === 'HR' || domain === 'Payroll' ? 'Letting agents change employee records or payroll workflows?' : domain === 'SaaS' || domain === 'Identity and Access' ? 'Letting agents modify accounts, permissions, or customer data?' : 'Letting agents take action in ' + domain.toLowerCase() + '?';
   return (
     <div className="cr-explorer">
-      <div className="cr-lanes">
-        <div className="cr-lane">
-          <span className="cr-step">YOUR AGENT · THE LLM</span>
-          <strong>Decides what to do</strong>
-          <p>Reads the ticket, picks the tool, chooses the arguments, and decides to try again when a call errors. This is the part you built, and CTRLRun never touches it.</p>
-        </div>
-        <span className="cr-flow-arrow" aria-hidden="true">→</span>
-        <div className="cr-lane cr-lane-control">
-          <span className="cr-step">CTRLRUN · THIS TOOL</span>
-          <strong>Decides whether it may run</strong>
-          <p>Sees no prompt, no reasoning, no chat. It sees one thing: the action about to leave your process, with its exact arguments. It answers whether that may execute now, and records what happened.</p>
-        </div>
-        <span className="cr-flow-arrow" aria-hidden="true">→</span>
-        <div className="cr-lane">
-          <span className="cr-step">THE REAL SYSTEM</span>
-          <strong>Where it becomes real</strong>
-          <p>Stripe, your database, the Kubernetes API, an email server. None of them can tell a first attempt from a retry, and a lost reply looks exactly like a failure.</p>
-        </div>
-      </div>
-      <p className="cr-lane-note">CTRLRun is not a model, a prompt layer, or a guardrail on what the agent <em>says</em>. It is the check on what the agent <em>does</em>, in the last moment before the effect is real.</p>
       <div className="cr-demo-toolbar">
         <div className="cr-field cr-domain-picker" ref={pickerRef}>
           <span id="cr-domain-label">Choose your domain</span>
@@ -253,11 +233,6 @@ export const ScenarioExplorer = ({ standalone = false }) => {
         </div>
         <label className="cr-field">Choose an action<select value={Math.min(actionIndex, selected.actions.length - 1)} onChange={event => { const index = Number(event.target.value); setActionIndex(index); restart(); track('use_case_selected', { action: selected.actions[index] }); }}>{selected.actions.map((item, index) => <option key={item} value={index}>{item}</option>)}</select></label>
         <label className="cr-field">Choose what goes wrong<select value={condition} onChange={event => { setCondition(event.target.value); restart(); track('scenario_completed', { outcome: event.target.value }); }}>{situations.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-      </div>
-      <div className="cr-chips">
-        <span className="cr-step">48 DOMAINS. START WITH ONE</span>
-        {quick.map(name => <button type="button" key={name} className={'cr-chip' + (domain === name ? ' cr-chip-on' : '')} aria-pressed={domain === name} onClick={() => chooseDomain(name)}>{name}</button>)}
-        <button type="button" className="cr-chip cr-chip-more" onClick={() => { setPickerOpen(true); setActiveOption(0); }}>Browse all 48 →</button>
       </div>
       <div className="cr-demo-stage">
         <div className="cr-request">
@@ -298,6 +273,33 @@ export const ScenarioExplorer = ({ standalone = false }) => {
           </div>
         </div>
       </div>
+      <div className="cr-chips">
+        <span className="cr-step">48 DOMAINS. START WITH ONE</span>
+        {quick.map(name => <button type="button" key={name} className={'cr-chip' + (domain === name ? ' cr-chip-on' : '')} aria-pressed={domain === name} onClick={() => chooseDomain(name)}>{name}</button>)}
+        <button type="button" className="cr-chip cr-chip-more" onClick={() => { setPickerOpen(true); setActiveOption(0); }}>Browse all 48 →</button>
+      </div>
+      <details className="cr-explorer-context"><summary>Where CTRLRun sits and what it checks</summary>
+      <div className="cr-lanes">
+        <div className="cr-lane">
+          <span className="cr-step">YOUR AGENT · THE LLM</span>
+          <strong>Decides what to do</strong>
+          <p>Reads the ticket, picks the tool, chooses the arguments, and decides to try again when a call errors. This is the part you built, and CTRLRun never touches it.</p>
+        </div>
+        <span className="cr-flow-arrow" aria-hidden="true">→</span>
+        <div className="cr-lane cr-lane-control">
+          <span className="cr-step">CTRLRUN · THIS TOOL</span>
+          <strong>Decides whether it may run</strong>
+          <p>Sees no prompt, no reasoning, no chat. It sees one thing: the action about to leave your process, with its exact arguments. It answers whether that may execute now, and records what happened.</p>
+        </div>
+        <span className="cr-flow-arrow" aria-hidden="true">→</span>
+        <div className="cr-lane">
+          <span className="cr-step">THE REAL SYSTEM</span>
+          <strong>Where it becomes real</strong>
+          <p>Stripe, your database, the Kubernetes API, an email server. None of them can tell a first attempt from a retry, and a lost reply looks exactly like a failure.</p>
+        </div>
+      </div>
+      <p className="cr-lane-note">CTRLRun is not a model, a prompt layer, or a guardrail on what the agent <em>says</em>. It is the check on what the agent <em>does</em>, in the last moment before the effect is real.</p>
+      </details>
       <div className="cr-demo-share">
         <div>
           <span className="cr-step">SHARE THIS SCENARIO</span>

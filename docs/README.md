@@ -2,7 +2,8 @@
 
 One Mintlify project, deployed from this repository's `/docs` directory.
 
-- `index.mdx` serves `/`: the product homepage, execution boundary, failure example, and scenario explorer.
+- `index.mdx` serves `/`: the product homepage, the hallucinated-refund example, the execution boundary and its four rules, and the integration entry point.
+- `try.mdx` serves `/try`: the interactive scenario explorer. Controls and a decision come first; the agent/boundary/system context sits in a disclosure below them.
 - `docs.mdx` serves `/docs`: the preserved technical overview.
 - `docs/` contains all technical pages, published under `/docs/...`. The three technical navigation tabs retain their full sidebar structure.
 - `risk-check.mdx` and `protect-my-agent.mdx` are custom-mode product pages.
@@ -44,7 +45,7 @@ function accepting a page and an optional preview base URL. It exercises browser
 downloads, error recovery and all six stages at three viewport widths. The letter demo remains
 independent.
 
-The homepage explorer contains 48 domains and 238 actions. All rules are illustrative, client-side simulations. The original Python runtime demos remain at `/docs/try-it` and `/docs/demos/medical-affairs`; they load their runtime only when invoked.
+The scenario explorer contains 48 domains and 238 actions. All rules are illustrative, client-side simulations. The original Python runtime demos remain at `/docs/try-it` and `/docs/demos/medical-affairs`; they load their runtime only when invoked.
 
 The risk check stores no answers and sends no form data until the visitor submits an architecture review. Its result distinguishes indicated patterns from unknown answers and explains the scoring rule.
 
