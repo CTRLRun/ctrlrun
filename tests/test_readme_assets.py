@@ -170,4 +170,4 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     assert marker not in head, "the capability matrix is not the first screen"
     assert marker in text, "the capability matrix was moved, not dropped"
     assert head.count("\n|---|") == 0, "no table above the first H2"
-    assert text.split("\n## ", 2)[1].startswith("The refund that happened twice")
+    assert text.split("\n## ", 2)[1].startswith("The refund nobody approved")

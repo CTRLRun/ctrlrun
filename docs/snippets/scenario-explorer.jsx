@@ -81,7 +81,7 @@ export const ScenarioExplorer = ({ standalone = false }) => {
       tone: 'green',
       reason: 'This action is inside the autonomy you gave the agent, so no person is asked.',
       llm: 'This is within my limits, so I will call the tool.',
-      kernel: 'Agreed — and the effect is reserved first, so a second worker proposing the same thing now waits.',
+      kernel: 'Agreed, and the effect is reserved first, so a second worker proposing the same thing now waits.',
       rule: money ? 'Example rule: this agent may act autonomously up to $1,000.' : 'Example rule: this agent may perform this action on the selected target.',
       sees: 'decision=allow → your function runs',
       doc: { href: '/docs/concepts/decisions', label: 'Decisions' },
@@ -186,7 +186,7 @@ export const ScenarioExplorer = ({ standalone = false }) => {
       reason: 'The real system confirmed the action. The outcome and the decision behind it are written to a receipt.',
       llm: 'Done. I will report success.',
       kernel: 'Committed. Any later attempt at the same business action now has something to be refused against.',
-      rule: 'A receipt records the action, the decision and the outcome — including who approved it.',
+      rule: 'A receipt records the action, the decision and the outcome, including who approved it.',
       sees: 'outcome=committed · receipt rcp_4c2a…',
       doc: { href: '/docs/concepts/receipts-and-evidence', label: 'Receipts and evidence' },
       marks: ['pass', 'pass', viaApproval ? 'pass' : 'skip', 'pass', 'pass'],
@@ -308,7 +308,7 @@ export const ScenarioExplorer = ({ standalone = false }) => {
           {!standalone && <a className="cr-text-link" href={shareUrl()}>Open on its own page ↗</a>}
         </div>
       </div>
-      <p className="cr-demo-note">Nothing here executes: this is an illustration of the decisions, with example rules that are not industry defaults. To watch the real library refuse a real call, <a href="/docs/try-it">run the released wheel in your browser</a> — Python and CTRLRun load into the tab and every refusal there is the library's own.{physical ? ' CTRLRun governs the software authorization and execution workflow; physical safety controls remain separate.' : ''}{domain === 'Healthcare Operations' ? ' Administrative workflows only; no diagnosis or clinical decisions.' : ''}</p>
+      <p className="cr-demo-note">Nothing here executes: this is an illustration of the decisions, with example rules that are not industry defaults. To watch the real library refuse a real call, <a href="/docs/try-it">run the released wheel in your browser</a>: Python and CTRLRun load into the tab and every refusal there is the library's own.{physical ? ' CTRLRun governs the software authorization and execution workflow; physical safety controls remain separate.' : ''}{domain === 'Healthcare Operations' ? ' Administrative workflows only; no diagnosis or clinical decisions.' : ''}</p>
       <div className="cr-domain-cta"><div><strong>{reviewQuestion}</strong><p>Review where execution controls belong in your architecture.</p></div><a className="cr-text-link" href={'/protect-my-agent?domain=' + encodeURIComponent(domain)} onClick={() => track('protect_clicked')}>Get a safety review ↗</a></div>
     </div>
   );

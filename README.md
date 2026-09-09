@@ -41,18 +41,25 @@
   transfers</a>.</em>
 </p>
 
-## The refund that happened twice
+## The refund nobody approved
 
-An agent refunds €500. The call reaches the provider and commits. The reply is lost on the way
-back, so the agent sees an error — and does what every retrying client does. The customer is
-refunded twice, and nothing in the stack noticed.
+A ticket asks for a €500 refund. The agent calls the refund tool with €5,000 — one extra zero.
+The tool is in its list, the arguments are well-formed, and the model is completely confident.
+Nothing above the call disagrees, because nothing above the call is a check: a tool being
+callable is not permission to call it with those arguments.
 
-The bug is not the retry. It is that the agent had no way to tell *this failed* from *I do not
-know what happened*. Retry libraries, agent frameworks and tool loops collapse those two into
-one, and a write that may already have committed is retried as though it certainly had not.
+CTRLRun is that check. It reads the arguments about to leave your process and answers what may
+happen to them. Under the demo's policy €500 is autonomous and €5,000 is not, so the extra zero
+meets a human instead of the provider. Nor does an approval travel: the demo's second scenario
+approves €2,000, executes €5,000 under that approval, and it authorises nothing, because it was
+bound to the action the human actually read.
 
-CTRLRun does not collapse them. A lost reply is `AMBIGUOUS`, never `FAILED`, and a retry against
-an `AMBIGUOUS` effect is refused — until a human, or a `reconcile` hook, says what happened.
+That is the half people expect. The other half is the same agent making a *correct* €500 refund
+that commits at the provider while the reply is lost coming back. The agent sees an error and
+retries, because retry libraries, agent frameworks and tool loops collapse *this failed* into *I
+do not know what happened*. CTRLRun keeps them apart: a lost reply is `AMBIGUOUS`, never
+`FAILED`, and a retry against an `AMBIGUOUS` effect is refused until a human, or a `reconcile`
+hook, says what happened.
 
 ```bash
 pip install ctrlrun && ctrlrun demo
