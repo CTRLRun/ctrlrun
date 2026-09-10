@@ -7,6 +7,23 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+### Added
+
+- **Python 3.13 and 3.14 are tested and declared.** CI's `check` job runs the full suite on
+  3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
+  `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
+  changed; the one test fix is below.
+
+### Fixed
+
+- **The migration tests' release fixtures could not build a venv on some interpreters.**
+  `venv.create` copies the interpreter by default, and a copied binary from a shared-libpython
+  build (uv's CPython 3.14 on macOS) aborted inside `ensurepip`, so all five release fixtures
+  errored before a release was installed. The fixture now symlinks, as `python -m venv` does on
+  POSIX.
+
 ## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
 
 Everything found after `v0.6.0` was tagged: twenty-nine defects from an audit of the shipped
