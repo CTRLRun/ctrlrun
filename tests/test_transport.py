@@ -1608,6 +1608,27 @@ def test_T226_behind_a_proxy_even_an_unreachable_proxy_is_not_claimed(monkeypatc
     assert isinstance(raised, httpx.ConnectError), raised
 
 
+def test_T226_a_proxy_the_environment_bypasses_entirely_still_claims(monkeypatch, refused):
+    """`NO_PROXY=*` is how httpx is told to ignore every proxy, and then there is no proxy in the
+    way: a refused connection is claimed as it would be with nothing configured at all.
+
+    Precondition (the control): with the same proxy named and `NO_PROXY` unset, the identical call
+    is not claimed, so the bypass is what decides and not the absence of a proxy variable.
+    """
+    from ctrlrun.gateway import transport as gateway_transport
+
+    target = f"http://{LOOPBACK}:{refused}/refunds"
+    _httpx_through(f"http://{LOOPBACK}:{refused}", monkeypatch)
+    assert not isinstance(
+        _raised(lambda: gateway_transport.request("POST", target, timeout=WAIT)), NotExecuted
+    ), "control: behind a proxy nothing is claimed"
+
+    monkeypatch.setenv("no_proxy", "*")
+    raised = _raised(lambda: gateway_transport.request("POST", target, timeout=WAIT))
+
+    assert isinstance(raised, NotExecuted), raised
+
+
 def test_T226_the_httpx_variant_marks_the_run_and_consults_it(refused):
     """One register for both variants: a request delivered through httpx, then a refused
     `HTTPConnection` in the same run, is not claimed; and a request delivered through the
@@ -2437,6 +2458,12 @@ refused_by_guard(lambda: tcp().connect(("127.0.0.1", outside)), "a TCP connect a
 refused_by_guard(
     lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).connect(("127.0.0.1", outside)),
     "a datagram connect",
+)
+# To a port this process did record, so only the socket's kind can refuse it: UDP datagrams to
+# the TCP port of that number reach whoever holds the UDP port, which may be another process.
+refused_by_guard(
+    lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).connect(("127.0.0.1", port)),
+    "a datagram connect to a recorded port",
 )
 refused_by_guard(
     lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", outside)),
