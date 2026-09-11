@@ -110,12 +110,13 @@ def statement_of(kind: bytes, body: bytes) -> bytes | None:
     `name NUL query NUL ...`. The Bind carries the arguments, so an effect key that happens to
     contain `UPDATE` is never mistaken for one, for the reason `is_commit` parses frames at all.
 
-    psycopg sends the text with each execution of a query until that query has run
-    `prepare_threshold` times (five by default) on that connection; after that it executes a
-    named prepared statement, whose Execute carries no text, and this returns `None` for it. So a
-    predicate built on this sees only a query's first few executions on a connection. Every
-    statement the tests hold is within those, and every test that holds one asserts the hold
-    fired, so a statement that had already been prepared fails the test rather than passing it.
+    psycopg carries the text on a query's **first six executions** on one connection, and a
+    review measured it rather than reading it off the default: executions 1 to 5 are unnamed
+    Parses, execution 6 is the named Parse that prepares it (`prepare_threshold`, five), and from
+    7 on the Bind names the prepared statement and no text travels, so this returns `None`. Every
+    statement the tests hold is the first or second execution of its query on its connection, and
+    every test that holds one asserts `holding.wait(BOUND)`, so a statement that had already been
+    prepared fails the test rather than slipping past it.
     """
     if kind == b"Q":
         return body.split(b"\x00", 1)[0]
@@ -254,8 +255,17 @@ class Proxy:
             self._hold_when = predicate
 
     def release(self) -> None:
-        """Forward what the armed hold held. Safe when nothing is held, and more than once."""
+        """Forward what the armed hold is holding. Safe when nothing is held, and more than once.
+
+        **It releases a hold that has fired, and never one that has not.** Releasing an armed hold
+        before its statement arrived pre-released it: the statement was then forwarded the moment
+        it was parsed, `holding` was set and `holds` counted it, which is the lie `arm()` exists to
+        remove, in a narrower form. A test whose `finally` releases, or which releases the wrong
+        hold, would have opened no window and passed. Found by review, round 2.
+        """
         with self._lock:
+            if not self.holding.is_set():
+                return
             released = self._released
         released.set()
 

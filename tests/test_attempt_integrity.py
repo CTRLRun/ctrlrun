@@ -41,6 +41,7 @@ from typing import Any
 import pytest
 
 from ctrlrun.effect import EffectState
+from ctrlrun.errors import CTRLRunError
 from failure_injection import Proxy, statement_of, upstream_of
 
 URL = os.environ.get("CTRLRUN_TEST_POSTGRES")
@@ -92,7 +93,7 @@ CHILD = textwrap.dedent("""
     log.addHandler(Branches())
     log.setLevel(logging.WARNING)
 
-    OPS = ("reserve", "begin", "fail", "ambiguous", "resolve")
+    OPS = ("reserve", "begin", "fail", "commit", "ambiguous", "resolve")
     for step in job["steps"]:
         if step["op"] not in OPS:
             raise SystemExit("unknown step %r" % step["op"])
@@ -128,6 +129,8 @@ CHILD = textwrap.dedent("""
                     store.begin_execution(key, actor)
                 elif op == "fail":
                     store.fail_effect(key, actor, "the remote refused before acting")
+                elif op == "commit":
+                    store.commit_effect(key, actor, {"refund": "re_1"})
                 elif op == "ambiguous":
                     store.mark_ambiguous(key, actor, "the outcome was lost")
                 else:
@@ -358,15 +361,23 @@ def stored(schema: str, key: str):
         store.close()
 
 
-def effects_statement(verb: bytes, schema: str):
-    """A `Proxy.arm` predicate: a statement on this schema's `effects` table beginning `verb`."""
-    table = f'"{schema}".effects'.encode()
+def table_statement(verb: bytes, schema: str, table_name: str):
+    """A `Proxy.arm` predicate: a statement on one of this schema's tables, beginning `verb`."""
+    table = f'"{schema}".{table_name}'.encode()
 
     def matches(kind: bytes, body: bytes) -> bool:
         text = statement_of(kind, body)
         return text is not None and text.lstrip().upper().startswith(verb) and table in text
 
     return matches
+
+
+def effects_statement(verb: bytes, schema: str):
+    return table_statement(verb, schema, "effects")
+
+
+def approvals_statement(verb: bytes, schema: str):
+    return table_statement(verb, schema, "approvals")
 
 
 # --- the injector's own control -------------------------------------------------------------
@@ -466,6 +477,7 @@ def test_the_hold_can_be_armed_twice_and_refuses_to_arm_over_a_pending_hold():
 
         proxy.arm(statement(b"UPDATE two"))
         assert not proxy.holding.is_set(), "the second hold reported itself held before firing"
+        proxy.release()  # nothing is held yet, so this must not pre-release the armed hold
         client.sendall(framed(b"P", b"\x00UPDATE two\x00\x00\x00"))
         assert proxy.holding.wait(BOUND), "the second hold never fired"
         assert not arrived(b"UPDATE two", 0.5), (
@@ -1013,7 +1025,11 @@ def test_T246c_a_stale_resolve_never_rewinds_a_newer_attempt(proxy, schema, home
         f"{record.attempt}: attempt 2's unknown outcome was overwritten, and a renewal from here "
         "hands out an attempt number that has already been dispatched"
     )
-    assert outcome["error"] == "DuplicateEffect", outcome
+    assert outcome["error"] == "AmbiguousEffect", (
+        f"the stale resolve was refused as {outcome['error']}; the record it found is AMBIGUOUS at "
+        "the newer attempt, which is nobody's live reservation, so in_progress would be false"
+    )
+    assert "moved from attempt 1" in outcome["message"], outcome["message"]
 
 
 @postgres
@@ -1055,45 +1071,250 @@ def test_T246c_a_stale_ambiguate_never_rewinds_a_newer_attempt(proxy, schema, ho
         f"the contender's stale AMBIGUOUS write left the record {found}: attempt 2, in flight, was "
         "rewound to attempt 1"
     )
-    assert outcome["error"] == "DuplicateEffect", outcome
+    assert outcome["error"] == "DuplicateEffect" and outcome["state"] == "in_progress", outcome
+    assert "moved from attempt 1" in outcome["message"], outcome["message"]
 
 
 @postgres
-def test_T246c_a_stale_transition_never_rewinds_a_newer_attempt(proxy, schema, home):
-    """`_transition`, the compare-and-set under `begin`, `commit`, `fail` and `mark_ambiguous`.
+@pytest.mark.parametrize(
+    ("op", "pre", "lands", "tail"),
+    [
+        ("ambiguous", "begin", EffectState.AMBIGUOUS, "AmbiguousEffect"),
+        ("commit", "begin", EffectState.COMMITTED, "DuplicateEffect"),
+        ("fail", "begin", EffectState.EXECUTING, "DuplicateEffect"),
+        ("begin", "", EffectState.RESERVED, "DuplicateEffect"),
+    ],
+)
+def test_T246c_a_stale_transition_lands_its_outcome_or_is_refused(
+    proxy, schema, home, op, pre, lands, tail
+):
+    """`_transition` under a reused `action_id`, held after its read while the record moves on.
 
-    Attempt 1 is `EXECUTING` under a reused `action_id`; its `mark_ambiguous` reads it and the proxy
-    holds the `UPDATE`. Meanwhile the same id fails attempt 1, renews to 2 and begins it. 0.6.1
-    matched `EXECUTING` under that id and wrote `AMBIGUOUS` at **1**.
+    The record cannot be rewound: the `UPDATE` carries the attempt it read. What is left is what
+    the stale write should do instead, and it is not the same answer for all four transitions.
+
+    **An outcome is never dropped.** `commit_effect` and `mark_ambiguous` carry what the executor
+    did, or the fact that nobody knows. Refusing them writes nothing, and then the record, which is
+    what gates the next renewal, carries nothing: a review measured a renewal to attempt 3 with
+    attempt 1's outcome recorded on no record at all, and in the `commit` row attempt 1 had
+    committed at the remote, so attempt 3 would have been a second refund. When the re-read says
+    the record is still ours and still in a state this transition may be made from, the transition
+    is re-issued once against that re-read, so the outcome lands on the newer attempt, exactly
+    where the same call a moment later would have landed it. Attributing it to the newer attempt is
+    the residual (§12.3a); losing it is not a residual, it is a lost outcome.
+
+    **A claim about a *running* attempt is refused.** `fail_effect` asserts that nothing happened,
+    and re-issuing attempt 1's `FAILED` over attempt 2 in flight would permit a retry beside a
+    dispatch that is still running. `begin_execution` claims a reservation this attempt no longer
+    holds. Both are refused, and the record is left as the newer attempt wrote it.
     """
-    key = "refund:stale-transition"
+    key = f"refund:stale-transition-{op}"
     setup = direct(schema)
     try:
         setup.reserve_effect(key, REUSED, LEASE)
-        setup.begin_execution(key, REUSED)
+        if pre:
+            setup.begin_execution(key, REUSED)
     finally:
         setup.close()
+    read_state = EffectState.EXECUTING if pre else EffectState.RESERVED
     later = T0 + timedelta(seconds=2)
+    rival_steps = (
+        [step("fail", key, REUSED, later)]
+        if pre
+        else [
+            step("begin", key, REUSED, later),
+            step("fail", key, REUSED, later),
+        ]
+    )
+    rival_steps += [step("reserve", key, REUSED, later)]
+    if pre:
+        rival_steps += [step("begin", key, REUSED, later)]
     outcome, rival, read = stale_write(
         proxy,
         home,
         schema,
         key,
-        [step("ambiguous", key, REUSED, T0 + timedelta(seconds=1))],
-        [
-            step("fail", key, REUSED, later),
-            step("reserve", key, REUSED, later),
-            step("begin", key, REUSED, later),
-        ],
+        [step(op, key, REUSED, T0 + timedelta(seconds=1))],
+        rival_steps,
     )
-    assert read is not None and (read.state, read.attempt) == (EffectState.EXECUTING, 1), read
-    assert rival["results"][1]["attempt"] == 2
+    assert read is not None and (read.state, read.attempt) == (read_state, 1), read
+    assert rival["results"][-2 if pre else -1]["attempt"] == 2, rival
 
     record = stored(schema, key)
     assert record is not None
     found = (record.state, record.attempt, record.action_id)
-    assert found == (EffectState.EXECUTING, 2, REUSED), (
-        f"attempt 1's stale mark_ambiguous left the record {found}: attempt 2, in flight, was "
-        "rewound to attempt 1"
+    assert found == (lands, 2, REUSED), (
+        f"attempt 1's stale {op} left the record {found}, expected {lands} at attempt 2: an "
+        "outcome was dropped, or a newer attempt was overwritten"
     )
-    assert outcome["error"] == "DuplicateEffect", outcome
+    if op in ("ambiguous", "commit"):
+        assert outcome["error"] is None, (
+            f"the {op} was refused ({outcome['error']}) and wrote nothing, so attempt 1's outcome "
+            "is recorded on no effect record and the next renewal is not gated by it"
+        )
+    else:
+        assert outcome["error"] == "DuplicateEffect" and outcome["state"] == "in_progress", outcome
+        assert "moved from attempt 1" in outcome["message"], outcome["message"]
+
+    # And whatever the record now says, it is not a record another attempt may take.
+    after = direct(schema, T0 + timedelta(seconds=3))
+    try:
+        with pytest.raises(CTRLRunError) as refused:
+            after.reserve_effect(key, "act_next", LEASE)
+    finally:
+        after.close()
+    assert type(refused.value).__name__ == tail, (
+        f"after a stale {op}, a further attempt was refused with {type(refused.value).__name__}, "
+        f"expected {tail}"
+    )
+
+
+@postgres
+def test_a_stale_expire_never_overwrites_a_consumption(proxy, schema, home):
+    """The same shape on `approvals`, found by the round-2 review's survey of every write.
+
+    `_expire` writes `status = expired` from a read that saw `granted` past `expires_at`, on
+    `approval_id` alone. A consumption that commits in between is overwritten, and an approval that
+    authorised a real effect reads `expired`: evidence corruption, and the one write on that table
+    that was not a compare-and-set (`_consume_locked`, `grant_approval` and `deny_approval` all
+    are). Here the expiring store's `UPDATE` is held while another process, whose clock is still
+    inside the approval's life, consumes it and reserves the key.
+    """
+    key = "refund:stale-expire"
+    approval = granted_for(schema, "consume_approval_and_reserve", key)
+    assert approval is not None
+    expired = T0 + timedelta(hours=2)  # past the approval's expires_at
+
+    late = Child(
+        home,
+        "late",
+        url=proxy.url(URL),
+        schema=schema,
+        gated=True,
+        steps=reserving(key, "act_late", expired, approval=approval),
+    )
+    try:
+        late.wait_ready()
+        proxy.reset_counters()
+        proxy.arm(approvals_statement(b"UPDATE", schema))
+        late.go()
+        assert proxy.holding.wait(BOUND), "the expiring UPDATE never reached the proxy"
+        rival = Child(
+            home,
+            "rival",
+            url=URL,
+            schema=schema,
+            gated=False,
+            steps=reserving(key, "act_rival", T0 + timedelta(seconds=2), approval=approval),
+        ).result()
+        assert rival["error"] is None and rival["attempt"] == 1, rival
+        proxy.release()
+        outcome = late.result()
+    finally:
+        proxy.release()
+        late.kill()
+
+    assert outcome["error"] == "ApprovalMismatch", outcome
+    assert approval_status(schema, approval) == "consumed", (
+        "the stale expiry overwrote a consumption: the approval that authorised the rival's "
+        "effect now reads expired, and the evidence says a human's yes was never spent"
+    )
+    record = stored(schema, key)
+    assert record is not None and record.action_id == "act_rival"
+
+
+# --- the outcome itself: never lost, whatever the store answers ------------------------------
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, tmp_path):
+    """`v0.1 §5.5` through `Control`, when the outcome write itself is refused.
+
+    The round-2 review drove this through the public API on SQLite, so the store is not the
+    variable: the executor runs past its lease, a contender finds the lapsed record and makes it
+    `AMBIGUOUS`, a human resolves it `FAILED` while the attempt is *still running*, and only then
+    does the executor raise `TimeoutError`. `mark_ambiguous` is then refused, because `FAILED` is
+    not a state this attempt may move from, and that refusal used to escape `Control`: no receipt,
+    no `EXECUTION_AMBIGUOUS` event, and the caller handed an `InvalidArgument` about its own effect
+    key instead of the exception its executor raised. An unknown outcome vanished, on both
+    backends, and this has nothing to do with the attempt number.
+
+    The store's answer may be a refusal; the evidence may not. The receipt and the event are
+    written whatever the store says, they name the refusal, and the caller gets its own exception
+    back. What the effect record says afterwards is the human's claim and not this attempt's, which
+    is the residual §12.3a states and the reason the receipt has to carry the truth.
+    """
+    from ctrlrun.action import Action, Principal
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import EventType, ReceiptResult
+    from ctrlrun.state import SQLiteStateStore
+
+    if backend == "postgres" and not URL:
+        pytest.skip("CTRLRUN_TEST_POSTGRES is not set; no server to run against")
+    now = [T0]
+    name = f"unknown_{uuid.uuid4().hex[:10]}"
+    if backend == "sqlite":
+        path = str(tmp_path / "store.db")
+
+        def open_store():
+            return SQLiteStateStore(path, clock=lambda: now[0])
+    else:
+        from ctrlrun.postgres import PostgresStateStore
+
+        PostgresStateStore.create_schema(URL, name)
+
+        def open_store():
+            return PostgresStateStore(URL, schema=name, clock=lambda: now[0])
+
+    store = open_store()
+    policy = Policy.from_yaml(
+        "schema: ctrlrun.policy/v2\nactions:\n  stripe.refund:\n"
+        '    effect: "refund:{id}"\n    rules:\n      - decision: allow\n'
+    )
+    control = Control(policy, store, clock=lambda: now[0], lease=LEASE)
+    action = Action(
+        name="stripe.refund", arguments={"id": "re_1"}, principal=Principal(agent="agent:a")
+    )
+    ran = []
+
+    def executor():
+        now[0] = T0 + timedelta(minutes=10)  # the lease lapsed while the remote was thinking
+        other = open_store()
+        try:
+            with pytest.raises(CTRLRunError):
+                other.reserve_effect("refund:re_1", "act_contender", LEASE)
+            other.resolve_effect("refund:re_1", EffectState.FAILED, "cli:human")
+        finally:
+            other.close()
+        ran.append("the executor ran, and nobody knows what the remote did")
+        raise TimeoutError("the refund response never arrived")
+
+    try:
+        before = len(store.receipts())
+        with pytest.raises(TimeoutError):
+            control.execute(action, executor, "refund:re_1")
+        assert ran, "the executor never ran; this test is about what happens after it does"
+
+        written = store.receipts()[before:]
+        assert len(written) == 1, (
+            f"{len(written)} receipts for an attempt whose outcome is unknown: the store refused "
+            "the outcome write and the evidence went with it"
+        )
+        assert written[0].result is ReceiptResult.AMBIGUOUS, written[0].result
+        assert "TimeoutError" in (written[0].error or ""), written[0].error
+        assert "refused" in (written[0].error or ""), (
+            f"the receipt says {written[0].error!r}; it must say the outcome could not be written, "
+            "because the effect record does not say it either"
+        )
+        assert EventType.EXECUTION_AMBIGUOUS in [event.type for event in store.events()], (
+            "no EXECUTION_AMBIGUOUS event: the one unknown outcome here is recorded nowhere"
+        )
+        record = store.get_effect("refund:re_1")
+        assert record is not None and record.attempt == 1
+    finally:
+        store.close()
+        if backend == "postgres":
+            from ctrlrun.postgres import PostgresStateStore
+
+            PostgresStateStore.drop_schema(URL, name)
