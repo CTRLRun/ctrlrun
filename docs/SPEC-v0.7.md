@@ -187,7 +187,7 @@ named, and none of them is left to be discovered by the item that meets it.
    those stores will measure a large skew at open, and the measurement will be true. §3.8 says what
    item 1 does about it, which is not to switch the detector off.
 7. **`max_attempts` needs `ctrlrun.policy/v5`.** Action-entry key sets are closed and every key
-   added since v0.2 has been gated on a schema version (`policy.py:115-127`). The milestone's plan
+   added since v0.2 has been gated on a schema version (`policy.py:118-127`). The milestone's plan
    lists one policy key and no schema bump; the key cannot ship without one (§5.3).
 8. **The gateway raises `NotExecuted` unchained.** `gateway/server.py:616` raises it from the
    token string with no `from`, because the transport has already reduced the exception to an enum.
