@@ -1443,6 +1443,33 @@ document and report every receipt a released 0.6 wrote as `content_altered`. So,
   stored hash for every receipt nobody touched, whatever schema wrote it. (The in-memory store keeps the
   objects it was handed rather than documents, so it has nothing to re-read and nothing a row-writer
   could reach.)
+- **The stored document survives nothing but the read that set it**, and three rules make that exact,
+  because each of the two obvious dataclass answers breaks shipped code:
+  - **(a) The field is not an `__init__` parameter and is not carried through `dataclasses.replace()`.**
+    If `replace()` copied it, G11's own tamper, `replace(target, decision_reason=...)` on a read-back
+    receipt handed to `verify_chain` (`verify/scenarios.py:2097-2103`), would hash the untouched stored
+    document, the chain would verify, and G11 would report a correct kernel as failing. And a read-back
+    receipt written again (`verify/scenarios.py:2084`) would reach `put_receipt`, whose
+    `replace(receipt, seq=..., prev_hash=...)` (`state.py:1153-1154`, `postgres.py:1513-1514`) would carry
+    the old document into `chain_hash()`, store that stale digest and advance the head with it while the
+    row's JSON is the new `to_dict()`, so the row would read back `content_altered`. Because it is not
+    carried, a modified copy has no stored document and is hashed from what it now says.
+  - **The store read path therefore sets the field after its own `replace(..., hash=...)`**, not before
+    (`state.py:1211`, `postgres.py:1561` both build the receipt with `replace(Receipt.from_json(...),
+    hash=...)`, which under (a) would otherwise discard the document it had just been given).
+  - **(b) `put_receipt` hashes the exact dictionary it serializes, and never takes the stored-document
+    branch**, so the hash written to the column and the document written beside it come from one
+    dictionary, and the read-time hash of that document is the write-time hash.
+
+  Nothing else is affected: no other reader calls `chain_hash()`. The in-memory store keeps the objects it
+  was handed; the JSONL sink and the OTel sink receive `put_receipt`'s fresh return; `ctrlrun receipts`,
+  the reporting payloads, the operator server's tools and verify's counterexample only display; a resumed
+  action's receipt is built fresh by `_record`; and the store conformance suite checks `put_receipt`'s
+  return (`conformance/store/suites.py:1506`). Write-time and read-time hashes agree for every schema:
+  SQLite stores `to_json()` of the hashed dictionary and Postgres `json.dumps(to_dict(), sort_keys=True)`
+  (`postgres.py:1524`), both as `TEXT` (`migrations.py:143`, `239`), and `canonical_bytes` refused a float,
+  a non-string key and a lone surrogate at write, so parsing and canonicalizing reproduces the write-time
+  bytes. `v1` and `v2` documents carry no `seq` and are never hashed.
 - **Every tamper the schema bump could hide is then a hash mismatch by construction.** A key added to a
   stored document, a relabelled `schema`, a removed `schema`, a `schema` this binary has never heard of: each
   changes the stored document, so each is `content_altered` at its `seq`, with no rule about key sets for
@@ -1684,7 +1711,8 @@ red test rather than a count taken below the record layer.
 and exactly as wide as the rule: a connect to `192.0.2.1` (TEST-NET-1) is refused; a connect to `127.0.0.1` on a
 port the run did not bind (a listener the test opened before installing the guard) is refused; a `bind` to
 `0.0.0.0` is refused; a lookup of `localhost`, and a `connect(("localhost", port))` to a bound port, are refused;
-`::1` is refused. And G12 was graded, not `N/A` and not skipped.
+`::1` is refused; an `AF_UNIX` bind is refused; and a listener bound to port 0 is admitted at the port
+`getsockname()` reports. And G12 was graded, not `N/A` and not skipped.
 
 #### T231: The gateway's `NotExecuted` carries its cause
 An intercepted `tools/call` against an upstream port that refuses: the effect is `FAILED`, the client gets
@@ -1892,12 +1920,17 @@ before any other table is read. SQLite and Postgres.
 #### T265: `v3` and `v4` in one chain
 A chain written by 0.6.1's code and continued by 0.7 verifies end to end with `verify_chain`, `ctrlrun
 receipts --verify-chain` and G11's reader; each `v3` receipt rehashes to its stored hash; each new receipt is
-`v4`. Mutating `chain_hash()` to hash `to_dict()` for a stored receipt makes this test fail with
-`content_altered` at the first `v3` receipt. Five tampers on stored rows, each `content_altered` at its `seq`,
+`v4`. Five tampers on stored rows, each `content_altered` at its `seq`,
 none surfacing a value, and **none raising out of `receipts()`**: a `v3` row given a `precondition_at_recheck`
 key; a chained `v3` row relabelled `v1`; one relabelled `v2`; one with its `schema` key removed; one saying
 `ctrlrun.receipt/v9`. With any of them present, `ctrlrun receipts` still lists every other row and
-`ctrlrun stats` still counts them.
+`ctrlrun stats` still counts them. **The mutation this catches**, `chain_hash()` hashing `to_dict()` for a stored
+receipt instead of its stored document, leaves untouched `v3` rows verifying (a `v3` receipt renders its document
+byte for byte) and relabelled or schema-removed rows failing (each renders under its own label); it is caught by
+exactly one tamper, the added `precondition_at_recheck` key, which then verifies cleanly. And a sixth case, in
+memory rather than on a row: a read-back receipt altered with `replace()`, as G11 does, and handed to
+`verify_chain` is `content_altered` at its `seq`, and the same receipt written again reads back clean, which
+fails if the stored document survives `replace()` (§6.11, rule (a)).
 
 #### T266: The store conformance suite covers the column
 A case asserting a store persists and returns `precondition_fingerprint`; a broken-store fixture that drops it
@@ -1927,8 +1960,9 @@ fails, and whoever adds it says in the test which kind it is. A positive control
 a document whose only effect-bearing action declares `max_attempts: 1`: G5 and G14 are `N/A` with §8.9's
 ceiling sentence, never `fail`; G12 passes on its two separate keys; G15 is graded. And against a document with
 action A (an `effect:`, `max_attempts: 1`, allowed) and action B (an `effect:`, no ceiling, deny-only): G5 and
-G14 are `N/A` with the ceiling sentence, because the ceiling is the only reason nothing is selectable; with B
-allowed instead, G5 and G14 select B and are graded.
+G14 are `N/A` with the ceiling sentence, because the ceiling is the only reason nothing is selectable; the same
+with B allowed by the policy but covered by no grant in the document's `authority:` section; and with B allowed
+and granted, G5 and G14 select B and are graded.
 
 #### T271: Core still installs nothing new, and the demo still runs offline
 `pip install ctrlrun` installs `pyyaml` and `click` and nothing else; `ctrlrun demo` runs every scenario in under
@@ -1991,11 +2025,14 @@ under `--store-url postgresql://remote-host/…`, whose libpq sockets T107's gua
 (`verify/scenarios.py:546-553`). T107's guard (`tests/test_verify.py:535-557`) is amended so that it admits
 exactly what the rule says and no more:
 
-- **It records every `(host, port)` bound through its patched socket class**, and admits `connect` and
-  `connect_ex` only to a recorded pair. Admitting any port on loopback would admit a local forwarding proxy, an
+- **It records every `(host, port)` bound through its patched socket class**, taken from `getsockname()`
+  after the `bind`, not from the requested address, since verify binds port 0 and the kernel chooses the
+  port. It admits `connect` and `connect_ex` only to a recorded pair. Admitting any port on loopback would admit a local forwarding proxy, an
   SSH tunnel or a container's published port, each of which leaves the host.
 - **It refuses any `bind` to an address other than `127.0.0.1`**, so a listener on `0.0.0.0` fails the run
-  instead of passing it.
+  instead of passing it, and **it refuses every `AF_UNIX` bind and connect, on purpose**: verify needs none,
+  and a Unix socket can reach a local daemon that leaves the host as surely as a TCP port can. The guard is
+  IPv4 on the one literal, and everything else is refused.
 - **It matches the literal string `"127.0.0.1"`**, not `ipaddress.ip_address(...).is_loopback`, whose handling
   of IPv4-mapped addresses varies across the supported Pythons, and it checks the host string inside the patched
   `connect` itself, because a C-level `connect(("localhost", port))` resolves without calling the patched
@@ -2047,12 +2084,13 @@ synthesized arguments resolve, **and whose ceiling allows a renewal** (no `max_a
 template`, and *in a `ctrlrun.policy/v1` document the template lives in the `@protect` decorator, which verify
 does not read*. True, because the token is defined only for an attempt that holds a reservation, and without a
 key there is no reservation and no attempt to name. And the new case: `every action with an effect: template
-that verify can drive to allow or approve declares max_attempts: 1, so no renewal can happen`. **Precedence:**
-this sentence is printed only where the ceiling is the *only* reason nothing is selectable, which verify
-establishes by selecting again with the ceiling filter removed; where that selection also finds nothing, the
-reason is `unselected()`'s, as before. An earlier draft's wording, without "that verify can drive to allow or
-approve", was false about a document with one allowed action at `max_attempts: 1` and a second, uncapped
-action that is deny-only or ungranted.
+that verify can select (a decision of allow or approve under a grant that covers it) declares max_attempts: 1,
+so no renewal can happen`. **Precedence:** this sentence is printed only where the ceiling is the *only* reason
+nothing is selectable, which verify establishes by selecting again with the ceiling filter removed; where that
+selection also finds nothing, the reason is `unselected()`'s, as before. "Select" covers both axes on purpose:
+an earlier wording, "can drive to allow or approve", read on the policy axis alone, was false about a document
+whose uncapped action is allowed by the policy and covered by no grant, and before that a wording without the
+qualifier was false about one whose uncapped action is deny-only.
 
 **Observable.** Attempt 1's executor reads the token and raises `NotExecuted`; attempt 2's reads it and commits.
 The two differ, and each equals the derivation from its own receipt's `effect_key` and `attempt`. That last
