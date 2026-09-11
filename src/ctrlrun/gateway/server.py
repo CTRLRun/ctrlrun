@@ -19,7 +19,7 @@ import select
 import socket
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +59,8 @@ from .mcp import (
     parse_request,
 )
 from .outcome import (
+    AMBIGUOUS_CODE,
+    AMBIGUOUS_TOKEN,
     GatewayOutcome,
     Observed,
     Transport,
@@ -585,6 +587,7 @@ class Gateway:
         held: dict[str, Any] = {"request_id": request_id}
         presented = parsed.document.get("params", {})
         presented = presented.get("requestState") if isinstance(presented, Mapping) else None
+        continuation = isinstance(presented, str) and bool(presented)
 
         def executor() -> Any:
             # §6.7 — the request the gateway sends is built from the action's *canonical*
@@ -603,6 +606,20 @@ class Gateway:
             )
             cause = _CAUSE.get() if isinstance(observed, Transport) else None
             outcome = classify(observed, not_executed_on_error=options.not_executed_on_error)
+            if continuation and outcome.effect is EffectState.FAILED:
+                # SPEC-v0.7 §12.2.12 — **nothing claims `FAILED` on a continuation leg.** A
+                # continuation exists only because the upstream answered `input_required`: it has
+                # the original request and is holding the exchange. A refused connection, a
+                # pre-dispatch JSON-RPC code, or the `401` rule are then answers about *this*
+                # leg's request and say nothing about what the upstream did with the original,
+                # so the effect's state is unknown. The upstream's own response is still relayed
+                # unchanged (§6.8); only what CTRLRun records changes.
+                outcome = replace(
+                    outcome,
+                    effect=EffectState.AMBIGUOUS,
+                    code=None if outcome.relay else AMBIGUOUS_CODE,
+                    token=None if outcome.relay else AMBIGUOUS_TOKEN,
+                )
             held["payload"] = payload
             held["status"] = status
             held["headers"] = response_headers

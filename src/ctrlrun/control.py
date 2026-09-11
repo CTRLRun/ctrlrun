@@ -40,7 +40,9 @@ from .effect import (
     UNRESOLVED_EFFECT,
     ReconcileOutcome,
     Reservation,
+    _closed,
     _ExecutorRun,
+    _opened,
     resolve_effect_key,
     resolve_resource,
     template_placeholders,
@@ -997,6 +999,7 @@ class Control:
             _Reconciler(None, False),
             held_key=held.effect_key,
             observation=observation,
+            resumed=True,
         )
 
     def _resumed_context(
@@ -1037,6 +1040,7 @@ class Control:
         *,
         held_key: str | None,
         observation: _Observation | None = None,
+        resumed: bool = False,
     ) -> Receipt:
         """Run the executor and record what happened (SPEC-v0.1 §5.5).
 
@@ -1057,12 +1061,19 @@ class Control:
         # SPEC-v0.7 §2.3, §12.2.9 — the register of what this run offered, for exactly the
         # executor's call. A classifier claims `NotExecuted` only inside it, and only while it is
         # unmarked: a connection refused after another in the same run delivered proves nothing.
-        run = _EXECUTOR_RUN.set(_ExecutorRun(_EXECUTOR_RUN.get()))
+        # A resumed leg starts **marked** (§12.2.12). A continuation exists only because the
+        # remote spoke, and the remote is holding the exchange, so nothing on that leg may say the
+        # remote did nothing: the same sentence the lease extension above makes, that the remote
+        # may already be acting on this reservation.
+        opened = _ExecutorRun(_EXECUTOR_RUN.get(), offered=resumed)
+        _opened(opened)
+        run = _EXECUTOR_RUN.set(opened)
         try:
             try:
                 result = executor()
             finally:
                 _EXECUTOR_RUN.reset(run)
+                _closed(opened)
         except Suspended as suspension:
             # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
             # and this attempt is not finished. Handled above the generic branch precisely so

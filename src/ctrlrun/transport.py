@@ -18,11 +18,14 @@ nothing happened: an xmlrpc client's retry, a redirect followed by an opener, an
 retry-once loop all make exactly that pair, and each is the original exception here.
 
 **The register sees only this module's own sends.** An executor that sends any part of the effect
-through another transport (`requests`, httpx used directly, a raw socket, or a thread that did not
-copy the executor's context) and then uses this module can receive a `NotExecuted` that is true of
-this module's connections and false of the effect. The claim holds only where every request of the
-effect goes through `ctrlrun.transport` or `ctrlrun.gateway.transport.request`, on the executor's
-own context.
+through another transport (`requests`, httpx used directly, a raw socket) and then uses this module
+can receive a `NotExecuted` that is true of this module's connections and false of the effect. The
+claim holds only where every request of the effect goes through `ctrlrun.transport` or
+`ctrlrun.gateway.transport.request`. A send through either on a thread that did not copy the
+executor's context is still seen: it belongs to no register, so it marks every open one, which
+costs claims in unrelated concurrent runs and never safety (§12.2.13). What is not seen is a
+sibling thread that sends **after** a claim was already decided: the claim is about the run up to
+the moment of the failure.
 
 Where the three are observed, the answer is `NotExecuted`, chained from the original exception.
 **Everywhere else the original exception propagates untouched**, and the kernel records it
@@ -50,7 +53,7 @@ import urllib.request
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from .effect import _EXECUTOR_RUN, EffectState
+from .effect import _EXECUTOR_RUN, EffectState, _offered
 from .errors import NotExecuted
 
 if TYPE_CHECKING:
@@ -117,7 +120,7 @@ class HTTPConnection(http.client.HTTPConnection):
       after any connect `send` itself triggers, so a `sendall` that raises part way counts as having
       written. `http.client` writes every request byte, a tunnel's `CONNECT` line included, through
       `send` (T229b pins that on every supported Python). The same send marks the executor run's
-      register, where there is one;
+      register, and where there is none, every register open in the process (§12.2.13);
     - **a foreign socket**: any socket assigned to `sock` other than by this object's own
       `connect()`.
 
@@ -177,9 +180,9 @@ class HTTPConnection(http.client.HTTPConnection):
         if self.sock is None and self.auto_open:
             self.connect()
         self._ctrlrun_offered = True
-        run = _EXECUTOR_RUN.get()
-        if run is not None:
-            run.mark()
+        # A send on a thread that did not copy the executor's context belongs to no register, and
+        # not copying is Python's default; it marks every open run instead (§12.2.13).
+        _offered(_EXECUTOR_RUN.get())
         super().send(data)
 
 

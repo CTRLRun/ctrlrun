@@ -1439,9 +1439,9 @@ def test_T226_the_forwarders_fresh_path_calls_the_same_observation_function(monk
     seen: list[str] = []
     original = gateway_transport._observed
 
-    def spy(exc, client):
+    def spy(exc, client, **options):
         seen.append(type(exc).__name__)
-        return original(exc, client)
+        return original(exc, client, **options)
 
     monkeypatch.setattr(gateway_transport, "_observed", spy)
 

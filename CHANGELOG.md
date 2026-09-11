@@ -52,8 +52,20 @@ any change to one appears here.
   claim needs it unmarked as well as the connection's own evidence. Outside an executor run
   nothing is claimed. **The limit is stated in the module, the class and the specification**: the
   register sees only this library's own sends, so an executor that sends part of the effect
-  through another transport, or on a thread that did not copy its context, and then uses the
-  classifier can be handed a claim that is true of these connections and false of the effect.
+  through another transport and then uses the classifier can be handed a claim that is true of
+  these connections and false of the effect. A send through this library on a thread that did not
+  copy the executor's context **is** seen: it belongs to no register, so it marks every register
+  open in the process, which costs claims in unrelated concurrent runs and never safety.
+
+  **A continuation leg never records `FAILED`, and 0.6.1 did.** A continuation exists only
+  because the remote answered and is holding the exchange, so nothing on that leg can say the
+  remote did nothing. `Control.resume` now runs with the register already marked, and the gateway
+  refuses to record `FAILED` for anything a continuation meets: a refused connection, a
+  pre-dispatch JSON-RPC code, or the `401` rule of `v0.2 §6.8`. At 0.6.1 each of those recorded
+  `FAILED` and, for a connection never established, answered the client `-41011` "not executed",
+  which permitted a retry of an effect the upstream may have been part-way through. The upstream's
+  own response is still relayed unchanged; what changes is the record, which is now `AMBIGUOUS`
+  and needs `ctrlrun resolve`.
 
   **Behind a proxy the gateway is stricter than 0.6.1.** httpx reports an unreachable proxy and a
   TLS failure with the target after the proxy answered the `CONNECT` line with the same

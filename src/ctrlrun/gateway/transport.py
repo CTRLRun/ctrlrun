@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .. import transport as _core
-from ..effect import _EXECUTOR_RUN, EffectState
+from ..effect import _EXECUTOR_RUN, EffectState, _offered
 from ..errors import NotExecuted
 from .legacy import is_event_stream, strip_event_ids
 from .mcp import LEGACY_DEFAULT_REVISION, LEGACY_REVISIONS
@@ -94,7 +94,7 @@ def _through_a_proxy() -> bool:
     return any(proxies.get(scheme) for scheme in ("http", "https", "all"))
 
 
-def _observed(exc: BaseException, httpx: Any) -> Transport:
+def _observed(exc: BaseException, httpx: Any, *, proxied: bool | None = None) -> Transport:
     """What an exception from a fresh, single-use httpx client shows (SPEC-v0.7 §2.5).
 
     httpx exposes no count of request bytes written after the connection is established, so this
@@ -108,9 +108,13 @@ def _observed(exc: BaseException, httpx: Any) -> Transport:
     followed dispatch and is `AFTER_REQUEST_SENT`. Only a client built for the one call, with no
     connection reuse, may be judged by this; the pooled client's observations are never recorded
     as an effect.
+
+    `proxied` is the answer as it was when the call began, because that is when the client took
+    its proxies; read at the moment of the exception it could have changed under another thread
+    (§12.2.14). Omitted, it is read here, which is what a caller with no call to speak of wants.
     """
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
-        if _through_a_proxy():
+        if _through_a_proxy() if proxied is None else proxied:
             return Transport.AFTER_REQUEST_SENT
         return Transport.NEVER_CONNECTED
     if isinstance(exc, _Disconnected):
@@ -146,12 +150,13 @@ def request(
 
     httpx = http_client()
     run = _EXECUTOR_RUN.get()
+    proxied = _through_a_proxy()
     try:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             response = client.request(method, url, content=content, headers=headers)
             response.read()
     except Exception as exc:
-        observed = _observed(exc, httpx)
+        observed = _observed(exc, httpx, proxied=proxied)
         if (
             run is not None
             and not run.offered
@@ -161,11 +166,10 @@ def request(
                 f"ctrlrun.gateway.transport: the connection was never established: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
-        if run is not None and observed is not Transport.NEVER_CONNECTED:
-            run.mark()
+        if observed is not Transport.NEVER_CONNECTED:
+            _offered(run)
         raise
-    if run is not None:
-        run.mark()
+    _offered(run)
     return response  # type: ignore[no-any-return]
 
 
@@ -314,9 +318,15 @@ class HTTPForwarder:
         if method == "POST":
             relayed["Content-Type"] = "application/json"
         owned = fresh or STREAM.get() is not None
+        # Read where the client takes its own proxies, not where the call fails: another thread
+        # may clear the environment while this one is in flight (§12.2.14).
+        proxied = _through_a_proxy()
+        run = _EXECUTOR_RUN.get()
         client = self.httpx.Client(timeout=self.timeout) if owned else self.pooled
         try:
             with client.stream(method, self.upstream, content=body, headers=relayed) as response:
+                if run is not None:
+                    run.mark()  # the request reached the wire: whatever follows, it was written
                 status = response.status_code
                 response_headers = dict(response.headers)
                 challenge = "www-authenticate" in response.headers
@@ -351,7 +361,15 @@ class HTTPForwarder:
             # connection never established may have happened after dispatch, bad encoding
             # included. The exception is kept beside the observation for the executor to chain.
             _CAUSE.set(exc)
-            return _observed(exc, self.httpx), None, 502, {}
+            observed = _observed(exc, self.httpx, proxied=proxied)
+            if observed is not Transport.NEVER_CONNECTED and run is not None:
+                # SPEC-v0.7 §2.5: the forwarder writes request bytes like everything else here,
+                # so it marks the run it writes in. Only its own: the relayed traffic it also
+                # carries (`tools/list`, GET, DELETE) is never an effect (§6.3), and marking
+                # every open run from a listener thread would let it suppress the claims of
+                # intercepted calls it has nothing to do with (§12.2.13).
+                run.mark()
+            return observed, None, 502, {}
         finally:
             if owned:
                 client.close()

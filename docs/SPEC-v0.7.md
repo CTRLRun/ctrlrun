@@ -303,9 +303,16 @@ observed all three. The third was added after the first independent review (§12
 3. **Zero request bytes were offered in this executor run at all**, by any of the classifier's
    connections or by `ctrlrun.gateway.transport.request`. `Control` opens a register, a private
    context variable, around each `executor()` call, and every classifier send marks it before the
-   first byte is handed over. **Outside an executor run there is no register, and nothing is
-   claimed**: on a thread the executor started without copying its context, and in code `Control`
-   is not running, where the kernel records nothing anyway.
+   first byte is handed over; a send that belongs to no register marks every register open in the
+   process, because a thread that did not copy the executor's context is the common case and its
+   request must not be invisible (§12.2.13). **Outside an executor run there is no register, and
+   nothing is claimed**: on a thread the executor started without copying its context, and in code
+   `Control` is not running, where the kernel records nothing anyway.
+4. **This is not a continuation leg.** A resumed run starts marked and never claims, whatever
+   happens to the continuation's own request: a continuation exists only because the remote
+   answered and is holding the exchange, so nothing on that leg can say the remote did nothing
+   (§12.2.12). The gateway applies the same rule to every `FAILED` it can reach on a continuation,
+   the pre-dispatch JSON-RPC codes and the `401` rule included (§2.4, §2.5).
 
 The third condition is what makes the claim about the effect and not about one connection object.
 An xmlrpc client that retries once on a new connection, an opener that follows a redirect, and an
@@ -315,12 +322,13 @@ third condition each is the original exception.
 
 **The register sees only the classifier's own sends, and that is its limit.** An executor that sends
 any part of the effect through another transport (`requests`, httpx used directly rather than
-through `ctrlrun.gateway.transport.request`, a raw socket, or the classifier on a thread that did
-not copy the executor's context) and then uses the classifier can receive a `NotExecuted` that is
-true of the classifier's connections and false of the effect. So can one that raises the
-classifier's `NotExecuted` while another request of the effect is still in flight on a second
-thread. **The claim holds only where every request of the effect goes through the classifier, on
-the executor's own context.** The module's and the class's docstrings say so in the same words.
+through `ctrlrun.gateway.transport.request`, a raw socket) and then uses the classifier can receive
+a `NotExecuted` that is true of the classifier's connections and false of the effect. So can one
+that raises the classifier's `NotExecuted` while another request of the effect is still in flight
+on a second thread, which the register cannot see because the claim is decided first. **The claim
+holds only where every request of the effect goes through the classifier.** A send through it on a
+thread that did not copy the executor's context *is* seen, at the cost of marking every open run
+(§12.2.13). The module's and the class's docstrings say so in the same words.
 
 **How the count is taken.** The mark is set **immediately before** the first byte is handed to the
 socket, and it is never cleared for the life of the connection object. It is set inside the
@@ -419,6 +427,11 @@ bug, an executor that raises `NotExecuted` after the remote acted, is exactly as
 yesterday. The classifier makes the transport half of the decision provable; the application half
 belongs to the person who knows the provider.
 
+**On a continuation leg, none of this claims `FAILED`** (§12.2.12): the pre-dispatch codes and the
+`401` rule below answer for the continuation's own request, and the upstream already has the
+original and is holding the exchange. The upstream's answer is relayed unchanged; the record is
+`AMBIGUOUS`.
+
 **The gateway's `401` / challenged-`403` rule is the product's one path from an HTTP status to
 `FAILED`, and it is said plainly rather than explained away.** On an intercepted call the fresh
 forwarder returns `UpstreamStatus` for a `401`, or a `403` carrying `WWW-Authenticate`
@@ -461,7 +474,11 @@ gateway's forwarder as well, whose behaviour behind a proxy is therefore stricte
 **`request()` shares the classifier's register** (§12.2.9): it claims only inside an executor run
 whose register is unmarked, and every call that may have written a byte marks it, so a request
 delivered through httpx and a refused `HTTPConnection` after it, or the other way round, are
-judged as one run.
+judged as one run. `HTTPForwarder` marks the run it writes in as well, and only that one: the
+relayed traffic it also carries is never an effect (`v0.2 §6.3`), so marking every open run from a
+listener thread would let `tools/list` suppress the claim of an intercepted call beside it
+(§12.2.13). Both read whether a proxy is in use **when the call begins**, where the client takes
+its own proxies, rather than when it fails (§12.2.14).
 
 **The promotion.** `ctrlrun/gateway/transport.py` gains the observation function the forwarder
 uses today, private, and one public function built on it:
@@ -1718,6 +1735,10 @@ executor's own retry-once loop around `urlopen`, a nested protected call that de
 outside any executor run nothing is claimed; a thread claims only under a copy of the executor's context;
 a request delivered on a connection by a thread with no register still marks that connection; a wrapper
 on `OpenerDirector.open` does not suppress a true claim; and no stack inspection remains in the module.
+**A thread that did not copy the context** delivers the effect and its run no longer claims, and the cost
+is asserted with it: a send belonging to no run suppresses the claims of every run open at that moment.
+The sibling-thread race of §2.3 is pinned as the disclosure describes it. `HTTPForwarder` marks the run it
+writes in, and the httpx variant reads its proxies when the call starts, not when it fails.
 
 #### T224: No HTTP status is `NotExecuted`
 Responses of 301, 303, 400, 401, 409, 429, 500 and 503: none becomes `NotExecuted`; the `30x` is not
@@ -1774,6 +1795,15 @@ port the run did not bind (a listener the test opened before installing the guar
 `::1` is refused; an `AF_UNIX` bind is refused; a UDP bind to a port admits no TCP connect to it and a
 datagram may not be connected or sent; a port whose socket has closed is refused; and a listener bound to port
 0 is admitted at the port `getsockname()` reports. And G12 was graded, not `N/A` and not skipped.
+
+#### T231b: A continuation leg never records `FAILED`
+The kernel's row: an executor delivers a request, the remote asks for more, the executor suspends, the
+remote goes away, and the continuation's connection is refused. The answer is the original exception, the
+record `AMBIGUOUS` and the next attempt refused. The gateway's rows, against a real MCP upstream that
+answered `input_required` with a `requestState` and is holding the exchange: a transport failure on the
+continuation is `-41010` and `AMBIGUOUS`, a pre-dispatch JSON-RPC code and a `401` are relayed unchanged
+and `AMBIGUOUS`. **Three controls**: the same three answers on a first leg still record `FAILED`, so a
+gateway that recorded everything `AMBIGUOUS` fails.
 
 #### T231: The gateway's `NotExecuted` carries its cause
 An intercepted `tools/call` against an upstream port that refuses: the effect is `FAILED`, the client gets
@@ -2409,7 +2439,9 @@ Each in the item that makes it true, and each recorded here so it can be found.
    (item 4).
 2. **`v0.1 §6.2`'s event list** gains `CLOCK_SKEW_DETECTED` (item 1).
 3. **`v0.2 §6.8`'s transport rows** are unchanged in meaning and now implemented by `ctrlrun.transport`; the
-   gateway's `NotExecuted` is chained (item 2).
+   gateway's `NotExecuted` is chained (item 2). **On a continuation leg none of `v0.2 §6.8`'s `FAILED`
+   rows records `FAILED`**, the pre-dispatch codes and the `401` rule included: the upstream is holding
+   the original request, so the effect's state is unknown and the record is `AMBIGUOUS` (§12.2.12).
 4. **`v0.3 §4.3.1`** gains §7's column and §5.5's order (items 4 and 5).
 5. **`v0.4 §3.7`** becomes *verify opens no connection except to the store `--store-url` names and to loopback
    listeners it bound itself*, and T107's guard admits only the `127.0.0.1` ports the run bound (item 2). **G5's selection**
@@ -2437,7 +2469,9 @@ own, and none of them is configurable.
 | Any failure after a byte of the same executor run was offered, on any other connection or through `gateway.transport.request` | Never `NotExecuted` (§2.3, §12.2.9) |
 | Any failure outside an executor run, or on a thread without the executor's context | Never `NotExecuted` (§2.3) |
 | A connection the classifier did not open, or reused | Never `NotExecuted` (§2.3) |
-| An httpx connect error or a proxy error where the environment names a proxy | Never `NotExecuted`; `AMBIGUOUS` (§2.5, §12.2.10) |
+| An httpx connect error or a proxy error where the environment named a proxy when the call began | Never `NotExecuted`; `AMBIGUOUS` (§2.5, §12.2.10, §12.2.14) |
+| Anything on a continuation leg: a refused connection, a pre-dispatch JSON-RPC code, a `401` | Never `FAILED`; the upstream's answer relayed and the record `AMBIGUOUS` (§12.2.12) |
+| A request byte offered by code that belongs to no executor run | Every open run is marked; none of them claims (§12.2.13) |
 | An HTTP response of any status | Never `NotExecuted` from the classifier (§2.4) |
 | An exception before any connection exists, or inside the classifier's own bookkeeping | That exception; `AMBIGUOUS` (§2.3) |
 | A `30x` response | Not followed; returned or raised as a status (§2.3) |
@@ -2655,11 +2689,9 @@ started without copying its context, and any use of the classifier outside `Cont
 record is written and the claim would be read by nobody. It is the fail-closed direction, and it
 costs a true `NotExecuted` in scripts that call the classifier directly.
 
-**A resumed leg is its own run.** `Control.resume` reaches the executor through the same place, so
-a continuation gets a fresh register and does not know what the suspended leg sent. That is the
-right reading of `v0.2 §6.9`: a leg that ended in `input_required` is the remote saying it has not
-finished, and the continuation's own refused connection carried nothing. It is recorded here
-because it is the one place the register is deliberately narrower than the effect.
+**A resumed leg starts marked**, and §12.2.12 argues it. The first version of this section said the
+opposite, that a continuation gets a fresh register because the suspended leg's remote had not
+finished; the second independent review showed what that records, and it was wrong.
 
 **The per-object mark is not subsumed by it.** A thread with no register can deliver a request on a
 connection; when the executor's own thread reuses that connection and its reconnect is refused, the
@@ -2712,6 +2744,63 @@ bind, so a UDP bind to `127.0.0.1:P` admitted a TCP connect to another process's
 and a port stayed admitted after its socket closed and another process rebound it. It now records
 only stream sockets, forgets a pair when the last socket holding it closes, detaches or is
 collected, and refuses a datagram connect or send. T230 asserts each.
+
+#### 12.2.12 Nothing claims `FAILED` on a continuation leg
+
+**Closed: a resumed run starts marked, and the gateway records `AMBIGUOUS` for every `FAILED` it
+could reach on a continuation.** §12.2.9's first version gave a resumed leg a fresh register and
+argued that a leg which ended in `input_required` is the remote saying it had not finished. The
+second independent review showed what that records. In the kernel: an executor delivers a request,
+the remote answers by asking for more, the executor suspends, the remote dies, and the
+continuation's refused connection is `NotExecuted`, so the record is `FAILED` at attempt 1 and the
+next call is dispatched again, to a remote that had the request. Through the gateway the same shape
+answers `-41011`.
+
+The argument was about the leg; the record is about the effect. **A continuation exists only
+because the remote spoke.** `server.py` takes it from the upstream's own response, and
+`control.py`'s lease extension already says the rest in the kernel's voice: the remote may already
+be acting on this reservation. So a resumed leg can never truthfully claim the remote did nothing,
+and `Control.resume` opens its register already marked.
+
+**The rule is general, and wider than the register.** On a continuation leg the gateway also
+refuses to record `FAILED` for a pre-dispatch JSON-RPC code and for the `401` rule of §2.4. Both
+are answers about the *continuation's* request; the upstream is holding the original, and a
+rejection of the second says nothing about what it did with the first. The upstream's own response
+is still relayed unchanged, so a client sees what the upstream said and CTRLRun records that the
+outcome is unknown. The price is a `ctrlrun resolve` where 0.6.1 permitted a retry, and the
+alternative is a retry of an effect the remote may be part-way through.
+
+#### 12.2.13 A thread that did not copy the context, and the price of seeing it
+
+**Closed: a send that belongs to no register marks every open one.** Not copying the context is
+Python's default: `threading.Thread` and `ThreadPoolExecutor.submit` both leave it behind, and only
+`asyncio.to_thread` carries it. An executor that hands its request to a worker thread and then
+fails to connect on its own thread was claiming that nothing happened, with the request delivered.
+§12.2.9 had this as a documented limit; the review was right that a limit this ordinary is a hole.
+
+The register is now a set of open runs, guarded by a lock, and a send with no register in context
+marks all of them. **The cost is real and it is the safe direction**: a stray send suppresses the
+claims of runs it has nothing to do with, turning a provable `FAILED` into `AMBIGUOUS`, never the
+other way round. The docstrings and §2.3 say so, and a test asserts the cost as well as the fix.
+
+**`HTTPForwarder` is the one exception, and marks only its own run.** It carries the gateway's
+relayed traffic too (`tools/list`, `GET`, `DELETE`), which `v0.2 §6.3` says is never an effect, on
+listener threads that have no register of their own. Marking every open run from there would let a
+`tools/list` beside an intercepted call suppress that call's claim, for no safety: those bytes
+cannot be part of anybody's effect.
+
+**What is still not seen**, and §2.3 says it: a sibling thread that copied the context and sends
+*after* a claim was decided. The claim is about the run up to the moment of the failure, and the
+race is pinned by a test so the disclosure cannot drift.
+
+#### 12.2.14 The proxy answer belongs to the start of the call
+
+**Closed: `_through_a_proxy()` is read where the client is built, and passed to the observation.**
+httpx takes its proxies when the client is constructed, and the first version read the environment
+again at the moment of the exception. A process that cleared `HTTPS_PROXY` on another thread while
+a call was in flight would then have a `CONNECT` line on the wire and an answer that said no proxy
+was involved, which is the one direction that produces a false claim. Both surfaces read it once,
+beside the register, and `_observed` takes it as an argument.
 
 ### 12.3a Item 3a: attempt numbers never repeat
 

@@ -2287,22 +2287,22 @@ class Engine:
                 "on a read timeout after the peer received a byte",
             )
 
+            # The connection delivers its first request **before the attempt**, so the run that
+            # meets it has offered nothing itself and only the connection's own byte mark can
+            # refuse the claim. Delivering it inside the run, or on a thread the run can see,
+            # would leave this row saying what `second_connection` already says (§12.2.11).
             listener = _Listener("answer")
             try:
-
-                def reused() -> str:
-                    connection = transport.HTTPConnection(
-                        _LOOPBACK, listener.port, timeout=_G12_WAIT
-                    )
-                    _post(connection, close=False)
-                    listener.stop_and_hold()
-                    # The reconnect alone is the short wait: a held, unlistening port refuses at
-                    # once on Linux and drops the SYN on macOS.
-                    connection.timeout = _G12_CONTROL_WAIT
-                    return _post(connection)
-
-                result = attempt("reused", reused)
+                connection = transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_WAIT)
+                _post(connection, close=False)
+                listener.stop_and_hold()
+                # The reconnect alone is the short wait: a held, unlistening port refuses at
+                # once on Linux and drops the SYN on macOS.
+                connection.timeout = _G12_CONTROL_WAIT
+                result = attempt("reused", lambda: _post(connection))
             finally:
+                with suppress(OSError):
+                    connection.close()
                 listener.close()
             rows["reused"] = delivered_then(
                 "reused",
