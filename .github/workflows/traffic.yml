@@ -94,13 +94,26 @@ jobs:
         id: downloads
         run: |
           set -eu
-          # No token: pypistats is public. `-f` is right here in a way it was not for the
-          # traffic API, because there is no 403 to explain -- but the body is still printed on
-          # a failure, since pypistats answering with an error document is the likely case.
-          if ! curl -sS -f -m 30 \
-            "https://pypistats.org/api/packages/ctrlrun/recent" > downloads-api.json; then
-            echo "::warning::pypistats did not answer; the downloads badge keeps its last value"
-            cat downloads-api.json >&2 || true
+          # No token: pypistats is public. What it does have is a per-IP rate limit, and a
+          # GitHub-hosted runner's IP is shared with everyone else's Actions -- the first real
+          # run got 429 in under half a second, having asked for nothing. So this is a polite
+          # caller: a User-Agent that says who it is and where to complain, and a handful of
+          # attempts spread over a few minutes. A daily job can afford to wait; a badge that
+          # publishes a wrong number cannot. Anything still 429 at the end leaves the badge on
+          # its last value, which is the designed failure.
+          status=0
+          for wait in 0 15 45 90 120; do
+            [ "$wait" = 0 ] || sleep "$wait"
+            status=$(curl -sS -o downloads-api.json -w '%{http_code}' -m 30 \
+              -H "User-Agent: CTRLRun-badge/1.0 (+https://github.com/CTRLRun/ctrlrun)" \
+              -H "Accept: application/json" \
+              "https://pypistats.org/api/packages/ctrlrun/recent") || status=000
+            [ "$status" = "200" ] && break
+            echo "pypistats answered $status; retrying"
+          done
+          if [ "$status" != "200" ]; then
+            echo "::warning::pypistats answered $status after 5 attempts; the downloads badge keeps its last value"
+            head -c 400 downloads-api.json >&2 || true
             echo "read=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
