@@ -24,6 +24,41 @@ any change to one appears here.
   errored before a release was installed. The fixture now symlinks, as `python -m venv` does on
   POSIX.
 
+### Documentation
+
+- **`docs/SPEC-v0.7.md`**: the v0.7 "Execution boundary" contract, a delta over v0.1 to v0.6. No
+  code lands with it. It asks one question: *does it hold at the edges the kernel does not
+  control?* The kernel does not decide whether the remote acted, an executor does; it does not own
+  the clock its leases are measured against once the store is on another host; and it does not know
+  whether the world still looks the way it did when a human said yes. Five items answer those
+  edges: the `NotExecuted` classifier promoted from the gateway into core as `ctrlrun.transport`,
+  clock-skew detection, a provider idempotency token derived from `(effect_key, attempt)`, an
+  operator-set ceiling on renewal after `FAILED` (`max_attempts`, written as an amendment to
+  `SPEC-v0.1.md` §5.4), and precondition fingerprints, which **narrow** the window between a
+  human's approval and the action's execution and do not close it. Tests come from §8
+  (T209 to T271, because T182 to T208 already belong to `SPEC-mcp-operator.md` and `SPEC-scan.md`);
+  public names are frozen in §9; guarantees G12 to G16 join `ctrlrun.guarantees/v3`.
+
+  **Reading the code changed nine things the plan had assumed**, and §1.4 lists them. Four matter
+  beyond this document. On Postgres a renewal could reuse an attempt number, and a lost `COMMIT`'s
+  re-issue could return a number other than the one it wrote; v0.7 makes the number load-bearing,
+  so both are fixed first, in a new **item 3a, "attempt numbers never repeat"**, its own pull
+  request stacked before item 3 and independently reviewed because it changes a store. Bumping the
+  receipt schema the ordinary way would have reported every receipt a released 0.6 wrote as
+  altered, so a receipt now renders under the schema it was written with. In enforce mode one
+  granted approval buys one dispatch, not unlimited ones, because every renewal of an approved
+  action needs a new granted approval; "granted" is not always a human (a scripted provider, an
+  automated `wait=True` loop and approvals granted ahead of a gateway all count), observe mode needs
+  none, and an adapter can still put a human in front of an attempt the ceiling will refuse, which
+  §5.5 records. The unbounded case the ceiling exists for is the action the policy allows outright.
+  And `max_attempts` needs `ctrlrun.policy/v5`.
+
+  **An independent review of the draft found seven blocking defects and nine smaller ones**, and
+  every one became an edit: among them the two store defects above, a G15 that passed with the
+  ceiling's own check deleted, a G5 that would have failed a correct kernel under `max_attempts: 1`,
+  a receipt rule that let a fabricated field verify, three false `N/A` reasons, and a verify
+  network rule that was already untrue under `--store-url`.
+
 ## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
 
 Everything found after `v0.6.0` was tagged: twenty-nine defects from an audit of the shipped
