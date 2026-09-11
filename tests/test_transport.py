@@ -20,7 +20,9 @@ joined with a bound, so a broken check fails red instead of hanging.
 from __future__ import annotations
 
 import ast
+import contextvars
 import datetime as dt
+import functools
 import http.client
 import inspect
 import io
@@ -33,7 +35,10 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import warnings
+import xmlrpc.client
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -43,11 +48,14 @@ import pytest
 import ctrlrun
 import ctrlrun.transport as transport
 from ctrlrun import (
+    Action,
     AmbiguousEffect,
     Control,
     EffectState,
+    InMemoryStateStore,
     NotExecuted,
     Policy,
+    Principal,
     SQLiteStateStore,
     context,
     protect,
@@ -89,8 +97,10 @@ class Peer:
         connections: int = 1,
         rcvbuf: int | None = None,
         wrap: ssl.SSLContext | None = None,
+        one_shot: bool = False,
     ) -> None:
         self.handler = handler
+        self._one_shot = one_shot
         self.received = bytearray()
         self.accepted = 0
         self.errors: list[BaseException] = []
@@ -115,6 +125,9 @@ class Peer:
                 self.errors.append(exc)
                 return
             self.accepted += 1
+            if self._one_shot:
+                # The server dies with its first connection: every later connect is refused.
+                self.listener.close()
             conn.settimeout(WAIT)
             if self._wrap is not None:
                 try:
@@ -327,12 +340,48 @@ def call(
         connection.close()
 
 
-def _raised(thunk: Callable[[], Any]) -> BaseException:
+def _caught(thunk: Callable[[], Any]) -> BaseException:
+    """What `thunk` raised, run as it is: outside any executor run unless it makes one itself."""
     try:
         thunk()
     except BaseException as exc:
         return exc
     raise AssertionError("the call returned; the test needed it to fail")
+
+
+_RUN_POLICY = """
+schema: ctrlrun.policy/v2
+actions:
+  transport.call:
+    decision: allow
+"""
+
+
+def in_run(thunk: Callable[[], Any]) -> Any:
+    """Run `thunk` as the executor of one real `Control.execute`, and answer what it returned.
+
+    The classifier claims only inside an executor run, where `Control` has opened the register
+    of what this run offered (§2.3, §12.2.9). Every test below that expects a claim, or asserts
+    the absence of one, therefore runs its call here: a "never `NotExecuted`" asserted outside a
+    run would be true of a classifier that could not claim at all (mutation pattern 3).
+    """
+    control = Control(Policy.from_yaml(_RUN_POLICY), InMemoryStateStore())
+    action = Action(
+        name="transport.call", arguments={}, principal=Principal(agent="transport-tests")
+    )
+    returned: list[Any] = []
+
+    def executor() -> Any:
+        returned.append(thunk())
+        return returned[-1]
+
+    control.execute(action, executor)
+    return returned[0]
+
+
+def _raised(thunk: Callable[[], Any]) -> BaseException:
+    """What `thunk` raised, run inside one executor run (see `in_run`)."""
+    return _caught(lambda: in_run(thunk))
 
 
 def _cause_chain(exc: BaseException) -> list[BaseException]:
@@ -446,7 +495,7 @@ def test_T220_a_byte_written_and_the_peer_killed_is_AMBIGUOUS(surface, control, 
     with peer(read_then_reset) as server:
         refund = _protected(control, lambda: call(surface, server.port))
         with context(agent="refund-agent"):
-            raised = _raised(lambda: refund("txn_1"))
+            raised = _caught(lambda: refund("txn_1"))
         server.join()
 
         assert len(server.received) >= 1, "precondition: the peer received a request byte"
@@ -493,7 +542,7 @@ def test_T221_a_refused_connection_is_NotExecuted_and_a_retry_is_admitted(surfac
     with peer(answering(200)) as server:
         refund = _protected(control, lambda: call(surface, target["port"]))
         with context(agent="refund-agent"):
-            raised = _raised(lambda: refund("txn_1"))
+            raised = _caught(lambda: refund("txn_1"))
 
         _assert_not_executed(raised, ConnectionRefusedError)
         assert store.receipts()[-1].result is ReceiptResult.FAILED
@@ -646,10 +695,11 @@ def test_T221_an_exception_in_the_classifiers_own_bookkeeping_is_never_NotExecut
     control_raised = _raised(lambda: call("http.client", refused))
     assert isinstance(control_raised, NotExecuted), "control: this connect is claimed"
 
-    def broken() -> bool:
-        raise RuntimeError("the classifier's bookkeeping failed")
+    class Broken:
+        def get(self) -> None:
+            raise RuntimeError("the classifier's bookkeeping failed")
 
-    monkeypatch.setattr(transport, "_inside_an_opener_it_did_not_build", broken)
+    monkeypatch.setattr(transport, "_EXECUTOR_RUN", Broken())
     raised = _raised(lambda: call("http.client", refused))
 
     assert type(raised) is RuntimeError, raised
@@ -806,20 +856,17 @@ class _TheTestsOwnHandler(urllib.request.HTTPHandler):
         return self.do_open(transport.HTTPConnection, req)
 
 
-def test_T223_an_opener_the_test_built_never_claims(refused):
+def test_T223_an_opener_the_test_built_is_judged_by_the_run_not_by_who_built_it(refused):
     """An opener built with `urllib` handlers of the test's own, around the classifier's class.
 
-    Precondition (the control): the same connection class, used directly on the same refused port,
-    raises `NotExecuted`. Inside an opener the classifier did not build, it does not (§2.3's first
-    condition).
+    Its only connection, refused before any byte of the run was offered, is claimed, because the
+    claim is true: nothing was sent (§12.2.2). What makes a foreign opener dangerous is a second
+    connection after a delivered first, and the redirect test below opens that window.
     """
-    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
-
     opener = urllib.request.build_opener(_TheTestsOwnHandler)
     raised = _raised(lambda: opener.open(f"http://{LOOPBACK}:{refused}/", data=b"{}", timeout=WAIT))
 
-    assert not isinstance(raised, NotExecuted), raised
-    assert isinstance(raised, urllib.error.URLError)
+    _assert_not_executed(raised, ConnectionRefusedError)
 
 
 def test_T223_a_redirect_in_an_opener_the_test_built_never_claims(refused):
@@ -843,6 +890,302 @@ def test_T223_a_redirect_in_an_opener_the_test_built_never_claims(refused):
 
     assert server.received.startswith(b"POST /refunds"), "precondition: the first request arrived"
     assert not isinstance(raised, NotExecuted), raised
+
+
+# === The register: one executor run, every classifier send (§2.3, §12.2.9) ======================
+#
+# The first review found that every false `NotExecuted` it could produce came from *two*
+# connections in one effect: the first delivered the request, the second was refused, and the
+# second was judged alone. Each test below reproduces one of its cases against a real peer that
+# receives the whole request first, and asserts that before anything else.
+
+
+def act_then_reset(state: Peer, conn: socket.socket) -> None:
+    """Read the whole request (the remote acts on it), then reset without answering."""
+    state.received += _read_request(conn)
+    _linger_reset(conn)
+
+
+def act_then_close(state: Peer, conn: socket.socket) -> None:
+    """Read the whole request (the remote acts on it), then close without answering."""
+    state.received += _read_request(conn)
+
+
+class _XMLRPCThroughTheClassifier(xmlrpc.client.Transport):
+    """`make_connection` is xmlrpc's documented override point; its `request` retries once,
+    on a new connection, after a reset or a peer that closed without answering."""
+
+    def make_connection(self, host):  # type: ignore[no-untyped-def]
+        chost, self._extra_headers, _ = self.get_host_info(host)
+        return transport.HTTPConnection(chost, timeout=WAIT)
+
+
+@pytest.mark.parametrize("dying", [act_then_reset, act_then_close], ids=["reset", "close"])
+def test_register_xmlrpcs_retry_after_a_delivered_request_never_claims(dying, control, store):
+    """Precondition, asserted first: the peer received the whole POST, then died, so the retry's
+    connection is refused. Judged alone, that refusal is a connection that offered nothing; the
+    register knows this run already offered the request."""
+    with peer(dying, one_shot=True) as server:
+
+        @protect("refund.create", control=control)
+        def refund(payment_id: str) -> Any:
+            proxy = xmlrpc.client.ServerProxy(
+                f"http://{LOOPBACK}:{server.port}/RPC2", transport=_XMLRPCThroughTheClassifier()
+            )
+            return proxy.refunds.create(payment_id, 100)
+
+        with context(agent="refund-agent"):
+            raised = _caught(lambda: refund("txn_1"))
+        server.join()
+
+        assert b"refunds.create" in server.received, "precondition: the request was delivered"
+        assert not isinstance(raised, NotExecuted), raised
+        assert store.receipts()[-1].result is ReceiptResult.AMBIGUOUS
+        assert store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+        with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+            refund("txn_1")
+
+
+def test_register_an_executors_own_retry_around_urlopen_never_claims(control, store):
+    """The most common composition there is: retry once on a reset. Precondition, asserted: the
+    first attempt's POST reached the peer before it reset and died."""
+    with peer(act_then_reset, one_shot=True) as server:
+
+        @protect("refund.create", control=control)
+        def refund(payment_id: str) -> int:
+            for attempt in range(2):
+                try:
+                    return call("urlopen", server.port)
+                except (ConnectionResetError, urllib.error.URLError):
+                    if attempt:
+                        raise
+            raise AssertionError("unreachable")
+
+        with context(agent="refund-agent"):
+            raised = _caught(lambda: refund("txn_1"))
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert not isinstance(raised, NotExecuted), raised
+    assert store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+
+
+def _redirecting_to(refused: int) -> Callable[[Peer, socket.socket], None]:
+    return answering(303, {"Location": f"http://{LOOPBACK}:{refused}/created"})
+
+
+@pytest.mark.skipif(
+    not hasattr(urllib.request, "FancyURLopener"), reason="FancyURLopener was removed in 3.14"
+)
+def test_register_FancyURLopener_following_a_303_never_claims(refused):
+    """The legacy opener follows a `303` through `URLopener.open`, which no stack heuristic knew.
+    Preconditions: the POST arrived, and the refused target claims on a fresh run (the control)."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+
+        class Opener(urllib.request.FancyURLopener):  # type: ignore[misc]
+            def open_http(self, url, data=None):  # type: ignore[no-untyped-def]
+                return self._open_generic_http(transport.HTTPConnection, url, data)
+
+        opener = Opener()
+    with peer(_redirecting_to(refused)) as server:
+        raised = _raised(
+            lambda: opener.open(f"http://{LOOPBACK}:{server.port}/refunds", data=b"amount=100")
+        )
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert not isinstance(raised, NotExecuted), raised
+
+
+class _ThreadHoppingHandler(urllib.request.HTTPHandler):
+    """A handler of the caller's that runs each connection on a worker thread."""
+
+    pool = ThreadPoolExecutor(1)
+
+    def http_open(self, req):  # type: ignore[no-untyped-def]
+        return self.pool.submit(self.do_open, transport.HTTPConnection, req).result()
+
+
+def test_register_an_opener_that_hops_threads_never_claims(refused):
+    """A worker thread that did not copy the executor's context has no register, and a
+    connection with no register never claims. Precondition: the POST arrived before the 303."""
+    opener = urllib.request.build_opener(_ThreadHoppingHandler)
+    with peer(_redirecting_to(refused)) as server:
+        raised = _raised(
+            lambda: opener.open(
+                f"http://{LOOPBACK}:{server.port}/refunds", data=b"{}", timeout=WAIT
+            )
+        )
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert not isinstance(raised, NotExecuted), raised
+
+
+def test_register_a_callers_opener_around_the_classifiers_own_handler_never_claims(refused):
+    """The classifier's private handler plus a redirect handler, assembled by a caller: the code
+    that built the opener is irrelevant now, only what the run offered. Precondition: the POST
+    arrived, and the refused target claims on a fresh run (the control)."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        transport._HTTPHandler(),
+        urllib.request.HTTPRedirectHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    with peer(_redirecting_to(refused)) as server:
+        raised = _raised(
+            lambda: opener.open(f"http://{LOOPBACK}:{server.port}/refunds", b"{}", WAIT)
+        )
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert not isinstance(raised, NotExecuted), raised
+
+
+def test_register_a_second_connection_in_one_run_after_the_first_delivered_never_claims(refused):
+    """The shape every case above reduces to, with no library in between: two connection
+    objects, the first delivered and answered, the second refused. Precondition (the control):
+    the second connection alone, in a run of its own, is claimed."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    def two_connections() -> int:
+        call("http.client", server.port)
+        return call("http.client", refused)
+
+    with peer(answering(200)) as server:
+        raised = _raised(two_connections)
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the first was delivered"
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+def test_register_outside_any_executor_run_nothing_is_claimed(refused):
+    """No register, no claim: outside `Control` the kernel records nothing, and a thread that did
+    not copy the executor's context cannot be seen. Precondition (the control): the identical
+    call inside a run is claimed."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    raised = _caught(lambda: call("http.client", refused))
+
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+def test_register_a_thread_claims_only_with_the_executors_context(refused):
+    """A thread started plainly has no register and never claims; one run under a copy of the
+    executor's context shares it, and its refused first connection is claimed."""
+    outcomes: dict[str, BaseException] = {}
+
+    def on_threads() -> None:
+        def attempt(label: str) -> None:
+            outcomes[label] = _caught(lambda: call("http.client", refused))
+
+        plain = threading.Thread(target=attempt, args=("plain",))
+        plain.start()
+        plain.join(WAIT)
+        copied = contextvars.copy_context()
+        shared = threading.Thread(target=copied.run, args=(attempt, "copied"))
+        shared.start()
+        shared.join(WAIT)
+
+    in_run(on_threads)
+
+    assert isinstance(outcomes["plain"], ConnectionRefusedError), outcomes["plain"]
+    assert isinstance(outcomes["copied"], NotExecuted), outcomes["copied"]
+
+
+def test_register_a_send_on_a_thread_without_the_register_still_marks_its_connection():
+    """The per-object mark is not subsumed by the register. A thread with no register delivers a
+    request on a connection; the executor's own thread then reuses that connection, which
+    reconnects and is refused. The run's register saw nothing; the connection did.
+
+    Preconditions, asserted: the peer received the request, and a fresh connection to the same
+    refused port in the same kind of run is claimed (the control).
+    """
+    with peer(answering(200)) as server:
+        connection = transport.HTTPConnection(LOOPBACK, server.port, timeout=WAIT)
+
+        def deliver() -> None:
+            connection.request("POST", "/refunds", body=b"{}")
+            connection.getresponse().read()
+
+        worker = threading.Thread(target=deliver)
+        worker.start()
+        worker.join(WAIT)
+        server.join()
+        port = server.port
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert isinstance(_raised(lambda: call("http.client", port)), NotExecuted), "control"
+
+    raised = _raised(lambda: connection.request("POST", "/refunds", body=b"{}"))
+    connection.close()
+
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+def test_register_a_nested_protected_call_marks_the_run_that_contains_it(control, store, refused):
+    """An executor that calls another protected function which delivers a request, then fails to
+    connect on its own: the outer run offered bytes through the inner one. Preconditions: the
+    inner request arrived, and the same refused connect in a run of its own is claimed."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+    inner_policy = Control(Policy.from_yaml(_RUN_POLICY), InMemoryStateStore())
+
+    with peer(answering(200)) as server:
+
+        @protect("transport.call", control=inner_policy)
+        def debit() -> int:
+            return call("http.client", server.port)
+
+        @protect("refund.create", control=control)
+        def refund(payment_id: str) -> int:
+            debit()
+            return call("http.client", refused)
+
+        with context(agent="refund-agent"):
+            raised = _caught(lambda: refund("txn_1"))
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the inner call delivered"
+    assert isinstance(raised, ConnectionRefusedError), raised
+    assert store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+
+
+def test_register_an_instrumented_opener_no_longer_suppresses_a_true_claim(monkeypatch, refused):
+    """A wrapper on `OpenerDirector.open`, the shape `opentelemetry-instrumentation-urllib`
+    installs, made `urlopen`'s own opener look foreign to the stack heuristic this replaced, and
+    a refused connect that sent nothing came back `AMBIGUOUS`. Nothing was sent here either."""
+    original = urllib.request.OpenerDirector.open
+
+    @functools.wraps(original)
+    def instrumented(opener, fullurl, data=None, timeout=None):  # type: ignore[no-untyped-def]
+        def wrapped():  # type: ignore[no-untyped-def]
+            return original(opener, fullurl, data=data, timeout=timeout)
+
+        return wrapped()
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", instrumented)
+
+    raised = _raised(lambda: call("urlopen", refused))
+
+    _assert_not_executed(raised, ConnectionRefusedError)
+
+
+def test_register_no_stack_heuristic_remains():
+    """§12.2.2: the stack walk is gone, not bypassed. No frame is inspected anywhere in the
+    module, and the opener is `urllib`'s own class."""
+    source = TRANSPORT_SOURCE.read_text(encoding="utf-8")
+    names = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.Attribute, ast.Name))
+    }
+    assert not names & {"_getframe", "f_back", "f_code", "f_locals", "stack", "currentframe"}
+    assert "_Opener" not in names and "_inside_an_opener_it_did_not_build" not in names
 
 
 # === T224: no HTTP status is NotExecuted ========================================================
@@ -1102,6 +1445,207 @@ def test_T226_the_forwarders_fresh_path_calls_the_same_observation_function(monk
     assert seen == ["ConnectError", "ConnectError"], "request() reached the same spy"
 
 
+def _gateway_for(tmp_path: Path, upstream: str, timeout: float = WAIT) -> tuple[Any, Any, Any]:
+    """A gateway in front of `upstream`, its store, and its forwarder (to close)."""
+    from ctrlrun.gateway.server import Gateway, GatewayConfig, httpx_forwarder
+
+    policy = """
+schema: ctrlrun.policy/v2
+actions:
+  mcp.acme.create_refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+"""
+    opened = SQLiteStateStore(tmp_path / "gateway.db")
+    config = GatewayConfig(
+        upstream=upstream, alias="acme", principal="refund-agent", upstream_timeout=timeout
+    )
+    forwarder = httpx_forwarder(config)
+    return Gateway(config, Control(Policy.from_yaml(policy), opened), forwarder), opened, forwarder
+
+
+def _tools_call(gateway: Any) -> Any:
+    import json
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "create_refund", "arguments": {"payment_id": "txn_1"}},
+    }
+    headers = {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "create_refund",
+    }
+    return json.loads(gateway.handle(json.dumps(body).encode(), headers).body)
+
+
+def test_T226_a_read_timeout_after_the_request_is_the_httpx_exception_everywhere(tmp_path):
+    """`httpx.ReadTimeout` after a delivered request: `request()` raises it untouched, the
+    forwarder's fresh path observes `AFTER_REQUEST_SENT`, and the gateway answers `-41010`.
+
+    Precondition, asserted each time: the peer received the request before the read timed out. A
+    mapping that caught `httpx.TimeoutException` where it means `httpx.ConnectTimeout` would claim
+    `NotExecuted` here, and until this test nothing exercised the difference.
+    """
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    with peer(read_then_hang) as server:
+        url = f"http://{LOOPBACK}:{server.port}/refunds"
+        raised = _raised(lambda: gateway_transport.request("POST", url, content=b"{}", timeout=0.3))
+        server.join()
+    assert server.received.startswith(b"POST /refunds"), "precondition: the request was delivered"
+    assert isinstance(raised, httpx.ReadTimeout), raised
+
+    with peer(read_then_hang) as server:
+        forwarder = gateway_transport.HTTPForwarder(
+            f"http://{LOOPBACK}:{server.port}/mcp", 0.3, httpx
+        )
+        try:
+            observed, _, _, _ = forwarder(b'{"jsonrpc":"2.0","id":1}', {}, fresh=True)
+        finally:
+            forwarder.close()
+        server.join()
+    assert server.received.startswith(b"POST /mcp"), "precondition: the request was delivered"
+    assert observed is transport.Transport.AFTER_REQUEST_SENT
+
+    with peer(read_then_hang) as server:
+        gateway, opened, forwarder = _gateway_for(
+            tmp_path, f"http://{LOOPBACK}:{server.port}/mcp", timeout=0.3
+        )
+        try:
+            answer = _tools_call(gateway)
+        finally:
+            forwarder.close()
+        server.join()
+    assert server.received.startswith(b"POST /mcp"), "precondition: the request was delivered"
+    assert answer["error"]["code"] == -41010
+    assert opened.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    opened.close()
+
+
+def _httpx_through(proxy_url: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    _proxy_environment(monkeypatch, proxy_url)
+    return httpx
+
+
+def test_T226_behind_a_proxy_a_refused_CONNECT_is_the_httpx_exception(monkeypatch):
+    """§2.3's tunnel row, for httpx: the `CONNECT` line was written, so nothing is claimed.
+    Precondition, asserted: the proxy received the `CONNECT` line."""
+    from ctrlrun.gateway import transport as gateway_transport
+
+    with peer(refusing_tunnel) as proxy:
+        httpx = _httpx_through(f"http://{LOOPBACK}:{proxy.port}", monkeypatch)
+        raised = _raised(
+            lambda: gateway_transport.request(
+                "POST", "https://target.ctrlrun.invalid/refunds", content=b"{}", timeout=WAIT
+            )
+        )
+        proxy.join()
+    assert proxy.received.startswith(b"CONNECT target.ctrlrun.invalid:443"), "precondition"
+    assert isinstance(raised, httpx.HTTPError) and not isinstance(raised, NotExecuted), raised
+
+
+def test_T226_behind_a_proxy_a_TLS_failure_after_the_tunnel_opened_is_never_claimed(
+    monkeypatch, server_tls
+):
+    """The review's case: the `CONNECT` was answered `200`, then the handshake with the target
+    failed, and httpx reports that as `httpx.ConnectError`, the same type as a refusal. Behind a
+    proxy httpx cannot say which of the two it was, so neither is claimed (§12.2.10).
+
+    Preconditions, asserted: the proxy received the `CONNECT` line and the target's handshake
+    failed, so no application byte was decrypted.
+    """
+    from ctrlrun.gateway import transport as gateway_transport
+
+    state: dict[str, Any] = {"handshake": None}
+
+    def tunnel_then_tls(proxy: Peer, conn: socket.socket) -> None:
+        proxy.received += _read_request(conn)
+        conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        try:
+            server_tls.wrap_socket(conn, server_side=True)
+        except (OSError, ssl.SSLError) as exc:
+            state["handshake"] = exc
+
+    for surface in ("request", "forwarder"):
+        with peer(tunnel_then_tls) as proxy:
+            httpx = _httpx_through(f"http://{LOOPBACK}:{proxy.port}", monkeypatch)
+            target = "https://target.ctrlrun.invalid/refunds"
+            if surface == "request":
+                raised = _raised(
+                    lambda target=target: gateway_transport.request(
+                        "POST", target, content=b"{}", timeout=WAIT
+                    )
+                )
+                assert isinstance(raised, httpx.ConnectError), raised
+            else:
+                forwarder = gateway_transport.HTTPForwarder(target, WAIT, httpx)
+                try:
+                    observed, _, _, _ = forwarder(b"{}", {}, fresh=True)
+                finally:
+                    forwarder.close()
+                assert observed is transport.Transport.AFTER_REQUEST_SENT, surface
+            proxy.join()
+        assert proxy.received.startswith(b"CONNECT target.ctrlrun.invalid:443"), surface
+        assert state["handshake"] is not None, "precondition: the target's handshake failed"
+
+
+def test_T226_behind_a_proxy_even_an_unreachable_proxy_is_not_claimed(monkeypatch, refused):
+    """Stricter than core, on purpose: httpx reports an unreachable proxy and a failed tunnel as
+    the same type, so behind a proxy it claims neither. `urlopen` claims the unreachable proxy
+    (T225) because it can see that no byte was offered; httpx cannot."""
+    from ctrlrun.gateway import transport as gateway_transport
+
+    httpx = _httpx_through(f"http://{LOOPBACK}:{refused}", monkeypatch)
+    raised = _raised(
+        lambda: gateway_transport.request("POST", "http://target.ctrlrun.invalid/", timeout=WAIT)
+    )
+
+    assert isinstance(raised, httpx.ConnectError), raised
+
+
+def test_T226_the_httpx_variant_marks_the_run_and_consults_it(refused):
+    """One register for both variants: a request delivered through httpx, then a refused
+    `HTTPConnection` in the same run, is not claimed; and a request delivered through the
+    classifier, then a refused httpx connection, is not claimed either. Preconditions: each
+    first request arrived, and each refused call alone is claimed (the controls)."""
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    refused_url = f"http://{LOOPBACK}:{refused}/"
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+    assert isinstance(
+        _raised(lambda: gateway_transport.request("POST", refused_url, timeout=WAIT)), NotExecuted
+    ), "control"
+
+    with peer(answering(200)) as server:
+        url = f"http://{LOOPBACK}:{server.port}/refunds"
+
+        def httpx_then_core() -> int:
+            gateway_transport.request("POST", url, content=b"{}", timeout=WAIT)
+            return call("http.client", refused)
+
+        raised = _raised(httpx_then_core)
+        server.join()
+    assert server.received.startswith(b"POST /refunds"), "precondition"
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+    with peer(answering(200)) as server:
+
+        def core_then_httpx() -> Any:
+            call("http.client", server.port)
+            return gateway_transport.request("POST", refused_url, timeout=WAIT)
+
+        raised = _raised(core_then_httpx)
+        server.join()
+    assert server.received.startswith(b"POST /refunds"), "precondition"
+    assert isinstance(raised, httpx.ConnectError), raised
+
+
 # === T227: one implementation of the rule ========================================================
 
 
@@ -1288,7 +1832,7 @@ def test_T229_no_CTRLRUN_environment_variable_is_read(monkeypatch, refused):
 
     monkeypatch.setattr(os, "environ", Recording(os.environ))
     for surface in SURFACES:
-        _raised(lambda surface=surface: call(surface, refused))
+        _caught(lambda surface=surface: call(surface, refused))
     assert not [key for key in read if str(key).upper().startswith("CTRLRUN")]
 
 
@@ -1586,7 +2130,13 @@ def test_T230_G12_passes_on_a_correct_kernel(tmp_path, document):
     result = _g12(tmp_path, document)
 
     assert result.status is Status.PASS, (result.reason, result.counterexample)
-    assert result.detail["rows"] == {"byte_written": "ambiguous", "never_connected": "failed"}
+    assert result.detail["rows"] == {
+        "byte_written": "ambiguous",
+        "read_timeout": "ambiguous",
+        "reused": "ambiguous",
+        "second_connection": "ambiguous",
+        "never_connected": "failed",
+    }
     assert result.effect_key == "refund:ctrlrun-verify-payment_id"
 
 
@@ -1643,6 +2193,87 @@ def test_T230_a_classifier_that_never_claims_fails_the_control(tmp_path, monkeyp
 
     assert result.status is Status.FAIL
     assert result.reason == reg.CONTROL_FAILED
+
+
+def test_T230_a_classifier_that_guesses_from_the_exception_type_fails_the_read_timeout_row(
+    tmp_path, monkeypatch
+):
+    """The classifier §2.3 rejects by name: `TimeoutError`, `ConnectionRefusedError`,
+    `socket.gaierror` and `ssl.SSLError` mapped to `NotExecuted` wherever they arise. It passes
+    the reset row and the control; the read-timeout row, a timeout after a delivered byte, is
+    where it is wrong, and G12 says so there."""
+    from ctrlrun.verify import Status
+
+    guessed = (TimeoutError, ConnectionRefusedError, socket.gaierror, ssl.SSLError)
+
+    def by_type(method):  # type: ignore[no-untyped-def]
+        def wrapped(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            try:
+                return method(self, *args, **kwargs)
+            except NotExecuted:
+                raise
+            except guessed as exc:
+                raise NotExecuted(f"guessed from {type(exc).__name__}") from exc
+
+        return wrapped
+
+    for name in ("connect", "send", "getresponse"):
+        monkeypatch.setattr(
+            transport.HTTPConnection, name, by_type(getattr(transport.HTTPConnection, name))
+        )
+    result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
+
+    assert result.status is Status.FAIL
+    assert result.reason.startswith("the classifier raised NotExecuted on a read timeout"), (
+        result.reason
+    )
+
+
+def test_T230_a_classifier_blind_to_its_own_evidence_fails_the_reused_row(tmp_path, monkeypatch):
+    """Every connect failure claimed, the byte mark, the foreign-socket record and the register
+    all ignored: the reset and read-timeout rows fail after `connect()` and cannot see it; the
+    reused row, a reconnect by a connection that already delivered a request, does."""
+    from ctrlrun.verify import Status
+
+    def blind(self):  # type: ignore[no-untyped-def]
+        try:
+            http.client.HTTPConnection.connect(self)
+        except Exception as exc:
+            raise NotExecuted("claimed without evidence") from exc
+
+    monkeypatch.setattr(transport.HTTPConnection, "connect", blind)
+    result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
+
+    assert result.status is Status.FAIL
+    assert result.reason.startswith(
+        "the classifier raised NotExecuted on a connection that had already delivered"
+    ), result.reason
+
+
+def test_T230_a_classifier_with_no_register_fails_the_second_connection_row(tmp_path, monkeypatch):
+    """The first release's classifier: a byte mark and a foreign-socket record per connection
+    object, and nothing about the run. Each connection judged alone passes every row but one: a
+    second connection, after the first delivered, is refused and claimed."""
+    from ctrlrun.verify import Status
+
+    def per_object(self):  # type: ignore[no-untyped-def]
+        self._ctrlrun_connecting = True
+        try:
+            http.client.HTTPConnection.connect(self)
+        except Exception as exc:
+            if not self._ctrlrun_offered and not self._ctrlrun_foreign:
+                raise NotExecuted("judged on this connection alone") from exc
+            raise
+        finally:
+            self._ctrlrun_connecting = False
+
+    monkeypatch.setattr(transport.HTTPConnection, "connect", per_object)
+    result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
+
+    assert result.status is Status.FAIL
+    assert result.reason.startswith("the classifier raised NotExecuted on a second connection"), (
+        result.reason
+    )
 
 
 def test_T230_a_classifier_that_always_claims_fails_the_observable(tmp_path, monkeypatch):
@@ -1797,6 +2428,29 @@ refused_by_guard(lambda: tcp(socket.AF_INET6).bind(("::1", 0)), "a bind to ::1")
 path = os.path.join(tempfile.mkdtemp(), "s")
 refused_by_guard(lambda: tcp(socket.AF_UNIX).bind(path), "an AF_UNIX bind")
 refused_by_guard(lambda: tcp(socket.AF_UNIX).connect(path), "an AF_UNIX connect")
+
+# Only a stream socket's bind is recorded: a UDP bind at another process's TCP port admits
+# nothing there, and a datagram socket connects and sends nowhere.
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.bind(("127.0.0.1", outside))
+refused_by_guard(lambda: tcp().connect(("127.0.0.1", outside)), "a TCP connect a UDP bind admitted")
+refused_by_guard(
+    lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).connect(("127.0.0.1", outside)),
+    "a datagram connect",
+)
+refused_by_guard(
+    lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", outside)),
+    "a datagram send",
+)
+udp.close()
+
+# A port is admitted while the socket that bound it is open, and forgotten when it closes: the
+# kernel may hand the port to another process the moment it is released.
+released = tcp()
+released.bind(("127.0.0.1", 0))
+released_port = released.getsockname()[1]
+released.close()
+refused_by_guard(lambda: tcp().connect(("127.0.0.1", released_port)), "a port bound and closed")
 
 # Admitted: a listener bound to port 0, at the port getsockname() reports.
 client = tcp()
