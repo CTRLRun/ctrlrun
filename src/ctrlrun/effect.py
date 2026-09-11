@@ -15,14 +15,16 @@ only way out of `AMBIGUOUS`, because it is the only one a human drives — arriv
 
 from __future__ import annotations
 
+import hashlib
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Literal
 
-from .action import Action
+from .action import Action, canonical_bytes
 from .errors import (
     AmbiguousEffect,
     CTRLRunError,
@@ -36,6 +38,11 @@ UNRESOLVED_EFFECT: Final = "effect_key_error"
 
 #: SPEC-v0.1 §5.3 E3 — a reservation is held for five minutes unless told otherwise.
 DEFAULT_LEASE: Final = timedelta(minutes=5)
+
+#: SPEC-v0.7 §4.2. The domain tag inside the idempotency token's canonical input. Versioned so
+#: a later derivation cannot collide with this one, and so a token can never equal a hash
+#: computed over the same pair for another purpose. Never a document on its own (§9.3).
+IDEMPOTENCY_SCHEMA: Final = "ctrlrun.idempotency/v1"
 
 #: `DuplicateEffect.state` values (SPEC-v0.1 §5.4).
 COMMITTED_EFFECT: Final = "committed"
@@ -417,3 +424,62 @@ def plan_lease_extension(
             f"which expires at {record.lease_expires_at!r}"
         )
     return replace(record, lease_expires_at=until, updated_at=now)
+
+
+def idempotency_token_for(effect_key: str, attempt: int) -> str:
+    """The provider idempotency token for one attempt on one effect key (SPEC-v0.7 §4.2).
+
+    A deterministic handle for reconciliation to observe **with**: an `AMBIGUOUS` effect can ask
+    the provider "did this attempt happen?" by a key the provider already indexes, without a
+    bespoke lookup per provider (§4.7). It gives nothing permission to act twice: after an
+    ambiguous outcome the kernel still refuses a blind retry, and that is unchanged.
+
+    Derived from `(effect_key, attempt)` and **never from the effect key alone** (§4.1). The
+    effect key is stable across v0.1 §5.4's renewal, so a provider sent the key would answer the
+    one retry the kernel permits *because the executor proved nothing happened* with the cached
+    failure of the attempt that failed. A renewal is a new attempt and gets a new token; a repeat
+    within one attempt, which is what provider-side deduplication is for, keeps the old one.
+
+    The canonical input carries a versioned domain tag and goes through `canonical_bytes`, so two
+    hosts agree byte for byte and the float rejection and the lone-surrogate refusal are inherited
+    rather than re-argued (`v0.6 §6.2`). SHA-256, truncated to 16 octets and rendered as a UUID of
+    **version 8**, because RFC 9562 puts a name-based UUID derived from SHA-256 in that space and
+    not in version 5's. 36 characters fits every limit §1.3 checked, and the effect key itself
+    does not appear in the token, which is what Stripe asks of callers whose keys are built from
+    arguments that may identify a person.
+
+    `attempt` must be an `int` that is not a `bool`, and at least 1. `canonical_bytes` accepts a
+    `bool`, since `bool` subclasses `int` and JSON has `true`, so left to the canonicalizer
+    `attempt=True` would derive a token nobody's attempt has: the check is here rather than
+    inherited, and T235 is what keeps it load-bearing.
+
+    An operator's effect key must name its effect uniquely across every store that shares one
+    provider account (§4.6): two stores deriving one key string for two different effects would
+    have the provider deduplicate the second against the first, and the kernel, which sees one
+    store, cannot check that.
+    """
+    if not isinstance(effect_key, str) or not effect_key:
+        raise InvalidArgument(
+            f"idempotency_token_for(effect_key={effect_key!r}) must be a non-empty string; a "
+            "token names an attempt on an effect key (SPEC-v0.7 §4.2)"
+        )
+    if isinstance(attempt, bool) or not isinstance(attempt, int):
+        raise InvalidArgument(
+            f"idempotency_token_for(attempt={attempt!r}) must be an int and not a bool; a bool "
+            "would canonicalize as true and derive a token no attempt has (SPEC-v0.7 §4.2)"
+        )
+    if attempt < 1:
+        raise InvalidArgument(
+            f"idempotency_token_for(attempt={attempt!r}) must be at least 1; attempts are "
+            "numbered from one (SPEC-v0.1 §5.4)"
+        )
+    digest = bytearray(
+        hashlib.sha256(
+            canonical_bytes(
+                {"schema": IDEMPOTENCY_SCHEMA, "effect_key": effect_key, "attempt": attempt}
+            )
+        ).digest()[:16]
+    )
+    digest[6] = (digest[6] & 0x0F) | 0x80  # version 8   (RFC 9562 §4.2, §5.8)
+    digest[8] = (digest[8] & 0x3F) | 0x80  # variant 10  (RFC 9562 §4.1)
+    return str(uuid.UUID(bytes=bytes(digest)))

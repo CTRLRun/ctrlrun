@@ -8,8 +8,9 @@ processes* -- has to be re-earned.
 **The mechanism.** `UNIQUE(effect_key)` plus `INSERT … ON CONFLICT DO NOTHING`, under `READ
 COMMITTED`, which is Postgres's default and which this store does **not** set. The guarantee is
 the unique index, not the isolation level. Every later transition is a compare-and-set --
-`UPDATE … WHERE effect_key = %s AND state = %s AND action_id = %s` -- with **the row count
-checked**.
+`UPDATE … WHERE effect_key = %s AND state = %s AND action_id = %s AND attempt = %s` -- with **the
+row count checked**. The attempt is SPEC-v0.7 §5.6's: every write is conditioned on the attempt
+number it read, so none can put an older one back.
 
 **The decisions stay where they are.** `plan_reservation`, `plan_lease_extension`,
 `check_consumable` and `check_answerable` are pure functions in `effect.py` and `approval.py`, and
@@ -49,6 +50,7 @@ from .approval import (
     check_consumable,
 )
 from .effect import (
+    COMMITTED_EFFECT,
     DEFAULT_LEASE,
     IN_PROGRESS_EFFECT,
     LEASE_EXPIRED,
@@ -60,6 +62,7 @@ from .effect import (
     plan_reservation,
 )
 from .errors import (
+    AmbiguousEffect,
     ApprovalMismatch,
     CTRLRunError,
     DuplicateEffect,
@@ -208,6 +211,17 @@ def _psycopg() -> Any:
     return psycopg
 
 
+class _Restage(Exception):  # noqa: N818 - errors.py's convention: no suffix
+    """Internal: the conditional `UPDATE` matched nothing and the record is still one this
+    outcome may be written to, at another attempt. Raised inside the transaction so the ordinary
+    handler rolls it back, and caught immediately outside it, because the re-issue opens a
+    transaction of its own on the same connection (SPEC-v0.7 §5.6)."""
+
+    def __init__(self, found: EffectRecord) -> None:
+        super().__init__(f"effect {found.effect_key!r} moved to attempt {found.attempt}")
+        self.found = found
+
+
 # `errors.py`'s convention: this codebase's exception names carry no suffix.
 class AmbiguousWrite(CTRLRunError):  # noqa: N818
     """A `COMMIT` whose outcome the store could not observe (SPEC-v0.6 §4.3 Table A).
@@ -257,6 +271,12 @@ def _is_our_own_write(found: EffectRecord, expected: EffectRecord) -> bool:
     here are what make the *realistic* collision detectable: a second attempt under the same id
     at any other instant, with any other lease, or at a different `attempt` number, differs in a
     column and is refused. SPEC-v0.6 §4.3.3 carries the argument.
+
+    **On the renewal path `created_at` separates nothing**, and the paragraph above should not be
+    read as if it did there. A renewal keeps the record's `created_at` (`_reserved` takes it from
+    the record it renews), so the expected row takes it from the record the re-read found and it
+    is equal by construction. What tells a rival's renewal from ours is `attempt`,
+    `lease_expires_at` and `updated_at` (SPEC-v0.7 §12.3a).
     """
     return (
         found.effect_key == expected.effect_key
@@ -267,6 +287,31 @@ def _is_our_own_write(found: EffectRecord, expected: EffectRecord) -> bool:
         and found.created_at == expected.created_at
         and found.updated_at == expected.updated_at
     )
+
+
+#: The outcome transitions. A stale one is re-issued against the re-read rather than refused,
+#: because refusing it drops what the executor said (SPEC-v0.7 §5.6, §12.3a).
+_OUTCOMES: Final = frozenset({EffectState.COMMITTED, EffectState.AMBIGUOUS})
+
+
+def _moved(found: EffectRecord, was: EffectRecord, effect_key: str) -> CTRLRunError:
+    """The refusal a record that moved between the read and the write earns (SPEC-v0.7 §5.6).
+
+    **The type comes from what the re-read found, and the message says what moved.** Every one of
+    these used to be `DuplicateEffect(state=in_progress)`, which `errors.py` defines as *another
+    attempt holds a live reservation*: after a stale `resolve_effect` the record is `AMBIGUOUS` at
+    a newer attempt, which is nobody's reservation, and a caller reading `in_progress` would wait
+    for a dispatch that is not running. Found by review, round 2.
+    """
+    moved = (
+        f"effect {effect_key!r} moved from attempt {was.attempt} ({was.state}) to attempt "
+        f"{found.attempt} ({found.state}) since it was read; nothing was written"
+    )
+    if found.state is EffectState.AMBIGUOUS:
+        return AmbiguousEffect(moved, effect_key=effect_key, action_id=found.action_id)
+    if found.state is EffectState.COMMITTED:
+        return DuplicateEffect(moved, state=COMMITTED_EFFECT, effect_key=effect_key)
+    return DuplicateEffect(moved, state=IN_PROGRESS_EFFECT, effect_key=effect_key)
 
 
 class PostgresStateStore:
@@ -748,24 +793,20 @@ class PostgresStateStore:
                 raise
             if effect_key is None or plan.reservation is None:
                 raise
-            if plan.renews:
-                self._resolve_lost_renewal(
-                    effect_key,
-                    plan.reservation,
-                    now,
-                    approval_id=approval_id,
-                    action_hash=action_hash,
-                    lease=lease,
-                )
-            else:
-                self._resolve_lost_insert(
-                    effect_key,
-                    plan.reservation,
-                    now,
-                    approval_id=approval_id,
-                    action_hash=action_hash,
-                    lease=lease,
-                )
+            # SPEC-v0.7 §5.6: the reservation returned is the one on the record. Returning
+            # `plan.reservation` here after a re-issue handed the caller the number first
+            # planned while the store held the number the re-issue wrote, which another process
+            # had already been handed.
+            resolve = self._resolve_lost_renewal if plan.renews else self._resolve_lost_insert
+            written = resolve(
+                effect_key,
+                plan.reservation,
+                now,
+                approval_id=approval_id,
+                action_hash=action_hash,
+                lease=lease,
+            )
+            return (approved.as_approval() if approved is not None else None), written
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
     def _resolve_lost_renewal(
@@ -777,13 +818,14 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
-    ) -> None:
-        """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`.
+    ) -> Reservation:
+        """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`. Returns the
+        reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
 
         A renewal's pre-state is `FAILED` (`v0.1 §5.4`'s one automatic retry). If the commit
         landed the record is ours and `RESERVED`; if it did not, the record is still `FAILED` and
         the renewal simply re-issues -- safe because that `UPDATE` is conditional on
-        `state = 'failed'`.
+        `state = 'failed'` and on the attempt it was planned from.
 
         Routing a renewal through Table A1 turned a **proven non-execution** into a refusal
         carrying a `state` that misdescribed the record: the collapse §4.3.2 exists to forbid,
@@ -792,9 +834,14 @@ class PostgresStateStore:
         found = self._fresh_read_effect(effect_key)
         if found is None:
             raise InvalidArgument(f"no reservation for effect {effect_key!r}")
-        if found.action_id == reservation.action_id and found.state is EffectState.RESERVED:
+        # §4.3.3's identity check, which the insert path had and this one did not. `RESERVED`
+        # under our `action_id` is not proof the commit landed: `action_id` is caller-supplyable,
+        # so another process renewing under the same one produced exactly that record, and 0.6.1
+        # concluded it was ours. Both processes then held one attempt, and the number returned
+        # was one this method never wrote. Building item 3a found it (SPEC-v0.7 §12.3a).
+        if _is_our_own_write(found, _reserved(reservation, found, now)):
             _took(A2_LANDED, effect_key)
-            return  # the commit landed
+            return reservation  # the commit landed, and this is the row it wrote
         if found.state is EffectState.FAILED:
             # Re-issue the SAME operation, approval included. Passing `None, None` here was the
             # double-spend `_resolve_lost_insert`'s comment describes, in the branch that
@@ -805,14 +852,22 @@ class PostgresStateStore:
             # different effect key. `v0.1 §4.2 A2` is that an approval is single-use and
             # consumed atomically with the reservation; this failed it open.
             _took(A2_REISSUE, effect_key)
-            self._authorize_and_reserve(
+            _, reissued = self._authorize_and_reserve(
                 approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
-            return
+            return _only(reissued, "reservation")
         _took(A2_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
             raise plan.refusal
+        # `FAILED` is the only record `plan_reservation` grants over, and it re-issued above. A
+        # grant here would be a record nothing in this protocol writes, so refuse rather than
+        # return a reservation nobody wrote.
+        raise DuplicateEffect(
+            f"effect {effect_key!r} could not be resolved after a lost commit",
+            state=IN_PROGRESS_EFFECT,
+            effect_key=effect_key,
+        )
 
     def _resolve_lost_insert(
         self,
@@ -823,8 +878,9 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
-    ) -> None:
-        """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means.
+    ) -> Reservation:
+        """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means. Returns the
+        reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
 
         The first row is an **identity check on the whole row we attempted to write**, not a match
         on `action_id` -- and the difference is a double execution. `Action.action_id` is
@@ -840,15 +896,19 @@ class PostgresStateStore:
             # operation was a double-spend: the effect was reserved, the caller was handed an
             # `Approval`, and the approval row was still `granted`, so the same approval then
             # authorised a second effect key. Found by review.
+            #
+            # And return what the re-issue wrote. It plans afresh, so if another process inserted
+            # and failed between the re-read and the re-issue's own read, it renews, and its
+            # number is not the one first planned (SPEC-v0.7 §5.6).
             _took(A1_REINSERT, effect_key)
-            self._authorize_and_reserve(
+            _, reissued = self._authorize_and_reserve(
                 approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
-            return
+            return _only(reissued, "reservation")
         expected = _reserved(reservation, None, now)
         if _is_our_own_write(found, expected):
             _took(A1_OURS, effect_key)
-            return  # the commit landed; we hold it
+            return reservation  # the commit landed; we hold it
         _took(A1_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
@@ -862,26 +922,40 @@ class PostgresStateStore:
     def _consumable(
         self, connection: Any, approval_id: str, action_hash: str, now: datetime
     ) -> ApprovalRecord:
-        verdict = check_consumable(
-            self._read_approval(connection, approval_id), approval_id, action_hash, now
-        )
+        # The record is read here rather than inside the call, because `ApprovalVerdict` carries
+        # exactly one of `record` and `refusal`, so a refusal that asks for the expiry write
+        # carries no record to take the status from.
+        found = self._read_approval(connection, approval_id)
+        verdict = check_consumable(found, approval_id, action_hash, now)
         if verdict.refusal is not None:
-            if verdict.expire:
+            if verdict.expire and found is not None:
                 # §4.2.2's second kept write: a lapsed approval is evidence. Its own transaction,
-                # ordered before the refusing one.
-                self._expire(approval_id)
+                # ordered before the refusing one, and conditional on the status it read.
+                self._expire(approval_id, found.status)
             raise verdict.refusal
         return _only(verdict.record, "approval record")
 
-    def _expire(self, approval_id: str) -> None:
+    def _expire(self, approval_id: str, was: ApprovalStatus) -> None:
+        """§4.2.2's second kept write, as a compare-and-set on the status it was planned against.
+
+        **Unconditional, this corrupted evidence.** The status comes from a plain `SELECT` that
+        saw `granted` past `expires_at`; a consumption committing between that read and this write
+        was overwritten, so an approval that authorised a real effect read `expired` and the
+        evidence said a human's yes had never been spent. Every other write on this table is
+        already a compare-and-set (`_consume_locked`, `grant_approval`, `deny_approval`); this one
+        was the exception, found by review, round 2 (SPEC-v0.7 §12.3a). A row count of zero needs
+        no refusal: the approval was answered or spent by somebody else, and the caller is being
+        refused anyway by the verdict that asked for this write.
+        """
         connection = self._connect()
         connection.execute("BEGIN")
         self._use_schema(connection)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status = %s WHERE approval_id = %s",
-                    (str(ApprovalStatus.EXPIRED), approval_id),
+                    f"UPDATE {self._q}.approvals SET status = %s WHERE approval_id = %s "
+                    "AND status = %s",
+                    (str(ApprovalStatus.EXPIRED), approval_id, str(was)),
                 )
             self._commit(connection)
         finally:
@@ -928,6 +1002,20 @@ class PostgresStateStore:
         if renews:
             # Only a FAILED record is renewable (§5.4); the WHERE clause says so again, so a
             # record that changed under us refuses instead of overwriting an attempt.
+            #
+            # **And only the FAILED record it was planned from** (SPEC-v0.7 §5.6). `_plan` read
+            # with a plain SELECT under READ COMMITTED, so between that read and this write
+            # another process can renew to the same number, run, fail and commit, leaving the
+            # record FAILED again. On `state` alone this matched it and wrote that number a
+            # second time: two dispatches, one attempt. `plan_reservation` renews to
+            # `record.attempt + 1` (effect.py), so the planned-from attempt is one below the
+            # reservation's, and it is taken from the plan, never from `previous`, which is a
+            # second read and may already be the newer record. That closes the race rather than
+            # narrowing it only because the attempt number only ever moves by a renewal, and that
+            # is true only because every other `UPDATE` on this table is conditioned on the
+            # attempt it read as well (`_write_effect`, `_transition`). At 0.6.1 they were not,
+            # and a stale one could write an older number back (T246c).
+            planned_from = reservation.attempt - 1
             with connection.cursor() as cursor:
                 cursor.execute(
                     # `resolved_by` is cleared with them, and its own line says why: a human
@@ -938,7 +1026,7 @@ class PostgresStateStore:
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=%s "
-                    "WHERE effect_key=%s AND state=%s",
+                    "WHERE effect_key=%s AND state=%s AND attempt=%s",
                     (
                         str(record.state),
                         record.action_id,
@@ -947,6 +1035,7 @@ class PostgresStateStore:
                         _iso(now),
                         record.effect_key,
                         str(EffectState.FAILED),
+                        planned_from,
                     ),
                 )
                 updated = cursor.rowcount
@@ -1032,6 +1121,15 @@ class PostgresStateStore:
 
         `was` is the record this write was planned against. It is optional only so the one caller
         that has already established the pre-state under a row lock need not repeat it.
+
+        **And on the attempt it was planned against** (SPEC-v0.7 §5.6). The `SET` writes the
+        attempt number it read, so a condition on `action_id` and `state` alone let a stale write
+        put an older number back: a caller that retries one `Action` reuses its `action_id`, so
+        `AMBIGUOUS` at 1 could become `AMBIGUOUS` at 2 under the same id between this read and
+        this write, and a `resolve_effect` decided on attempt 1 then wrote `FAILED` at **1** over
+        it. The next renewal handed out 2 again. A review reproduced it; T246c is the test.
+        `resolve_effect`, `extend_lease`, `hold_continuation` and §4.2.2's kept `AMBIGUOUS` write
+        all come here.
         """
         expected = was if was is not None else record
         with connection.cursor() as cursor:
@@ -1039,7 +1137,7 @@ class PostgresStateStore:
                 f"UPDATE {self._q}.effects SET "
                 f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                 "result_json=%s, error=%s, updated_at=%s, resolved_by=%s "
-                "WHERE effect_key=%s AND action_id=%s AND state=%s",
+                "WHERE effect_key=%s AND action_id=%s AND state=%s AND attempt=%s",
                 (
                     str(record.state),
                     record.action_id,
@@ -1052,6 +1150,7 @@ class PostgresStateStore:
                     record.effect_key,
                     expected.action_id,
                     str(expected.state),
+                    expected.attempt,
                 ),
             )
             if cursor.rowcount != 1:
@@ -1067,11 +1166,10 @@ class PostgresStateStore:
                     frozenset({expected.state}),
                     self._clock(),
                 )
-                raise DuplicateEffect(
-                    f"effect {record.effect_key!r} was taken by another attempt",
-                    state=IN_PROGRESS_EFFECT,
-                    effect_key=record.effect_key,
-                )
+                # The predicate passed, so the record is still ours and still in the state this
+                # write was planned against: what moved is the attempt. `_moved` says so, and
+                # takes its type from the record rather than calling everything in_progress.
+                raise _moved(found, expected, record.effect_key)
 
     # --- transitions (SPEC-v0.6 §4.2, §4.3.2 Table A2) ----------------------------------
 
@@ -1079,13 +1177,32 @@ class PostgresStateStore:
         self._transition(effect_key, action_id, EffectState.EXECUTING, _RESERVED)
 
     def commit_effect(self, effect_key: str, action_id: str, result: Any) -> None:
-        self._transition(effect_key, action_id, EffectState.COMMITTED, _EXECUTING, result=result)
+        # `carries_outcome`: what the executor did, so a record that moved under this write is
+        # re-issued against rather than refused (SPEC-v0.7 §5.6). It is passed here, at the call
+        # site, and never inferred from the target state: `_transition` is generic, and a later
+        # transition to `COMMITTED` or `AMBIGUOUS` that is somebody's *decision* rather than an
+        # executor's outcome -- a human's resolution is exactly that -- must not inherit it.
+        self._transition(
+            effect_key,
+            action_id,
+            EffectState.COMMITTED,
+            _EXECUTING,
+            result=result,
+            carries_outcome=True,
+        )
 
     def fail_effect(self, effect_key: str, action_id: str, error: str) -> None:
         self._transition(effect_key, action_id, EffectState.FAILED, _EXECUTING, error=error)
 
     def mark_ambiguous(self, effect_key: str, action_id: str, error: str) -> None:
-        self._transition(effect_key, action_id, EffectState.AMBIGUOUS, _UNFINISHED, error=error)
+        self._transition(
+            effect_key,
+            action_id,
+            EffectState.AMBIGUOUS,
+            _UNFINISHED,
+            error=error,
+            carries_outcome=True,
+        )
 
     def _transition(
         self,
@@ -1097,6 +1214,8 @@ class PostgresStateStore:
         result: Any = None,
         error: str | None = None,
         retrying: bool = False,
+        restaged: bool = False,
+        carries_outcome: bool = False,
     ) -> None:
         """One compare-and-set, with the row count checked (§4.2).
 
@@ -1116,11 +1235,14 @@ class PostgresStateStore:
             )
             moved = _transitioned(record, state, now, result=result, error=error)
             with connection.cursor() as cursor:
+                # Conditioned on the attempt read, as `_write_effect` is and for its reason: the
+                # `SET` writes that number back, and `action_id` and `state` can come round again
+                # at a newer attempt under a reused `action_id` (SPEC-v0.7 §5.6, T246c).
                 cursor.execute(
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=%s, error=%s, updated_at=%s "
-                    "WHERE effect_key=%s AND action_id=%s AND state=%s",
+                    "WHERE effect_key=%s AND action_id=%s AND state=%s AND attempt=%s",
                     (
                         str(moved.state),
                         moved.action_id,
@@ -1132,20 +1254,71 @@ class PostgresStateStore:
                         effect_key,
                         action_id,
                         str(record.state),
+                        record.attempt,
                     ),
                 )
                 updated = cursor.rowcount
             if updated != 1:
                 # The record changed between the read and the write. Re-plan through the same
                 # predicate rather than guessing.
-                _checked(
+                found = _checked(
                     self._read_effect(connection, effect_key), effect_key, action_id, expected, now
                 )
-                raise DuplicateEffect(
-                    f"effect {effect_key!r} was taken by another attempt",
-                    state=IN_PROGRESS_EFFECT,
-                    effect_key=effect_key,
-                )
+                # The set is the assertion, not the condition: only these two states can carry
+                # an executor's outcome, and a caller that says otherwise is a wiring bug.
+                assert not carries_outcome or state in _OUTCOMES, state
+                if carries_outcome and not restaged:
+                    # The predicate passed: the record is still ours and still in a state this
+                    # transition may be made from, and only the attempt or the pre-state moved
+                    # under us. **An outcome is not dropped here** (SPEC-v0.7 §5.6). Refusing
+                    # wrote nothing, and the effect record is what gates the next renewal: a
+                    # review measured a renewal to attempt 3 with attempt 1's `commit_effect`
+                    # recorded on no record at all, which for a refund that had landed is a
+                    # second refund. Re-issued once against the re-read, the outcome lands on the
+                    # newer attempt, which is where the same call a moment later would have put
+                    # it; attributing it there is §12.3a's residual, losing it is not.
+                    #
+                    # `begin_execution` and `fail_effect` are NOT re-issued, and the difference
+                    # is the point: `FAILED` asserts that nothing happened, so re-issuing attempt
+                    # 1's over attempt 2 in flight would permit a retry beside a running dispatch.
+                    #
+                    # `restaged` bounds this at one, as `retrying` bounds the lost-commit re-read:
+                    # a record that moves again under the re-issue is refused rather than chased.
+                    raise _Restage(found)
+                raise _moved(found, record, effect_key)
+        except _Restage as moved:
+            self._rollback(connection)
+            # Logged **before** the re-issue, not after it. Logging afterwards told the operator
+            # about a restage only when it went on to succeed, so a restage that then refused left
+            # no line at all and §4.3.4's rule -- which branch ran is observable -- did not hold
+            # for the one case worth reading a log about. Found by review, round 3.
+            _LOG.warning(
+                "effect %r moved to attempt %s while %s was being recorded; re-issuing the "
+                "outcome against the record as it now stands (SPEC-v0.7 5.6)",
+                effect_key,
+                moved.found.attempt,
+                state,
+                extra={"effect_key": effect_key, "attempt": moved.found.attempt, "restage": True},
+            )
+            # **Both bounds travel, and neither resets the other.** `retrying` is passed on
+            # because this re-issue's own `COMMIT` can be lost, and a lost commit that re-entered
+            # here with `retrying` cleared alternated with the restage bound forever: a review
+            # composed the two halves -- every `COMMIT` lost, and a record that keeps moving --
+            # and measured `RecursionError` at 113 deep, which is T155f's failure mode returning
+            # by another door. Every loop in this project is bounded, and two bounds that reset
+            # each other are not a bound.
+            self._transition(
+                effect_key,
+                action_id,
+                state,
+                expected,
+                result=result,
+                error=error,
+                retrying=retrying,
+                restaged=True,
+                carries_outcome=carries_outcome,
+            )
+            return
         except AmbiguousWrite:
             raise
         except BaseException:
@@ -1163,7 +1336,16 @@ class PostgresStateStore:
                 # could classify it -- leaving the record stranded `EXECUTING`. Found by review.
                 # *Every loop in this project is bounded*, and a re-read path is a loop.
                 raise
-            self._resolve_lost_update(effect_key, action_id, state, expected, result, error)
+            self._resolve_lost_update(
+                effect_key,
+                action_id,
+                state,
+                expected,
+                result,
+                error,
+                restaged=restaged,
+                carries_outcome=carries_outcome,
+            )
 
     def _resolve_lost_update(
         self,
@@ -1173,6 +1355,9 @@ class PostgresStateStore:
         expected: frozenset[EffectState],
         result: Any,
         error: str | None,
+        *,
+        restaged: bool = False,
+        carries_outcome: bool = False,
     ) -> None:
         """§4.3.2 Table A2: a lost `COMMIT` on a compare-and-set.
 
@@ -1195,8 +1380,18 @@ class PostgresStateStore:
             return  # the commit landed
         if found.action_id == action_id and found.state in expected:
             _took(A2_REISSUE, effect_key)
+            # `restaged` travels with `retrying` for the reason the restage handler passes
+            # `retrying` on: a bound that another path clears is not a bound (SPEC-v0.7 §12.3a).
             self._transition(
-                effect_key, action_id, state, expected, result=result, error=error, retrying=True
+                effect_key,
+                action_id,
+                state,
+                expected,
+                result=result,
+                error=error,
+                retrying=True,
+                restaged=restaged,
+                carries_outcome=carries_outcome,
             )
             return
         _took(A2_REFUSE, effect_key)
@@ -1375,10 +1570,11 @@ class PostgresStateStore:
         self._commit(connection)
 
     def _answerable(self, connection: Any, approval_id: str, now: datetime) -> ApprovalRecord:
-        verdict = check_answerable(self._read_approval(connection, approval_id), approval_id, now)
+        found = self._read_approval(connection, approval_id)
+        verdict = check_answerable(found, approval_id, now)
         if verdict.refusal is not None:
-            if verdict.expire:
-                self._expire(approval_id)
+            if verdict.expire and found is not None:
+                self._expire(approval_id, found.status)
             raise verdict.refusal
         return _only(verdict.record, "approval record")
 

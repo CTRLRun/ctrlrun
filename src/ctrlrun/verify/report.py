@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
-from .guarantees import CATALOGUE, EFFECT_TEMPLATE_NOTE, GUARANTEES
+from .guarantees import CATALOGUE, EFFECT_KEY_SCOPE_NOTE, EFFECT_TEMPLATE_NOTE, GUARANTEES
 
 #: SPEC-v0.4 §4.2 — the schema of one `ctrlrun verify --json` document.
 REPORT_SCHEMA: Final = "ctrlrun.verify/v1"
@@ -261,6 +261,14 @@ class Report:
                 lines += _wrapped_note(str(note))
             if result.counterexample is not None:
                 lines += [f"     {line}" for line in result.counterexample.to_text().split("\n")]
+        if any(
+            result.id == "G14" and result.status in (Status.PASS, Status.FAIL)
+            for result in self.guarantees
+        ):
+            # SPEC-v0.7 §8.9. Beneath the table rather than under G14's own row, because it is
+            # not a reason for G14's status: it is the one thing a single-store run cannot check
+            # (§4.6), and a guarantee silent about that would read as having checked it.
+            lines += _wrapped_note(EFFECT_KEY_SCOPE_NOTE)
         lines.append("")
         lines.append(self.summary_line())
         return "\n".join(lines)
@@ -486,6 +494,7 @@ __all__ = [
     "BADGE_LABEL",
     "BADGE_PASS_COLOR",
     "CLASS_NAME",
+    "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
     "REPORT_SCHEMA",
     "SUITE_NAME",

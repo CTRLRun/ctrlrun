@@ -120,12 +120,12 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 12/12"
+          test "$AUTHORITY" = "verified 13/13"
           # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
           # to diverge from (SPEC-v0.7 §8.9). G16 is graded on both documents (§8.9).
           test "$AUTHORITY_NA" = "1"
           test "$TEMPLATES" = "verified 7/7"
-          test "$TEMPLATES_NA" = "6"
+          test "$TEMPLATES_NA" = "7"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml

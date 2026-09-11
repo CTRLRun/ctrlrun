@@ -1731,6 +1731,11 @@ class SQLiteStateStore:
         if renews:
             # Only a FAILED record is renewable (§5.4); the WHERE clause says so again, so a
             # record that changed under us refuses instead of overwriting an attempt.
+            #
+            # `AND attempt=?`, the attempt the plan renewed from, is SPEC-v0.7 §5.6's condition
+            # for Postgres, kept here for defence in depth and stated as what it is: BEGIN
+            # IMMEDIATE already holds the write lock across the read and this write, so the
+            # stale case cannot happen on this backend and removing the clause fails no test.
             updated = connection.execute(
                 # `resolved_by` is cleared with them, and its own line says why: a human
                 # resolving to FAILED is saying *"this may be retried"*, not committing the
@@ -1739,7 +1744,7 @@ class SQLiteStateStore:
                 # because the resolver used to live inside the `error` this UPDATE clears.
                 "UPDATE effects SET state=?, action_id=?, attempt=?, lease_expires_at=?, "
                 "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=? "
-                "WHERE effect_key=? AND state=?",
+                "WHERE effect_key=? AND state=? AND attempt=?",
                 (
                     str(record.state),
                     record.action_id,
@@ -1748,6 +1753,7 @@ class SQLiteStateStore:
                     _iso(now),
                     record.effect_key,
                     str(EffectState.FAILED),
+                    reservation.attempt - 1,
                 ),
             ).rowcount
             if updated != 1:

@@ -63,6 +63,16 @@ GUARANTEES: Final = (
         ),
     ),
     Guarantee(
+        "G14",
+        "token changes across a renewal",
+        (
+            "v0.1 §5.4",
+            "v0.7 §8 T232",
+            "v0.7 §8 T233",
+            "v0.7 §8 T238",
+        ),
+    ),
+    Guarantee(
         "G16",
         # Not "a moved precondition is refused": a precondition that moves after the comparison
         # is not refused (§6.7), and a title is the shortest sentence this project writes about
@@ -159,6 +169,17 @@ STORE_READS_APPLICATION_CLOCK: Final = (
     "to diverge from; pass --store-url postgresql://… to grade this"
 )
 
+#: G14's note, printed once beneath the table (SPEC-v0.7 §8.9, §4.6). Not an N/A reason and not
+#: a finding: the token is a function of `(effect_key, attempt)` and nothing else, so two stores
+#: that share a provider account derive one token wherever their effect-key strings coincide.
+#: Verify sees one store and cannot check it, and a guarantee that stayed silent about the one
+#: thing it cannot see would be read as having checked it.
+EFFECT_KEY_SCOPE_NOTE: Final = (
+    "a token is unique only as far as your effect keys are: two stores sharing a provider "
+    "account must not produce the same effect-key string for different effects, and nothing "
+    "here can check that"
+)
+
 #: `--only` (§4.6).
 NOT_SELECTED: Final = "not selected"
 
@@ -170,6 +191,7 @@ __all__ = [
     "CANDIDATE_BOUND",
     "CATALOGUE",
     "CONTROL_FAILED",
+    "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
     "EVERY_ACTION_DENIED",
     "GRANT_ALREADY_EXPIRED",
