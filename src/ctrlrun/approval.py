@@ -8,17 +8,18 @@ owns the models, the reason vocabulary, and the two providers that ask a human.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
-from .action import Action
+from .action import Action, canonical_bytes
 from .errors import (
     ActionDenied,
     ApprovalMismatch,
@@ -93,6 +94,19 @@ class ApprovalRequest:
     #: which is a narrower window than the one §7.2 is about and is recorded by the receipt's
     #: own `policy_hash` either way.
     policy_hash: str | None = None
+    #: SPEC-v0.7 §6.2: the precondition fingerprint captured when this request was created, or
+    #: `None` where the call that created it named no provider. A hash and never the state it
+    #: was computed from (§6.10): `"sha256:"` over the canonical form of what the operator's
+    #: provider returned, under the `ctrlrun.precondition/v1` domain tag.
+    #:
+    #: Captured at request time for `policy_hash`'s reason (`v0.6 §7.1`): the store has no
+    #: provider, and giving `ctrlrun approve` one would make an unreachable resource a failure
+    #: of the command a human answers with. `Control.execute` rechecks it on the presenting
+    #: pass, strictly before the store call that consumes the approval, and refuses where the
+    #: two differ or where only one side has one. That recheck **narrows** the window between
+    #: the human's decision and the effect; a change landing after the comparison and before
+    #: the reservation is not refused (§6.7).
+    precondition_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -347,6 +361,45 @@ def policy_in_force(policy_hash: str | None) -> Iterator[None]:
         _POLICY_AT_REQUEST.reset(token)
 
 
+#: SPEC-v0.7 §6.2: the precondition fingerprint captured on the request pass, travelling to
+#: `build_request` exactly as `_POLICY_AT_REQUEST` does and for the same reason: the provider
+#: protocol takes an action and a ttl and nothing else.
+#:
+#: **The residual is `_POLICY_AT_REQUEST`'s, and here it is refused rather than read as "not
+#: recorded".** A third-party provider that builds its `ApprovalRequest` itself records no
+#: fingerprint, and the presenting pass, which names the provider, then meets an approval
+#: without one: `precondition_missing` (§6.4), never a skip.
+_PRECONDITION_AT_REQUEST: ContextVar[str | None] = ContextVar(
+    "ctrlrun_precondition_at_request", default=None
+)
+
+#: SPEC-v0.7 §6.2: the domain tag inside the fingerprint's canonical input, so a fingerprint
+#: can never equal another hash of the same mapping. Never a document on its own (§9.3).
+_PRECONDITION_SCHEMA: Final = "ctrlrun.precondition/v1"
+
+
+@contextmanager
+def _precondition_at_request(fingerprint: str | None) -> Iterator[None]:
+    """Record `fingerprint` on any request built inside this block (SPEC-v0.7 §6.2)."""
+    token = _PRECONDITION_AT_REQUEST.set(fingerprint)
+    try:
+        yield
+    finally:
+        _PRECONDITION_AT_REQUEST.reset(token)
+
+
+def _precondition_fingerprint(state: Mapping[str, Any]) -> str:
+    """`"sha256:" + hex(SHA-256(canonical_bytes({"schema": ..., "state": state})))` (§6.2).
+
+    Through `canonical_bytes` and nothing else, so the float rejection, the non-string-key
+    refusal and the lone-surrogate refusal are inherited rather than re-argued. Whatever it
+    raises is the caller's to turn into `precondition_unavailable`; this function decides
+    nothing about the action.
+    """
+    document = {"schema": _PRECONDITION_SCHEMA, "state": dict(state)}
+    return "sha256:" + hashlib.sha256(canonical_bytes(document)).hexdigest()
+
+
 def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequest:
     """Build a request for `action`, validating the ttl. Package-internal, not public API.
 
@@ -361,6 +414,7 @@ def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequ
         action_hash=action.action_hash,
         action=action,
         policy_hash=_POLICY_AT_REQUEST.get(),
+        precondition_fingerprint=_PRECONDITION_AT_REQUEST.get(),
         created_at=now,
         expires_at=now + ttl,
     )

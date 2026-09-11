@@ -63,6 +63,20 @@ GUARANTEES: Final = (
         ),
     ),
     Guarantee(
+        "G14",
+        "token changes across a renewal",
+        (
+            "v0.1 §5.4",
+            "v0.7 §8 T232",
+            "v0.7 §8 T233",
+            "v0.7 §8 T238",
+        ),
+    ),
+    # SPEC-v0.7 §9.4 — **in id order**, because `BY_ID`'s insertion order is the report's order.
+    # Items 3, 4 and 5 each appended after G13 on their own branch, so a textual merge would have
+    # produced G13/G15/G14/G16 or a conflict; this is the conflict, resolved the way the
+    # catalogue reads.
+    Guarantee(
         "G15",
         # Exactly `report._TITLE_WIDTH`. A longer title is the one thing that breaks the CLI
         # table's alignment, and "a renewal past the operator's ceiling is refused" was 48.
@@ -75,6 +89,15 @@ GUARANTEES: Final = (
             "v0.7 §8 T245",
             "v0.7 §8 T245b",
         ),
+    ),
+    Guarantee(
+        "G16",
+        # Not "a moved precondition is refused": a precondition that moves after the comparison
+        # is not refused (§6.7), and a title is the shortest sentence this project writes about
+        # a guarantee. What is compared is the fingerprint, and what G16 grades is one that had
+        # already moved when the recheck read it.
+        "a moved fingerprint is refused",
+        ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
     ),
 )
 
@@ -133,6 +156,15 @@ GRANT_RESOURCE_NOTE: Final = (
 )
 NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 
+#: SPEC-v0.7 §8.9, G16's note, printed once beneath the table as `EFFECT_TEMPLATE_NOTE` is. G16
+#: is graded against verify's own stand-in for the operator's provider, because a provider is
+#: named in code and not in any document verify reads; this says so where a reader looks.
+PRECONDITION_NOTE: Final = (
+    "verify supplies its own precondition provider; whether your @protect declares one is in "
+    "your code, which verify does not read. The gateway and the ACS hook cannot name a "
+    "provider at all, and refuse an approval that carries a fingerprint"
+)
+
 #: G4's second N/A (§2.2). No backend in v0.4 reaches it — `SQLiteStateStore` refuses
 #: `:memory:` precisely so that it cannot — and the row exists so a v0.6 backend that cannot
 #: make the guarantee reports N/A rather than a green it did not earn.
@@ -184,6 +216,17 @@ CEILING_FORBIDS_RENEWAL: Final = (
     "approve under a grant that covers it) declares max_attempts: 1, so no renewal can happen"
 )
 
+#: G14's note, printed once beneath the table (SPEC-v0.7 §8.9, §4.6). Not an N/A reason and not
+#: a finding: the token is a function of `(effect_key, attempt)` and nothing else, so two stores
+#: that share a provider account derive one token wherever their effect-key strings coincide.
+#: Verify sees one store and cannot check it, and a guarantee that stayed silent about the one
+#: thing it cannot see would be read as having checked it.
+EFFECT_KEY_SCOPE_NOTE: Final = (
+    "a token is unique only as far as your effect keys are: two stores sharing a provider "
+    "account must not produce the same effect-key string for different effects, and nothing "
+    "here can check that"
+)
+
 #: `--only` (§4.6).
 NOT_SELECTED: Final = "not selected"
 
@@ -198,6 +241,7 @@ __all__ = [
     "CEILING_BOUND",
     "CEILING_FORBIDS_RENEWAL",
     "CONTROL_FAILED",
+    "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
     "EVERY_ACTION_DENIED",
     "GRANT_ALREADY_EXPIRED",

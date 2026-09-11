@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
-from .guarantees import CATALOGUE, EFFECT_TEMPLATE_NOTE, GUARANTEES
+from .guarantees import CATALOGUE, EFFECT_KEY_SCOPE_NOTE, EFFECT_TEMPLATE_NOTE, GUARANTEES
 
 #: SPEC-v0.4 §4.2 — the schema of one `ctrlrun verify --json` document.
 REPORT_SCHEMA: Final = "ctrlrun.verify/v1"
@@ -244,19 +244,31 @@ class Report:
             f"store      {self.store['backend']}, scratch (created and destroyed for this run)"
         )
         lines.append("")
-        noted = False
+        noted: set[str] = set()
         for result in self.guarantees:
             lines.append(_result_line(result))
             note = result.detail.get("note")
-            if note and not noted:
+            if note and str(note) not in noted:
                 # §4.1's example prints the `@protect` sentence once, under the first
                 # guarantee the missing template takes out. Every one of them carries it in
                 # `detail.note` (T102); repeating it on three consecutive lines would push
                 # the rows that differ off the reader's screen.
-                noted = True
+                #
+                # **Once per note, not once per report** (SPEC-v0.7 §8.9): G16's note is a
+                # different sentence, and a report that printed only the first note it met
+                # would drop G16's on every document that also lacks an `effect:` template.
+                noted.add(str(note))
                 lines += _wrapped_note(str(note))
             if result.counterexample is not None:
                 lines += [f"     {line}" for line in result.counterexample.to_text().split("\n")]
+        if any(
+            result.id == "G14" and result.status in (Status.PASS, Status.FAIL)
+            for result in self.guarantees
+        ):
+            # SPEC-v0.7 §8.9. Beneath the table rather than under G14's own row, because it is
+            # not a reason for G14's status: it is the one thing a single-store run cannot check
+            # (§4.6), and a guarantee silent about that would read as having checked it.
+            lines += _wrapped_note(EFFECT_KEY_SCOPE_NOTE)
         lines.append("")
         lines.append(self.summary_line())
         return "\n".join(lines)
@@ -482,6 +494,7 @@ __all__ = [
     "BADGE_LABEL",
     "BADGE_PASS_COLOR",
     "CLASS_NAME",
+    "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
     "REPORT_SCHEMA",
     "SUITE_NAME",

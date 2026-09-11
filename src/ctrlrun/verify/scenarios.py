@@ -51,12 +51,19 @@ from ..authority import (
     Subject,
     contained_dimension,
 )
-from ..control import Control, context, protect
-from ..effect import EffectRecord, EffectState, resolve_effect_key, resolve_resource
+from ..control import Control, context, idempotency_token, protect
+from ..effect import (
+    EffectRecord,
+    EffectState,
+    idempotency_token_for,
+    resolve_effect_key,
+    resolve_resource,
+)
 from ..errors import (
     ActionDenied,
     AmbiguousEffect,
     ApprovalMismatch,
+    ApprovalRequired,
     AuthorityDenied,
     AuthorityEscalation,
     CTRLRunError,
@@ -861,13 +868,14 @@ class Engine:
         executor: _Executor,
         effect_key: str | None,
         approval_id: str | None,
+        preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         if approval_id is None:
-            return control.execute(action, executor, effect_key)
+            return control.execute(action, executor, effect_key, preconditions=preconditions)
         from ..control import with_approval
 
         with with_approval(approval_id):
-            return control.execute(action, executor, effect_key)
+            return control.execute(action, executor, effect_key, preconditions=preconditions)
 
     def refused(
         self,
@@ -2335,6 +2343,129 @@ class Engine:
             for store in opened:
                 store.close()
 
+    # --- G14: the provider token changes across a renewal ---------------------------------
+
+    def g14(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. As G5, it needs one action with an `effect:` template.
+
+        The observable is the renewal: attempt 1's executor reads the token and reports that
+        nothing happened, attempt 2's reads it and commits, the two differ, and each is the
+        derivation from its own receipt's `effect_key` and `attempt`. That last clause is what a
+        kernel returning a fresh random string on every read would fail.
+
+        The control runs **first**, and catches the two kernels the observable cannot: one whose
+        answer moves within a single attempt, and one that sets the context variable and never
+        resets it. The second would pass the observable, because every executor would still read
+        its own attempt's value; it fails where a caller outside any attempt is handed the last
+        attempt's token.
+        """
+        # SPEC-v0.7 §8.9 — as G5, and for the identical reason: G14's observable **is** a
+        # renewal, so under `max_attempts: 1` a correct kernel refuses attempt 2 and G14 would
+        # report it as a `fail`. Item 4 built the filter and the precedence; this reuses both
+        # unchanged rather than growing a second copy.
+        selection = self.select(needs_effect=True, needs_renewal=True)
+        if selection is None:
+            reason, detail = self._renewal_unselected(reg.NO_EFFECT_TEMPLATE)
+            return self.na("G14", reason, **detail)
+        control, store, recorder, _ = self._control_for("G14", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            key = str(selection.effect_key)
+            failed_attempt: list[str] = []
+
+            def read_twice_then_report_nothing() -> Any:
+                failed_attempt.append(idempotency_token())
+                failed_attempt.append(idempotency_token())
+                raise NotExecuted("ctrlrun-verify: the remote did nothing")
+
+            first = selection.build()
+            with suppress(NotExecuted):
+                self.execute(
+                    control,
+                    first,
+                    _Executor(read_twice_then_report_nothing),
+                    key,
+                    self.approve(control, store, first, selection),
+                )
+            _expect_control(
+                len(failed_attempt) == 2 and failed_attempt[0] == failed_attempt[1],
+                "one attempt reads one token, however often it asks",
+                f"the executor read {failed_attempt!r}",
+            )
+            answered: list[object] = []
+            try:
+                answered.append(idempotency_token())
+            except InvalidArgument:
+                pass
+            except Exception as raised:
+                answered.append(raised)
+            _expect_control(
+                not answered,
+                "the accessor outside any executor raises InvalidArgument",
+                f"a caller outside every attempt was answered with {answered[0]!r}"
+                if answered
+                else "",
+            )
+            failed = store.get_effect(key)
+            _expect_control(
+                failed is not None and failed.state is EffectState.FAILED,
+                "an executor that raises NotExecuted leaves the record FAILED and renewable",
+                f"the record is {None if failed is None else failed.state}",
+            )
+
+            renewed: list[str] = []
+
+            def read_then_commit() -> Any:
+                renewed.append(idempotency_token())
+                return f"{APPROVER}-result"
+
+            retry = selection.build()
+            admitted = self.execute(
+                control,
+                retry,
+                _Executor(read_then_commit),
+                key,
+                self.approve(control, store, retry, selection),
+            )
+            _expect_control(
+                admitted.result is ReceiptResult.COMMITTED and len(renewed) == 1,
+                "the renewal after NotExecuted is admitted and executes",
+                f"it ended {admitted.result} after {len(renewed)} reads",
+            )
+            _expect(
+                failed_attempt[0] != renewed[0],
+                "the renewal carries a different token from the attempt that failed",
+                "both attempts were given the same token, which a provider would answer with "
+                "the cached failure of the first",
+            )
+            ran = sorted(
+                (
+                    receipt
+                    for receipt in store.receipts()
+                    if receipt.effect_key == key
+                    and receipt.result in (ReceiptResult.FAILED, ReceiptResult.COMMITTED)
+                ),
+                key=lambda receipt: receipt.attempt or 0,
+            )
+            derived = [
+                idempotency_token_for(str(receipt.effect_key), receipt.attempt or 0)
+                for receipt in ran
+            ]
+            _expect(
+                derived == [failed_attempt[0], renewed[0]],
+                "each attempt's token is the derivation from its own receipt",
+                f"the receipts of attempts {[receipt.attempt for receipt in ran]} re-derive "
+                f"{derived!r}, and the executors read "
+                f"{[failed_attempt[0], renewed[0]]!r}",
+            )
+            detail["attempts"] = [receipt.attempt for receipt in ran]
+            detail["summary"] = "attempt 1 and its renewal carry different tokens"
+
+        try:
+            return self.graded("G14", selection, store, recorder, body)
+        finally:
+            store.close()
+
     # --- G15: a renewal past the operator's ceiling is refused ----------------------------
 
     def g15(self) -> GuaranteeResult:
@@ -2503,6 +2634,112 @@ class Engine:
             return attempt()
         with with_approval(approval_id):
             return attempt()
+
+    # --- G16: a moved precondition is refused before the reservation ---------------------
+
+    def g16(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. The precondition recheck, against the kernel in this configuration,
+        with verify's own provider standing in for the operator's code.
+
+        **Graded as G5 and G10 are, and never `N/A` for want of a fingerprint in the document**:
+        a provider is named in code (`@protect(preconditions=...)`), not in any document verify
+        reads, so "the configuration names no fingerprint" is a sentence verify has no way to
+        make true. The note printed beneath the table says so. `N/A` only where no action reaches
+        `approve`, which is G1's reason and G1's one weakness, inherited and stated.
+
+        The approval still being `granted` after the refusal is what proves the refusal came
+        before the store call that consumes it; the missing `EFFECT_RESERVED` proves it came
+        before the reservation, where there is a key to reserve. The positive control is the
+        same approval presented once the provider reports the world the human saw again, which
+        must commit: without it, a kernel that refused every presentation would pass.
+
+        What this grades is the refusal of a change landing **before** the comparison. The
+        residual window after it, which the recheck narrows and does not close, is not a
+        property verify could grade: a correct kernel does not refuse it (§6.7).
+        """
+        selection = self.select(decisions=(Decision.APPROVE,))
+        if selection is None:
+            return self.na("G16", self.unselected(reg.NO_APPROVE_RULE), **self.unselected_detail())
+        control, store, recorder, _ = self._control_for("G16", selection)
+        seen = f"{reg.SYNTHETIC_PREFIX}-the-state-a-human-approved"
+        world = {"state": seen}
+
+        def provider(action: Action) -> Mapping[str, Any]:
+            return {"resource": world["state"]}
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["note"] = reg.PRECONDITION_NOTE
+            action = selection.build()
+            key = selection.effect_key
+            asked = self.refused(
+                lambda: self.execute(control, action, _Executor(), key, None, provider),
+                (ApprovalRequired,),
+                "ApprovalRequired on the request pass",
+                "an action that requires approval ran without one",
+            )
+            request_id = str(getattr(asked, "request_id", ""))
+            store.grant_approval(request_id, APPROVER)
+
+            world["state"] = f"{reg.SYNTHETIC_PREFIX}-the-state-it-moved-to"
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(control, action, executor, key, request_id, provider),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='precondition_changed') before the reservation",
+                "the approval opened the action in a world that moved after it was granted",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "precondition_changed",
+                "ApprovalMismatch(reason='precondition_changed')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            record = store.get_approval(request_id)
+            _expect(
+                record is not None and record.status is ApprovalStatus.GRANTED,
+                "the approval is still granted, so the refusal came before the store call "
+                "that consumes it",
+                f"the approval is {None if record is None else record.status}",
+            )
+            if key is not None:
+                reserved = [
+                    event
+                    for event in recorder.events
+                    if event.type is EventType.EFFECT_RESERVED and event.effect_key == key
+                ]
+                _expect(
+                    not reserved and store.get_effect(key) is None,
+                    f"nothing reserved {key!r}",
+                    f"{len(reserved)} EFFECT_RESERVED and a record in "
+                    f"{getattr(store.get_effect(key), 'state', None)}",
+                )
+            _expect(
+                _named_event(
+                    recorder, EventType.APPROVAL_INVALIDATED, reason="precondition_changed"
+                ),
+                "APPROVAL_INVALIDATED with reason 'precondition_changed'",
+                f"events were {recorder.types()}",
+            )
+
+            world["state"] = seen
+            committed = _Executor()
+            receipt = self.execute(control, action, committed, key, request_id, provider)
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same approval, presented once the world is the one the human saw, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G16", selection, store, recorder, body)
+        finally:
+            store.close()
 
 
 @dataclass(frozen=True)

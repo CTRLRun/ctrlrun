@@ -1522,6 +1522,39 @@ actions:
     )
 
 
+def test_T252_G14_reuses_the_same_selection_and_the_same_sentence(tmp_path):
+    """§8.9 amends G5 **and** G14 in the same way, because each one's control is a renewal.
+
+    Item 3 landed G14 on a branch of its own while this was being built, so the wiring happened
+    at the merge. One mechanism, not two: `select(needs_renewal=True)` and
+    `_renewal_unselected(...)`, and the sentence a reader sees is the same one.
+    """
+    from ctrlrun.verify import Status
+
+    capped = _verify(tmp_path, V5_CEILING_1_ONLY, only=("G5", "G14"))
+    for gid in ("G5", "G14"):
+        assert capped[gid].status is Status.NOT_APPLICABLE, (gid, capped[gid].reason)
+        assert capped[gid].reason == CEILING_FORBIDS_RENEWAL, gid
+
+    graded = _verify(tmp_path, V5_CEILING_3, only=("G5", "G14"))
+    for gid in ("G5", "G14"):
+        assert graded[gid].status is Status.PASS, (gid, graded[gid].reason)
+
+
+def test_T252_the_catalogue_is_in_id_order(tmp_path):
+    """`BY_ID`'s insertion order is the report's order (SPEC-v0.7 §9.4).
+
+    Items 3, 4 and 5 each appended after G13 on their own branch, so a textual merge yields
+    G13/G15/G14 as easily as a conflict, and nothing but this would notice: every count still
+    adds up and every id is still present, and the table simply prints out of order.
+    """
+    from ctrlrun.verify import guarantees as reg
+
+    numbers = [int(guarantee.id[1:]) for guarantee in reg.GUARANTEES]
+    assert numbers == sorted(numbers), [g.id for g in reg.GUARANTEES]
+    assert [int(gid[1:]) for gid in reg.BY_ID] == numbers
+
+
 def test_T252_the_catalogue_titles_fit_the_report_table(tmp_path):
     """A title wider than `report._TITLE_WIDTH` breaks the CLI table's alignment."""
     from ctrlrun.verify import guarantees as reg

@@ -32,15 +32,16 @@ any change to one appears here.
 - **The attempt ceiling, `max_attempts`** (SPEC-v0.7 §5, item 4, and the amendment to
   `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding the
   **attempts** that may execute on one effect key, the first included: `max_attempts: 3` is the
-  first attempt and two renewals. **An attempt, not an executor invocation**: a `Suspended`
-  executor holds its reservation and every `Control.resume` runs on that same attempt, so an
-  elicitation loop is one dispatch however many rounds it takes. The gateway bounds those with
-  `max_elicitation_rounds`; a direct `Control.resume` caller has no bound, and this adds none. It needs `schema: ctrlrun.policy/v5`, a new schema version that
+  first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version that
   is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and a
   mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
   is inside the policy hash, so a receipt records which one refused an attempt.
+  **An attempt, not an executor invocation**: a `Suspended` executor holds its reservation and
+  every `Control.resume` runs on that same attempt, so an elicitation loop is one dispatch however
+  many rounds it takes. The gateway bounds those with `max_elicitation_rounds`; a direct
+  `Control.resume` caller has no bound, and this adds none.
   **The decision is taken on the attempt number the store assigned**, after the reservation and
-  before the executor, because two callers that both read attempt *N−1* would both pass a read
+  before the executor, because two callers that both read attempt *N-1* would both pass a read
   taken before reserving. Above the ceiling the executor is not called, the record is released as
   `FAILED` with an error naming the ceiling, `EFFECT_RESERVATION_REFUSED` carries
   `reason: "attempt_ceiling"` with the attempt and the ceiling, a `blocked` receipt is written,
@@ -52,18 +53,107 @@ any change to one appears here.
   first**, so on an `APPROVE` action a human can be asked, and answer, for an attempt that is then
   refused: a wasted answer, never an execution, and `docs/SPEC-v0.7.md` §5.2 and §5.5 say so
   rather than closing it. In observe mode the refusal is recorded as `would_have.blocked_reason:
-  "attempt_ceiling"` and the action runs. Verify gains **G15**, and G5 now selects only an action
-  whose ceiling permits a renewal, reporting `N/A` where the ceiling is the only reason it cannot,
-  because G5's control *is* a renewal and `max_attempts: 1` would otherwise report a correct
-  kernel as a failure. No new error type, no new event type, no new `StateStore` method, no new
-  `Control` method, and no CLI change.
+  "attempt_ceiling"` and the action runs. Verify gains **G15**, and G5 and G14 now select only an
+  action whose ceiling permits a renewal, reporting `N/A` where the ceiling is the only reason
+  they cannot, because each one's control *is* a renewal and `max_attempts: 1` would otherwise
+  report a correct kernel as a failure. No new error type, no new event type, no new `StateStore`
+  method, no new `Control` method, and no CLI change.
+- **The provider idempotency token** (SPEC-v0.7 §4, item 3). `ctrlrun.idempotency_token()`, a new
+  zero-argument accessor re-exported at package import, answers inside an executor with the token
+  of the attempt it is running: `ctrlrun.effect.idempotency_token_for(effect_key, attempt)`, a
+  SHA-256 over the canonical form of `(effect_key, attempt)` under the domain tag
+  `ctrlrun.idempotency/v1`, rendered as a 36-character UUID of version 8. Send it to a provider as
+  its idempotency key. **Derived from the attempt and not from the effect key alone**: the effect
+  key is stable across `SPEC-v0.1.md` §5.4's renewal, so a provider given it would answer the one
+  retry the kernel permits, permitted *because the executor proved nothing happened*, with the
+  cached failure of the attempt that failed. It is stable within one attempt, including across a
+  `Control.resume` of a suspended one, and different after a renewal. **What it is for is
+  reconciliation**: a deterministic handle to ask a provider what became of an attempt whose
+  outcome is unknown, by a key the provider already indexes. It does not make a retry safe, and
+  after an `AMBIGUOUS` outcome the kernel still refuses one. Nothing is stored: the token is a pure
+  function of two fields every receipt of an attempt that ran already carries, so a receipt
+  re-derives it and a `reconcile` hook reads the attempt off the record. The executor signature is
+  unchanged, and an executor that never calls the accessor runs exactly as it did at 0.6.1. Outside
+  an executor, for an action with no effect key, for an observe-mode attempt whose reservation was
+  refused, and on a thread started without a copy of the executor's context, it raises
+  `InvalidArgument`. Verify gains G14, with a note beneath the table: a token is unique only as far
+  as the operator's effect keys are, and a kernel that sees one store cannot check that two stores
+  sharing a provider account never produce one effect-key string for two different effects.
+- **Precondition fingerprints** (`docs/SPEC-v0.7.md` §6, §7). `@protect(..., preconditions=provider)`
+  and `Control.execute(..., preconditions=provider)`, where the provider takes the `Action` and
+  returns a mapping of the state an approval depends on. A precondition fingerprint **narrows**
+  the window between a human's approval and the action's execution; it does not close it.
+  Under `APPROVE` the provider is called when the approval is requested, and the result is kept only
+  as a `sha256:` fingerprint on the request (`ApprovalRequest.precondition_fingerprint`, stored in the
+  new `approvals.precondition_fingerprint` column). On the presenting pass it is called again,
+  strictly before the store call that consumes the approval, and the action is refused with
+  `ApprovalMismatch` and a reason of its own: `precondition_changed` where the two fingerprints
+  differ, `precondition_missing` where only one side has one (a store that lost the column, or the
+  gateway and the ACS hook, which name no provider), and `precondition_unavailable` where the
+  provider raises or returns something that is not a canonicalizable mapping. Every refusal reserves
+  nothing and leaves the approval granted. On the request pass a provider that fails refuses the
+  action with `ActionDenied(reason="precondition_unavailable")` before any human is asked, and a
+  fingerprint that is computed and then **not recorded** (a store without the column, a third-party
+  `ApprovalProvider` building its own request) refuses with
+  `ActionDenied(reason="precondition_missing")` and **withdraws the request it left behind** where
+  this call can reach it: denied while it is pending, spent where a grant landed inside the window,
+  and `not_withdrawn:<status>` in the evidence where neither write was possible (the provider raised
+  after recording, or the store refused). §6.4 states that bound and its residual. **A withdrawal is
+  a `deny_approval`**, so `find_denied_request` returns it and the gateway's "no is an answer"
+  pre-check refuses every call for that action hash until the request expires, as though a human had
+  said no: fail-closed, bounded by the TTL, and traceable through the approver
+  `ctrlrun:precondition-not-recorded`. `ALLOW`, `DENY` and `Control.resume` never call the provider;
+  observe mode compares, records and runs.
+  The comparison is a network call, so it runs outside the atomic reservation write, and a change
+  that lands after the comparison and before the reservation is not refused: T261b opens that
+  window and asserts exactly that. Raw provider output reaches no receipt, event, log line or
+  table, and a provider's exception is recorded by its type name only. No `skip_preconditions`,
+  and no timeout parameter: a provider that hangs holds the call and reserves nothing.
+- **Migration `0005_precondition_fingerprint`** adds `approvals.precondition_fingerprint`, `NULL` on
+  every existing row, on SQLite and Postgres. A database built by 0.6.1's own code migrates keeping
+  every row, and 0.6.1 refuses the migrated database at open naming `0005`. **Stop every 0.6 process
+  before any 0.7 process opens the store**: a store checks migrations only at open, so a 0.6.1
+  process already running would consume a fingerprinted approval with no comparison, *and* would
+  rehash every `v4` receipt under `v3`'s keys and report a correct chain as altered. The trigger is
+  the first receipt a 0.7 process writes, not the first caller that passes `preconditions=`, and
+  nothing in the new process can see the old one.
+- **G16 in `ctrlrun verify`**, "a moved fingerprint is refused" before the reservation, under
+  `ctrlrun.guarantees/v3`. Verify supplies its own provider, because a provider is named in code
+  that verify does not read, and the report says so beneath the table; `not applicable` only where
+  no action requires approval. The store conformance suite gains a `precondition-fingerprint` case
+  and a broken-store fixture that fails it by name.
+
 
 ### Changed
+
 
 - **An action entry may declare `max_attempts`, and a renewal over `FAILED` can now be bounded.**
   This is stricter than 0.6.1 only where an operator asks for it: an action that declares no
   `max_attempts` renews without bound, exactly as before, and every document that loaded at 0.6.1
   loads unchanged. There is no default ceiling, and no value of the key means "unlimited".
+
+- **`ctrlrun.receipt/v4`**, with `precondition_at_request` and `precondition_at_recheck`, and the
+  first receipt-schema bump that does not report older receipts as altered. A receipt read from a
+  store is now hashed as the document it was read from (`docs/SPEC-v0.7.md` §6.11, amending
+  `SPEC-v0.6.md` §6.4's last bullet), so every `v3` receipt a released 0.6 wrote still rehashes to its
+  stored hash and a chain spanning `v3` and `v4` verifies end to end. A key added to a stored
+  receipt, a relabelled `schema`, a removed one or an unknown one is `content_altered` at its `seq`,
+  and no longer something a reader could miss. **Visible**: `to_dict()`, `ctrlrun receipts --json`
+  and `ctrlrun inspect` render each receipt under its own schema, so a pre-v0.6 receipt shows its
+  own `v1` or `v2` label and keys where 0.6.1 showed `v3`. Upgrade every reader before any writer:
+  a `v4` JSONL line handed to 0.6.1 rehashes wrongly.
+- **`ctrlrun verify` prints each distinct note once**, where it printed only the first note in the
+  report, which would have dropped G16's beneath G3's. CI's `verify` job expects `verified 13/13`
+  with two not applicable, and `verified 7/7` with eight, measured from a run of the merged
+  catalogue rather than carried over from either branch.
+- **A receipt chain reader no longer stops at a row it cannot hash.** A stored document holding a
+  value with no canonical form (a float, a lone surrogate) made `verify_chain` raise, so one
+  tampered row ended the walk: `ctrlrun receipts --verify-chain` exited with no report and a forged
+  field at another `seq` went unnamed. Such a row is `content_altered` at its `seq`, named by the
+  refusal's type and never its message.
+- **`APPROVAL_CONSUMED` carries what the presenting pass compared**, where a precondition was
+  compared, so a suspended action's resumed leg, whose receipt is the only one it gets, records the
+  comparison its first leg made.
 
 ### Fixed
 

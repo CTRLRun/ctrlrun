@@ -1330,6 +1330,7 @@ effect: the reservation is held, the provider hangs, and nobody knows whether to
 |---|---|
 | The call names a provider, and it returns a canonicalizable mapping | the request is created carrying the fingerprint; `ApprovalRequired` as today |
 | The provider raises, returns a non-mapping, or returns something the canonicalizer refuses | **refused before any request exists**: `ActionDenied(reason="precondition_unavailable")`, a `denied` receipt keeping `decision: approve`, `ACTION_DENIED` with the reason; no human is asked |
+| The fingerprint is computed and the store hands the request back without it | **refused**: `ActionDenied(reason="precondition_missing")`, and the request is **withdrawn** where this call can reach it, so no later presentation of it compares nothing (§6.4, and its residual); a `denied` receipt keeping `decision: approve` |
 
 Every refusal on the presenting pass appends `APPROVAL_INVALIDATED` with `data.reason` naming which, and
 the two fingerprints it compared, hashes only. The three reasons are distinct because a mismatch and an
@@ -1376,6 +1377,48 @@ that can.
 Both refusals share `precondition_missing`, and are told apart by the event's two fields, one of which
 is null.
 
+**And a fingerprint that is computed and then not recorded is refused on the request pass, with the
+request withdrawn.** Refusing only at presentation was not enough, and an independent review showed
+why: where the fingerprint never reaches the record, *neither* side has one at presentation, which is
+the first row of §6.2's table, so any call naming no provider consumed the approval with nothing
+compared. That is the skip this section forbids, reached through the very causes it lists. So the
+request pass reads its own request back, through the object the provider returned **and** through
+`get_approval`, and where the fingerprint is not there:
+
+- the action is refused, `ActionDenied(reason="precondition_missing")`, before any human answers;
+- the request the provider already recorded is **withdrawn**, through `deny_approval`, an existing
+  store method (`v0.6 §9.2` is not amended): `check_consumable` then refuses it for ever, by a
+  denial's own reason. A grant that landed inside the window is withdrawn by being **spent** instead,
+  `consume_approval` on an approval nothing reserved for and nothing ran on, because `deny_approval`
+  answers only a pending request;
+- `APPROVAL_INVALIDATED` records the reason, which of the two withdrawals was used, and the
+  fingerprint that was computed and not recorded.
+
+**The residual, stated, and it is wider than one race.** `Control` learns that a request exists only
+when the provider returns, so anything that happens to the row before that is beyond this refusal:
+
+- an approval granted **and presented** inside `request()` is spent before there is anything to
+  withdraw;
+- **a provider that records a request and then raises** leaves the same orphan with no race at all,
+  and `Control` never learns its id. The exception is the provider's and propagates; the kernel logs
+  a warning naming the action and saying a fingerprint was computed, which is all it can do;
+- a store that refuses the withdrawal itself leaves the request answerable. The action is still
+  refused, with its receipt and its `ACTION_DENIED`, and `APPROVAL_INVALIDATED` says
+  `not_withdrawn:<status>` rather than claiming a write (§6.2's table, and the reason strings of §9.2).
+
+So the claim this section makes is bounded: **a request this call can reach is withdrawn, and the
+evidence names what was done to it.** Closing the rest needs a store call that records the request and
+its fingerprint together, and `StateStore` is frozen (`v0.6 §9.2`); §12.5 records the alternative that
+would remove the *cause* rather than close the window, and why v0.7 does not take it.
+
+**What a withdrawal looks like to everything that reads denials.** It is a `deny_approval`, so
+`find_denied_request` returns it and the gateway's *"no is an answer"* pre-check (`v0.2 §6.10`) refuses
+every call for that action hash until the request expires, as though a human had said no. That is
+fail-closed, bounded by the TTL and traceable through the approver
+(`ctrlrun:precondition-not-recorded`), and it exports an in-process misconfiguration to a path that
+never asked for a fingerprint, which is the cost of using an existing store method rather than adding
+one.
+
 **What that costs at the gateway and the ACS hook, stated with its bound.** Both present the newest
 granted approval for the action's hash and create a new request only when they find none
 (`server.py:709-725`, `acs.py:202-218`). Where the newest granted approval carries a fingerprint, every
@@ -1421,6 +1464,19 @@ Two reasons. **Every existing reason survives unchanged:** T2's `mismatch`, T4's
 is spent only where its answer can matter**, which is a courtesy to the resource it reads. Nothing is
 skipped by this: an approval `check_consumable` refuses is refused by the store as well, with nothing
 consumed.
+
+**The refusal is raised from this read, and nothing is written for it.** Two things follow, and an
+independent review found both wanting in the first build. The refusal is not left to the store call:
+a `pending` record a human grants between this read and that call would be consumed there with nothing
+compared, which is the skip §6.4 forbids, so the verdict this read found is the verdict that is raised.
+And **no write goes to the store on this path at all**, not even the lapse of an expired grant: whose
+clock decides expiry is `v0.1 §4.2 A3`'s question and the answer stays the **store's**. A `Control`
+whose clock runs ahead of its store's would otherwise send a grant the store still calls live to
+`consume_approval`, the store would spend it, and the row would say `consumed` while the events said
+expired and the receipt said blocked. The row keeps what the store gave it; `APPROVAL_EXPIRED` records
+the lapse this clock saw; nothing is reserved and nothing runs; and `check_consumable` refuses that
+grant at every later presentation, on whichever clock. Where no precondition is in play this read
+decides nothing, and the store call is 0.6.1's, on the store's clock, including its lapse write.
 
 ### 6.7 The residual window, stated
 
@@ -1485,8 +1541,10 @@ account states and PHI stay out of the evidence; only the fingerprint does. The 
 exists in memory for as long as it takes to canonicalize and hash it, and T260 searches every written row,
 every JSONL line and every captured log record for a sentinel value the provider returned.
 
-The fingerprint goes to three places, all of them hashes: `approvals.precondition_fingerprint`,
-`APPROVAL_INVALIDATED`'s data on a refusal, and the receipt's two fields (§6.11). It is not added to the
+The fingerprint goes to four places, all of them hashes: `approvals.precondition_fingerprint`,
+`APPROVAL_INVALIDATED`'s data on a refusal, `APPROVAL_CONSUMED`'s data where a comparison was made
+(§6.11, which is how a resumed leg records the comparison its first leg made), and the receipt's two
+fields. This enumeration exists to be complete, so a fifth place is a change to this paragraph. It is not added to the
 webhook document (`ctrlrun.approval_request/v1` is unchanged), to `ctrlrun inspect`, or to anything a
 human is shown to decide with: a hash tells a human nothing about the world they are approving, and the
 human reads the world in their own systems.
@@ -1496,7 +1554,11 @@ human reads the world in their own systems.
 **Two receipt fields**, `precondition_at_request` and `precondition_at_recheck`: the approval's stored
 fingerprint and the one computed on the presenting pass, `null` where there was none. On a refusal they
 say which side moved or was missing; on a committed action they are equal, and the receipt records that
-the world was checked. The schema becomes **`ctrlrun.receipt/v4`**, and it moves once, in item 5, which
+the world was checked. **A resumed leg's receipt says the same**, and that needs one more write: the leg
+that consumed the approval records what it compared on its `APPROVAL_CONSUMED` (hashes only, and nothing
+at all where nothing was compared), and `Control.resume` reads it back. A suspended action writes no
+receipt on its first leg, so the resumed leg's is the only receipt it ever gets, and without this the one
+comparison that did happen left no trace in it. The schema becomes **`ctrlrun.receipt/v4`**, and it moves once, in item 5, which
 is why item 5 is last.
 
 **One column**, through migration **`0005_precondition_fingerprint`**: `approvals.precondition_fingerprint
@@ -1539,6 +1601,13 @@ document and report every receipt a released 0.6 wrote as `content_altered`. So,
     branch**, so the hash written to the column and the document written beside it come from one
     dictionary, and the read-time hash of that document is the write-time hash.
 
+  **A store outside this package does not get this**, and saying so here is better than leaving an
+  implementer to find it: the field is private, `_stored_receipt` is its only writer, and §9.2 adds no
+  public name for either. A third-party store's read-back receipts are hashed from `to_dict()`, as at
+  0.6.1: an untouched `v3` or `v4` row still verifies, and a key added to one of its stored documents
+  does not show. Whether that setter should be public is the maintainer's to decide on its own merits,
+  not this item's to settle by adding a name.
+
   Nothing else is affected: no other reader calls `chain_hash()`. The in-memory store keeps the objects it
   was handed; the JSONL sink and the OTel sink receive `put_receipt`'s fresh return; `ctrlrun receipts`,
   the reporting payloads, the operator server's tools and verify's counterexample only display; a resumed
@@ -1554,7 +1623,23 @@ document and report every receipt a released 0.6 wrote as `content_altered`. So,
   the reader to get wrong. Without this, a row-writer could add `precondition_at_recheck` to a receipt
   0.6.1 wrote; a reader rendering it under `v3`'s keys would leave the key out of the hash, the chain would
   verify, and a reader that parsed it would show a fabricated field.
-- **`from_dict` never raises inside a store read, over the schema or over a key.** `receipts()` builds
+
+  **Including a key whose value has no canonical form.** A float or a lone surrogate made `chain_hash()`
+  raise out of the walk, so one such row stopped the whole read: `ctrlrun receipts --verify-chain` exited
+  with no report at all, and a forged field at another `seq` went unnamed. A document this reader cannot
+  canonicalize is a document nothing here wrote, since `put_receipt` hashes what it serializes, so it is
+  `content_altered` at its `seq` like any other altered document, named by the canonicalizer's exception
+  **type** and never its message, which quotes what it refused. The rows that link to it are told that it
+  has no computable hash. A malformed value of a key a schema *declares*, a float among `controls` say, is
+  a document that cannot be parsed at all and behaves as it does at 0.6.1, which the next bullet covers.
+- **`from_dict` never raises inside a store read over the *schema* or over an added *key*. Over a
+malformed **value** of a key a schema declares, it still does, exactly as at 0.6.1**, and that is
+stated rather than smoothed over: a float among `controls` makes `_controls_of` raise out of
+`receipts()`, so one `UPDATE` blinds `ctrlrun receipts`, `--verify-chain`, `inspect`, `stats` and G11
+at once. v0.7 neither introduces nor widens it, and fixing it needs either a new name in
+`CHAIN_BREAKS` -- a closed set and a `v0.6 §6.5` surface -- or a reader that can walk raw rows, which
+is a shape this milestone does not have. It is deferred with that blast radius written down, and §12.5
+records it for the roadmap. `receipts()` builds
   every row with `Receipt.from_json` (`state.py:1211`), so a `from_dict` that raised on one tampered row
   would raise out of `receipts()` and blind every reader at once: the chain walk, `ctrlrun receipts`,
   `inspect`, `stats` and G11. An absent or unknown `schema`, or an extra key, is left to the hash to
@@ -1587,13 +1672,18 @@ means an added key is neither parsed nor rendered, so the recomputed hash matche
 anything, unless `Receipt` carried a marker saying "this document had extra keys", which would be a public
 name added to a frozen record for a check the stored document makes for free.
 
-**No 0.6 process may be running when any caller uses `preconditions=`.** A store checks migrations
-only at open (`postgres.py:259`), so a 0.6.1 process already running when `0005` is applied keeps
-running against the migrated database: it reads approvals through columns it knows, never sees the
-fingerprint, and consumes a fingerprinted approval with no recheck. The kernel cannot detect that
-process from the new one, so the rule is operational and stated as one, here and in the upgrade notes
-item 6 writes: **stop every 0.6 process before the first caller passes `preconditions=`**. Until then an
-approval carries no fingerprint, and a 0.6 process consuming one loses nothing a 0.6.1 deployment had.
+**No 0.6 process may be running when a 0.7 process opens the store.** A store checks migrations only at
+open (`postgres.py:259`), so a 0.6.1 process already running when `0005` is applied keeps running
+against the migrated database, and it meets the schema bump in two ways. It reads approvals through the
+columns it knows, never sees the fingerprint, and consumes a fingerprinted approval with no recheck.
+And it rehashes every `v4` receipt a 0.7 process writes under `v3`'s keys, so `verify_chain` in that
+process reports a correct chain as `content_altered` and its head as mismatched.
+
+**The trigger is the first receipt a 0.7 process writes, not the first caller that passes
+`preconditions=`**, and an independent review measured it: a 0.6.1 reader held open across the
+migration misreports a chain written by a 0.7 process that named no provider at all. The kernel cannot
+detect that process from the new one, so the rule is operational and stated as one, here and in the
+upgrade notes item 6 writes: **stop every 0.6 process before any 0.7 process opens the store.**
 
 **Every reader upgrades before any writer switches** (`v0.3 §12.2`). The chain walk, `ctrlrun receipts
 --verify-chain` and `ctrlrun verify` read `v3` and `v4`, and **a chain spanning both verifies end to end**
@@ -2401,7 +2491,7 @@ BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"   # joins BLOCKED_BY_STATE
 |---|---|---|
 | `ActionDenied.reason`, `EFFECT_RESERVATION_REFUSED.data.reason` | `attempt_ceiling` | §5.5 |
 | `ApprovalMismatch.reason`, `APPROVAL_INVALIDATED.data.reason` | `precondition_changed`, `precondition_missing`, `precondition_unavailable` | §6.2 |
-| `ActionDenied.reason` (request pass) | `precondition_unavailable` | §6.2 |
+| `ActionDenied.reason` (request pass) | `precondition_unavailable`, `precondition_missing` | §6.2, §6.4 |
 | `would_have.blocked_reason` | `attempt_ceiling` | §5.5 |
 
 The two `preconditions=` keywords and `clock_skew_threshold=` are keywords on existing callables, not new
@@ -2513,6 +2603,9 @@ own, and none of them is configurable.
 | A stored receipt document with an added key, a changed or removed `schema`, or an unknown one | A hash mismatch: `content_altered` at its `seq`. `receipts()` does not raise, and no reader surfaces an undeclared key (§6.11) |
 | A presented approval whose fingerprint differs from the recheck | `ApprovalMismatch(reason="precondition_changed")`; nothing reserved; approval `granted` (§6.3) |
 | A fingerprint on one side only | `ApprovalMismatch(reason="precondition_missing")`; never a skip (§6.4) |
+| A fingerprint computed on the request pass and not recorded on the request | `ActionDenied(reason="precondition_missing")`; the request is withdrawn, denied where it is still pending and spent where it was granted inside the window; no human is asked to answer it (§6.4) |
+| An approval the read finds unusable where a precondition is in play | The refusal that read found, raised by `Control`, with **nothing written to the store**; expiry stays the store's to decide and to record (§6.6) |
+| A stored receipt document whose value has no canonical form | `content_altered` at its `seq`, named by the refusal's type; the walk continues and every other break is still reported (§6.11) |
 | The provider raises, returns a non-mapping, or returns what `canonical_bytes` refuses | Presenting pass: `ApprovalMismatch(reason="precondition_unavailable")`, nothing reserved. Request pass: `ActionDenied(reason="precondition_unavailable")`, no request created (§6.5) |
 | An 0.6 binary opening a database migrated by 0.7 | `SchemaMismatch` at open, naming `0005` and both versions (§6.11) |
 
@@ -2926,6 +3019,73 @@ prepares it, and `statement_of`'s docstring says so.
 
 ### 12.3 Item 3: the idempotency token
 
+**The derivation is §4.2's, byte for byte, and the three worked values are the code's.**
+`idempotency_token_for("refund:txn_1", 1)` is `382ee448-97da-8107-b674-8c253650d93f`, attempt 2 is
+`28bb40af-814c-8fb6-ba63-e8663b1c036d` and `refund:txn_2` at attempt 1 is
+`89977bc9-d128-8ae8-871f-f5265155e60f`. T235 pins the first as a literal and the other two beside
+it, so a change to the domain tag, the truncation, the version nibble or the canonical form is a
+red test rather than a silent change of every token a deployment has ever sent.
+
+**The domain tag is a module constant, `effect.IDEMPOTENCY_SCHEMA`, not a literal and not a private
+name.** Every schema string in this codebase is a public `Final` beside the code that stamps it, as
+`ACTION_SCHEMA`, `RECEIPT_SCHEMA` and `INSPECTION_SCHEMA` are, and none of them is in §9's frozen
+list either; item 1's `_CLOCK_SKEW_TRIGGERS` is private because it is a closed vocabulary a caller
+would otherwise be tempted to extend, which a schema tag is not.
+
+**The binding is a context manager around `executor()` and nothing else.** `_attempt_token` sets the
+variable where `held_key is not None` and resets it in a `finally`, so the value is gone whether the
+executor returned, raised, or suspended. `_outcome` is the single place `execute`, `_observed` and
+`resume` all reach, which is why a resumed leg reads the token of the attempt it resumes without a
+second binding site: `resume` passes `held.record.attempt`, unchanged (`control.py:992`), and T233
+asserts the number and the token together, so a change to either is visible.
+
+**`held_key`, not `effect_key`.** The two differ for an observe-mode attempt whose reservation was
+refused, where `effect_key` names the key and `held_key` is `None` because another attempt owns the
+record. Binding on `effect_key` would hand that executor attempt 1's token, which names the real
+holder's attempt, and it would do so on the one path where nothing can be written to say so. T236
+drives it, and the test beside it, an observe-mode attempt that *does* hold its key and is answered,
+is the control that keeps it from passing against a kernel that simply never answers in observe mode.
+
+**The context variable takes a default of `None` rather than being left unset.** `_CONTEXT` and
+`_PRESENTED_APPROVAL` are read with `.get(None)`; this one is read with `.get()` against a declared
+default, which is the same refusal and lets a test undo a deliberately leaking mutant without a
+reset token. The accessor refuses `None` and never guesses.
+
+**G14 runs its control first.** The two reads and the refusal outside any executor are asserted
+before the renewal, so a kernel whose answer moves within an attempt, and a kernel that sets the
+variable and never resets it, both report `control failed` rather than a violation of the
+observable, which is the distinction §1.3 draws. The leaking kernel is the sharper of the two: it
+passes the observable, because each executor still reads its own attempt's value.
+
+**The note beneath the table is not an N/A reason and not a finding.** §4.6's sentence is printed
+under the table whenever G14 is graded, once, from `EFFECT_KEY_SCOPE_NOTE`, rather than in G14's
+`detail.note`: `detail.note` is rendered under the guarantee's own row and only for the first
+result carrying one, so a run where an earlier N/A already printed a note would have swallowed it.
+A guarantee silent about the one thing a single-store run cannot check would read as having checked
+it.
+
+**No `reconcile` hook signature changed, and none needed to.** The hook is handed the effect key
+(`v0.2 §11`), and the attempt is on the record, so `idempotency_token_for(key,
+store.get_effect(key).attempt)` is the whole of what §4.5 asks for. Making the accessor answer inside
+a hook was rejected in §4.3 and nothing in the code argued for it: the blocking call really does run
+under a different attempt from the eager one.
+
+**Its catalogue title is *token changes across a renewal*,** thirty characters, because the report's
+title column is thirty-two and a longer one pushes every status on that row out of line. G13's entry
+made the same choice for the same reason.
+
+**The counts verify pins moved by one, as item 1's did.** G14 joins G3, G4 and G5 wherever the
+effect template lives in a `@protect` decorator verify does not read, so `V1_PAYMENTS` reports six
+over six with seven not applicable; the authority example reports twelve over twelve. The
+catalogue-size guard in T101 was the literal `"8/8"`, which is the real summary now that eight
+guarantees are applicable there, and it is computed from `len(GUARANTEES)` instead.
+
+**Item 3a is what makes this sound on Postgres, and it is not merged.** The token is unique per
+dispatch only where the attempt number is unique per key and the number `Control` is handed is the
+number the store wrote, and on Postgres neither holds until item 3a lands (§1.4 item 3, §4.4, §5.6).
+This item is built on `main` and cherry-picks nothing; T232 cannot see that defect and does not
+claim to.
+
 ### 12.4 Item 4: the attempt ceiling
 
 **The three equality gates became one ordering, and there is now a place to put the next one.** §5.3 named
@@ -2975,11 +3135,19 @@ finds something, and otherwise `unselected()`'s sentence, which is what keeps a 
 from being told its ceilings took the guarantee away. The same shape gives G15 `CEILING_ABOVE_BOUND` only where an
 action does declare a ceiling and every one is above 100.
 
-**G14 is not amended here, because it does not exist on this branch.** §8.9 says item 4 makes the change for both
-G5 and G14 "since item 3 lands G14 before `max_attempts` exists". Item 3 is a parallel lane and had not merged
-when this was built, so `verify/scenarios.py` has no `g14` to amend. The mechanism it needs is here and is the one
-G5 uses: `select(needs_effect=True, needs_renewal=True)` and `_renewal_unselected(...)` for the reason. Whichever
-of items 3 and 4 rebases second wires G14 to them, in two lines.
+**G14 was amended after the fact, because it did not exist when item 4 was built.** §8.9 says item 4 makes the
+change for both G5 and G14 "since item 3 lands G14 before `max_attempts` exists"; item 3 was a parallel lane and
+had not merged, so there was no `g14` to amend and the first commit wired only G5. The mechanism was built to be
+reused rather than copied, and when `main` arrived carrying items 3 and 5 it was: `g14` now selects with
+`needs_effect=True, needs_renewal=True` and reports through `_renewal_unselected(...)`, unchanged, in two lines.
+**Four merge points, not two**, and the two extra are the ones a textual merge gets wrong quietly. The catalogue
+tuple is the first: items 3, 4 and 5 each appended after G13, so `GUARANTEES` had to be reordered by hand to
+G13, G14, G15, G16, because `BY_ID`'s insertion order *is* the report's order and a report listing G15 before
+G14 would be the first one that did. The N/A reason constants and `__all__` come from both sides and both were
+kept. And `ci.yml`'s `AUTHORITY_NA` and `TEMPLATES_NA` were **measured from a run of the merged catalogue**
+rather than taken from either branch: 13/13 with 2 not applicable (G13, G15) and 7/7 with 8 (G3, G4, G5, G8, G9,
+G13, G14, G15). Taking either side's number would have been a green CI assertion about a catalogue that no
+longer existed.
 
 **The refusal's `ActionDenied` yields to the store's.** Where the record moved on between the reservation and the
 release, `begin_execution` or `fail_effect` refuses, and §5.7 says that refusal propagates after the `blocked`
@@ -3040,5 +3208,174 @@ and `Control.evaluate`'s docstring now says it does not see the ceiling. G15's t
 no title ever exceeds the width again.
 
 ### 12.5 Item 5: precondition fingerprints
+
+It narrows; the residual window of §6.7 is T261b's, and nothing written for this item says otherwise.
+
+**§6.6's read is where a refusal is raised from, and not only where it is found, and it writes
+nothing.** The first build read the record, skipped the provider on a refusal verdict, and let
+`_take` raise the store's own refusal. That had a hole: a `pending` approval a human grants between
+the read and the store call was then consumed with no comparison, which is a skip reached by timing.
+So where the read's verdict is a refusal and the precondition question is live (a provider is named,
+or the record carries a fingerprint), `Control` raises that verdict itself, from the same pure
+`check_consumable` every store applies, with the reason and message the store would give. T262's
+pending-race case opens that window with a grant that lands inside the read.
+
+**The first build made one exception, sending an expired grant to `consume_approval` so the lapse
+would be recorded as 0.6.1 records it, and the independent review measured what that costs.** With
+`Control`'s clock two minutes ahead of the store's and a minute of life left by the store's, the
+store consumed the grant: the row said `consumed`, the events said `APPROVAL_EXPIRED` and
+`APPROVAL_INVALIDATED` with no `APPROVAL_CONSUMED`, and the receipt said blocked. Safe, and untrue,
+and it quietly moved `v0.1 §4.2 A3`'s question of whose clock decides expiry from the store to
+`Control`. So this path now writes nothing at all: the row keeps the status the store gave it, the
+lapse this clock saw is in `APPROVAL_EXPIRED`, and `check_consumable` refuses the grant at every
+later presentation. Where neither side has a fingerprint the store call is 0.6.1's exactly, on the
+store's clock, including its lapse write, and the divergent-clock test pins that too.
+
+**The read runs on every presenting pass under `APPROVE`**, provider or not: only the record says
+whether an approval carries a fingerprint, and one that does, presented by a call naming no
+provider, is refused (§6.4). The cost is one `get_approval` per approved action.
+
+**`precondition_missing` on a call that names a provider fetches first**, so the event's
+`precondition_at_recheck` is set and §6.4's "one of which is null" holds for both cases. A provider
+that fails there is `precondition_unavailable`: the outage is what an operator fixes first.
+
+**What `error` holds**, in the event, the receipt's `error` and the log line alike: the provider's
+exception by type name; `returned <type>, not a mapping`; or the type name of what `canonical_bytes`
+raised, whose message can quote the value it refused. T260 plants a sentinel in a provider's
+exception message and finds it nowhere.
+
+**A fingerprint that is computed and not recorded is refused on the request pass, and the request is
+withdrawn.** The review's blocking finding: a store that drops the column and a third-party
+`ApprovalProvider` that builds its own `ApprovalRequest` both leave an approval requested with a
+fingerprint carrying none, and at presentation *neither* side has one, which is §6.2's first row and
+0.6.1's path. Every call naming no provider consumed it with nothing compared, which is exactly the
+skip §6.4 forbids. The request pass reads its own request back, through the returned object and
+through `get_approval`, and where the fingerprint is not there it refuses and withdraws the request
+with the store methods that exist: `deny_approval` while it is pending, `consume_approval` for a
+grant that landed inside the window. **The residual is in §6.4**: an approval granted *and presented*
+inside `request()` is spent before `Control` knows the request exists, and closing that needs a store
+call that records the request and its fingerprint together. `StateStore` is frozen (`v0.6 §9.2`), so
+that is a finding for the maintainer and not a method this item adds. The honest test names it.
+
+**A withdrawal reports what happened to the request, not what was read before trying.** The first
+build of it returned the status from the read *before* its own failed `consume_approval`, and said
+`consumed` whether it had spent the grant or another caller had. The review drove a presentation that
+won that race: it **ran the action**, and the evidence said the request had been withdrawn `granted`
+while the row said `consumed`. So the row is read back after a failed write and the answers are
+distinct -- `denied`, `spent`, `already_consumed`, `not_withdrawn:<status>` -- and the refusal calls
+itself a withdrawal only for the first two, which are this call's own writes.
+
+**Every exception in the withdrawal is caught, on `_spend_unneeded_approval`'s argument pointed the
+other way.** A `sqlite3.OperationalError` out of `deny_approval` used to leave `_presented` with no
+`ACTION_DENIED`, no receipt and an answerable unfingerprinted request. There, catching everything is
+safe because the action proceeds and there is nothing to protect; here it is safe because the action is
+refused whatever the store does, so a wider catch can only add a refusal and its evidence. No other
+handler in this file may widen on either argument without making it again.
+
+**The object-side half of the recorded check was subsumed, and is gone.** It compared the
+`ApprovalRequest` the provider returned as well as the record read back. A presentation reads the
+store, so a returned object that differs from the row changes nothing a later pass sees, and both
+reachable causes (a store without the column, a provider that builds its own request) are visible in
+the read-back. Collapsed rather than kept as documentation, which is what `CONTRIBUTING.md`'s first
+shape asks for.
+
+**Rejected for v0.7: making the fingerprint recordable by a third-party provider.** The reachable cause
+of §6.4's residual is as much the frozen `ApprovalProvider` protocol as `StateStore`'s method set:
+`build_request` is package-internal and the context variable it reads is private, so a provider outside
+this package cannot record a fingerprint however careful it is, and the kernel can only detect that
+afterwards. Publishing either would remove the cause rather than close the window, which is the better
+shape of fix. It is not taken here because it is a public name on a frozen surface (`v0.1 §8`,
+`v0.5 §9`) and because the case is **unreachable with all three shipped providers**, which build their
+requests through `build_request`; v0.7 refuses the reachable symptom instead, and the decision is
+recorded so a later milestone can weigh the name rather than rediscover the argument.
+
+**Deferred, with its blast radius: a malformed value of a key a schema declares.** `_controls_of`
+raises out of `from_dict`, so one `UPDATE` putting a float among a receipt's `controls` blinds
+`ctrlrun receipts`, `receipts --verify-chain`, `inspect`, `stats` and G11 together, where the
+schema-level and added-key cases are each reported at their `seq` and leave every other row readable.
+v0.7 neither introduces nor widens it: 0.6.1 behaves the same. Fixing it needs a new name in
+`CHAIN_BREAKS`, which is a closed set on a `v0.6 §6.5` surface, or a reader that walks raw rows, and
+neither belongs in an item about preconditions. Item 6 carries it to the roadmap as a named item before
+v1.0, with this paragraph as its statement.
+
+**A provider outage in observe mode costs the duplicate refusal too.** Observe mode records a failed
+comparison and runs holding nothing, which is 0.6.1's observe path for any approval mismatch, so
+while a provider is down every observed action under `APPROVE` with an effect key runs without
+reserving its key: two of them are two unreserved attempts, and neither `would_have.blocked_reason`
+says `duplicate`. Enforce mode refuses instead, so nothing is lost there.
+
+**Everything a provider hands back is inside one `try`.** `isinstance(state, Mapping)` sat outside
+it, and `isinstance` reads `__class__`: an object whose `__class__` raises carried its own message
+out of `Control` as a raw exception, with no refusal reason and no receipt.
+
+**`ctrlrun inspect` adds no field.** Its approval entries, the webhook document and the operator
+server's pending listing carry no fingerprint (§6.10); `inspect --json` embeds the receipt and the
+events, and those carry the fields §6.10 and §6.11 place there, as evidence rather than as the
+question put to a human.
+
+**The three reason strings are private constants in `control.py`.** §9.2 adds no public name for
+them and says so; every test asserts the string.
+
+**Observe mode records a failed comparison the way it records any presented approval that does not
+match**: `APPROVAL_INVALIDATED` with the reason and both fields, `would_have.blocked_reason =
+"approval_mismatch"`, and the action runs holding no reservation, which is 0.6.1's observe path for
+an approval mismatch. No grant is spent.
+
+**A resumed leg's receipt records the comparison its first leg made.** The first build left
+`precondition_at_recheck` null there, on the ground that this leg compares nothing, and the review
+found the consequence: the first leg of a suspended action writes no receipt, so the one comparison
+that happened left no trace anywhere and §6.11's *on a committed action they are equal* was false of
+every resumed leg. The leg that consumes the approval now records what it compared on its
+`APPROVAL_CONSUMED` (hashes only, and nothing at all where nothing was compared), and `resume` reads
+it back from that event. Where no such event exists, the record's own fingerprint fills
+`precondition_at_request` and the recheck field stays null, which is what a leg that compared
+nothing should say.
+
+**Rendering a label this binary does not know.** §6.11 fixes the four known schemas. An unknown
+label renders under `v3`'s keys with its own label; an absent one renders with no `schema` key. The
+two `v4` fields are rendered only for a `v4` label, since they are read only from a `v4` document.
+A `v1` receipt's principal renders as `v1` wrote it, `agent` and `user` only.
+
+**`put_receipt` writes `v4` whatever schema the receipt was read under.** A `v1` or `v2` key set has
+no `seq`, so a read-back receipt written again under its own label would carry no position in its own
+document. A receipt written again is a new row this binary writes.
+
+**The stored document is excluded from equality**, and the store conformance suite's field-by-field
+comparison skips fields excluded from equality, because the receipt read back has a stored document
+and the one written has none by design.
+
+**A stored row whose document has no canonical form is `content_altered`, not a raised walk.** The
+first build let the canonicalizer's refusal out of `verify_chain`, and the review showed what that
+costs: an added key holding a float or a lone surrogate ended the walk, `ctrlrun receipts
+--verify-chain` exited with no report at all, and a forged `decision_reason` at another `seq` went
+unnamed. The claim that 0.6.1 behaved the same was false for an added key, which 0.6.1 ignored when
+hashing. `put_receipt` hashes what it serializes, so a stored document this reader cannot
+canonicalize is one nothing here wrote: it is reported at its `seq`, by the refusal's type and never
+its message, and the rows that link to it are told it has no computable hash. A malformed value of a
+key a schema declares, a float among `controls` say, still raises out of `from_dict` as it did at
+0.6.1, and that case is the one §6.11's last bullet already covers.
+
+**`ApprovalRequest` does not validate the fingerprint's shape.** A malformed stored value compares
+unequal and is refused `precondition_changed`; validating at construction would make a tampered row
+raise out of `get_approval` and blind every reader of that approval.
+
+**G16's title is "a moved fingerprint is refused".** "A moved precondition is refused" is
+unqualified and §6.7 says why: a precondition that moves after the comparison is not refused. A title
+is the shortest sentence this project writes about a guarantee, so the titles are scanned by T268
+with everything else this item writes.
+
+**`PRECONDITION_NOTE` is not a public name.** It went into `verify.guarantees.__all__` and not into
+§9.2, and §9.2 is the list of what v0.7 adds; `scenarios.py` reads it as an attribute, as it reads
+every other reason in that module.
+
+**Verify prints each distinct note once**, where it printed only the first. G16's note is a
+different sentence from G3's, and the first rule dropped it on every document that also lacked an
+`effect:` template.
+
+**G16 grades a change before the comparison.** A change after it is not refused by a correct kernel,
+so there is nothing there for verify to grade; T261b is where that residual is kept honest.
+
+**CI's `verify` job now expects `verified 12/12` and `verified 7/7`.** Item 1's G13 moves both again,
+and whichever lands second rebases the two lines.
 
 ### 12.6 Item 6: the release
