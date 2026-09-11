@@ -62,6 +62,18 @@ GUARANTEES: Final = (
             "v0.7 §8 T213",
         ),
     ),
+    Guarantee(
+        "G15",
+        "a renewal past the operator's ceiling is refused",
+        (
+            "v0.1 §5.4",
+            "v0.7 §8 T240",
+            "v0.7 §8 T241",
+            "v0.7 §8 T242",
+            "v0.7 §8 T245",
+            "v0.7 §8 T245b",
+        ),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -141,6 +153,27 @@ STORE_READS_APPLICATION_CLOCK: Final = (
     "to diverge from; pass --store-url postgresql://… to grade this"
 )
 
+#: SPEC-v0.7 §8.9 — G15's two N/A reasons, and the bound behind the second. Every loop verify
+#: runs is bounded (`v0.4 §3.6`), so a ceiling above what verify will drive is a statement about
+#: the document *and* about verify's stated bound, on the precedent of `GRANT_ALREADY_EXPIRED`.
+NO_CEILING_DECLARED: Final = (
+    "no action verify can drive to allow or approve declares both `effect:` and `max_attempts`"
+)
+CEILING_BOUND: Final = 100
+CEILING_ABOVE_BOUND: Final = (
+    f"every declared max_attempts is above verify's bound of {CEILING_BOUND} attempts"
+)
+
+#: SPEC-v0.7 §8.9 — the reason G5 (and G14, when item 3 lands it) reports where the operator's
+#: ceiling is the *only* thing that makes a renewal unselectable. Printed only where selecting
+#: again without the ceiling filter does find something; otherwise `unselected()`'s reason wins,
+#: because a document whose uncapped action is deny-only or ungranted is not a document whose
+#: ceilings took the guarantee away.
+CEILING_FORBIDS_RENEWAL: Final = (
+    "every action with an `effect:` template that verify can select (a decision of allow or "
+    "approve under a grant that covers it) declares max_attempts: 1, so no renewal can happen"
+)
+
 #: `--only` (§4.6).
 NOT_SELECTED: Final = "not selected"
 
@@ -151,6 +184,9 @@ __all__ = [
     "BY_ID",
     "CANDIDATE_BOUND",
     "CATALOGUE",
+    "CEILING_ABOVE_BOUND",
+    "CEILING_BOUND",
+    "CEILING_FORBIDS_RENEWAL",
     "CONTROL_FAILED",
     "EFFECT_TEMPLATE_NOTE",
     "EVERY_ACTION_DENIED",
@@ -161,6 +197,7 @@ __all__ = [
     "NO_ACTIONS",
     "NO_APPROVE_RULE",
     "NO_AUTHORITY_SECTION",
+    "NO_CEILING_DECLARED",
     "NO_DELEGABLE_GRANT",
     "NO_EFFECT_TEMPLATE",
     "NO_EXPIRES_AT",

@@ -106,8 +106,9 @@ def test_T113_the_summary_is_the_last_line_and_names_the_not_applicable_ids(tmp_
 
     assert last == report.summary_line()
     assert last.startswith(f"{report.passed}/{report.applicable} declared guarantees pass.")
-    # G13 is N/A on every SQLite run (SPEC-v0.7 §8.9): SQLite has no clock of its own.
-    assert "6 not applicable: G3, G4, G5, G8, G9, G13." in last
+    # G13 is N/A on every SQLite run and G15 wherever no action declares a ceiling
+    # (SPEC-v0.7 §8.9): SQLite has no clock of its own, and this document names no bound.
+    assert "7 not applicable: G3, G4, G5, G8, G9, G13, G15." in last
     # The fraction is passes over applicable. A report with six N/As does not say 12/12.
     assert "12/12" not in text
 
@@ -132,9 +133,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
-        (ALL_APPLICABLE, "9/9 declared guarantees pass. 3 not applicable"),
-        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 6 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 12 not applicable"),
+        (ALL_APPLICABLE, "9/9 declared guarantees pass. 4 not applicable"),
+        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 7 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 13 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )
@@ -445,7 +446,7 @@ def test_T116_a_run_with_six_not_applicable_still_exits_0(tmp_path, monkeypatch)
     result = _cli(tmp_path, WITH_NOT_APPLICABLE)
 
     assert result.exit_code == 0
-    assert "6 not applicable" in result.stdout
+    assert "7 not applicable" in result.stdout
 
 
 def test_T116_json_and_junit_can_be_combined(tmp_path, monkeypatch):

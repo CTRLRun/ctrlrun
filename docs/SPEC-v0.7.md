@@ -2847,6 +2847,72 @@ prepares it, and `statement_of`'s docstring says so.
 
 ### 12.4 Item 4: the attempt ceiling
 
+**The three equality gates became one ordering, and there is now a place to put the next one.** §5.3 named
+`policy.py:912`, `931` and `1171` and said each becomes "this version or later". Writing three more membership
+tuples would have made the fourth schema's item write three more again, so the comparison is one function,
+`_at_least(schema, minimum)`, reading `SUPPORTED_SCHEMAS`'s order. `require_v3` and `require_v4` stay separate
+functions, for `require_v4`'s own reason: the *consequences* differ per key and the sentence an operator reads
+is the point. A name not in `SUPPORTED_SCHEMAS` is treated as too old, which is the fail-closed direction and is
+unreachable from `Policy._from_document`, where an unknown schema is refused before any gate runs.
+
+**Naming the line needed the document's marks back, and they are gone by the time an entry is parsed.**
+`strict_load` hands `_parse_entry` a plain mapping, and PyYAML drops a node's marks the moment it constructs one:
+`construct_yaml_map` builds a bare `dict` and copies into it, so even a mapping subclass returned from
+`construct_mapping` would not survive. Two designs were rejected before the one that shipped. Carrying marks
+through the parse means a mapping type every caller of `strict_load` inherits, `authority.py` included, for a
+message on a path that refuses the document anyway. Searching the text for `max_attempts:` finds the wrong action
+in a document with two. What ships instead is `yaml.compose` **on the refusal path only**: the text is threaded
+from `from_yaml` to `_from_document` to `_parse_entry` as a `line_of` callable, and the second parse happens once,
+for a document that is about to be refused, and asks the loader for the one mark the message needs. Where the text
+is not available, which is only `_from_document`'s own default, the message omits the line rather than inventing
+one.
+
+**One comparison for both defences, so they cannot drift.** `Control._over_the_ceiling(ceiling, attempt)` is the
+whole of "past the ceiling", and the fast path and the check both call it. Two spellings of the same comparison
+would be a second definition to keep right, and §5.5's argument is that the two defences are *independent in what
+they read* (a record before reserving, a reservation's assigned number) and identical in what they conclude. The
+tests keep them apart by the evidence each leaves, which is what §5.5 asks for, rather than by patching one of two
+comparisons.
+
+**What the fast path may refuse is normative and is now a single `if`.** `_ceiling_fast_path` returns `None` for
+any record that is not `FAILED`. An earlier draft refused at or above the ceiling whatever the state, which reads
+as stricter and is worse: it would refuse an `AMBIGUOUS` record with `attempt_ceiling` instead of letting the
+reservation raise `AmbiguousEffect`, it would take T245's and G15's only route to the check away, and it would put
+a `blocked` receipt saying `attempt_ceiling` on an effect whose outcome nobody knows.
+
+**The observe-mode half is in two places because enforce mode's order is.** The fast path's `would_have` entry is
+recorded in `execute`, before `_observed` is called, because in enforce mode the fast path runs before the approval
+gate and `_Observation.block` keeps the **first** reason; recording it inside `_observed` would let
+`approval_required` win a race enforce mode does not have. The check's half is in `_observed`, after
+`_observe_secure` returns, and reads `Policy.max_attempts` directly rather than taking `_ceiling`'s warning path:
+a reservation exists there, so an effect key exists, so the warning cannot apply.
+
+**G15's two `N/A` reasons are decided by selecting twice, and so is G5's one.** `select()` gained
+`needs_renewal`, `needs_ceiling` and `ceiling_bound`, and the precedence §8.9 states is implemented as a second
+`select()` with the ceiling filter removed: G5 prints `CEILING_FORBIDS_RENEWAL` only where that second selection
+finds something, and otherwise `unselected()`'s sentence, which is what keeps a deny-only or ungranted document
+from being told its ceilings took the guarantee away. The same shape gives G15 `CEILING_ABOVE_BOUND` only where an
+action does declare a ceiling and every one is above 100.
+
+**G14 is not amended here, because it does not exist on this branch.** §8.9 says item 4 makes the change for both
+G5 and G14 "since item 3 lands G14 before `max_attempts` exists". Item 3 is a parallel lane and had not merged
+when this was built, so `verify/scenarios.py` has no `g14` to amend. The mechanism it needs is here and is the one
+G5 uses: `select(needs_effect=True, needs_renewal=True)` and `_renewal_unselected(...)` for the reason. Whichever
+of items 3 and 4 rebases second wires G14 to them, in two lines.
+
+**The refusal's `ActionDenied` yields to the store's.** Where the record moved on between the reservation and the
+release, `begin_execution` or `fail_effect` refuses, and §5.7 says that refusal propagates after the `blocked`
+receipt. So `_refuse_ceiling` keeps the store's exception and raises it in place of `ActionDenied`, after
+appending the event and writing the receipt: the caller is told the truer thing, which is that the key is not
+theirs any more, and `v0.1 §5.5`'s rule that a store's refusal propagates is not weakened by a path that refuses
+for a different reason.
+
+**T247 asserts a property, not an interleaving, and says so.** Six OS processes race renewals of one key on
+Postgres under a ceiling of three. Racing processes do not reliably stall between a `SELECT` and an `UPDATE`, so
+the test cannot claim to open item 3a's window and does not: it asserts that the total number of executor calls
+never exceeds the ceiling, that at least one was made, and that at least one process was refused with
+`attempt_ceiling`, so a run in which nothing contended fails rather than passing quietly.
+
 ### 12.5 Item 5: precondition fingerprints
 
 ### 12.6 Item 6: the release

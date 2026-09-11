@@ -29,6 +29,34 @@ any change to one appears here.
   Postgres `--store-url` and `N/A` on SQLite, and the catalogue moves to
   `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
   on SQLite and the in-memory store because neither has a clock of its own.
+- **The attempt ceiling, `max_attempts`** (SPEC-v0.7 §5, item 4, and the amendment to
+  `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding the
+  attempts that may **execute** on one effect key, the first included: `max_attempts: 3` is the
+  first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version that
+  is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and a
+  mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
+  is inside the policy hash, so a receipt records which one refused an attempt.
+  **The decision is taken on the attempt number the store assigned**, after the reservation and
+  before the executor, because two callers that both read attempt *N−1* would both pass a read
+  taken before reserving. Above the ceiling the executor is not called, the record is released as
+  `FAILED` with an error naming the ceiling, `EFFECT_RESERVATION_REFUSED` carries
+  `reason: "attempt_ceiling"` with the attempt and the ceiling, a `blocked` receipt is written,
+  and `ActionDenied(reason="attempt_ceiling")` is raised. A read of the record before the approval
+  gate refuses the ordinary sequential case earlier, writing nothing, spending no presented
+  approval and creating no approval request; it refuses only a `FAILED` record and is never the
+  guarantee. In observe mode the refusal is recorded as `would_have.blocked_reason:
+  "attempt_ceiling"` and the action runs. Verify gains **G15**, and G5 now selects only an action
+  whose ceiling permits a renewal, reporting `N/A` where the ceiling is the only reason it cannot,
+  because G5's control *is* a renewal and `max_attempts: 1` would otherwise report a correct
+  kernel as a failure. No new error type, no new event type, no new `StateStore` method, no new
+  `Control` method, and no CLI change.
+
+### Changed
+
+- **An action entry may declare `max_attempts`, and a renewal over `FAILED` can now be bounded.**
+  This is stricter than 0.6.1 only where an operator asks for it: an action that declares no
+  `max_attempts` renews without bound, exactly as before, and every document that loaded at 0.6.1
+  loads unchanged. There is no default ceiling, and no value of the key means "unlimited".
 
 ### Fixed
 

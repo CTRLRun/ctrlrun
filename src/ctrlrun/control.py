@@ -39,6 +39,7 @@ from .effect import (
     RECONCILED_UNKNOWN,
     RESOLVED_BY_RECONCILE,
     UNRESOLVED_EFFECT,
+    EffectState,
     ReconcileOutcome,
     Reservation,
     resolve_effect_key,
@@ -75,6 +76,7 @@ from .receipt import (
     BLOCKED_AMBIGUOUS,
     BLOCKED_APPROVAL_MISMATCH,
     BLOCKED_APPROVAL_REQUIRED,
+    BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
     BLOCKED_IN_PROGRESS,
     Event,
@@ -328,6 +330,9 @@ class Control:
         #: appended once however many actions read it.
         self._skew_reported: ClockSkew | None = None
         self._skew_warned: set[str] = set()
+        #: SPEC-v0.7 §5.3 — the actions already warned about for a ceiling that can count
+        #: nothing, so the warning is one per action per Control and not one per call.
+        self._ceiling_warned: set[str] = set()
 
     @classmethod
     def from_file(
@@ -724,6 +729,29 @@ class Control:
                 reason=evaluation.reason,
                 action_id=action.action_id,
             )
+        # SPEC-v0.7 §5.5 — the ceiling's fast path, between policy and the approval gate. It
+        # saves a write, it saves a presented approval from being spent, and it saves a human
+        # from being asked about an attempt that could never run (`v0.3 §4.3`). It is never the
+        # guarantee: the check on the number the store assigned is, below.
+        ceiling = self._ceiling(action, effect_key)
+        refused_early = self._ceiling_fast_path(effect_key, ceiling)
+        if refused_early is not None:
+            if observation is not None:
+                # §5.7 — recorded and not enforced. Here rather than inside `_observed`, because
+                # enforce mode decides this before the approval gate and `_Observation.block`
+                # keeps the first reason: recording it later would let `approval_required` win a
+                # race that enforce mode does not have.
+                observation.block(BLOCKED_ATTEMPT_CEILING)
+            else:
+                self._refuse_ceiling(
+                    action,
+                    evaluation,
+                    started_at,
+                    effect_key,
+                    attempt=refused_early,
+                    ceiling=ceiling,
+                    reserved=False,
+                )
         if observation is not None:
             return self._observed(
                 action, evaluation, executor, effect_key, started_at, observation, reconciler, held
@@ -732,6 +760,21 @@ class Control:
             action, evaluation, started_at, effect_key, held, reconciler
         )
         attempt = 1 if reservation is None else reservation.attempt
+        # SPEC-v0.7 §5.5 — the check, on the attempt number the store **assigned**, after the
+        # reservation and before the executor. Two callers who both read N-1 both pass the fast
+        # path above; only this one stops the second, because the reservation is the only write
+        # that assigns the number atomically.
+        if reservation is not None and self._over_the_ceiling(ceiling, reservation.attempt):
+            self._refuse_ceiling(
+                action,
+                evaluation,
+                started_at,
+                effect_key,
+                attempt=reservation.attempt,
+                ceiling=ceiling,
+                reserved=True,
+                approval=approval,
+            )
 
         if effect_key is not None:
             try:
@@ -783,6 +826,13 @@ class Control:
         )
         held_key = None if reservation is None else effect_key
         attempt = 1 if reservation is None else reservation.attempt
+        # SPEC-v0.7 §5.7 — the check, in observe mode: recorded and not enforced, because
+        # observe mode suppresses CTRLRun's decisions and not the record of an effect that
+        # happened. The fast path's half is recorded in `execute`, before this is reached.
+        if reservation is not None and self._over_the_ceiling(
+            self._policy.max_attempts(action.name), reservation.attempt
+        ):
+            observation.block(BLOCKED_ATTEMPT_CEILING)
         if held_key is not None:
             try:
                 self._store.begin_execution(held_key, action.action_id)
@@ -1644,6 +1694,126 @@ class Control:
             approval_id=presented,
             approver=self._approver_of(presented),
             effect_key=effect_key,
+        )
+
+    # --- the attempt ceiling (SPEC-v0.7 §5) ---------------------------------------------
+
+    def _ceiling(self, action: Action, effect_key: str | None) -> int | None:
+        """This action's `max_attempts`, or `None` where the operator named none (§5.3).
+
+        **A ceiling on an action that resolves no effect key counts nothing**, and is warned
+        about once per action rather than refused at load: the `effect:` template may come from
+        the decorator, which the policy cannot see (`v0.2 §3.2`), so the loader cannot tell a
+        ceiling that will count from one that cannot. Same treatment as a `reconcile` hook with
+        no key, and for the same reason.
+        """
+        ceiling = self._policy.max_attempts(action.name)
+        if ceiling is not None and effect_key is None and action.name not in self._ceiling_warned:
+            self._ceiling_warned.add(action.name)
+            _LOG.warning(
+                "%s: max_attempts is %d but this call resolves no effect key, so there is no "
+                "record to count attempts on and nothing is bounded. Declare effect= on "
+                "@protect, or an 'effect:' template in the policy",
+                action.name,
+                ceiling,
+            )
+        return ceiling
+
+    @staticmethod
+    def _over_the_ceiling(ceiling: int | None, attempt: int) -> bool:
+        """Whether this attempt number is past the operator's ceiling (SPEC-v0.7 §5.5).
+
+        One comparison for both defences, so there is one definition of "past the ceiling" and
+        not two that can drift. `None` is no ceiling, which is `v0.1 §5.4` exactly.
+        """
+        return ceiling is not None and attempt > ceiling
+
+    def _ceiling_fast_path(self, effect_key: str | None, ceiling: int | None) -> int | None:
+        """The attempt number a read before the approval gate refuses, or `None` (§5.5).
+
+        **It refuses only a `FAILED` record**, normatively. A record in any other state,
+        `AMBIGUOUS` above all, passes untouched to the reservation, which refuses or reconciles
+        it exactly as at 0.6.1; T245's route and G15 both depend on that, and a fast path that
+        answered for an `AMBIGUOUS` record would take the check's only test away from it.
+
+        It is a fast path and **never the guarantee**: two callers who both read attempt N-1
+        both pass it. What it buys is that the ordinary sequential case never writes, never
+        spends a presented approval and never asks a human.
+        """
+        if ceiling is None or effect_key is None:
+            return None
+        record = self._store.get_effect(effect_key)
+        if record is None or record.state is not EffectState.FAILED:
+            return None
+        attempt = record.attempt + 1
+        return attempt if self._over_the_ceiling(ceiling, attempt) else None
+
+    def _refuse_ceiling(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        *,
+        attempt: int,
+        ceiling: int | None,
+        reserved: bool,
+        approval: Approval | None = None,
+    ) -> NoReturn:
+        """Refuse one attempt for the operator's ceiling, and say so in the history (§5.5).
+
+        Above the ceiling the executor is not called. Where a reservation was taken, the record
+        is released as `FAILED` through `begin_execution` and `fail_effect`, with an error naming
+        the ceiling: `FAILED` is true here, because nothing ran. `EXECUTION_STARTED` is **not**
+        appended, because that event is the claim that something started.
+
+        `ActionDenied` and not `DuplicateEffect`, `AmbiguousEffect` or `NotExecuted`: it is the
+        only type in the closed set whose meaning is true, "the action may not run, and `reason`
+        says why". `max_attempts` is a policy saying no, and an agent loop's `except ActionDenied`
+        is written for exactly that. The receipt is `blocked` rather than `denied` because it
+        describes what stopped the attempt, which is the effect's own history, and it keeps the
+        decision the policy actually reached (`v0.1 §6.1`, `§4.2 A1`).
+        """
+        error = f"attempt {attempt} refused: max_attempts is {ceiling} (SPEC-v0.7 §5)"
+        released: CTRLRunError | None = None
+        if reserved and effect_key is not None:
+            try:
+                self._store.begin_execution(effect_key, action.action_id)
+                self._store.fail_effect(effect_key, action.action_id, error)
+            except (DuplicateEffect, AmbiguousEffect) as refused:
+                # §5.7 — the record moved on while the ceiling was deciding. The refusal
+                # propagates after the `blocked` receipt, as `v0.1 §5.5` has a store's refusal
+                # propagate: `AMBIGUOUS` is not something this path may collapse to `FAILED`.
+                released = refused
+        presented = approval.approval_id if approval is not None else None
+        self._append(
+            EventType.EFFECT_RESERVATION_REFUSED,
+            action,
+            {
+                "reason": BLOCKED_ATTEMPT_CEILING,
+                "attempt": attempt,
+                "max_attempts": ceiling,
+            },
+            effect_key,
+            approval=approval,
+        )
+        self._record(
+            action,
+            evaluation,
+            ReceiptResult.BLOCKED,
+            started_at,
+            error=error,
+            approval=approval,
+            approver=self._approver_of(presented),
+            effect_key=effect_key,
+            attempt=attempt,
+        )
+        if released is not None:
+            raise released
+        raise ActionDenied(
+            f"{action.name} denied: {error}",
+            reason=BLOCKED_ATTEMPT_CEILING,
+            action_id=action.action_id,
         )
 
     def _unrecorded(
