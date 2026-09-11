@@ -40,13 +40,24 @@ any change to one appears here.
   public names are frozen in §9; guarantees G12 to G16 join `ctrlrun.guarantees/v3`.
 
   **Reading the code changed nine things the plan had assumed**, and §1.4 lists them. Four matter
-  beyond this document: on Postgres a renewal could reuse an attempt number, which v0.7 makes
-  load-bearing, so item 4 tightens that `UPDATE`; bumping the receipt schema the ordinary way would
-  have reported every receipt a released 0.6 wrote as altered, so a receipt now renders under the
-  schema it was written with; one human approval buys one dispatch, not unlimited ones, because
-  every renewal of an approved action needs a new approval, so the unbounded case the ceiling
-  exists for is the action the policy allows outright; and `max_attempts` needs
-  `ctrlrun.policy/v5`.
+  beyond this document. On Postgres a renewal could reuse an attempt number, and a lost `COMMIT`'s
+  re-issue could return a number other than the one it wrote; v0.7 makes the number load-bearing,
+  so both are fixed first, in a new **item 3a, "attempt numbers never repeat"**, its own pull
+  request stacked before item 3 and independently reviewed because it changes a store. Bumping the
+  receipt schema the ordinary way would have reported every receipt a released 0.6 wrote as
+  altered, so a receipt now renders under the schema it was written with. In enforce mode one
+  granted approval buys one dispatch, not unlimited ones, because every renewal of an approved
+  action needs a new granted approval; "granted" is not always a human (a scripted provider, an
+  automated `wait=True` loop and approvals granted ahead of a gateway all count), observe mode needs
+  none, and an adapter can still put a human in front of an attempt the ceiling will refuse, which
+  §5.5 records. The unbounded case the ceiling exists for is the action the policy allows outright.
+  And `max_attempts` needs `ctrlrun.policy/v5`.
+
+  **An independent review of the draft found seven blocking defects and nine smaller ones**, and
+  every one became an edit: among them the two store defects above, a G15 that passed with the
+  ceiling's own check deleted, a G5 that would have failed a correct kernel under `max_attempts: 1`,
+  a receipt rule that let a fabricated field verify, three false `N/A` reasons, and a verify
+  network rule that was already untrue under `--store-url`.
 
 ## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
 

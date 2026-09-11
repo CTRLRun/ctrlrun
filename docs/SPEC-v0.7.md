@@ -31,23 +31,29 @@ disagreed.
 
 ## 1. Scope
 
-v0.7 delivers five things, one build-list item each, plus a release. The `#` column is the
+v0.7 delivers six things, one build-list item each, plus a release. The `#` column is the
 build-list position.
 
 | # | Deliverable | Ships in | Section |
 |---|---|---|---|
 | 1 | Clock-skew detection: a measurement, one event type, a verify guarantee, a store conformance case | core; the measurement itself in `ctrlrun[postgres]` | §3 |
 | 2 | `ctrlrun.transport`, the `NotExecuted` classifier for `http.client` and `urllib` | core, stdlib; the httpx variant in `ctrlrun[gateway]` | §2 |
+| 3a | Attempt numbers never repeat: the Postgres renewal compare-and-set, and the attempt a lost `COMMIT`'s re-issue returns | `ctrlrun[postgres]`; SQLite for defence in depth | §5.6 |
 | 3 | The provider idempotency token, derived from `(effect_key, attempt)` | core | §4 |
 | 4 | The attempt ceiling, `max_attempts`, and the amendment to `v0.1 §5.4` | core | §5 |
 | 5 | Precondition fingerprints, rechecked before the reservation | core | §6, §7 |
 | 6 | Release 0.7.0 | none | none |
 
+**Item 3a is its own build item**, a separate pull request stacked immediately before item 3, and it
+gets an **independent review** because it changes a store: items 3 and 4 both rest on the attempt
+number being unique per key, and on Postgres it is not yet (§5.6). Independent review is therefore
+required for items 2, 3a, 4 and 5.
+
 The dependency rule of `v0.2 §1.1` and every release since is unchanged and binding:
 `pip install ctrlrun` MUST continue to install `pyyaml` and `click` and nothing else. **Everything
-here is core and stdlib** except two pieces that exist only because their client lives in an extra:
-the skew measurement, which needs a Postgres connection (`ctrlrun[postgres]`), and the httpx
-variant of the classifier (`ctrlrun[gateway]`). `urllib` and `http.client` are stdlib, which is
+here is core and stdlib** except the pieces that exist only because their client lives in an extra:
+the skew measurement and item 3a's fix, which live in the Postgres store (`ctrlrun[postgres]`), and
+the httpx variant of the classifier (`ctrlrun[gateway]`). `urllib` and `http.client` are stdlib, which is
 precisely why the classifier for them belongs in core rather than behind the extra it has lived in
 until now.
 
@@ -80,8 +86,9 @@ matters more than the features do.
   is not amended, and every lease is decided by the same comparison against the same clock as at
   0.6.1.
 - **Not a new `StateStore` method.** `StateStore` is frozen by `v0.6 §9.2` and stays frozen. v0.7
-  adds a column through the migration runner (§6.11) and a read-only attribute on one concrete
-  store that is not part of the protocol (§3.6), and says why the second is not the first.
+  adds a column through the migration runner (§6.11) and one optional, read-only store attribute
+  that no store is required to have (§3.6), and says why the second is not the first, and where it
+  comes close.
 - **Not a new error type.** The closed set in `errors.py` gains nothing. A precondition mismatch is
   an `ApprovalMismatch` with its own `reason`, a renewal past the ceiling is an `ActionDenied` with
   its own `reason`, and a token asked for outside an executor is an `InvalidArgument`.
@@ -157,30 +164,49 @@ named, and none of them is left to be discovered by the item that meets it.
    v0.7 continues from there. It cannot: `SPEC-mcp-operator.md` took T182 to T193 and
    `SPEC-scan.md` took T194 to T208, and both are implemented under those names in
    `tests/test_mcp_operator.py` and `tests/test_scan.py`. §8 begins at T209, the first free number.
-2. **One human "yes" does not buy unlimited dispatches.** The roadmap's v0.7 bullet says *"one human
-   approval plus an executor that always reports 'nothing happened' is unlimited dispatches"*. For
-   an `APPROVE` action it is one dispatch: the first reservation consumes the approval, and every
-   renewal needs a new one (§5.2). The unbounded case is real and is the `ALLOW` action with an
-   effect key, which renews with no human at all. §5 is written against the code's version, and
-   item 6 reconciles the roadmap sentence.
+2. **One granted approval does not buy unlimited dispatches, in enforce mode.** The roadmap's v0.7
+   bullet says *"one human approval plus an executor that always reports 'nothing happened' is
+   unlimited dispatches"*. For an `APPROVE` action in enforce mode it is one dispatch: the first
+   reservation consumes the approval, and every renewal needs a new **granted** approval (§5.2).
+   "Granted" is not "a human said yes": a `ScriptedApprovalProvider`, a `@protect(wait=True)` loop
+   answered by automation, the operator server's write tools and a gateway or ACS hook spending
+   approvals granted in advance all grant without a human deciding each one. In observe mode nothing
+   is consumed and an `APPROVE` action runs with no approval at all (`control.py:821-827`,
+   `899-925`). The unbounded case is real and is the `ALLOW` action with an effect key, which renews
+   with no approval at all. §5 is written against the code's version, and item 6 reconciles the
+   roadmap sentence. One path contradicts §5.5's claim that the ceiling's fast path spares a human:
+   an adapter asks `ctrlrun.adapter.needs_approval`, which calls `Control.evaluate`, which does not
+   see the ceiling (`adapter.py:408-450`), so a framework can put an approval in front of a human
+   for an attempt the fast path will then refuse (§5.5).
 3. **On Postgres the attempt number is not yet unique per key.** The renewal `UPDATE` is
    conditioned on `state = 'failed'` and not on the attempt it planned from
    (`postgres.py:787-800`), so under `READ COMMITTED` a renewal planned against attempt *k* can land
    after another process has renewed to *k+1* and failed again, and write *k+1* a second time.
    Through 0.6.1 that was harmless. v0.7 makes the attempt number load-bearing twice, in the token
    and in the ceiling, and a reused number would give two dispatches one token and let a ceiling of
-   N admit N+1 executions. Item 4 conditions the `UPDATE` on the attempt as well (§5.6). That is a
-   tighter `WHERE` clause inside an existing method, not a new method.
+   N admit N+1 executions. A second path returns a stale number: a lost `COMMIT` on a reservation is
+   resolved by re-issuing it, and the re-issue's result is discarded (`postgres.py:602-622`,
+   `660-663`, `696-699`), so `Control` can be handed attempt *k+1* while the store wrote *k+2*.
+   **Item 3a**, a build item of its own with an independent review, fixes both (§5.6): the `UPDATE`
+   is conditioned on the planned-from attempt as well, and the re-issue's reservation is the one
+   returned. Both are changes inside existing methods; neither is a new method.
 4. **A receipt schema bump breaks every chained receipt unless the rehash rule changes.**
    `Receipt.chain_hash()` recomputes over `to_dict()` (`receipt.py:314`), and `to_dict()` stamps the
    binary's current schema and its current key set (`receipt.py:318-345`). `v0.6 §6.4`'s last bullet
    records exactly this and calls it *"a durable property of the design"*. Adding the `v4` fields
    the ordinary way would report every receipt a released 0.6 wrote as `content_altered`. Item 5
    makes a receipt render under the schema it was written with (§6.11), which amends that bullet.
-5. **Verify's network guard refuses loopback.** `v0.4 §3.7` says no scenario opens a socket, and
-   T107's guard replaces `socket.socket` outright. G12 needs a loopback peer it controls. The rule
-   is amended to *nothing leaves the host* and T107's guard to refuse every non-loopback address
-   (§8.9, G12).
+5. **Verify's network guard refuses loopback, and "no network" is already not quite true.**
+   `v0.4 §3.7` says no scenario opens a socket, and T107's guard (`tests/test_verify.py:535-557`)
+   refuses `socket.socket.connect`, `connect_ex`, `socket.create_connection` and
+   `socket.getaddrinfo`; `bind`, `listen` and `socketpair` pass it. G12 needs a loopback peer it
+   controls. And `--store-url postgresql://remote-host/…` already connects off the host, through
+   libpq's own sockets, which the guard never sees (`verify/scenarios.py:546-553`). The rule becomes
+   *verify opens no connection except to the store `--store-url` names and to loopback listeners
+   it bound itself*, and T107's guard admits a connect or a lookup for the loopback literals
+   `127.0.0.1` and `::1` only, refusing `localhost` and everything else (§8.9, G12). Item 6
+   reconciles the README's *"with no network"* (`README.md:258`), which is already inaccurate
+   under `--store-url`.
 6. **Verify and the test suite inject clocks into Postgres stores.** `verify/scenarios.py:553`
    builds every Postgres scratch store with verify's injected clock, which is anchored to the
    document rather than to now, and the Postgres tests pass frozen clocks throughout. Every one of
@@ -367,9 +393,23 @@ bug, an executor that raises `NotExecuted` after the remote acted, is exactly as
 yesterday. The classifier makes the transport half of the decision provable; the application half
 belongs to the person who knows the provider.
 
-The gateway's `401` / challenged-`403` rule is not a counterexample. It stays in `outcome.py` and
-out of `ctrlrun.transport`, because it rests on a statement the MCP authorization specification
-makes about where the token check sits (§2.1).
+**The gateway's `401` / challenged-`403` rule is the product's one path from an HTTP status to
+`FAILED`, and it is said plainly rather than explained away.** On an intercepted call the fresh
+forwarder returns `UpstreamStatus` for a `401`, or a `403` carrying `WWW-Authenticate`
+(`gateway/transport.py:214-220`); `outcome._status` maps it to `FAILED` (`outcome.py:191-192`); and the
+gateway's executor raises `NotExecuted` (`server.py:615-616`). It rests on the MCP peer's word, as the
+JSON-RPC pre-dispatch codes do: the MCP authorization specification puts the token check before the
+method, and an upstream that violated that would win a retry it should not have, the residual
+`THREAT_MODEL.md` already records for the pre-dispatch codes. It stays in `outcome.py`, it is not part
+of `ctrlrun.transport`, and **`ctrlrun.gateway.transport.request` does not apply it**: an executor
+calling an HTTP API with httpx is not talking to an MCP peer, and a `401` from its provider is a
+status like any other (§2.5).
+
+**`http.client` routes every request byte through `HTTPConnection.send`** on CPython 3.12
+(`http/client.py`: `_send_output` and `_tunnel` both call `self.send`), which is what lets the mark
+live there. That is a fact about one standard library, and the classifier stakes a safety claim on it,
+so T229b pins it on every Python this project supports, 3.11 to 3.14: every byte a real loopback peer
+receives was first handed to `send`.
 
 ### 2.5 The httpx variant, in `ctrlrun[gateway]`
 
@@ -405,7 +445,11 @@ missing extra is `MissingDependency` naming the install line, as every extra is.
 **The gateway's executor chains.** `server.py:616` raises `NotExecuted(str(outcome.token or
 observed))` with no cause, because the forwarder has already reduced the exception to an enum.
 After item 2 the forwarder keeps the exception it observed beside the enum and the executor raises
-`from` it, so a gateway `failed` receipt carries the same evidence a `@protect` one does.
+`from` it. For a connection never established, a gateway `failed` receipt then carries the same
+evidence a `@protect` one does. For the `FAILED` that comes from the upstream's own answer, a
+pre-dispatch JSON-RPC code or the `401` rule above, there is no transport exception to chain: the
+evidence is the upstream's response, which the gateway relays unchanged and the receipt's `error`
+names.
 
 **A custom forwarder's observation is its author's claim.** `Gateway` accepts a forwarder other than
 `HTTPForwarder`, and such a forwarder returns a `Transport` member the gateway believes. That seam
@@ -536,8 +580,10 @@ would be a decision.
 
 ### 3.6 How it reaches the `EventSink`
 
-The store sits below `Control` and has no sink; `ARCHITECTURE.md` §6 says `postgres.py` must not
-know about sinks, and v0.6 §4.3.4's branch reports go to the store's own logger for that reason.
+The store sits below `Control` and has no sink; `v0.6 §9.7`'s module-map row says `postgres.py` must
+not know about sinks (policy, decorator and sinks, `state.py`'s row unchanged), and `v0.6 §4.3.4`'s
+branch reports go to the store's own logger for that reason. (`ARCHITECTURE.md` §6 does not yet carry
+that row; item 6 adds it with `transport.py`'s.)
 With `StateStore` frozen, the measurement has to reach `Control` some other way.
 
 **Decided: the store retains, `Control` pulls.**
@@ -549,8 +595,10 @@ With `StateStore` frozen, the measurement has to reach `Control` some other way.
   `timedelta`, `measured_at` (the application's midpoint), `trigger` (`"open"` or
   `"lease_expired"`), and the derived `exceeded`.
 - `Control` reads `getattr(store, "clock_skew", None)` at the start of every `execute` and `resume`,
-  and again immediately after a reservation is refused with `AmbiguousEffect`. Where the value is
-  exceeded and is not the measurement it last reported, `Control` appends **`CLOCK_SKEW_DETECTED`**
+  and again immediately after a reservation is refused with `AmbiguousEffect`. **It uses the value
+  only if `isinstance(value, ClockSkew)`**; anything else is ignored with one log line per store, and
+  an exception raised by the read is logged and never raised, because an observation must not be able
+  to fail an action (§3.5). Where the value is exceeded and is not the measurement it last reported, `Control` appends **`CLOCK_SKEW_DETECTED`**
   through `_append`, so the store writes it and every sink receives it with the store-assigned
   `event_id` (`v0.2 §4.1`). The at-open report carries no `action_id`, like the three `DELEGATION_*`
   types (`v0.3 §7`), because it is about the deployment and not about an action. The `E3` report
@@ -561,11 +609,17 @@ With `StateStore` frozen, the measurement has to reach `Control` some other way.
   sees are the numbers the decision used), `direction` (`"ahead"` or `"behind"`), `trigger`, and
   `measured_at`.
 
-**Why this is not a new `StateStore` method.** The protocol does not change; `Control` reads the
-attribute with a `None` default, and a store without it (SQLite, the in-memory store, any third-party
-backend) reports nothing. That is correct rather than convenient: only a store with its own clock has
-anything to report, and a third-party store with one may expose the same attribute and be read the
-same way. It is a public name on `PostgresStateStore`, and §9 lists it.
+**Why this is not a new `StateStore` method, and where it comes close.** The protocol does not
+change; `Control` reads the attribute with a `None` default, and a store without it (SQLite, the
+in-memory store, any third-party backend) reports nothing. That is correct rather than convenient:
+only a store with its own clock has anything to report. But it is honest to say what it is in effect:
+**an optional member of the store contract.** `Control` reads it from any store, this section invites
+a third-party store with a clock to expose it, and T214 grades its presence. §9.2 lists it as an
+optional store attribute, not as a `PostgresStateStore` detail. Two consequences follow and are
+stated rather than discovered: a **wrapper** around a store (the conformance suite's fixtures, an
+operator's instrumentation proxy) that does not forward the attribute silently drops skew reporting
+while every decision is unchanged; and whether an optional attribute counts as "a new store method"
+under `v0.6 §9.2` is a judgment this document puts to the maintainer rather than makes.
 
 **Rejected: a keyword-only constructor argument that `Control` wires**, such as
 `on_clock_skew=callable`. The store exists before any `Control` that uses it, so a callback given at
@@ -679,6 +733,11 @@ derivation is a red test and not a silent change.
 - **The effect key does not appear in the token.** Stripe asks callers not to put *"sensitive data
   (for example, email addresses or personal identifiers)"* in idempotency keys, and an effect key is
   built from arguments that often are.
+- **`bool` is refused by `idempotency_token_for` itself.** `canonical_bytes` accepts a `bool`, since it
+  is a subclass of `int` and JSON has `true`; left to the canonicalizer, `attempt=True` would derive a
+  token nobody's attempt has. So the function checks `attempt` is an `int`, not a `bool`, and at least 1,
+  and `effect_key` a non-empty `str`, before canonicalizing, and T235's refusal of a `bool` is the test
+  that makes that check load-bearing rather than decorative.
 
 **Rejected: `effect_key` alone** (§4.1). **Rejected: 64 hex characters, or a readable prefix such as
 `ctrlrun-v1-`.** Both exceed Adyen's, Square's and PayPal's documented limits, and a token a provider
@@ -731,9 +790,12 @@ unchanged (`state.py:1921-1944`, `_continuable`), and `hold_continuation` moves 
 number and the same token, which is what a provider that deduplicates across the elicitation round trip
 needs (T233).
 
-**The attempt number must be unique per key for this to hold**, and on Postgres it is not yet
-(§1.4 item 3). Item 4 fixes it (§5.6); item 3 relies on the fix and T232's Postgres run is the test
-that would see it missing.
+**The attempt number must be unique per key for this to hold, and the number `Control` is handed
+must be the number the store wrote.** On Postgres neither is true yet (§1.4 item 3). **Item 3a**, stacked
+immediately before item 3, fixes both (§5.6), and item 3 is built on it. T232 cannot see the defect on
+its own: two processes renewing concurrently do not open the window, which needs one renewal stalled
+between its read and its write while another process renews, runs and fails. T246 and T246b open it
+deterministically, and they are item 3a's tests.
 
 ### 4.5 No receipt field
 
@@ -762,7 +824,32 @@ one.
 
 Nothing here joins item 5's receipt bump: the fields are already there.
 
-### 4.6 What it is for
+### 4.6 Two deployments, one provider account
+
+The token is a function of `(effect_key, attempt)` and nothing else, so **two deployments that share
+one provider account and one effect-key namespace derive identical tokens for different effects.** A
+staging store and a production store both reserving `refund:txn_1`, or two tenants' stores both
+reserving `order:1001`, against one Stripe account: the second to send gets the first's cached
+response back, the provider having deduplicated it, and its executor sees a success it did not cause.
+That is a false `COMMITTED`, and it is the worst outcome in this document.
+
+**Decided: namespace the effect key per deployment, and add no discriminator to the derivation.** `v0.1
+§5.1` already says effect keys are globally unique within a store and should be namespaced; this
+section adds that where two stores share a provider account the namespace must include the deployment,
+as in `effect="acme-prod:refund:{payment_id}"`, and the docstring, the README and `THREAT_MODEL.md` say
+so (item 6). The argument against a discriminator in the derivation:
+
+- **Nothing available is both stable and sufficient.** The environment is stable at execution time, but
+  the case that bites is two stores in the *same* environment sharing an account, which it does not
+  separate. A store identity would separate them, and no store has one: `v0.6 §5.1` refuses process and
+  host identity on records, and inventing a store id would be a new column and a new thing to keep
+  stable across a migration or a restore.
+- **The derivation is pinned to two inputs** so that anyone holding a receipt can re-derive it (§4.5), and
+  a third input that is usually the same would make "usually" the operative word in a safety argument.
+- **The operator already owns the namespace.** The effect key is the operator's template, and it is the
+  one identifier that is supposed to be unique across whatever shares the effect.
+
+### 4.7 What it is for
 
 **A deterministic handle for reconciliation to observe with.** Its value is that an `AMBIGUOUS` effect
 can ask the provider "did `(effect_key, attempt)` happen?" by a key the provider already indexes,
@@ -793,16 +880,21 @@ Each renewal is individually *correct*: the executor proved nothing happened. Th
 
 ### 5.2 Three sentences, first, because they are what a reviewer checks
 
-**How a renewal after `FAILED` is authorised today.** By the policy decision the new proposal
-reaches, and by nothing the first attempt left behind. `plan_reservation` admits the renewal with
+**How a renewal after `FAILED` is authorised today, in enforce mode.** By the policy decision the new
+proposal reaches, and by nothing the first attempt left behind. `plan_reservation` admits the renewal with
 `attempt + 1` and consults no approval; the first attempt's approval was consumed in the transaction
 that reserved it (`state.py:1553-1556`, `postgres.py:584-587`), so presenting it again is refused by
 `check_consumable` with `reason="consumed"` (`approval.py:229-236`), and with nothing presented
 `_presented` creates a new request and raises `ApprovalRequired` (`control.py:1620-1648`). **An
 `APPROVE` action therefore needs a new granted approval for every renewal, and an `ALLOW` action
-renews with no human at all.** The gateway and the ACS hook present the newest granted, unexpired
-approval for the action's hash (`v0.2 §6.10`), which a human may have granted several of; each still
-buys one dispatch. (This corrects the roadmap, §1.4 item 2.)
+renews with no approval at all.** "Granted" is the word, not "a human said yes": a
+`ScriptedApprovalProvider` grants on a script (`approval.py:486-487`), `@protect(wait=True)` re-presents
+whatever answer arrives (`control.py:2116-2132`), the operator server's write tools grant from a
+chat, and the gateway and the ACS hook present the newest granted, unexpired approval for the action's
+hash (`server.py:709`, `acs.py:203`), which may have been granted several times over in advance; each
+still buys one dispatch. **In observe mode none of this holds**: nothing is consumed, and an `APPROVE`
+action with no approval presented runs anyway (`control.py:821-827`, `899-925`). (This corrects the
+roadmap, §1.4 item 2.)
 
 **What happens to an approval on a refused attempt.** Where the ceiling is found by §5.5's fast path,
 before the approval gate, nothing has been written and a presented approval stays `granted`. Where it
@@ -849,6 +941,16 @@ one effect key, **the first included**. `max_attempts: 1` means no renewal after
   (`v0.3 §12.1`). A `v4` document using `max_attempts` is a `PolicyError` naming the key and `v5`. An
   0.6.1 reader refuses a `v5` document outright, which is the fail-closed direction: a reader that
   ignored the key would renew without a ceiling.
+- **`v5` is a superset of `v4`**, as `v4` is of `v3`: a `v5` document may use every key any earlier
+  version allows. Three gates in the loader compare for equality and would refuse exactly that, and
+  item 4 changes each to "this version or later": `require_v3` accepts only `v3` and `v4`
+  (`policy.py:912`, for `environment`, `authority` and `mode`, and its own comment at `910-911`
+  predicts this); `require_v4` accepts only `v4` (`policy.py:931`, for `version` and `controls`); and
+  the entry-key check refuses `data` unless the schema is exactly `v4` (`policy.py:1171`). T244 loads a
+  `v5` document using every earlier key. **A standalone authority document labelled `v5` is accepted**
+  (`authority.py:1194` checks membership of the supported set), deliberately: `v5` adds nothing to that
+  document's closed key set, so it means exactly what it means at `v3`, and a deployment that moves its
+  policy to `v5` may move both files together without being refused for it.
 - **It is inside the policy hash.** `_canonical_policy` hashes each action entry whole
   (`policy.py:761-790`), so two documents with different ceilings have different hashes and a
   receipt records which ceiling refused it.
@@ -918,12 +1020,34 @@ released and nothing consumed, and **no approval request is created**. It saves 
 presented approval from being spent, and it saves a human from being asked about an attempt that could
 never run, which `v0.3 §4.3`'s first reason says a denial must never do.
 
+**With one exception, stated.** An adapter decides whether to interrupt for a human through
+`ctrlrun.adapter.needs_approval`, which calls `Control.evaluate` (`adapter.py:408-450`), and
+`Control.evaluate` does not see the ceiling: it takes an `Action`, not an effect key, and it writes
+nothing. So a framework can put an approval in front of a human for an attempt the fast path then
+refuses; the human's answer is recorded, the approval is left `granted` because the fast path consumes
+nothing, and nothing runs. Teaching `evaluate` the ceiling would mean resolving an effect template and
+reading the store inside a method whose contract is a decision about an action, and that is not this
+milestone's change to make. The cost is one wasted answer per refused attempt, and §1.4 item 2
+records it.
+
 It is a fast path and **never the guarantee**. Two callers who both read attempt N−1 both pass it, and
 only the check on the assigned number stops the second. The two defences are independent, so each gets
-its own deterministic test with the other defeated (T245, T245b), because two defences against one
-failure hide each other's mutations. The two are distinguishable by what they leave: the fast path
-writes nothing and the record keeps its attempt number; the check after the reservation leaves the
-record `FAILED` at the refused number, with `EFFECT_RESERVED` before the refusal.
+its own deterministic test, because two defences against one failure hide each other's mutations, and
+they are told apart by what they leave: the fast path writes nothing and the record keeps its attempt
+number; the check after the reservation leaves the record `FAILED` at the refused number, with
+`EFFECT_RESERVED` before the refusal.
+
+**The check alone is reachable through a public route, with no seam.** Attempt N's executor raises
+`TimeoutError`, so the record is `AMBIGUOUS` at attempt N. Attempt N+1 carries a `reconcile` hook that
+answers `not_executed`. The fast path reads an `AMBIGUOUS` record, which is not its business, and lets
+the call through; `_secure`'s first `_take` is refused with `AmbiguousEffect`, the hook moves the
+record to `FAILED` at N, and the second `_take` renews it to N+1 (`control.py:1331-1351`). Only the check
+after the reservation can refuse that, and it must. T245 and G15 use exactly this route; T245b shows
+the fast path by the evidence it leaves on a record already `FAILED` at the ceiling.
+
+**Every reservation method MUST return the attempt number it actually wrote.** The check compares the
+number `Control` is handed, and the token (§4) is derived from it, so a store that returns the number it
+planned while writing a different one defeats both. §5.6 says where Postgres does that today.
 
 **The order of `Control.execute`, amended.** `v0.3 §4.3.1` fixes it as `principal_expired` →
 authority → policy → approval → reservation → execution. It becomes `principal_expired` → authority →
@@ -935,33 +1059,52 @@ read before reserving as the only check**, because two callers who both read N�
 which is attribution and not prevention. **Rejected: counting receipts or events**, because the record
 already carries the number and the store is the only thing that assigns it atomically.
 
-### 5.6 The attempt number must be unique per key, and on Postgres it is not yet
+### 5.6 Attempt numbers never repeat: item 3a
 
-On SQLite the renewal reads and writes inside one `BEGIN IMMEDIATE` (`state.py:1543-1561`), and the
-in-memory store under one lock, so no two reservations of one key can carry the same attempt number.
-On Postgres the plan is read with a plain `SELECT` under `READ COMMITTED` and the renewal is
-`UPDATE … WHERE effect_key = %s AND state = 'failed'` (`postgres.py:787-800`). Between the read and the
-`UPDATE`, another process can renew to *k+1*, run, fail and commit, leaving the record `FAILED` again;
-the stale `UPDATE` then matches and writes *k+1* a second time.
+Two properties, and on Postgres neither holds yet: **no two reservations of one key carry the same
+attempt number**, and **the number a reservation method returns is the number it wrote**. v0.7 makes the
+attempt number load-bearing twice (the token and the ceiling), so both are fixed first, in a build item
+of their own: **item 3a, stacked immediately before item 3, with an independent review because it
+changes a store.**
 
-Nothing in 0.6.1 depended on the number, so this is not a defect there. v0.7 depends on it twice: two
-dispatches sharing a number share a token, and a ceiling of N admits one execution more per stale
-reader.
-
-**Item 4 conditions the renewal on the attempt it planned from**:
-`… WHERE effect_key = %s AND state = 'failed' AND attempt = %s`, with the planned-from number. A stale
+**The stale renewal.** On Postgres the plan is read with a plain `SELECT` under `READ COMMITTED`
+(`postgres.py:744-748`, `476-484`) and the renewal is `UPDATE … WHERE effect_key = %s AND state =
+'failed'` (`postgres.py:787-800`). Between the read and the `UPDATE`, another process can renew to *k+1*,
+run, fail and commit, leaving the record `FAILED` again; the stale `UPDATE` then matches and writes *k+1*
+a second time. Item 3a conditions it on the attempt it planned from:
+`… WHERE effect_key = %s AND state = 'failed' AND attempt = %s`. That closes this race completely rather
+than narrowing it, because the attempt number is monotonic: only a renewal changes it, and every other
+transition carries it through unchanged (`state.py:281-342`, `_transitioned` and `_resolved`). A stale
 renewal then matches no row and is refused exactly as a lost renewal race is refused today
-(`postgres.py:802-807`). SQLite's `UPDATE` gains the same condition for defence in depth, where
-`BEGIN IMMEDIATE` makes it unreachable, which is why it is worth keeping (the constraint is the last
-word, as `state.py:1650-1657` says of the unique index). This is a tighter `WHERE` clause inside an
-existing method. It adds no method, changes no signature and changes no decision `plan_reservation`
-makes.
+(`postgres.py:802-807`).
 
-T246 opens the window deterministically on Postgres with the proxy the tests own, holding the stale
-`UPDATE` until another process has renewed and failed. The store conformance suite states the
-property, attempt numbers are never reused on one key, and gains a case for it if its barrier can reach
-between a store's read and its write; `v0.6 §2.4` says the in-process case cannot open windows inside a
-store, and if that holds here §12 says so and T246 is the only test of the defence.
+**The lost `COMMIT`.** Where the reservation's `COMMIT` is lost, `_authorize_and_reserve` re-reads and,
+where the write did not land, re-issues the operation through `_authorize_and_reserve(..., retrying=True)`
+from `_resolve_lost_renewal` and `_resolve_lost_insert` (`postgres.py:602-622`, `660-663`, `696-699`).
+**The re-issue's result is discarded** and the original plan's reservation is returned. If another
+process renewed and failed between the lost commit and the re-read, the re-issue writes *k+2* and
+`Control` is handed *k+1*: two dispatches share a token, the ceiling undercounts, and `Control.resume`,
+which reads the stored number (`control.py:992`), later derives a different token inside the same
+attempt, which breaks T233. Item 3a returns the re-issue's reservation on both paths, so the number
+`Control` holds is the one on the record.
+
+**On SQLite and the in-memory store** the renewal reads and writes inside one `BEGIN IMMEDIATE`
+(`state.py:1543-1560`) or under one lock (`state.py:846-857`), and neither has a lost-commit path, so
+neither defect exists there. SQLite's `UPDATE` gains the same `AND attempt = %s` for defence in depth,
+and it is stated as what it is: **an equivalent mutant on SQLite**, since `BEGIN IMMEDIATE` makes the
+stale case unreachable, so removing it there fails no test and T246 on Postgres is its only test.
+
+Both are changes inside existing methods: a tighter `WHERE` clause and a different return value of the
+same type. Neither adds a method, changes a signature or changes a decision `plan_reservation` makes.
+
+**The tests open the windows on purpose.** Two processes renewing concurrently, which an earlier draft of
+T232 leaned on, do not: the window needs one renewal stalled between its `SELECT` and its `UPDATE` long enough for another process to
+renew, run and fail. T246 holds the stale `UPDATE` with the proxy the tests own until that has
+happened; T246b swallows a reservation's `COMMIT` with the same proxy, interleaves another process's
+renew-and-fail before the re-read, and asserts the attempt returned equals the attempt stored. The store
+conformance suite states both properties and gains a case for them if its barrier can reach between a
+store's read and its write; `v0.6 §2.4` says the in-process case cannot open windows inside a store,
+and if that holds here §12 says so and T246 and T246b are the only tests of the defence.
 
 ### 5.7 What the ceiling does not touch
 
@@ -1098,12 +1241,15 @@ guard fired (`CONTRIBUTING.md`, the first of the four shapes of a false green). 
 
 On `v0.6 §7.2.1`'s precedent, for its three reasons applied to the world rather than to the policy.
 
-- **A human's yes is not spent on a world they did not see.** They approved the action against the
-  state they looked at. Consuming the approval would make the operator ask again for an action that
-  was refused by a fact, not by the human.
+- **A human's yes is not spent where the provider reports a world different from the one they saw.**
+  They approved the action against the state they looked at. Consuming the approval on a refusal
+  would make the operator ask again for an action that was refused by a reported fact, not by the
+  human. (It can still be spent on a world that moved after the comparison: §6.7's segments 2 and 3.
+  This row is about the refusal, not about that.)
 - **The approval authorizes nothing on its own.** It is bound to one `action_hash`, and every
-  presentation is rechecked against the world. While the world differs it opens nothing; if the world
-  returns to the state the human saw, it opens exactly the action it was granted for.
+  presentation is rechecked against what the provider reports. While the provider reports a different
+  state the approval is refused at every presentation; if it reports the state the human saw again,
+  the approval is accepted for exactly the action it was granted for.
 - **It still expires.** `v0.1 §4.2 A3` checks expiry at consumption, and the refusal is recorded
   against the approval, so the history shows a grant that met a changed world.
 
@@ -1130,6 +1276,16 @@ that can.
 
 Both refusals share `precondition_missing`, and are told apart by the event's two fields, one of which
 is null.
+
+**What that costs at the gateway and the ACS hook, stated with its bound.** Both present the newest
+granted approval for the action's hash and create a new request only when they find none
+(`server.py:709-725`, `acs.py:202-218`). Where the newest granted approval carries a fingerprint, every
+identical call through that path is refused `precondition_missing` and no fresh request is ever
+created, **until that approval expires** (fifteen minutes by default, `v0.1 §4.1`) or is consumed by the
+path that names the provider. That is a denial of service on that one action through that one path,
+bounded by the approval's `expires_at`, and it is the fail-closed direction: the alternative is a path
+that cannot recheck spending an approval that was granted conditional on a recheck. An operator who
+wants an action reachable through both paths declares no provider for it.
 
 ### 6.5 Why a provider that fails refuses the action, with its own reason
 
@@ -1260,14 +1416,33 @@ released 0.6 wrote as `content_altered`. So, from item 5:
 
 - `Receipt` carries **`schema`**, the schema string of the document it was read from, and a receipt this
   binary writes is `ctrlrun.receipt/v4`.
-- `to_dict()` renders **the key set of that schema**. A `v4` receipt renders `v3`'s keys plus the two
-  precondition fields under `"schema": "ctrlrun.receipt/v4"`. Every other schema this binary knows,
-  `v1`, `v2` and `v3`, renders exactly as 0.6.1 renders it, which for a `v3` receipt is the document it
-  was written as, byte for byte. `v1` and `v2` receipts carry no `seq` and are never rehashed (`unchained`,
-  `v0.6 §6.5`); they keep 0.6.1's rendering so that nothing a reader already sees changes.
+- **Every schema renders under its own label and its own key set.** A `v4` receipt renders `v3`'s keys
+  plus the two precondition fields under `"schema": "ctrlrun.receipt/v4"`; a `v3` receipt renders the
+  document it was written as, byte for byte; a `v2` or `v1` receipt renders under `v2` or `v1` with that
+  version's keys. 0.6.1 rendered `v1` and `v2` receipts under the `v3` label, which made three labels
+  hash identically; that ends, and `ctrlrun receipts --json` shows a pre-v0.6 receipt's own label, which
+  item 6 lists as a visible change.
+- **`from_dict` parses only the declared schema's keys.** A document carrying any key outside its
+  declared schema's set has been altered by definition, since no writer of that schema wrote it: the
+  chain reader reports it **`content_altered`** at its `seq`, and no reader surfaces the extra key's
+  value. Without this, a row-writer could add `precondition_at_recheck` to a receipt 0.6.1 wrote; the
+  `v3` rendering would leave it out of the hash, the chain would verify, and every reader would show a
+  fabricated field.
+- **`unchained` is decided by `seq` alone**, as the chain reader decides it today (`receipt.py:570-571`),
+  never by the label. `seq` did not exist before `v3`, so a document carrying a `seq` and labelled `v1`
+  or `v2` is **`content_altered`**: somebody relabelled a chained receipt.
 - `Receipt.from_dict` refuses a document whose `schema` is absent or is not one of the four, with
-  `InvalidArgument` naming it. A document that does not say which rule hashes it cannot be rehashed by
-  any rule, and rendering it under this binary's would be a guess.
+  `InvalidArgument` naming it, and the chain reader reports such a row `content_altered` at its `seq`
+  rather than stopping. A document that does not say which rule hashes it cannot be rehashed by any rule,
+  and rendering it under this binary's would be a guess.
+
+**No 0.6 process may be running when any caller uses `preconditions=`.** A store checks migrations
+only at open (`postgres.py:259`), so a 0.6.1 process already running when `0005` is applied keeps
+running against the migrated database: it reads approvals through columns it knows, never sees the
+fingerprint, and consumes a fingerprinted approval with no recheck. The kernel cannot detect that
+process from the new one, so the rule is operational and stated as one, here and in the upgrade notes
+item 6 writes: **stop every 0.6 process before the first caller passes `preconditions=`**. Until then an
+approval carries no fingerprint, and a 0.6 process consuming one loses nothing a 0.6.1 deployment had.
 
 **Every reader upgrades before any writer switches** (`v0.3 §12.2`). The chain walk, `ctrlrun receipts
 --verify-chain` and `ctrlrun verify` read `v3` and `v4`, and **a chain spanning both verifies end to end**
@@ -1294,7 +1469,7 @@ this project's worst hole arrived (`v0.3 §4.3.1`).
 | `Control.evaluate` | no | **no** | it decides and writes nothing; no approval is consumed, so there is nothing to bind a fingerprint to, and a provider call from a read-only query would give it I/O it has never had |
 | `Control.resume` | no | **no** | `v0.6 §7.2.3`: refusing strands a reservation the remote may be acting on; the approval was consumed on the first leg |
 | `Control.delegate` / `Control.revoke` | no | **no** | they create and remove authority and consume no approval |
-| The gateway's `tools/call` | no | **no provider**, and it **refuses** a presented approval that carries a fingerprint (`precondition_missing`) | it goes through `Control.execute`, and a policy document cannot name a Python callable; an approval requested with a fingerprint was granted against a world this path cannot recheck (§6.4) |
+| The gateway's `tools/call` | no | **no provider**, and it **refuses** a presented approval that carries a fingerprint (`precondition_missing`) | it goes through `Control.execute`, and a policy document cannot name a Python callable; an approval requested with a fingerprint was granted against a world this path cannot recheck, and the path keeps refusing until that approval expires, with no fresh request created (§6.4) |
 | `ctrlrun.acs`'s request hook | no | **no provider**, and refuses a fingerprinted approval, as the gateway | the same shape and the same reason; the platform executes after the hook answers, so its window is wider still, which is a reason to refuse rather than to skip |
 | `ctrlrun.verify.run` | informational | informational | it drives the first two rows with its own provider for G16 (§8.9) |
 | An adapter's protected tool → `@protect` → `Control.execute` | yes, where the decorator names one; `InterruptApprovalProvider` builds its requests through `build_request`, so the fingerprint is recorded | yes | the `@protect` row reached through a framework (`v0.5 §4.1`) |
@@ -1367,7 +1542,9 @@ of the first re-measures nothing.
 #### T216: A failed measurement changes nothing
 The measurement query is made to raise, at open and on the `E3` path. The store opens; the reservation's
 refusal is the same `AmbiguousEffect` with the same record written; nothing is raised that 0.6.1 did not
-raise; a log record names the failure.
+raise; a log record names the failure. And from `Control`'s side: a store whose `clock_skew` is not a
+`ClockSkew` (a string, a `timedelta`), and one whose `clock_skew` property raises, each leave the action's
+outcome, receipt and events exactly as without it, with one log line.
 
 #### T217: The event reaches every sink, through `Control`, with the store's id
 A recording sink receives `CLOCK_SKEW_DETECTED` with the `event_id` the store assigned, and the store's
@@ -1440,23 +1617,48 @@ imports none of the extras either. By AST: every import in `transport.py` is a s
 The public signatures of `urlopen`, `HTTPConnection`, `HTTPSConnection` and `request` are compared against
 §2.8's lists; an unlisted parameter fails. No `CTRLRUN_*` environment variable is read by the module.
 
+#### T229b: `http.client` writes only through `send`, on every supported Python
+On 3.11, 3.12, 3.13 and 3.14: a real loopback peer records every byte it receives for a request with a body,
+headers and a proxy tunnel; the bytes handed to `HTTPConnection.send` over the same exchange are recorded by a
+subclass; the two are equal. §2.3's mark lives in `send` on the strength of this, and a Python that wrote a
+byte by another route would fail here before it failed anywhere that mattered.
+
 #### T230: G12 in verify, under the amended network guard
-§8.9's G12 entry. T107's guard is amended to refuse every non-loopback address for `connect`, `bind` and
-`getaddrinfo`; the same subprocess asserts the guard is live (a connect to `192.0.2.1`, TEST-NET-1, is refused
-by it) and that G12 was graded, not `N/A` and not skipped.
+§8.9's G12 entry. T107's guard is amended to let `connect`, `connect_ex`, `create_connection` and
+`getaddrinfo` through for the loopback literals `127.0.0.1` and `::1` and nothing else, `localhost` included.
+The same subprocess asserts the guard is live (a connect to `192.0.2.1`, TEST-NET-1, and a lookup of
+`localhost` are both refused by it) and that G12 was graded, not `N/A` and not skipped.
 
 #### T231: The gateway's `NotExecuted` carries its cause
 An intercepted `tools/call` against an upstream port that refuses: the effect is `FAILED`, the client gets
 `-41011`, and the `NotExecuted` the gateway's executor raised has the httpx exception as its `__cause__`,
 where 0.6.1's had none (`server.py:616`).
 
+### 8.3a Item 3a: Attempt numbers never repeat (§5.6)
+
+Numbered T246 and T246b because they were drafted under item 4; they are item 3a's, and they land in its
+pull request, which is stacked before item 3's.
+
+#### T246: A stale renewal on Postgres never lands
+With the proxy the tests own, a renewal planned against attempt *k* is held between its `SELECT` and its
+`UPDATE` until another process has renewed to *k+1*, run and failed. The held renewal is refused; the record is
+`FAILED` at *k+1*; no attempt number was written twice. Mutating the `WHERE` clause back to 0.6.1's makes this
+test fail with two reservations carrying *k+1*. On SQLite the same condition is an equivalent mutant (§5.6), and
+the table says so rather than claiming a row.
+
+#### T246b: A lost `COMMIT` returns the attempt it wrote
+The proxy swallows a reservation's `COMMIT` (a renewal, and separately an insert); before the store re-reads,
+another process renews the key and fails. The re-issue writes the next number, and the attempt the reservation
+method returns equals the attempt on the stored record. Mutating either resolve path back to returning the
+original plan's reservation makes this test fail with the two numbers differing.
+
 ### 8.3 Item 3: The idempotency token (§4)
 
 #### T232: A `FAILED` renewal changes the token
 **The test this item exists for.** An executor reads `idempotency_token()` and raises `NotExecuted`; the
 renewal's executor reads it again and commits. The two differ, and each equals
-`idempotency_token_for(receipt.effect_key, receipt.attempt)` of its own receipt. On both backends, and on
-Postgres under two processes renewing concurrently.
+`idempotency_token_for(receipt.effect_key, receipt.attempt)` of its own receipt. On both backends. It does
+not open the stale-read window on Postgres, and does not claim to: that is item 3a's T246 and T246b.
 
 #### T233: Stable within one attempt, across `Control.resume`
 Read twice in one executor: equal. An executor that suspends and is resumed: the resumed leg reads the same
@@ -1470,7 +1672,8 @@ the test that says so.)
 `idempotency_token_for("refund:txn_1", 1) == "382ee448-97da-8107-b674-8c253650d93f"`, as a literal. The same
 pair in a subprocess, against SQLite and against Postgres, gives the same string. The value parses as a UUID of
 version 8 and variant RFC 9562's, and is 36 ASCII characters. A float, a `bool` attempt, an attempt below 1 and
-an empty key are `InvalidArgument`.
+an empty key are `InvalidArgument`. **The `bool` row is load-bearing**: `canonical_bytes` accepts `True`, so
+without the function's own check `idempotency_token_for(key, True)` would return a token (§4.2).
 
 #### T236: Outside an executor it fails closed
 `InvalidArgument` from: the top level; inside `Control.evaluate`; inside an executor whose action has no effect
@@ -1511,27 +1714,25 @@ this suite; G15 reports `N/A` with its sentence.
 line. `max_attempts` in a `ctrlrun.policy/v4` document: a `PolicyError` naming `v5`. Two documents differing
 only in a ceiling have different `policy_hash` values.
 
-#### T245: The concurrency case: the check on the assigned number, alone
-The fast path is defeated on purpose rather than raced for: two callers both pass it having read the record
-`FAILED` at attempt N−1; the first reserves attempt N, runs and fails; only then does the second reserve. It
-is assigned attempt N+1 and refused by the check after the reservation, leaving the record `FAILED` at N+1
-with `EFFECT_RESERVED` before its refusal. The executor ran N times in all. (Had the second reserved while
-the first held its lease, it would have met `DuplicateEffect(state="in_progress")`, which is not the window
-this test is about.)
+#### T245: The check on the assigned number, alone, through the public route
+§5.5's route, with no seam: attempts 1 to N−1 raise `NotExecuted`; attempt N raises `TimeoutError`, so the
+record is `AMBIGUOUS` at N; attempt N+1 carries a `reconcile` hook answering `not_executed`. The fast path
+lets it through (the record it reads is `AMBIGUOUS`), the hook moves the record to `FAILED` at N, the second
+take renews it to N+1, and the check refuses: `ActionDenied(reason="attempt_ceiling")`, `EFFECT_RESERVED`
+before `EFFECT_RESERVATION_REFUSED`, the record `FAILED` at N+1, the executor called N times. Deleting the
+check makes this test fail with N+1 executions.
 
-#### T245b: The fast path, alone
-The check after the reservation is disabled by the test; a record already `FAILED` at the ceiling is refused
-by the fast path with nothing reserved (the record's attempt unchanged, no `EFFECT_RESERVED`), no approval
-request created and a presented approval still `granted`.
-
-#### T246: A stale renewal on Postgres never lands
-With the proxy the tests own, a renewal planned against attempt *k* is held before its `UPDATE` until another
-process has renewed to *k+1* and failed. The held renewal is refused; the record is `FAILED` at *k+1*; no
-attempt number was written twice. Mutating the `WHERE` clause back to 0.6.1's makes this test fail with two
-reservations carrying *k+1*.
+#### T245b: The fast path, alone, by the evidence it leaves
+A record already `FAILED` at the ceiling: the next call is refused with the record's attempt unchanged, no
+`EFFECT_RESERVED` for the call, no approval request created, and a presented approval still `granted`. Those
+four facts can only come from the fast path, since the check after the reservation always leaves a reservation
+behind; deleting the fast path turns each of them over while the refusal itself survives.
 
 #### T247: Both backends, and the v0.6 multi-process standard
-T240 to T245b on SQLite and on Postgres; on Postgres, T245 with the contenders in separate OS processes.
+T240 to T245b on SQLite and on Postgres. On Postgres, under `v0.6`'s multi-process standard: more processes
+than the ceiling allows race renewals of one key across the boundary, each executor counting its calls in a file
+the parent reads, and the total never exceeds N. That depends on item 3a, and it is the test that would see item
+3a missing from item 4's side.
 
 #### T248: What happens to an approval on a refused attempt
 Through the fast path, the presented approval is `granted` afterwards. Through the check after the
@@ -1578,7 +1779,9 @@ and a list: each `precondition_unavailable` on the presenting pass and `ActionDe
 A request created with a fingerprint, the column then set to `NULL` directly in the database, presented with the
 provider: `precondition_missing`. An approval carrying a fingerprint presented by a call with no provider,
 through `Control.execute`, the gateway and the ACS hook: `precondition_missing`, `-41006` with the reason, and
-`deny` with `["ctrlrun.blocked", "precondition_missing"]` respectively. Never a skip.
+`deny` with `["ctrlrun.blocked", "precondition_missing"]` respectively. Never a skip. Through the gateway, a
+second and a third identical call are refused the same way with no new request created, and once the approval
+has expired the next call creates one (§6.4's bound).
 
 #### T258: `ALLOW` and `DENY` never call the provider
 The provider's call count is zero for an `ALLOW` action with and without a presented approval, and for a `DENY`.
@@ -1620,7 +1823,8 @@ A chain written by 0.6.1's code and continued by 0.7 verifies end to end with `v
 receipts --verify-chain` and G11's reader; each `v3` receipt rehashes to its stored hash; each new receipt is
 `v4`. A document with no `schema`, and one saying `ctrlrun.receipt/v9`, is refused by `from_dict` naming it.
 Mutating `to_dict` to render every receipt as `v4` makes this test fail with `content_altered` at the first
-`v3` receipt.
+`v3` receipt. Three tampers, each `content_altered` at its `seq` and none surfacing a value: a `v3` row given a
+`precondition_at_recheck` key; a chained `v3` row relabelled `v1`; a chained `v3` row relabelled `v2`.
 
 #### T266: The store conformance suite covers the column
 A case asserting a store persists and returns `precondition_fingerprint`; a broken-store fixture that drops it
@@ -1633,8 +1837,8 @@ never call the provider (counted); the gateway and the ACS hook refuse a fingerp
 
 #### T268: The documentation says narrows
 `README.md`, `CHANGELOG.md`, this document's §6 and the docstrings of every public name §6 adds are scanned for
-*prevent*, *close*, *closes*, *guarantee* and *ensure* in any sentence that also mentions a precondition or a
-fingerprint, against an allow-list of exact lines that disclaim, on `v0.6` T180's design: a new occurrence
+*prevent*, *close*, *closes*, *guarantee*, *ensure*, *opens nothing*, *cannot* and *blocks* in any sentence
+that also mentions a precondition or a fingerprint, against an allow-list of exact lines that disclaim, on `v0.6` T180's design: a new occurrence
 fails, and whoever adds it says in the test which kind it is. A positive control asserts the pattern fires on
 *"the recheck prevents a stale approval"*.
 
@@ -1646,7 +1850,9 @@ fails, and whoever adds it says in the test which kind it is. A positive control
 #### T270: Verify against the shipped examples
 `ctrlrun verify` against `examples/policies/payments.yaml` and `examples/authority/payments.yaml` reports what
 0.6.1 reported for G1 to G11, plus G12 to G16 each graded or `N/A` with its sentence, under
-`ctrlrun.guarantees/v3`. All sixteen ids are present in the registry before the release PR opens.
+`ctrlrun.guarantees/v3`. All sixteen ids are present in the registry before the release PR opens. And against
+a document whose only effect-bearing action declares `max_attempts: 1`: G5 and G14 are `N/A` with §8.9's
+ceiling sentence, never `fail`; G12 passes on its two separate keys; G15 is graded.
 
 #### T271: Core still installs nothing new, and the demo still runs offline
 `pip install ctrlrun` installs `pyyaml` and `click` and nothing else; `ctrlrun demo` runs every scenario in under
@@ -1680,24 +1886,35 @@ byte; after one byte, every failure is the original exception and the effect is 
 **Requires.** One action the configuration can drive to `allow` or `approve`, as G10 requires (verify grants its
 own approval, `v0.4 §3.5`).
 
-**N/A when.** Every action in the policy is denied. Reason: `every action in the policy is denied`, G10's
-sentence, and true for G10's reason: there is no action through which an outcome could be recorded.
-**Never `N/A` because of the environment.** A sandbox that will not let verify bind a loopback socket is an
-internal error, exit 3 (`v0.4 §3.8`), because it is a fact about the machine and not about the document.
+**N/A when.** No such action can be selected. The reason is built the way G10's is, through `unselected()`
+(`verify/scenarios.py:868-879`, `1924`): `every action in the policy is denied` where that is why, and the
+grant-coverage sentence `NO_GRANT_COVERS_SELECTION` where an action reaches a decision and no grant covers what
+verify can build. Hardcoding G10's sentence would print "every action in the policy is denied" about a document
+whose actions are allowed and merely ungranted, which is a false `N/A`. **Never `N/A` because of the
+environment.** A sandbox that will not let verify bind a loopback socket is an internal error, exit 3
+(`v0.4 §3.8`), because it is a fact about the machine and not about the document.
 
-**Observable.** Verify binds a listener on `127.0.0.1` at an ephemeral port. The executor calls
-`ctrlrun.transport.urlopen` against it; the listener reads at least one byte, **records that it did** (the
-scenario asserts this first), and resets. The exception is not `NotExecuted`; the receipt is `ambiguous`; where
-the action has an effect key the record is `AMBIGUOUS`.
+**Observable.** Verify binds a listener on the literal `127.0.0.1`, at an ephemeral port. The executor drives
+`ctrlrun.transport.HTTPConnection("127.0.0.1", port)` directly, **not** `urlopen`: `urlopen` honours
+`HTTP_PROXY`, and on a host that sets one the loopback request would go to the proxy, and G12 would fail for a
+reason that has nothing to do with the kernel. The listener reads at least one byte, **records that it did**
+(the scenario asserts this first), and resets. The exception is not `NotExecuted`; the receipt is `ambiguous`;
+where the action has an effect key the record is `AMBIGUOUS`.
 
 **Control.** A loopback socket verify bound and did not listen on: the call raises `NotExecuted` chained from
 `ConnectionRefusedError`, the receipt is `failed`, and where there is a key the record is `FAILED`. A classifier
 that never claimed would pass the observable and fail this; one that always claimed would fail the observable.
-The guarantee is the asymmetry, so both directions are asserted or neither is, as G10's are.
+The guarantee is the asymmetry, so both directions are asserted or neither is, as G10's are. **The observable
+and the control use separate effect keys**, as G10's rows do (`verify/scenarios.py:1954-1958`), so each is a
+first attempt and an operator's `max_attempts: 1` cannot turn the control into a ceiling refusal.
 
-**What it amends.** `v0.4 §3.7`'s "no scenario opens a socket" becomes **nothing verify does leaves the host**:
-G12 opens loopback sockets to listeners verify itself bound, and nothing else. T107's guard is amended to match
-(T230).
+**What it amends.** `v0.4 §3.7`'s "no scenario opens a socket" becomes **verify opens no connection except to
+the store `--store-url` names and to loopback listeners it bound itself.** The old sentence was already untrue
+under `--store-url postgresql://remote-host/…`, whose libpq sockets T107's guard never sees
+(`verify/scenarios.py:546-553`). T107's guard (`tests/test_verify.py:535-557`) is amended to let `connect`,
+`connect_ex`, `create_connection` and `getaddrinfo` through for the loopback literals `127.0.0.1` and `::1`
+only, and to go on refusing `localhost` and everything else (T230). Item 6 reconciles `README.md:258`'s *"with
+no network"*.
 
 ---
 
@@ -1734,24 +1951,29 @@ running, so a renewal after `FAILED` sees a different token and one attempt sees
 
 **Descends from.** `v0.1 §5.4`, T232, T233, T238.
 
-**Requires.** As G5: one action declaring an `effect:` template whose placeholders the synthesized arguments
-resolve.
+**Requires.** As G5, as amended below: one action declaring an `effect:` template whose placeholders the
+synthesized arguments resolve, **and whose ceiling allows a renewal** (no `max_attempts`, or at least 2).
 
-**N/A when.** As G5, with G5's reason and note: `no action declares an effect: template`, and *in a
-`ctrlrun.policy/v1` document the template lives in the `@protect` decorator, which verify does not read*. True,
-because the token is defined only for an attempt that holds a reservation, and without a key there is no
-reservation and no attempt to name.
+**N/A when.** As G5, with G5's reason and note, built through `unselected()`: `no action declares an effect:
+template`, and *in a `ctrlrun.policy/v1` document the template lives in the `@protect` decorator, which verify
+does not read*. True, because the token is defined only for an attempt that holds a reservation, and without a
+key there is no reservation and no attempt to name. And the new case: `every action with an effect: template
+declares max_attempts: 1, so no renewal can happen`, true because a ceiling of one forbids the renewal G14 and
+G5 exist to observe.
 
 **Observable.** Attempt 1's executor reads the token and raises `NotExecuted`; attempt 2's reads it and commits.
-The two differ, and each equals the derivation from its own receipt's `effect_key` and `attempt`.
+The two differ, and each equals the derivation from its own receipt's `effect_key` and `attempt`. That last
+clause is what a kernel returning a fresh random string on every read would fail.
 
-**Control.** Inside attempt 1 the accessor read twice returns one string, and the accessor called outside any
-executor raises `InvalidArgument`. A kernel that returned a fresh random string on every read would pass the
-observable and fail this; one that returned the effect key's token would fail the observable.
+**Control.** Inside attempt 1 the accessor read twice returns one string, and **the accessor called outside any
+executor raises `InvalidArgument`**. What the control catches is a context variable that leaks: a kernel that
+set the token and never reset it would pass the observable, because each executor would still read its own
+attempt's value, and would fail here, where a caller outside any attempt was handed the last attempt's token.
+The two-reads half catches a token recomputed from something that moves within one attempt.
 
 **Why G14 depends on the document at all.** It does not depend on what the operator wrote the way G15 and G16
-do; it depends on there being an effect key, which is the same thing G5 depends on, and a guarantee graded where
-no reservation could exist would be one that could not have failed.
+do; it depends on there being an effect key a renewal can reach, which is the same thing G5 depends on, and a
+guarantee graded where no renewal could exist would be one that could not have failed.
 
 ---
 
@@ -1762,20 +1984,27 @@ key, the first included, and the refusal names the ceiling.
 
 **Descends from.** `v0.1 §5.4` as amended (§5.8), T240 to T245b.
 
-**Requires.** One action that declares both an `effect:` template and `max_attempts`, that the configuration can
-drive to `allow` or `approve`, with `max_attempts` no greater than 100.
+**Requires.** One action verify can drive to `allow` or `approve` that declares both an `effect:` template and
+`max_attempts`, with `max_attempts` no greater than 100.
 
-**N/A when.** No such action exists. Reason: `no action with an effect: template declares max_attempts`, which is
-the gap the roadmap wants an operator to see. Or every such action's ceiling is above verify's bound. Reason:
-`every declared max_attempts is above verify's bound of 100 attempts`, true of the document and of verify's
-stated bound, on the precedent of G4's `GRANT_ALREADY_EXPIRED`: every loop verify runs is bounded
-(`v0.4 §3.6`).
+**N/A when.** No such action can be selected. Reason, through `unselected()`: `no action verify can drive to
+allow or approve declares both effect: and max_attempts`, with the grant-coverage sentence in its place where the
+miss was on the authority axis. The earlier draft's `no action with an effect: template declares max_attempts`
+was false about a document with such an action that is deny-only, ungranted or not synthesizable. Or every such
+action's ceiling is above verify's bound. Reason: `every declared max_attempts is above verify's bound of 100
+attempts`, true of the document and of verify's stated bound, on the precedent of G4's `GRANT_ALREADY_EXPIRED`:
+every loop verify runs is bounded (`v0.4 §3.6`).
 
-**Observable.** An executor that raises `NotExecuted` on every call: exactly N calls; attempt N+1 raises
-`ActionDenied` with `reason == "attempt_ceiling"`; the call count is still N; the record is `FAILED`; the refused
-attempt's receipt is `blocked`.
+**Observable.** §5.5's public route, so that the check after the reservation is what refuses and the fast path
+cannot: attempts 1 to N−1 raise `NotExecuted`; attempt N raises `TimeoutError`, leaving the record `AMBIGUOUS`
+at N; attempt N+1 carries a `reconcile` hook answering `not_executed`, passes the fast path, is reconciled and
+renewed to N+1, and raises `ActionDenied` with `reason == "attempt_ceiling"`. The executor was called exactly N
+times; `EFFECT_RESERVED` precedes `EFFECT_RESERVATION_REFUSED` for attempt N+1; the record is `FAILED` at N+1; the
+refused attempt's receipt is `blocked`. A kernel with the check deleted executes attempt N+1 and fails here. An
+earlier draft drove N+1 sequential `NotExecuted` attempts, which the fast path alone refuses, so that G15 passed
+with the guarantee's own mechanism deleted.
 
-**Control.** Every attempt up to N executed: the call count reached N, so for N of 2 or more the renewal was
+**Control.** Every attempt up to N executed: the call count reached N, so for N of 2 or more the renewals were
 admitted. A kernel that refused every renewal would fail this.
 
 ---
@@ -1789,24 +2018,39 @@ fingerprint computed at presentation differs; the approval is left `granted`.
 
 **Requires.** One action the configuration can drive to `approve`, as G1 requires.
 
-**N/A when.** No action requires approval. Reason: `no action requires approval`, G1's sentence, and true because
-a precondition binds only where an approval is consumed (§6.8).
+**N/A when.** No such action can be selected. The reason is built as G1's is, through `unselected()`
+(`verify/scenarios.py:1025`): `no action requires approval` where that is why, and the grant-coverage sentence
+where it is not. It is true in the first case because a precondition binds only where an approval is consumed
+(§6.8). **G16 inherits G1's one weakness**, stated rather than hidden: an approval action that exists but that
+verify cannot synthesize within its candidate bound (`v0.4 §3.3`) is reported through the same sentence G1 uses
+for it, which says less than it could.
 
 **Observable.** Verify supplies its own provider. The request is created while it returns one state and granted;
 at presentation it returns another. `ApprovalMismatch` with `reason == "precondition_changed"`; the executor's
-count is zero; no `EFFECT_RESERVED` for the action; the approval is `granted`.
+count is zero; **the approval is still `granted`**, which is what proves the refusal came before the store call
+that consumes it; and where the action has an effect key, no `EFFECT_RESERVED` exists for it and no record was
+written. For an action with no effect key the reservation assertion is vacuous, and the approval's status
+carries the proof alone.
 
 **Control.** The same, with the provider returning the original state at presentation: the action executes and
 commits.
 
 **Note, printed once beneath the table** as G3's is: *verify supplies its own precondition provider; whether your
-`@protect` declares one is in your code, which verify does not read.* The roadmap's exit sentence says G16 is `N/A`
-where the configuration names no fingerprint. A fingerprint is named in code (§6.2), not in any document verify
-reads, so that sentence cannot be made true; G16 is instead graded as G5 and G10 are, against the kernel
-in this configuration with verify's own stand-in for the operator's code, and the note says so. Item 6 reconciles the
-roadmap sentence.
+`@protect` declares one is in your code, which verify does not read. The gateway and the ACS hook cannot name a
+provider at all, and refuse an approval that carries a fingerprint.* The roadmap's exit sentence says G16 is
+`N/A` where the configuration names no fingerprint. A fingerprint is named in code (§6.2), not in any document
+verify reads, so that sentence cannot be made true; G16 is instead graded as G5 and G10 are, against the kernel
+in this configuration with verify's own stand-in for the operator's code, and the note says so. Item 6
+reconciles the roadmap sentence.
 
 ---
+
+**G5 is amended in the same way as G14**, because an operator's ceiling can make its control impossible: G5's
+control renews the selected action's key, `NotExecuted` then a retry that must commit
+(`verify/scenarios.py:1344-1377`), and under `max_attempts: 1` that retry is refused, which would report a
+correct kernel as `fail`. **Item 4 makes the change for both G5 and G14**, since item 3 lands G14 before
+`max_attempts` exists: each selects only an action whose ceiling allows a renewal, and where every candidate
+declares `max_attempts: 1` each is `N/A` with the sentence above. T270 runs a document shaped that way.
 
 **The catalogue moves once.** Item 1 bumps `ctrlrun.guarantees/v2` to `v3` and lands G13; items 2 to 5 land G12,
 G14, G15 and G16. Between items, unreleased `main` carries a partial `v3`, and item 6 asserts all five are present
@@ -1855,11 +2099,14 @@ class ClockSkew:
 
 DEFAULT_CLOCK_SKEW_THRESHOLD: Final = timedelta(seconds=1)   # ctrlrun.postgres
 
-# ctrlrun.postgres (§3.6, §3.7). Not StateStore methods: attributes of the one concrete store with a clock
+# An OPTIONAL store attribute (§3.6). Not on the StateStore protocol; any store may expose it, and
+# Control reads it with getattr and uses it only if it is a ClockSkew. PostgresStateStore exposes it.
+clock_skew: ClockSkew | None                                        # read-only
+
+# ctrlrun.postgres (§3.7)
 class PostgresStateStore:
     def __init__(self, url, *, clock=..., schema="public",
                  clock_skew_threshold: timedelta = DEFAULT_CLOCK_SKEW_THRESHOLD) -> None: ...
-    clock_skew: ClockSkew | None                                    # read-only
 
 # ctrlrun.policy (§5.3)
 class Policy:
@@ -1890,7 +2137,9 @@ The two `preconditions=` keywords and `clock_skew_threshold=` are keywords on ex
 methods. `ClockSkew`, `Receipt.schema` and `ApprovalRequest.precondition_fingerprint` are fields and a record
 type. `idempotency_token_for` exists because §4.5's re-derivation needs a public definition to re-derive from,
 and `request` because the httpx variant is the gateway's rule offered to an executor using httpx (§2.5).
-`clock_skew` is the one that most resembles a store method, and §3.6 argues why it is not one.
+`clock_skew` is the one that most resembles a store method: it is an **optional store attribute**, read from
+any store, and §3.6 argues why it is not a `StateStore` method, says that a wrapper which does not forward it
+silently drops skew reporting, and leaves to the maintainer whether `v0.6 §9.2`'s bar should cover it.
 
 **And no other public name.** No new `Control` method, no new `StateStore` method, no new error type, no new
 approval provider, no new sink, **no new CLI command and no new CLI flag**.
@@ -1939,15 +2188,17 @@ Each in the item that makes it true, and each recorded here so it can be found.
 3. **`v0.2 §6.8`'s transport rows** are unchanged in meaning and now implemented by `ctrlrun.transport`; the
    gateway's `NotExecuted` is chained (item 2).
 4. **`v0.3 §4.3.1`** gains §7's column and §5.5's order (items 4 and 5).
-5. **`v0.4 §3.7`** becomes *nothing verify does leaves the host*, and T107's guard refuses every non-loopback
-   address (item 2).
+5. **`v0.4 §3.7`** becomes *verify opens no connection except to the store `--store-url` names and to loopback
+   listeners it bound itself*, and T107's guard admits the loopback literals only (item 2). **G5's selection**
+   (`v0.4 §2.2`) skips an action whose ceiling forbids a renewal (item 4, §8.9).
 6. **`v0.6 §6.4`'s last bullet**: an additive receipt field no longer breaks the rehash of an older receipt,
    because a receipt renders under its own schema; the unreleased builds that bullet describes are unchanged
    (item 5).
 7. **`v0.6 §8` T141**'s "no other N/A is accepted" admits the skew case's `not_applicable` on SQLite and the
    in-memory store (item 1).
-8. **`v0.6 §4.2`'s renewal compare-and-set** is conditioned on the planned-from attempt as well as the state
-   (item 4, §5.6).
+8. **`v0.6 §4.2`'s renewal compare-and-set** is conditioned on the planned-from attempt as well as the state,
+   and **`v0.6 §4.3.2`'s lost-commit re-issue** returns the reservation it wrote rather than the one first
+   planned (**item 3a**, its own pull request with an independent review, stacked before item 3; §5.6).
 
 ---
 
@@ -1973,7 +2224,10 @@ own, and none of them is configurable.
 | A record already `FAILED` at the ceiling | Refused before the approval gate; nothing written; no request created (§5.5) |
 | A reservation assigned an attempt number above the ceiling | Executor not called; record released `FAILED`; `blocked` receipt; `ActionDenied(reason="attempt_ceiling")` (§5.5) |
 | A crash between that reservation and its release | `AMBIGUOUS` once the lease lapses; a human or a hook resolves it; never `FAILED` (§5.2) |
-| A Postgres renewal planned against a stale attempt number | Matches no row; refused (§5.6) |
+| A Postgres renewal planned against a stale attempt number | Matches no row; refused (§5.6, item 3a) |
+| A lost `COMMIT` on a reservation, resolved by re-issuing it | The attempt the re-issue wrote is the one returned, never the one first planned (§5.6, item 3a) |
+| A store whose `clock_skew` is not a `ClockSkew`, or whose read raises | Ignored with a log line; the action is unaffected (§3.6) |
+| A receipt document with a key outside its declared schema, or a `seq` under a `v1` or `v2` label | `content_altered` at its `seq`; no reader surfaces the extra key (§6.11) |
 | A presented approval whose fingerprint differs from the recheck | `ApprovalMismatch(reason="precondition_changed")`; nothing reserved; approval `granted` (§6.3) |
 | A fingerprint on one side only | `ApprovalMismatch(reason="precondition_missing")`; never a skip (§6.4) |
 | The provider raises, returns a non-mapping, or returns what `canonical_bytes` refuses | Presenting pass: `ApprovalMismatch(reason="precondition_unavailable")`, nothing reserved. Request pass: `ActionDenied(reason="precondition_unavailable")`, no request created (§6.5) |
@@ -2054,6 +2308,8 @@ decided, not afterwards.
 ### 12.1 Item 1: clock skew
 
 ### 12.2 Item 2: the transport classifier
+
+### 12.3a Item 3a: attempt numbers never repeat
 
 ### 12.3 Item 3: the idempotency token
 
