@@ -2554,6 +2554,15 @@ retry beside a running dispatch; `begin_execution` claims a reservation this att
 an outcome to the newer attempt is the residual below; dropping it is a lost outcome, and between the two the
 fail-closed direction is to land it.
 
+**The bound has its own test, at the store's own read, because no proxy can drive it.** A second move under the
+re-issue needs a rival interleaved *inside* the re-issue, and a hold fires once. `v0.6`'s T155f is the precedent
+for what an unbounded re-issue costs: driven by a proxy that swallowed every `COMMIT`, the lost-commit path
+recursed 96 deep and escaped as `RecursionError`, outside the error taxonomy. So the stale re-issue's bound is
+driven by subclassing the store's own `_read_effect` to report the record one attempt further on every read,
+which is a rival that never stops moving and makes every conditional `UPDATE` miss. Bounded, the call refuses
+and writes nothing; unbounded, it recurses until Python stops it, which is what removing the flag produces and
+what the mutation table records.
+
 **The refusal now takes its type from what the re-read found.** Every one of these was
 `DuplicateEffect(state=in_progress)`, which `errors.py` defines as *another attempt holds a live reservation*.
 After a stale `resolve_effect` the record is `AMBIGUOUS` at the newer attempt, which is nobody's reservation, so

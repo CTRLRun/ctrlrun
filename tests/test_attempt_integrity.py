@@ -1318,3 +1318,61 @@ def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, t
             from ctrlrun.postgres import PostgresStateStore
 
             PostgresStateStore.drop_schema(URL, name)
+
+
+@postgres
+def test_the_outcome_re_issue_is_bounded_at_one(schema):
+    """*Every loop in this project is bounded*, and the re-issue above is a loop.
+
+    `T155f` is the precedent: the lost-commit re-issue had no bound, and driven with a proxy that
+    swallowed every `COMMIT` the store recursed 96 deep and escaped as `RecursionError`, outside
+    the error taxonomy entirely. The stale re-issue is bounded the same way, by a flag, and this
+    drives it the same way: a record that has moved **again** by the time the re-issue reads it.
+
+    No proxy can open that window deterministically, because it would have to interleave a rival
+    inside each re-issue, and a hold fires once. So the seam is the store's own read, subclassed to
+    report the record one attempt further on each time it is consulted while the flag is set: a
+    rival that never stops moving. It refuses nothing the real store refuses and invents no outcome
+    the real store cannot produce, it only makes every conditional `UPDATE` miss, which is what a
+    rival moving the row does. With the bound the call refuses; without it, it recurses until
+    Python stops it, which is a failure mode no caller can classify.
+    """
+    from dataclasses import replace
+
+    from ctrlrun.postgres import PostgresStateStore
+
+    class KeepsMoving(PostgresStateStore):
+        moving = False
+        reads = 0
+
+        def _read_effect(self, connection, effect_key):  # type: ignore[no-untyped-def]
+            record = super()._read_effect(connection, effect_key)
+            if record is None or not self.moving:
+                return record
+            self.reads += 1
+            return replace(record, attempt=record.attempt + self.reads)
+
+    key = "refund:bounded-reissue"
+    store = KeepsMoving(URL, schema=schema, clock=lambda: T0)
+    try:
+        store.reserve_effect(key, "act_moving", LEASE)
+        store.begin_execution(key, "act_moving")
+        store.moving = True
+        with pytest.raises(CTRLRunError) as refused:
+            store.mark_ambiguous(key, "act_moving", "the outcome was lost")
+        assert not isinstance(refused.value, RecursionError), (
+            "the re-issue chased a record that kept moving until Python stopped it"
+        )
+        assert "moved from attempt" in str(refused.value), refused.value
+        assert store.reads >= 3, (
+            f"the record was read {store.reads} times: the re-issue never ran, so this test is "
+            "not about the bound"
+        )
+    finally:
+        store.moving = False
+        store.close()
+
+    # The record is exactly as attempt 1 left it: a refused re-issue writes nothing.
+    record = stored(schema, key)
+    assert record is not None
+    assert (record.state, record.attempt) == (EffectState.EXECUTING, 1), record
