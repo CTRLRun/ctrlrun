@@ -3108,6 +3108,15 @@ correct kernel. Nobody saw it because the reasoning and the measurement were bot
 **CI found it on Linux after a clean macOS run and a clean review round**, which is the argument
 for the matrix and against a mechanism measured on one platform.
 
+**A second platform lesson, from the same CI.** Where a peer's reset surfaces is not the same on
+both: macOS raises it from the response read, Linux from the send. The kernel does not care, since
+the classifier re-raises whatever it was and the mark is already set either way, and G12's reset row
+passes on both. What it changed was a **mutant**: T230's "a classifier that always claims" wrapped
+only the response read, so on Linux the reset row was unmutated and the read-timeout row caught the
+mutant instead, under a different sentence. The double now claims from the send as well. A test
+double that models a wrong classifier has to be wrong everywhere the failure can land, or it is
+testing the platform.
+
 There is no second mechanism now. The reused row reconnects to **the socket §12.2.1 already
 describes**: bound by verify, never listened on, refused at once on Linux and dropped on macOS, and
 held for the row's duration so no other process can take it. The connection's target has nothing to

@@ -2839,24 +2839,42 @@ def test_T230_a_classifier_with_no_register_fails_the_second_connection_row(tmp_
 
 
 def test_T230_a_classifier_that_always_claims_fails_the_observable(tmp_path, monkeypatch):
-    """The other direction of the asymmetry: a byte written and still claimed is the violation."""
+    """The other direction of the asymmetry: a byte written and still claimed is the violation.
+
+    The double claims from **both** `request` and `getresponse`, because a peer that resets after
+    reading surfaces that reset in either call depending on the platform: macOS raises it from the
+    response read, Linux from the send. Wrapping only the read left the reset row unmutated on
+    Linux and let the read-timeout row catch this instead, which CI found and which says nothing
+    about the kernel (§12.2.11). A classifier that guesses guesses wherever the failure lands.
+    """
     from ctrlrun.verify import Status
 
-    original = transport.HTTPConnection.getresponse
+    originals = {
+        name: getattr(transport.HTTPConnection, name) for name in ("request", "getresponse")
+    }
 
-    def guessing(self):  # type: ignore[no-untyped-def]
-        try:
-            return original(self)
-        except Exception as exc:
-            raise NotExecuted("a classifier that guessed from the exception type") from exc
+    def guessing(name):  # type: ignore[no-untyped-def]
+        def wrapped(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            try:
+                return originals[name](self, *args, **kwargs)
+            except NotExecuted:
+                raise
+            except Exception as exc:
+                raise NotExecuted("a classifier that guessed from the exception type") from exc
 
-    monkeypatch.setattr(transport.HTTPConnection, "getresponse", guessing)
+        return wrapped
+
+    for name in originals:
+        monkeypatch.setattr(transport.HTTPConnection, name, guessing(name))
     result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
 
     assert result.status is Status.FAIL
-    # By its message: the kernel would also write a `failed` receipt here, and a check on the
-    # receipt alone would report this under a different sentence (mutation pattern 1).
-    assert result.reason.startswith("the classifier raised NotExecuted after the peer received")
+    # By its message, and by the row it names: the kernel would also write a `failed` receipt
+    # here, and a check on the receipt alone would report this under a different sentence, while
+    # a check on the status alone could not tell this from any other failure (pattern 1).
+    assert result.reason.startswith("the classifier raised NotExecuted after the peer received"), (
+        result.reason
+    )
 
 
 def test_T230_a_kernel_that_records_every_failure_FAILED_fails_the_observable(
