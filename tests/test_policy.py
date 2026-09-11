@@ -648,6 +648,36 @@ def test_malformed_policy_document_is_a_policy_error(text: str) -> None:
         Policy.from_yaml(text)
 
 
+@pytest.mark.parametrize(
+    ("case", "text"),
+    [
+        # The fuzzer's own crash unit, decoded exactly as `fuzz/properties.py` decodes it
+        # (`utf-8`, `replace`), so this test fails if the decode path or the loader changes.
+        ("overflowing \\U escape", b'"\\Ueeeeeeeeeeeeeeeee\xd4a'.decode("utf-8", "replace")),
+        ("\\U above the Unicode maximum", '"\\U00110000"'),
+        # The one a person writes. The two above need a fuzzer or a bad day; a mistyped month
+        # in a date is an ordinary typo, and it crashed with `ValueError` from `datetime`.
+        ("a month that does not exist", "schema: ctrlrun.policy/v1\nactions: {}\nx: 2026-99-99\n"),
+    ],
+)
+def test_a_document_pyyaml_cannot_convert_is_refused_in_words(case: str, text: str) -> None:
+    """`Policy.from_yaml` promises `PolicyError` for anything malformed, without qualification.
+
+    PyYAML converts a scalar before it has decided the document is well formed, and these three
+    conversions raise the interpreter's exception rather than a `YAMLError`: the codepoint of an
+    over-long `\\U` escape overflows a C int, `chr()` refuses one above `0x10FFFF`, and
+    `datetime` refuses month 99. Each reached the caller as `OverflowError` or `ValueError`
+    through a loader whose whole job is to turn a bad document into one named error.
+
+    Nothing unsafe was admitted -- the document is refused either way -- so what this fixes is
+    the type, and the type is the contract: a caller catching `PolicyError` around a policy load
+    caught none of these. Found by `fuzz/properties.py` after 174,380 executions, which is the
+    argument for the fuzzer running on every push rather than on a schedule somebody mutes.
+    """
+    with pytest.raises(PolicyError, match="not valid YAML"):
+        Policy.from_yaml(text)
+
+
 def test_yaml_is_loaded_safely() -> None:
     # A policy file is untrusted input; it must not be able to construct Python objects.
     with pytest.raises(PolicyError):

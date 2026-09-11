@@ -177,14 +177,29 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     # The category noun, which the hero went without until 0.6: a reader had to reverse-engineer
     # what CTRLRun *is* from three slogans. The documentation root carried it; the README did not.
     assert "A Python library that sits between the decision to act and the call that acts." in head
+    # The row was cut from thirteen to ten on 2026-09-11: `pypi/pyversions` is metadata rather
+    # than a claim, and `ruff` and `mypy --strict` say how the library is written, which is not
+    # what a stranger is deciding on the first screen. `scripts/check.sh` still runs all three
+    # and `test_ci_runs_the_check_script` still requires CI to call it, so what the two badges
+    # asserted is enforced where it was always enforced. Their absence is required rather than
+    # merely untested: a row that grew back would otherwise pass.
     for badge in (
         "pypi/v/ctrlrun",
-        "pypi/pyversions/ctrlrun",
+        "downloads-badge.json",
+        "clones-badge.json",
         "ci.yml/badge.svg",
+        "fuzz.yml/badge.svg",
         "verify-badge.json",
         "pypi/l/ctrlrun",
     ):
         assert badge in head, badge
+    for gone in ("pypi/pyversions/ctrlrun", "astral-sh/ruff", "mypy-strict"):
+        assert gone not in head, gone
+    # `img.shields.io/pypi/dm` rendered the download count live, which means shields asking
+    # pypistats on behalf of every project it serves: it returned `rate limited by upstream
+    # service` the day it shipped. `traffic.yml` now asks once a day and publishes the answer.
+    # Pinned as an absence because the live form is the obvious thing to reach for again.
+    assert "pypi/dm/ctrlrun" not in head, "the live shields form is rate limited; use the endpoint"
     marker = "generated from capabilities.yaml (readme)"
     assert marker not in head, "the capability matrix is not the first screen"
     assert marker in text, "the capability matrix was moved, not dropped"

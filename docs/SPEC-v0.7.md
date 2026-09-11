@@ -1087,11 +1087,39 @@ changes a store.**
 'failed'` (`postgres.py:787-800`). Between the read and the `UPDATE`, another process can renew to *k+1*,
 run, fail and commit, leaving the record `FAILED` again; the stale `UPDATE` then matches and writes *k+1*
 a second time. Item 3a conditions it on the attempt it planned from:
-`… WHERE effect_key = %s AND state = 'failed' AND attempt = %s`. That closes this race completely rather
-than narrowing it, because the attempt number is monotonic: only a renewal changes it, and every other
-transition carries it through unchanged (`state.py:281-342`, `_transitioned` and `_resolved`). A stale
-renewal then matches no row and is refused exactly as a lost renewal race is refused today
-(`postgres.py:802-807`).
+`… WHERE effect_key = %s AND state = 'failed' AND attempt = %s`. A stale renewal then matches no row and is
+refused exactly as a lost renewal race is refused today (`postgres.py:802-807`).
+
+**That closes the race only if the attempt number is monotonic, and on Postgres it was not.** Only a renewal
+changes the number, and every other transition computes the same number (`state.py:281-342`, `_transitioned`
+and `_resolved`); but on Postgres each of them *writes* that number back, from its own earlier read, under a
+`WHERE` on `effect_key`, `action_id` and `state` alone (`_write_effect`, under `resolve_effect`, `extend_lease`,
+`hold_continuation` and §4.2.2's kept `AMBIGUOUS` write; `_transition`, under `begin_execution`,
+`commit_effect`, `fail_effect` and `mark_ambiguous`). A caller that retries one `Action` object reuses its
+`action_id`, so `(action_id, state)` can come round again at a newer attempt between the read and the write,
+and the stale write then puts the older number back: a human's `resolve_effect` decided on `AMBIGUOUS` at 1
+lands on `AMBIGUOUS` at 2 and writes `FAILED` at **1**, and the next renewal hands out 2 a second time. Item 3a's
+independent review reproduced it. So every `UPDATE` on `effects` is conditioned on the attempt it read as well,
+with the row count checked as before, and a write whose row moved matches nothing and is re-read. With that, and
+only with it, the number moves only by a renewal, and the renewal's condition closes the race rather than
+narrowing it. There are three `UPDATE`s on the table and one `INSERT`, which lands only where there is no row,
+and all four are covered (§12.3a).
+
+**What the re-read then does is not the same answer for all of them, and the difference is an outcome.**
+`commit_effect` and `mark_ambiguous` carry what the executor did, or the fact that nobody knows; refusing them
+writes nothing, and the effect record, which is what gates the next renewal, is then silent about an attempt
+that may have acted. They are **re-issued once** against the re-read where it says the record is still this
+attempt's and still in a state the write may be made from, so the outcome lands on the newer attempt.
+`begin_execution` and `fail_effect` are refused there, because `FAILED` asserts that nothing happened and
+attempt 2 is running. Everything else, `resolve_effect` and §4.2.2's kept `AMBIGUOUS` write among them, is
+refused with the type the re-read's record earns and a message naming the move (§12.3a, T246c).
+
+**And this is a store-level race, not the human's.** Conditioning `resolve_effect` on the attempt it read closes
+the milliseconds between that read and its own write. The window a person actually stands in is longer: they
+inspect, they decide, they run `ctrlrun resolve`, and the attempt can move between the inspection and the
+command. `resolve_effect` carries no attempt number and does not look at `action_id`, so a human who read
+attempt 1 can still resolve attempt 2's ambiguity with no `action_id` reuse anywhere. An attempt argument on the
+CLI and on the operator tool would close that one, and it is a follow-up rather than part of item 3a (§12.3a).
 
 **The lost `COMMIT`.** Where the reservation's `COMMIT` is lost, `_authorize_and_reserve` re-reads and,
 where the write did not land, re-issues the operation through `_authorize_and_reserve(..., retrying=True)`
@@ -1742,6 +1770,26 @@ of a window nobody opened.) In both, the attempt the reservation method returns 
 record, and mutating that path's resolve function back to returning the original plan's reservation makes its
 variant fail with the two numbers differing.
 
+#### T246c: No stale write moves an attempt number backwards, and no outcome is dropped instead
+The shape of T246, for every Postgres write that is not a renewal, under an `action_id` the caller reuses. With
+the proxy the tests own, the write's `UPDATE` is held after its read while another process brings the record
+back to the same `action_id` and a state the write may be made from, at attempt 2. Released, it never rewinds
+the record, and what it does instead depends on what it carries: `commit_effect` and `mark_ambiguous` are
+re-issued once against the re-read, so the outcome lands at attempt 2; `begin_execution` and `fail_effect` are
+refused, because `FAILED` asserts that nothing happened and attempt 2 is running; `resolve_effect` and the
+§4.2.2 `AMBIGUOUS` write by a contender are refused, typed by what the re-read found and naming the move. Each
+variant ends by asserting that no further attempt may be taken. Every one was red before its fix: first with
+the record rewound to attempt 1, and then, for the two that carry an outcome, with the outcome dropped and a
+further attempt permitted. Added by item 3a after its reviews (§12.3a).
+
+#### T246d: An unknown outcome the store refuses to record is never lost
+Through `Control.execute`, on **both backends**, with no proxy: the executor runs past its lease, a contender
+makes the lapsed record `AMBIGUOUS`, a human resolves it `FAILED` while the attempt is still running, and the
+executor then raises `TimeoutError`. `mark_ambiguous` is refused with `InvalidArgument`, which is not a refusal
+`Control` used to catch. The caller gets its own `TimeoutError`, one `ambiguous` receipt is written naming both
+the executor's exception and the store's refusal, and the `EXECUTION_AMBIGUOUS` event is appended. Red before
+the fix with no receipt, no event and `InvalidArgument` reaching the caller (§12.3a).
+
 ### 8.3 Item 3: The idempotency token (§4)
 
 #### T232: A `FAILED` renewal changes the token
@@ -2343,6 +2391,9 @@ Each in the item that makes it true, and each recorded here so it can be found.
 8. **`v0.6 §4.2`'s renewal compare-and-set** is conditioned on the planned-from attempt as well as the state,
    and **`v0.6 §4.3.2`'s lost-commit re-issue** returns the reservation it wrote rather than the one first
    planned (**item 3a**, its own pull request with an independent review, stacked before item 3; §5.6).
+   **Table A2 row 1 on a renewal** applies `v0.6 §4.3.3`'s whole-row identity check, which only the insert
+   path applied before, and **every other compare-and-set on `effects`** is conditioned on the attempt it read
+   (item 3a, §5.6, §12.3a). `SPEC-v0.6.md` §4.2 and §4.3.4 carry pointers here.
 
 ---
 
@@ -2369,7 +2420,14 @@ own, and none of them is configurable.
 | A reservation assigned an attempt number above the ceiling | Executor not called; record released `FAILED`; `blocked` receipt; `ActionDenied(reason="attempt_ceiling")` (§5.5) |
 | A crash between that reservation and its release | `AMBIGUOUS` once the lease lapses; a human or a hook resolves it; never `FAILED` (§5.2) |
 | A Postgres renewal planned against a stale attempt number | Matches no row; refused (§5.6, item 3a) |
+| A Postgres `commit_effect` or `mark_ambiguous` whose record moved since its read, still this attempt's and still in a state it may be written from | Matches no row; re-read; **re-issued once** against the re-read, so the outcome lands on the newer attempt and is never dropped (§5.6, T246c, item 3a) |
+| A Postgres `begin_execution` or `fail_effect` in the same position | Matches no row; re-read; refused, typed by what the re-read found, naming the move; nothing written, and the running attempt is left alone (§5.6, T246c) |
+| Any other Postgres write to an effect record whose attempt moved since its read (`resolve_effect`, `extend_lease`, `hold_continuation`, the kept `AMBIGUOUS` write) | Matches no row; re-read; refused, typed by what the re-read found; nothing written (§5.6, T246c, item 3a) |
+| A store refusal to an executor's outcome write, of any type | The `EXECUTION_AMBIGUOUS` event and the `ambiguous` receipt are written anyway and name the refusal; the caller's own exception propagates; nothing is reconciled on a record this attempt could not mark (§12.3a, item 3a) |
+| A Postgres approval expiry whose approval was answered or consumed since its read | Matches no row; the approval keeps what the other writer wrote; the refusal that asked for the expiry is raised as before (§12.3a, item 3a) |
 | A lost `COMMIT` on a reservation, resolved by re-issuing it | The attempt the re-issue wrote is the one returned, never the one first planned (§5.6, item 3a) |
+| A lost `COMMIT` on a Postgres renewal whose re-read finds our `action_id` on a row that is not our own write | Not ours: `a2.row3.refuse`, refused through `plan_reservation`; nothing returned (§12.3a, item 3a) |
+| A lost `COMMIT` on a Postgres insert whose re-read finds another attempt's record the planner would renew over | `a1.row3.refuse`; `DuplicateEffect(state=in_progress)`; nothing returned (§12.3a, item 3a) |
 | A store whose `clock_skew` is not a `ClockSkew`, or whose read raises | Ignored with a log line; the action is unaffected (§3.6) |
 | A stored receipt document with an added key, a changed or removed `schema`, or an unknown one | A hash mismatch: `content_altered` at its `seq`. `receipts()` does not raise, and no reader surfaces an undeclared key (§6.11) |
 | A presented approval whose fingerprint differs from the recheck | `ApprovalMismatch(reason="precondition_changed")`; nothing reserved; approval `granted` (§6.3) |
@@ -2556,6 +2614,234 @@ action that can store it and a sink is handed only an event that was stored.
 ### 12.2 Item 2: the transport classifier
 
 ### 12.3a Item 3a: attempt numbers never repeat
+
+Both defects §5.6 names were reproduced before they were fixed, each by a test that was red on 0.6.1's
+store for the reason it names: T246 with two reservations carrying attempt 2; T246b's renewal variant with the
+method returning 2 while the record held 3; T246b's insert variant with 1 returned and 2 stored. All of them run
+in separate OS processes against a local Postgres, with the parent holding the proxy, and every wait bounded.
+Both reservation methods, `reserve_effect` and `consume_approval_and_reserve`, run through every window,
+because §5.5 says *every* reservation method returns the number it wrote.
+
+**The independent review found the premise of the renewal fix false, and it was.** §5.6's first draft argued
+that conditioning the renewal on its planned-from attempt closed the race *because the attempt number is
+monotonic*. On Postgres it was not: `_write_effect` and `_transition` wrote back the attempt they had read,
+under a `WHERE` on `effect_key`, `action_id` and `state`, and a caller that retries one `Action` object reuses
+its `action_id`, so that pair comes round again at a newer attempt. The reviewer held a `resolve_effect`'s
+`UPDATE` with this item's own proxy while a second human resolved attempt 1, the owner retried, and attempt 2
+timed out; released, the stale resolution wrote `FAILED` at 1 over `AMBIGUOUS` at 2, and the next renewal handed
+out attempt 2 again. That is two dispatches under one number and one token, a ceiling of N admitting N+1, and
+attempt 2's unknown outcome settled by a human who had read attempt 1's record: a double-execution risk present
+since 0.6. SQLite and the in-memory store never had it, since their read and write are one critical section.
+Every `UPDATE` on `effects` in `postgres.py` was checked, and there are three: the renewal (conditioned by the
+first fix), `_write_effect` (under `resolve_effect`, `extend_lease`, `hold_continuation` and §4.2.2's kept
+`AMBIGUOUS` write) and `_transition` (under `begin_execution`, `commit_effect`, `fail_effect`, `mark_ambiguous`
+and Table A2's re-issue). The one `INSERT` lands only where no row exists. Both compare-and-sets are now
+conditioned on the attempt they read; a moved row matches nothing and is re-read. T246c holds each shape that
+reaches them, and each was red on the store before this fix with the record rewound to attempt 1.
+`extend_lease` and `hold_continuation` share `_write_effect`'s statement, so its mutant is killed by the
+`resolve_effect` and contender-`AMBIGUOUS` variants; the four transitions share `_transition`'s.
+
+**And the refusal that replaced the rewind dropped outcomes, which the second review round caught.** A write
+whose row has moved is re-read and run through `_checked`, and where the record is still this attempt's and
+still in a state the write may be made from, the predicate *passes*: only the attempt moved. The first fix then
+raised and wrote nothing, and for `commit_effect` and `mark_ambiguous` that is a lost outcome, not a refusal.
+The reviewer measured it: attempt 1's `commit_effect` refused, the record left `EXECUTING` at attempt 2, attempt
+2 reporting `NotExecuted`, and a renewal to attempt 3 with attempt 1's commit recorded on no effect record at
+all. For a refund that had landed, attempt 3 is a second refund. The effect record is what gates the next
+renewal, so a write that carries an outcome may not simply decline to land. Both outcome transitions are now
+**re-issued once** against the re-read, bounded by a `restaged` flag as Table A2's re-issue is bounded by
+`retrying`, so the stale write lands exactly where the same call a moment later would have landed it: on the
+newer attempt. `begin_execution` and `fail_effect` are still refused, and the asymmetry is the argument.
+`FAILED` asserts that *nothing happened*, so re-issuing attempt 1's over attempt 2 in flight would permit a
+retry beside a running dispatch; `begin_execution` claims a reservation this attempt no longer holds. Attributing
+an outcome to the newer attempt is the residual below; dropping it is a lost outcome, and between the two the
+fail-closed direction is to land it.
+
+**Two bounds that reset each other are not a bound, and that took a third round to see.** `restaged` bounds the
+stale re-issue and `retrying` bounds `v0.6 §4.3.2` Table A2's lost-commit re-issue. Each was tested alone and
+each held alone. Composed, they cleared each other: the restage re-issued without passing `retrying` on, and the
+lost-commit re-issue re-issued without passing `restaged` on, so a `COMMIT` lost inside a restage reset the
+restage bound and a restage inside a lost-commit re-issue reset the lost-commit bound. A review drove both
+halves at once, every `COMMIT` lost and a record that keeps moving, and measured `RecursionError` at 113 deep,
+which is T155f's failure mode arriving by another door and outside the closed set of errors, so no caller can
+classify it. Both flags now travel through both re-issues. The composition is the property, not either flag, and
+its test drives both halves the way each is driven alone: the real proxy at `drop_before_commit = 1000` for the
+lost `COMMIT`, and the seam below for the record that moves.
+
+**Two things about that test were measured rather than assumed, and both would have made it a false green.**
+The first is the interleaving: the obvious every-other-read pattern ends bounded even when the flags do not
+compose, so the patterns come from a search over this proxy, and there are two, because `(0, 0, 1, 0)` is the
+one that catches the restage failing to pass `retrying` on and `(1, 0, 0, 0)` is the one that catches the
+lost-commit re-issue failing to pass `restaged` on. The second is the assertion. Dropping **both** flags
+recurses; dropping **one** does not recurse at all on any pattern of six reads or fewer, measured rather than
+sampled, it simply permits one
+re-issue more than the bound allows, and that extra level terminates. So a test asserting only *"this did not
+blow the stack"* would be green for each flag taken alone, which is precisely the pair of mutants that say each
+is load-bearing. Each bound permits one re-issue, so three is the deepest nesting any interleaving may reach,
+and the test asserts that: a fourth level means a bound was cleared, whether or not that pattern went on
+forever.
+
+**The re-issue is asked for at the call site rather than inferred from the state it writes.** It was keyed on
+the target state, `COMMITTED` or `AMBIGUOUS`, which is right for every path there is today and wrong the moment
+a transition to one of those states is somebody's *decision* rather than an executor's outcome. A human's
+resolution is exactly that, and it reaches `_write_effect` today, but `_transition` is generic and the next
+transition to land there would have inherited the re-issue silently. `commit_effect` and `mark_ambiguous` now
+pass `carries_outcome=True`, and the state set survives as an assertion: a caller that claims to carry an
+outcome into any other state is a wiring bug rather than a re-issue.
+
+**A restage that then refuses says so.** The line naming it was written after the nested call returned, so it
+appeared only when the re-issue succeeded, and the case an operator would actually go looking for, a stale
+outcome that was re-issued and still refused, left no line at all. It is written before the re-issue now, which
+is `v0.6 §4.3.4`'s rule applied to a branch that section does not enumerate: which branch ran is observable.
+
+**The bound has its own test, at the store's own read, because no proxy can drive it.** A second move under the
+re-issue needs a rival interleaved *inside* the re-issue, and a hold fires once. `v0.6`'s T155f is the precedent
+for what an unbounded re-issue costs: driven by a proxy that swallowed every `COMMIT`, the lost-commit path
+recursed 96 deep and escaped as `RecursionError`, outside the error taxonomy. So the stale re-issue's bound is
+driven by subclassing the store's own `_read_effect` to report the record one attempt further on every read,
+which is a rival that never stops moving and makes every conditional `UPDATE` miss. Bounded, the call refuses
+and writes nothing; unbounded, it recurses until Python stops it, which is what removing the flag produces and
+what the mutation table records.
+
+**The refusal now takes its type from what the re-read found.** Every one of these was
+`DuplicateEffect(state=in_progress)`, which `errors.py` defines as *another attempt holds a live reservation*.
+After a stale `resolve_effect` the record is `AMBIGUOUS` at the newer attempt, which is nobody's reservation, so
+the type was false and a caller reading `in_progress` would wait for a dispatch that is not running. `_moved`
+picks `AmbiguousEffect` for an `AMBIGUOUS` record, `DuplicateEffect(committed)` for a committed one and
+`in_progress` otherwise, and the message names the move: *moved from attempt 1 (ambiguous) to attempt 2
+(ambiguous) since it was read; nothing was written*.
+
+**An unknown outcome is never lost, whatever the store answers.** The same review drove the case through
+`Control` on SQLite, where none of this item's races exist, and found something older and worse. `Control`
+caught `DuplicateEffect` and `AmbiguousEffect` around its outcome writes; a record a human resolved `FAILED`
+while the attempt was still running answers `InvalidArgument`, which escaped. The result was an executor's
+`TimeoutError` producing **no receipt, no `EXECUTION_AMBIGUOUS` event**, and the caller handed a store error
+about its own effect key instead of its executor's exception: the unknown outcome existed nowhere. The store's
+answer to an outcome write may be a refusal; the evidence may not. `Control` now catches every `CTRLRunError`
+from the three outcome writes, writes the event and the receipt whatever the answer was, and **names the
+refusal in them**, with what the executor did beside it: an executor that returned leaves a remote that very
+likely acted and one that raised `NotExecuted` leaves a remote that very likely did not, and recording only the
+refusal made those two receipts identical for whoever runs `ctrlrun resolve`, because where the store would not take the outcome the effect record does not carry it and
+the receipt is the only place it exists. The caller's own exception propagates, and eager reconciliation stays
+gated on the write having landed, so nothing is retried on the strength of a refused outcome write. What the
+record says afterwards is the human's claim, not this attempt's, and that is the one thing the evidence can
+still contradict. T246d is the test, on both backends and for all three outcomes.
+
+**What the wider catch also absorbs, said plainly.** Each of those three `except` clauses wraps exactly one
+store call, so no approval, authority or reservation refusal passes through it. But `CTRLRunError` includes
+`InvalidArgument`, and a mis-wired `held_key` raises `InvalidArgument("no reservation for effect ...")`, which
+now becomes an `ambiguous` receipt naming the refusal rather than an exception at the caller. That is the right
+trade and it is a trade: a wiring bug on this path surfaces in the evidence instead of at the call site, and it
+surfaces as an unknown outcome, which is the fail-closed reading of *the store would not record what the
+executor did*. The receipt names the exception type, so the bug is legible; what it no longer does is stop the
+attempt from being recorded at all.
+
+**What that does not close, stated without softening, because the first draft of this paragraph softened it in
+three places.** The attempt number is now monotonic, so no two reservations of one key carry the same number.
+What a reused `action_id` still leaves open is which attempt a *late* write is about, on **every backend**: a
+transition names its holder by `action_id` alone, so attempt 1's write, arriving after its lease lapsed, a
+contender ambiguated the record and the same `Action` was retried, reads attempt 2's record, finds its own id
+in a state it expects, and lands there. Three corrections to how that was stated:
+
+- **It is not only misattribution.** A late `commit_effect` records the wrong attempt's outcome, which is bad
+  evidence. A late `fail_effect` is worse: it writes `FAILED` over attempt 2 **while attempt 2 is executing**,
+  and `FAILED` is the one state that permits a renewal, so attempt 3 may be dispatched beside a dispatch that is
+  still running. That is a concurrent double execution, and calling it attribution would be this repository's
+  own prevention-versus-attribution error.
+- **And `mark_ambiguous` reaches the same place in one more step, which is why the asymmetry above is argued on
+  this ground and not on the state's name.** A late or re-issued `mark_ambiguous` lands `AMBIGUOUS` on attempt
+  2; the write succeeded, so `Control` counts the outcome as recorded and eager reconciliation runs; a hook
+  answering `not_executed` resolves the record `FAILED`, because the hook is asked about the **effect key** and
+  not about the attempt; and attempt 3 may then be reserved while attempt 2 is still executing. The step that
+  `fail_effect` takes in one, `mark_ambiguous` takes in two, and the second is taken by a hook that cannot see
+  which attempt it is answering about. Recording the unknown outcome is still right, and the store must still
+  never drop it; what the pair shows is that the residual is about attempt *identity* and is not closed by
+  refusing one transition.
+- **It does not need a human.** A reconcile hook answering `not_executed` moves an `AMBIGUOUS` record to
+  `FAILED` with no person involved (`control.py`, `_reconciled`), so the sequence runs unattended.
+- **There is a fix inside the frozen protocol, and it is declined here rather than unavailable.** A store-side
+  memo of the attempt each reservation wrote, keyed by `(effect_key, action_id)` and seeded by `reserve_effect`,
+  `consume_approval_and_reserve` and `take_continuation`, would let every transition condition on the attempt
+  the caller actually holds without touching a frozen signature. It is declined in item 3a because it is a
+  schema change: a table or a column, a migration, the store conformance suite, and a rule for what a memo that
+  is missing means, which is a specification amendment of its own and is the shape v0.9's budgets will need
+  anyway. Item 3a's subject is the attempt number, and this is the attempt *identity*. Stated here so the next
+  milestone inherits the argument rather than the surprise.
+
+**A third path, found while building: the renewal's "landed" row trusted `action_id`.** Table A2 row 1 on a
+renewal (`_resolve_lost_renewal`) concluded that a lost `COMMIT` had landed from two facts: the record was
+`RESERVED`, and it carried the renewal's `action_id`. `v0.6 §4.3.3` explains why that is not enough and applied
+the fix to the insert path only: `action_id` is caller-supplyable, and a caller that rebuilt the same `Action`
+after a restart renews under the same one. So a renewal whose `COMMIT` was lost, followed by a second process
+renewing the key under the same `action_id`, left the first concluding the row was its own write: two
+dispatches holding one attempt, and a number returned that the method never wrote, which is §5.5's MUST
+failing on the third branch of the same function. The row now applies §4.3.3's check, `_is_our_own_write`,
+against the row the renewal would have written, so a rival's lease or `updated_at` makes it `a2.row3.refuse`.
+The identical-in-every-column residual §4.3.3 states is unchanged, and it needs a clock frozen across processes.
+The test is T246b's third variant, `landed`. It was red on 0.6.1 in both methods, and a check on `attempt`
+alone would not pass it, because the rival renewed to the same number. §9.6 item 8 and §10 carry the row.
+
+**The planned-from attempt is the plan's, and T246 opens two windows to show it.** `_reserve_locked` reads the
+record a second time, for `created_at`, between `_plan`'s read and the `UPDATE`. A condition taken from that
+second read would pass a test that holds only the `UPDATE`, because both reads precede the hold and see the same
+record. So T246 runs at two points: holding the `UPDATE` (§8.3a's window) and holding the second read, where
+that read sees the rival's attempt. The condition is `reservation.attempt - 1`, which is the attempt
+`plan_reservation` renewed from (`effect.py`, `record.attempt + 1`). Taking it from the second read fails the
+second window and passes the first.
+
+**The store conformance suite gains no case: `v0.6 §2.4` holds here.** Its barrier releases contenders
+together and cannot stop one between its `SELECT` and its `UPDATE`, because that is inside `reserve_effect`
+and reaching it needs a hook in shipping code (`v0.6 §2.5`). It cannot lose a `COMMIT` either. The suite states
+both properties in the `retry-table` case, which already asserts that the returned attempt and the stored
+attempt agree on the path it can reach. T246 and T246b are the only tests of the defence, as §5.6 anticipated.
+
+**Two lines no test reaches, stated as such, and one that a test now does.** SQLite's `AND attempt = ?` is an
+equivalent mutant: with it removed the whole suite passes, Postgres included, because `BEGIN IMMEDIATE` holds the
+read and the write together (§5.6). So is `carries_outcome` at the re-issue's guard: reverting it to the older
+`state in _OUTCOMES` condition fails no test, because the only two callers reaching those states pass
+`carries_outcome=True` and nothing else transitions to `COMMITTED` or `AMBIGUOUS` through `_transition`. It is
+kept for the reason the paragraph above gives, that a future outcome-carrying transition must opt in deliberately
+rather than inherit the re-issue, and it is declared here as an equivalent mutant rather than counted as a
+mutation row, because a row that cannot fail is the false green this list exists to prevent. And `_resolve_lost_renewal` ends in a refusal after `a2.row3.refuse` for the
+case where `plan_reservation` grants. That case is unreachable, because the only record the planner grants over
+that a store writes is `FAILED`, which re-issued a line earlier; it is there because the function must return a
+reservation it wrote or raise. Replacing it with `return reservation` fails no test, and the mutation table says
+so. The first draft of this paragraph said the insert path "ends the same way", and the review showed that its
+line is **reachable**: a rival inserts attempt 1 and fails it between the lost `COMMIT` and the re-read, the
+re-read finds `FAILED` at 1 under the rival, and the planner grants a renewal over it, so the refusal is that
+last line's alone. Replaced with `return reservation`, it handed the held process attempt 1 on a record it never
+wrote and failed none of 112 Postgres tests. T246b's `insert-refuse` variant is that interleaving, and it kills
+the mutant.
+
+**One write on `approvals` was not a compare-and-set, and the round-2 survey found it.** `_expire` marks a
+lapsed approval `expired` from a read that saw it `granted` past `expires_at`, and matched on `approval_id`
+alone. A consumption committing between that read and that write was overwritten, so an approval that
+authorised a real effect read `expired` and the evidence said a human's yes had never been spent. `v0.6 §4.2.2`
+keeps that write deliberately, as evidence; evidence that overwrites newer evidence is worse than none. It now
+carries the status it read, as `_consume_locked`, `grant_approval` and `deny_approval` already did, and a row
+count of zero needs no refusal because the caller is being refused anyway by the verdict that asked for the
+write. Its test holds the expiring `UPDATE` while another process, whose clock is still inside the approval's
+life, consumes it. SQLite's expiry is inside the same `BEGIN IMMEDIATE` as its read and was never exposed.
+
+**The proxy grew a mode, not a sibling.** `failure_injection.Proxy` gained `arm(predicate)`: a predicate over
+each parsed client message, which holds the first match (one statement, on one connection) until `release()`.
+`partition` already held traffic, but on every connection at once and at a moment the test chose rather than at
+a statement. The predicate reads SQL from the Parse message, never from a Bind parameter, for the reason
+`is_commit` parses frames, and a fixture test pins that. psycopg sends a query's text only until it has run
+that query five times on one connection and then executes a prepared statement with none, so a predicate sees
+only a query's first few executions; every held statement here is within them, and every test that holds one
+asserts the hold fired. The first version was an attribute, `hold_when`, and one-shot without saying so: its
+events were never cleared, so a second hold on one proxy reported itself held at once and forwarded its
+statement, the review found. Items 3 and 4 will reuse it, so `arm()` clears `holding` in place, gives each
+arming its own release event, and refuses to arm while a hold is armed or held; a server-free fixture test arms
+it twice over real loopback sockets. Round 2 found the hole that was left: `release()` called while a hold was
+armed but had not fired pre-released it, so the statement went straight through with `holding` set and `holds`
+counting a window that never opened, which is the same lie in a narrower form and exactly what a `finally` that
+releases would have produced. It now releases only a hold that has actually fired, under the lock `_holds` uses,
+and the fixture test releases into an armed-but-unfired hold and then asserts the statement is still held. The
+same round measured the prepare threshold rather than reading it off the default: a query's text travels on its
+first six executions on one connection, executions 1 to 5 as unnamed Parses and 6 as the named Parse that
+prepares it, and `statement_of`'s docstring says so.
 
 ### 12.3 Item 3: the idempotency token
 

@@ -444,6 +444,15 @@ def reservation_e1_cross_process(backend: StoreBackend, processes: int = CONTEND
 
 @case("retry-table", "the retry table of v0.1 §5.4, every row")
 def reservation_retry_table(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """`v0.1 §5.4`, every row, and SPEC-v0.7 §5.6's two properties where this suite can reach them.
+
+    **No two reservations of one key carry the same attempt number, and the number a reservation
+    method returns is the number it wrote.** The `FAILED` row asserts both on the path a suite
+    can drive: the renewal is handed attempt 2 and the record says 2. The windows where a store
+    breaks them are inside one method call, a renewal stalled between its read and its write or
+    a lost `COMMIT`, and `v0.6 §2.4` says why no barrier here reaches them. SPEC-v0.7 §8.3a's
+    T246 and T246b open them against Postgres with a proxy the tests own.
+    """
     title = reservation_retry_table.title
     store = backend.open()
 

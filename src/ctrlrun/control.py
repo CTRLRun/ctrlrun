@@ -1154,13 +1154,25 @@ class Control:
                 # the one outcome that leaves the key retryable (§5.4).
                 try:
                     self._store.fail_effect(held_key, action.action_id, str(exc))
-                except (DuplicateEffect, AmbiguousEffect) as refused:
+                except CTRLRunError as refused:
                     # SPEC: §5.2 — the record moved on while the executor ran: this attempt's
                     # lease lapsed and another declared the effect AMBIGUOUS, which only a
                     # human moves it out of. The store's refusal is what propagates, not the
                     # NotExecuted: an agent that caught that would retry a key it lost.
+                    #
+                    # **Every refusal the store can answer with, not two of them.** A record a
+                    # human resolved while this attempt was still running answers
+                    # `InvalidArgument`, which escaped: no receipt, no event, and the caller
+                    # handed a store error about its own effect key. Found by review, round 2.
                     self._unrecorded(
-                        action, evaluation, started_at, held_key, attempt, refused, approval
+                        action,
+                        evaluation,
+                        started_at,
+                        held_key,
+                        attempt,
+                        refused,
+                        approval,
+                        did=f"the executor raised NotExecuted: {exc}",
                     )
                     raise
             self._append(
@@ -1201,12 +1213,26 @@ class Control:
                 try:
                     self._store.mark_ambiguous(held_key, action.action_id, error)
                     recorded = True
-                except (DuplicateEffect, AmbiguousEffect) as refused:
+                except CTRLRunError as refused:
                     # Recording an unknown outcome must never mask the exception that caused
-                    # it. A store that refuses here has the record in a state a human already
-                    # owns — where this attempt was trying to put it — and the receipt below
-                    # says `ambiguous` either way.
+                    # it, and must never be lost with the refusal either. The receipt and the
+                    # event below are written whatever the store answered, and they carry the
+                    # refusal, because where the store would not take the outcome the effect
+                    # record does not carry it: the evidence is then the only place it exists.
+                    #
+                    # **Every refusal, not two of them, and it is named rather than logged
+                    # away.** `DuplicateEffect` and `AmbiguousEffect` were caught and the
+                    # comment here said the record was in a state "a human already owns"; a
+                    # record a human resolved `FAILED` while this attempt was still running
+                    # answers `InvalidArgument` instead, which escaped this handler entirely,
+                    # so an unknown outcome reached no receipt and no event and the caller was
+                    # handed a store error in place of its executor's exception. Found by
+                    # review, round 2 (SPEC-v0.7 §12.3a).
                     _LOG.warning("%s: effect %s: %s", action.name, effect_key, refused)
+                    error = _storable(
+                        f"{error} (the effect record does not carry this outcome: the store "
+                        f"refused the write with {type(refused).__name__}: {refused})"
+                    )
             self._append(
                 EventType.EXECUTION_AMBIGUOUS,
                 action,
@@ -1236,13 +1262,20 @@ class Control:
         if held_key is not None:
             try:
                 self._store.commit_effect(held_key, action.action_id, result)
-            except (DuplicateEffect, AmbiguousEffect) as refused:
+            except CTRLRunError as refused:
                 # SPEC: §5.2 — the executor returned, but the key is no longer this attempt's
                 # to commit: the lease lapsed and the record is AMBIGUOUS until a human says
                 # otherwise. What happened at the remote is now as unknown as a timeout, so
                 # the attempt is recorded `ambiguous` rather than committed.
                 self._unrecorded(
-                    action, evaluation, started_at, held_key, attempt, refused, approval
+                    action,
+                    evaluation,
+                    started_at,
+                    held_key,
+                    attempt,
+                    refused,
+                    approval,
+                    did="the executor returned, so the remote may well have acted",
                 )
                 raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
@@ -1681,16 +1714,27 @@ class Control:
         started_at: datetime,
         effect_key: str,
         attempt: int,
-        refused: DuplicateEffect | AmbiguousEffect,
+        refused: CTRLRunError,
         approval: Approval | None,
+        *,
+        did: str,
     ) -> None:
         """Record an outcome the store refused to write (SPEC-v0.1 §5.2, §5.5).
 
         The executor finished, but the effect record moved on while it ran, so what happened
         at the remote is exactly as unknown as a timeout: `ambiguous`, whatever the executor
         returned or raised. A terminal action still gets its receipt (§6.1).
+
+        **`did` is what the executor did, and it belongs in the receipt beside the refusal.**
+        Recording only the refusal made two receipts identical that a human must be able to tell
+        apart: an executor that *returned* leaves a remote that very likely acted, and one that
+        raised `NotExecuted` leaves a remote that very likely did not. With the effect record
+        carrying neither, the receipt is the only place that fact exists, and whoever runs
+        `ctrlrun resolve` on this key has nothing else to go on. Found by review, round 3.
         """
-        error = f"{type(refused).__name__}: {refused}"
+        error = _storable(
+            f"{did}, and the outcome write was refused: {type(refused).__name__}: {refused}"
+        )
         self._append(
             EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, effect_key, approval=approval
         )

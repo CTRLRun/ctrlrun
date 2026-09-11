@@ -153,6 +153,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Shared, verbatim, with the `clones` job in `traffic.yml`: the two publishers of the
+    # `badges` branch. Without it both can fetch the same head, and the second push is rejected
+    # as a non-fast-forward -- which shows up as a badge that quietly stopped moving.
+    concurrency:
+      group: badges-branch
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
