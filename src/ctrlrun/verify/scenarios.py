@@ -2143,11 +2143,27 @@ class Engine:
         would be true of a request that never left. Then: the exception is not `NotExecuted`, the
         receipt is `ambiguous`, and where there is a key the record is `AMBIGUOUS`.
 
+        **Three more observable rows**, each where a different wrong classifier is wrong, because
+        the reset row fails in `getresponse()` and a claim can only originate in `connect()`: a
+        classifier with no evidence at all passes it (§12.2.11).
+
+        - *read timeout*: the listener reads the request and never answers. A classifier that
+          maps `TimeoutError` to `NotExecuted` claims here.
+        - *reused*: one connection delivers a request and is answered; the listener is gone, its
+          port held by a socket that does not listen; the same connection's next request
+          reconnects and fails. A classifier that ignores the connection's own byte mark claims.
+        - *second connection*: one connection delivers a request and is answered; a second,
+          separate connection in the same executor run fails to connect. A classifier that judges
+          each connection alone, with no register of the run, claims.
+
+        Each asserts first that its listener received a request byte, then that the answer is not
+        `NotExecuted`, the receipt `ambiguous` and the record `AMBIGUOUS`.
+
         **Control.** A socket verify bound and never listened on: the call raises `NotExecuted`
-        chained from the connect's own exception, the receipt is `failed`, the record `FAILED`. A
-        classifier that never claimed would pass the observable and fail this; one that always
-        claimed would fail the observable. The two rows use separate effect keys, so each is a
-        first attempt.
+        chained from the connect's own exception, a refusal on Linux and a timeout on macOS, the
+        receipt is `failed`, the record `FAILED`. A classifier that never claimed would pass the
+        observable rows and fail this; one that claimed where it should not fails one of them.
+        Every row uses its own effect key, so each is a first attempt.
 
         `N/A` only where no action can be driven to `allow` or `approve`, with `unselected()`'s
         reason, as G10's. Never because of the environment: a machine that will not let verify bind
@@ -2210,12 +2226,37 @@ class Engine:
                 )
             return "" if receipt is None else str(receipt.result)
 
+        def delivered_then(
+            label: str,
+            listener: _Listener,
+            raised: BaseException | None,
+            receipt: Receipt | None,
+            key: str | None,
+            claimed: str,
+        ) -> str:
+            # First, the precondition that makes the row mean anything.
+            _expect_control(
+                listener.received >= 1,
+                "the loopback listener received at least one request byte before it reset"
+                if label == "byte_written"
+                else f"{label}: the loopback listener received at least one request byte",
+                f"it received {listener.received} bytes",
+            )
+            _expect(
+                not isinstance(raised, NotExecuted),
+                "a failure after a request byte of the run was written is not NotExecuted",
+                f"the classifier raised NotExecuted {claimed}: {raised}",
+            )
+            return graded_row(
+                raised, receipt, key, (ReceiptResult.AMBIGUOUS, EffectState.AMBIGUOUS), _expect
+            )
+
         def body(detail: dict[str, Any]) -> None:
             rows: dict[str, str] = {}
 
-            listener = _ResettingListener()
+            listener = _Listener("reset")
             try:
-                raised, receipt, key = attempt(
+                result = attempt(
                     "byte_written",
                     lambda: _post(
                         transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_WAIT)
@@ -2223,19 +2264,68 @@ class Engine:
                 )
             finally:
                 listener.close()
-            # First, the precondition that makes the observable mean anything.
-            _expect_control(
-                listener.received >= 1,
-                "the loopback listener received at least one request byte before it reset",
-                f"it received {listener.received} bytes",
+            rows["byte_written"] = delivered_then(
+                "byte_written", listener, *result, "after the peer received a byte"
             )
-            _expect(
-                not isinstance(raised, NotExecuted),
-                "a failure after a request byte was written is not NotExecuted",
-                f"the classifier raised NotExecuted after the peer received a byte: {raised}",
+
+            listener = _Listener("hang")
+            try:
+                result = attempt(
+                    "read_timeout",
+                    lambda: _post(
+                        transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_READ_WAIT)
+                    ),
+                )
+            finally:
+                listener.close()
+            rows["read_timeout"] = delivered_then(
+                "read_timeout",
+                listener,
+                *result,
+                "on a read timeout after the peer received a byte",
             )
-            rows["byte_written"] = graded_row(
-                raised, receipt, key, (ReceiptResult.AMBIGUOUS, EffectState.AMBIGUOUS), _expect
+
+            listener = _Listener("answer")
+            try:
+
+                def reused() -> str:
+                    connection = transport.HTTPConnection(
+                        _LOOPBACK, listener.port, timeout=_G12_CONTROL_WAIT
+                    )
+                    _post(connection, close=False)
+                    listener.stop_and_hold()
+                    return _post(connection)
+
+                result = attempt("reused", reused)
+            finally:
+                listener.close()
+            rows["reused"] = delivered_then(
+                "reused",
+                listener,
+                *result,
+                "on a connection that had already delivered a request",
+            )
+
+            listener = _Listener("answer")
+            held = _loopback_socket()  # bound, and never listening
+            try:
+                target = held.getsockname()[1]
+
+                def second_connection() -> str:
+                    _post(transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_WAIT))
+                    return _post(
+                        transport.HTTPConnection(_LOOPBACK, target, timeout=_G12_CONTROL_WAIT)
+                    )
+
+                result = attempt("second_connection", second_connection)
+            finally:
+                held.close()
+                listener.close()
+            rows["second_connection"] = delivered_then(
+                "second_connection",
+                listener,
+                *result,
+                "on a second connection after the first delivered the request",
             )
 
             held = _loopback_socket()  # bound, and never listening
@@ -2275,10 +2365,13 @@ _LOOPBACK: Final = "127.0.0.1"
 #: How long G12 waits on any socket, so a broken classifier fails red rather than hanging (§3.6).
 _G12_WAIT: Final = 5.0
 
-#: The control's connect timeout. A SYN to a port that is bound and not listening is answered
-#: with a reset on Linux, so the connect is refused at once, and is dropped on macOS, so the
-#: connect times out after this. Either way no byte was offered and the claim is the same.
-_G12_CONTROL_WAIT: Final = 1.0
+#: The connect timeout toward a port held by a socket that does not listen. A SYN to such a port
+#: is answered with a reset on Linux, so the connect is refused at once, and is dropped on macOS,
+#: so the connect times out after this. Either way no byte was offered and the claim is the same.
+_G12_CONTROL_WAIT: Final = 0.5
+
+#: The read-timeout row's timeout: long enough for a loopback request to be written and read.
+_G12_READ_WAIT: Final = 0.3
 
 #: How much G12's listener reads before it resets. Not a knob: T230 sets it to zero to show that
 #: a listener which received nothing fails the control rather than passing the observable.
@@ -2331,15 +2424,45 @@ def _loopback_reachable() -> None:
         listener.close()
 
 
-class _ResettingListener:
-    """G12's peer: it accepts, reads at least one request byte, records how many, and resets.
+def _read_request(conn: socket.socket) -> int:
+    """Read one small HTTP request, headers and `Content-Length` body; answer how many bytes."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(_READ_AT_MOST)
+        if not chunk:
+            return len(data)
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(body) < length:
+        chunk = conn.recv(_READ_AT_MOST)
+        if not chunk:
+            break
+        body += chunk
+    return len(head) + 4 + len(body)
 
-    The reset is `SO_LINGER` zero, so the client's next read sees `ConnectionResetError`: the peer
-    killed after the byte arrived, which is the case where nobody knows whether the remote acted.
+
+class _Listener:
+    """G12's peer, bound by verify on the loopback literal, serving one connection.
+
+    - `reset`: reads at least one request byte, records how many, and resets (`SO_LINGER` zero),
+      so the client's next read sees `ConnectionResetError`: the peer killed after the byte
+      arrived, which is the case where nobody knows whether the remote acted.
+    - `hang`: reads the request and never answers, until the client goes away.
+    - `answer`: reads the request and answers `200` with `Connection: close`.
+
+    `stop_and_hold()` ends the listener and keeps its port bound by a socket that does not listen,
+    so a reconnect is refused or dropped and the port cannot pass to another process in between.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str) -> None:
         self.received = 0
+        self._mode = mode
+        self._held: socket.socket | None = None
         self._socket = _loopback_socket()
         self._socket.listen(1)
         self._socket.settimeout(_G12_WAIT)
@@ -2355,19 +2478,51 @@ class _ResettingListener:
         with conn:
             conn.settimeout(_G12_WAIT)
             with suppress(OSError):
-                self.received = len(conn.recv(_READ_AT_MOST))
-            with suppress(OSError):
-                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                if self._mode == "reset":
+                    self.received = len(conn.recv(_READ_AT_MOST))
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                elif self._mode == "hang":
+                    self.received = len(conn.recv(_READ_AT_MOST))
+                    while conn.recv(_READ_AT_MOST):
+                        pass
+                else:
+                    self.received = _read_request(conn)
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+
+    def stop_and_hold(self) -> None:
+        """Close the listener and bind its port again, not listening, before anything else can.
+
+        The re-bind uses `SO_REUSEADDR`, since the served connection's server side is in
+        `TIME_WAIT`. If it fails, somebody else took the port in between, and the row would send a
+        request to a service verify did not start: an internal error, never a result.
+        """
+        self._thread.join(_G12_WAIT * 2)
+        self._socket.close()
+        held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            held.bind((_LOOPBACK, self.port))
+        except Exception as taken:
+            held.close()
+            raise VerifyInternalError(
+                f"G12: verify could not hold port {self.port} after its listener closed: {taken}. "
+                "Another process took it; run verify again (SPEC-v0.7 §12.2.11)"
+            ) from taken
+        self._held = held
 
     def close(self) -> None:
         """Wait for the peer to finish, bounded, so `received` is final when it is read."""
         self._thread.join(_G12_WAIT * 2)
-        with suppress(OSError):
-            self._socket.close()
+        for opened in (self._socket, self._held):
+            if opened is not None:
+                with suppress(OSError):
+                    opened.close()
 
 
-def _post(connection: Any) -> str:
-    """The request both G12 rows send: a body, so there is a request byte to write."""
+def _post(connection: Any, *, close: bool = True) -> str:
+    """The request every G12 row sends: a body, so there is a request byte to write."""
     try:
         connection.request(
             "POST",
@@ -2375,9 +2530,10 @@ def _post(connection: Any) -> str:
             body=b'{"ctrlrun-verify":"G12"}',
             headers={"Content-Type": "application/json"},
         )
-        connection.getresponse()
+        connection.getresponse().read()
     finally:
-        connection.close()
+        if close:
+            connection.close()
     return f"{APPROVER}-result"
 
 

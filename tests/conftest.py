@@ -112,22 +112,36 @@ def authority_events_are_declared(request, monkeypatch):
 #: SPEC-v0.7 §8.9 (G12, T230). "No network" means **no connection except to a loopback
 #: listener this process bound itself**, which is the rule `v0.4 §3.7` became when verify gained a
 #: guarantee that needs a peer it controls. Everything else is refused: any other address, any
-#: bind that is not `127.0.0.1`, every `AF_UNIX` bind and connect, IPv6, and `localhost`, which
-#: is checked by the literal string inside `connect` because a C-level connect resolves a name
-#: without calling the patched `getaddrinfo`. One definition, used by T107, T230, the examples and
+#: bind that is not `127.0.0.1`, every `AF_UNIX` bind and connect, IPv6, a datagram connect or
+#: send, a port whose socket has closed, and `localhost`, which is checked by the literal string
+#: inside `connect` because a C-level connect resolves a name without calling the patched
+#: `getaddrinfo`. One definition, used by T107, T230, the examples and
 #: the cookbook, so no copy can come to refuse less than another.
 _NO_NETWORK_GUARD = '''\
 """Imported by `site` at startup: no connection except to a loopback listener bound here."""
 
 import socket
+import weakref
 
 _real = socket.socket
 _real_create_connection = socket.create_connection
 _real_getaddrinfo = socket.getaddrinfo
 _LOOPBACK = "127.0.0.1"
-#: Every (host, port) bound through the patched class, from getsockname() after the bind, so a
-#: bind to port 0 is recorded at the port the kernel chose.
-_bound = set()
+#: (host, port) -> the ids of the open *stream* sockets that bound it, taken from getsockname()
+#: after the bind, so a bind to port 0 is recorded at the port the kernel chose. A datagram bind
+#: is never recorded, because TCP and UDP ports are separate spaces: a UDP bind to a port another
+#: process's TCP listener holds must admit nothing there. And a pair is forgotten when the last
+#: socket holding it closes, detaches or is collected, because the kernel may hand a released
+#: port to another process at once.
+_bound = {}
+
+
+def _forget(pair, holder):
+    holders = _bound.get(pair)
+    if holders is not None:
+        holders.discard(holder)
+        if not holders:
+            del _bound[pair]
 
 
 def _refuse(what):
@@ -150,7 +164,7 @@ def _literal(address):
 
 
 def _admitted(address):
-    return _literal(address) and (address[0], address[1]) in _bound
+    return _literal(address) and bool(_bound.get((address[0], address[1])))
 
 
 class _Guarded(_real):
@@ -164,18 +178,43 @@ class _Guarded(_real):
         if not _literal(address):
             _refuse(f"bind {address!r}")
         super().bind(address)
-        host, port = self.getsockname()[:2]
-        _bound.add((host, port))
+        if self.type == socket.SOCK_STREAM:
+            pair = tuple(self.getsockname()[:2])
+            _bound.setdefault(pair, set()).add(id(self))
+            self._guard_release = weakref.finalize(self, _forget, pair, id(self))
+
+    def _release(self):
+        release = getattr(self, "_guard_release", None)
+        if release is not None:
+            release()
+
+    def close(self):
+        self._release()
+        super().close()
+
+    def detach(self):
+        self._release()
+        return super().detach()
 
     def connect(self, address):
-        if not _admitted(address):
+        if self.type != socket.SOCK_STREAM or not _admitted(address):
             _refuse(f"connect to {address!r}")
         return super().connect(address)
 
     def connect_ex(self, address):
-        if not _admitted(address):
+        if self.type != socket.SOCK_STREAM or not _admitted(address):
             _refuse(f"connect to {address!r}")
         return super().connect_ex(address)
+
+    def sendto(self, *args):
+        if self.type != socket.SOCK_STREAM:
+            _refuse(f"send a datagram {args[-1]!r}")
+        return super().sendto(*args)
+
+    def sendmsg(self, *args):
+        if self.type != socket.SOCK_STREAM:
+            _refuse("send a datagram")
+        return super().sendmsg(*args)
 
 
 def _create_connection(address, *args, **kwargs):

@@ -39,7 +39,28 @@ any change to one appears here.
   `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
   loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
   and to loopback listeners verify bound itself*, and the test suite's network guard admits
-  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound, and nothing else.
+  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound through a stream
+  socket that is still open, and nothing else.
+
+  **The claim is about the executor run, not about one connection.** An independent review showed
+  that every false `NotExecuted` it could produce came from two connections in one effect: the
+  first delivered the request, the second was refused, and a per-connection classifier judged the
+  second alone. `xmlrpc.client`'s retry, `FancyURLopener` following a `303`, an opener whose
+  handler runs on a worker thread, and an executor's own retry-once-on-reset loop all make that
+  pair. `Control` now opens a register around each executor call; every send through
+  `ctrlrun.transport` or `ctrlrun.gateway.transport.request` marks it before the first byte, and a
+  claim needs it unmarked as well as the connection's own evidence. Outside an executor run
+  nothing is claimed. **The limit is stated in the module, the class and the specification**: the
+  register sees only this library's own sends, so an executor that sends part of the effect
+  through another transport, or on a thread that did not copy its context, and then uses the
+  classifier can be handed a claim that is true of these connections and false of the effect.
+
+  **Behind a proxy the gateway is stricter than 0.6.1.** httpx reports an unreachable proxy and a
+  TLS failure with the target after the proxy answered the `CONNECT` line with the same
+  `ConnectError`, and `ctrlrun.transport` counts a written `CONNECT` line as a byte. Where the
+  environment names a proxy, `ConnectError` and `ProxyError` are now an unknown outcome: an
+  intercepted call that would have been recorded `FAILED` with `-41011` is recorded `AMBIGUOUS`
+  with `-41010`, and needs `ctrlrun resolve`. With no proxy configured nothing changes.
 
 ### Fixed
 

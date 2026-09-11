@@ -31,6 +31,7 @@ from .approval import (
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
+    _EXECUTOR_RUN,
     COMMITTED_EFFECT,
     DEFAULT_LEASE,
     RECONCILED_STATES,
@@ -39,6 +40,7 @@ from .effect import (
     UNRESOLVED_EFFECT,
     ReconcileOutcome,
     Reservation,
+    _ExecutorRun,
     resolve_effect_key,
     resolve_resource,
     template_placeholders,
@@ -1052,8 +1054,15 @@ class Control:
         `observation` turns every terminal receipt below into an `observed` one carrying what
         the executor did and what enforce mode would have done (§6.3).
         """
+        # SPEC-v0.7 §2.3, §12.2.9 — the register of what this run offered, for exactly the
+        # executor's call. A classifier claims `NotExecuted` only inside it, and only while it is
+        # unmarked: a connection refused after another in the same run delivered proves nothing.
+        run = _EXECUTOR_RUN.set(_ExecutorRun(_EXECUTOR_RUN.get()))
         try:
-            result = executor()
+            try:
+                result = executor()
+            finally:
+                _EXECUTOR_RUN.reset(run)
         except Suspended as suspension:
             # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
             # and this attempt is not finished. Handled above the generic branch precisely so

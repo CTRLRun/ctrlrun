@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -50,6 +51,39 @@ ReconcileOutcome = Literal["committed", "not_executed", "unknown"]
 `AMBIGUOUS`. A hook moves a record only in the direction its answer points, and is the only
 thing besides a human permitted to move one out of `AMBIGUOUS`.
 """
+
+
+class _ExecutorRun:
+    """The register of one executor run: whether any request byte has been offered in it.
+
+    SPEC-v0.7 §2.3, §12.2.9. `Control` opens one around each `executor()` call, and
+    `ctrlrun.transport` and `ctrlrun.gateway.transport.request` mark it before they hand a byte
+    over and read it before they claim `NotExecuted`. A connection failing to connect proves
+    nothing about the effect if an earlier connection in the same run already delivered the
+    request, so the claim needs this, not only the connection's own record.
+
+    A run opened inside another run (an executor calling a protected function) marks the run that
+    contains it too: the outer effect has then offered bytes, through the inner one. Private, and
+    not part of the API: the classifiers are its only readers.
+    """
+
+    __slots__ = ("_outer", "offered")
+
+    def __init__(self, outer: _ExecutorRun | None) -> None:
+        self.offered = False
+        self._outer = outer
+
+    def mark(self) -> None:
+        run: _ExecutorRun | None = self
+        while run is not None:
+            run.offered = True
+            run = run._outer
+
+
+#: The current run's register, or `None` outside any executor run: on a thread that did not copy
+#: the executor's context, and in code `Control` is not running. `None` means nothing is claimed.
+_EXECUTOR_RUN: ContextVar[_ExecutorRun | None] = ContextVar("ctrlrun_executor_run", default=None)
+
 
 RECONCILED_COMMITTED: Final = "committed"
 RECONCILED_NOT_EXECUTED: Final = "not_executed"

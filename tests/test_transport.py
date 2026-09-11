@@ -298,7 +298,7 @@ def no_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _proxy_environment(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
-    monkeypatch.delenv("no_proxy")
+    monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.setenv("http_proxy", url)
     monkeypatch.setenv("https_proxy", url)
 

@@ -2,16 +2,32 @@
 
 `v0.1 §5.5` gives an executor the one decision the kernel does not take: whether the remote side
 acted. `NotExecuted` means it definitely did not, and it is the only exception an agent may read as
-permission to retry. This module makes the transport half of that decision **from evidence**:
+permission to retry. This module makes the transport half of that decision **from evidence**, and
+claims `NotExecuted` for a failure to connect only where it observed all three of:
 
-- the classifier opened the connection itself, fresh, and no socket it did not open ever sat on it;
-- zero request bytes were handed to that connection's socket, counted above TLS.
+- **the connection never held a socket it did not open itself**;
+- **the connection never handed a request byte to its socket**, counted above TLS;
+- **no request byte was offered in this executor run at all**, by any connection of this module or
+  by `ctrlrun.gateway.transport.request`. `Control` opens that register around each executor call
+  (a private context variable), and every send marks it before the first byte is handed over.
+  Outside an executor run there is no register, and nothing is claimed.
 
-Where both were observed, a failure to connect is `NotExecuted`, chained from the original
-exception. **Everywhere else the original exception propagates untouched**, and the kernel
-records it `AMBIGUOUS`. A classifier that cannot observe does not claim: `ConnectionResetError`
-arrives both before the peer read the request and after it acted on it, so no exception type is
-ever evidence.
+The third is what makes the claim about the effect rather than about one connection. An executor
+whose first connection delivered the request and whose second was refused has not proven that
+nothing happened: an xmlrpc client's retry, a redirect followed by an opener, and an executor's own
+retry-once loop all make exactly that pair, and each is the original exception here.
+
+**The register sees only this module's own sends.** An executor that sends any part of the effect
+through another transport (`requests`, httpx used directly, a raw socket, or a thread that did not
+copy the executor's context) and then uses this module can receive a `NotExecuted` that is true of
+this module's connections and false of the effect. The claim holds only where every request of the
+effect goes through `ctrlrun.transport` or `ctrlrun.gateway.transport.request`, on the executor's
+own context.
+
+Where the three are observed, the answer is `NotExecuted`, chained from the original exception.
+**Everywhere else the original exception propagates untouched**, and the kernel records it
+`AMBIGUOUS`. A classifier that cannot observe does not claim: `ConnectionResetError` arrives both
+before the peer read the request and after it acted on it, so no exception type is ever evidence.
 
 The rule itself is `effect_state`, and it is the one implementation: `ctrlrun.gateway.outcome` and
 `ctrlrun.gateway.transport` call it rather than keeping copies (§2.1).
@@ -29,18 +45,16 @@ from __future__ import annotations
 
 import http.client
 import socket
-import sys
 import urllib.error
 import urllib.request
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from .effect import EffectState
+from .effect import _EXECUTOR_RUN, EffectState
 from .errors import NotExecuted
 
 if TYPE_CHECKING:
     import ssl
-    from types import FrameType
 
 __all__ = ["HTTPConnection", "HTTPSConnection", "Transport", "effect_state", "urlopen"]
 
@@ -92,47 +106,6 @@ def _named(exc: BaseException) -> str:
     )
 
 
-class _Opener(urllib.request.OpenerDirector):
-    """The one opener the classifier builds.
-
-    `open` is overridden only so that it has a code object of its own: a connection finds out
-    whether it is inside this opener by the frames on the stack, never by reading their locals.
-    """
-
-    def open(
-        self,
-        fullurl: str | urllib.request.Request,
-        data: urllib.request._DataType | None = None,
-        timeout: float | None = socket._GLOBAL_DEFAULT_TIMEOUT,  # type: ignore[attr-defined]
-    ) -> http.client.HTTPResponse:
-        response: http.client.HTTPResponse = super().open(fullurl, data, timeout)
-        return response
-
-
-#: The code objects that tell the two apart: `urllib`'s `open`, and the classifier's own.
-_OPENER_OPEN: Final = urllib.request.OpenerDirector.open.__code__
-_OWN_OPEN: Final = _Opener.open.__code__
-
-
-def _inside_an_opener_it_did_not_build() -> bool:
-    """True where this call is running inside a `urllib` opener other than `urlopen`'s own.
-
-    §2.3's first condition says a connection opened by an opener the classifier did not build is
-    not the classifier's to claim. That is not decoration: `build_opener` follows a `303` with a
-    second connection after the first request was delivered, and a refused second connection judged
-    on its own would be `NotExecuted` about an effect that happened. `urlopen`'s opener has no
-    redirect handler, so inside it this never arises.
-    """
-    frame: FrameType | None = sys._getframe(1)
-    while frame is not None:
-        if frame.f_code is _OPENER_OPEN:
-            caller = frame.f_back
-            if caller is None or caller.f_code is not _OWN_OPEN:
-                return True
-        frame = frame.f_back
-    return False
-
-
 class HTTPConnection(http.client.HTTPConnection):
     """`http.client.HTTPConnection`, plus `NotExecuted` from `connect()` where it is proven.
 
@@ -143,19 +116,24 @@ class HTTPConnection(http.client.HTTPConnection):
     - **the mark**: set in `send`, immediately before the first byte is handed to the socket and
       after any connect `send` itself triggers, so a `sendall` that raises part way counts as having
       written. `http.client` writes every request byte, a tunnel's `CONNECT` line included, through
-      `send` (T229b pins that on every supported Python);
+      `send` (T229b pins that on every supported Python). The same send marks the executor run's
+      register, where there is one;
     - **a foreign socket**: any socket assigned to `sock` other than by this object's own
       `connect()`.
 
     `connect()` raises `NotExecuted`, chained from the original exception, only for an `Exception`
-    from the connect it wraps, on an object whose mark is unset and which never held a foreign
-    socket, outside any `urllib` opener but `urlopen`'s. Everything else propagates as it was
-    raised: a reused connection, a caller's socket, a failure after a byte was offered, an exception
-    in this code's own bookkeeping, and any `BaseException` (an interrupt is never turned into a
-    retry permission). Several requests on separate objects are separate claims, each about its own
-    connection: an executor that sent the effect on one and then fails to connect another has made
-    a composition this class cannot see. So are bytes a caller writes to `sock` itself rather than
-    through `send`: they are outside the count, exactly as bytes sent by another client are.
+    from the connect it wraps, inside an executor run whose register is unmarked, on an object
+    whose mark is unset and which never held a foreign socket. Everything else propagates as it was
+    raised: a reused connection, a second connection after any byte of the run was offered, a
+    caller's socket, a call outside any executor run, a failure after a byte was offered, an
+    exception in this code's own bookkeeping, and any `BaseException` (an interrupt is never turned
+    into a retry permission).
+
+    The object's own mark is not subsumed by the register: a thread that did not copy the
+    executor's context has no register, and a request it delivers on this connection is still
+    remembered here when the executor's thread reuses the object. Bytes a caller writes to `sock`
+    itself, rather than through `send`, are outside both, exactly as bytes sent by another client
+    are.
     """
 
     _ctrlrun_offered: bool = False
@@ -179,12 +157,14 @@ class HTTPConnection(http.client.HTTPConnection):
             super().connect()
         except Exception as exc:
             # SPEC-v0.7 §2.3. The evidence is read after the attempt, not before: a proxy tunnel
-            # offers its `CONNECT` line through `send` inside this very call, and neither record
-            # is ever cleared, so reading it here sees everything that happened before as well.
+            # offers its `CONNECT` line through `send` inside this very call, and no record is
+            # ever cleared, so reading it here sees everything that happened before as well.
+            run = _EXECUTOR_RUN.get()
             proven = (
-                not self._ctrlrun_offered
+                run is not None
+                and not run.offered
+                and not self._ctrlrun_offered
                 and not self._ctrlrun_foreign
-                and not _inside_an_opener_it_did_not_build()
             )
             observed = Transport.NEVER_CONNECTED if proven else Transport.AFTER_REQUEST_SENT
             if effect_state(observed) is EffectState.FAILED:
@@ -197,6 +177,9 @@ class HTTPConnection(http.client.HTTPConnection):
         if self.sock is None and self.auto_open:
             self.connect()
         self._ctrlrun_offered = True
+        run = _EXECUTOR_RUN.get()
+        if run is not None:
+            run.mark()
         super().send(data)
 
 
@@ -233,7 +216,9 @@ def urlopen(
     """`urllib.request.urlopen` for `http` and `https`, classified (SPEC-v0.7 §2.3).
 
     Raises `NotExecuted`, chained from the original exception, only where the connection it opened
-    failed before any request byte was offered. Every other failure is `urllib`'s own exception,
+    failed before any request byte was offered, in this call or earlier in the same executor run,
+    and only inside an executor run (`HTTPConnection` says why). Every other failure is `urllib`'s
+    own exception,
     which the kernel records `AMBIGUOUS`: a reset or a timeout after the request was offered, a
     proxy that refused a tunnel after its `CONNECT` line was sent, a malformed URL or an unknown
     scheme (nothing was connected, so nothing is claimed).
@@ -253,7 +238,7 @@ def urlopen(
     request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
     if request.type not in _SCHEMES:
         raise urllib.error.URLError(f"unknown url type: {request.type}")
-    opener = _Opener()
+    opener = urllib.request.OpenerDirector()
     for handler in (
         urllib.request.ProxyHandler(),
         urllib.request.UnknownHandler(),
@@ -263,4 +248,5 @@ def urlopen(
         urllib.request.HTTPErrorProcessor(),
     ):
         opener.add_handler(handler)
-    return opener.open(request, data, timeout)
+    response: http.client.HTTPResponse = opener.open(request, data, timeout)
+    return response

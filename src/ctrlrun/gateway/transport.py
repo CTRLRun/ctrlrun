@@ -18,13 +18,14 @@ import queue
 import re
 import socket
 import threading
+import urllib.request
 from collections.abc import Generator, Iterator, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .. import transport as _core
-from ..effect import EffectState
+from ..effect import _EXECUTOR_RUN, EffectState
 from ..errors import NotExecuted
 from .legacy import is_event_stream, strip_event_ids
 from .mcp import LEGACY_DEFAULT_REVISION, LEGACY_REVISIONS
@@ -78,18 +79,39 @@ class _Disconnected(Exception):
 _CAUSE: ContextVar[BaseException | None] = ContextVar("ctrlrun_gateway_cause", default=None)
 
 
+def _through_a_proxy() -> bool:
+    """Whether httpx, trusting the environment as it does by default, may send through a proxy.
+
+    httpx takes its proxies from `urllib.request.getproxies()`: the environment, and the system
+    configuration on macOS and Windows. It drops them all when `NO_PROXY` contains `*`. This reads
+    the same source and answers True for any `http`, `https` or `all` proxy unless `NO_PROXY` is
+    `*`. A narrower `NO_PROXY` is not consulted, so a host it bypasses is judged as if proxied:
+    the fail-closed direction, which costs a claim and never makes a false one.
+    """
+    proxies = urllib.request.getproxies()
+    if "*" in [host.strip() for host in proxies.get("no", "").split(",")]:
+        return False
+    return any(proxies.get(scheme) for scheme in ("http", "https", "all"))
+
+
 def _observed(exc: BaseException, httpx: Any) -> Transport:
     """What an exception from a fresh, single-use httpx client shows (SPEC-v0.7 §2.5).
 
     httpx exposes no count of request bytes written after the connection is established, so this
     claims exactly one thing: `httpx.ConnectError` and `httpx.ConnectTimeout` are raised while the
     connection is being established (TCP, and TLS where there is TLS), before a request byte is
-    written, and are `NEVER_CONNECTED`. The listener's own cancellation is `CLIENT_DISCONNECTED`.
-    Everything else, a proxy's refusal included, may have followed dispatch and is
-    `AFTER_REQUEST_SENT`. Only a client built for the one call, with no connection reuse, may be
-    judged by this; the pooled client's observations are never recorded as an effect.
+    written, and are `NEVER_CONNECTED`. **Behind a proxy they are not**: httpx reports an
+    unreachable proxy, and a TLS failure with the target after the proxy answered the `CONNECT`
+    line, with the same types, and `ctrlrun.transport` counts that line as written (§2.3's tunnel
+    row). One rule, so behind a proxy both are `AFTER_REQUEST_SENT` (§12.2.10). The listener's own
+    cancellation is `CLIENT_DISCONNECTED`. Everything else, a proxy's refusal included, may have
+    followed dispatch and is `AFTER_REQUEST_SENT`. Only a client built for the one call, with no
+    connection reuse, may be judged by this; the pooled client's observations are never recorded
+    as an effect.
     """
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        if _through_a_proxy():
+            return Transport.AFTER_REQUEST_SENT
         return Transport.NEVER_CONNECTED
     if isinstance(exc, _Disconnected):
         return Transport.CLIENT_DISCONNECTED
@@ -111,26 +133,40 @@ def request(
     default, stated here rather than inherited). The response is read before it is returned.
 
     Raises `NotExecuted`, chained from the httpx exception, only where the connection was never
-    established; every other failure is the httpx exception, untouched, which the kernel records
-    `AMBIGUOUS`. No HTTP status is ever `NotExecuted` here: an HTTP API is not an MCP peer, and a
-    `401` from a provider is a status like any other (§2.4). An executor may still raise
+    established, no proxy was in the way, and no request byte had been offered earlier in the
+    same executor run, by this function or by `ctrlrun.transport` (the register `Control` opens
+    around each executor call; outside one, nothing is claimed). Every other failure is the httpx
+    exception, untouched, which the kernel records `AMBIGUOUS`, and every call that may have
+    written a byte marks the register for what follows it in the run. No HTTP status is ever
+    `NotExecuted` here: an HTTP API is not an MCP peer, and a `401` from a provider is a status
+    like any other (§2.4). An executor may still raise
     `NotExecuted` on its own provider-specific evidence, which is then its claim, not this one's.
     """
     from . import http_client
 
     httpx = http_client()
+    run = _EXECUTOR_RUN.get()
     try:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             response = client.request(method, url, content=content, headers=headers)
             response.read()
-            return response  # type: ignore[no-any-return]
     except Exception as exc:
-        if _core.effect_state(_observed(exc, httpx)) is EffectState.FAILED:
+        observed = _observed(exc, httpx)
+        if (
+            run is not None
+            and not run.offered
+            and _core.effect_state(observed) is EffectState.FAILED
+        ):
             raise NotExecuted(
                 f"ctrlrun.gateway.transport: the connection was never established: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+        if run is not None and observed is not Transport.NEVER_CONNECTED:
+            run.mark()
         raise
+    if run is not None:
+        run.mark()
+    return response  # type: ignore[no-any-return]
 
 
 def _chunks(response: Any, sink: StreamSink | None) -> Generator[bytes, None, None]:

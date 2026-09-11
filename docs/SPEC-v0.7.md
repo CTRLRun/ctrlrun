@@ -292,14 +292,35 @@ call in the code that looks like it did the reasoning. An exception cannot be fo
 
 ### 2.3 What counts as proven, for `http.client` and `urllib`
 
-Two conditions, **both** required, and the classifier claims `NotExecuted` only when it has
-observed both:
+Three conditions, **all** required, and the classifier claims `NotExecuted` only when it has
+observed all three. The third was added after the first independent review (§12.2.9):
 
-1. **The classifier opened the connection itself, fresh, for this call.** Not reused, not pooled,
-   not supplied by the caller, and not opened by an opener the classifier did not build.
+1. **The classifier opened the connection itself, fresh.** Not reused, not pooled, and never
+   holding a socket the caller supplied.
 2. **Zero request bytes were handed to the socket**, counted by the classifier's own connection
    *above* TLS: application bytes offered to the socket object `http.client` writes to, after the
    TLS layer where there is one.
+3. **Zero request bytes were offered in this executor run at all**, by any of the classifier's
+   connections or by `ctrlrun.gateway.transport.request`. `Control` opens a register, a private
+   context variable, around each `executor()` call, and every classifier send marks it before the
+   first byte is handed over. **Outside an executor run there is no register, and nothing is
+   claimed**: on a thread the executor started without copying its context, and in code `Control`
+   is not running, where the kernel records nothing anyway.
+
+The third condition is what makes the claim about the effect and not about one connection object.
+An xmlrpc client that retries once on a new connection, an opener that follows a redirect, and an
+executor's own retry-once-on-reset loop all open a second connection after the first delivered the
+request, and the second, refused and judged alone, is a connection that offered nothing. Under the
+third condition each is the original exception.
+
+**The register sees only the classifier's own sends, and that is its limit.** An executor that sends
+any part of the effect through another transport (`requests`, httpx used directly rather than
+through `ctrlrun.gateway.transport.request`, a raw socket, or the classifier on a thread that did
+not copy the executor's context) and then uses the classifier can receive a `NotExecuted` that is
+true of the classifier's connections and false of the effect. So can one that raises the
+classifier's `NotExecuted` while another request of the effect is still in flight on a second
+thread. **The claim holds only where every request of the effect goes through the classifier, on
+the executor's own context.** The module's and the class's docstrings say so in the same words.
 
 **How the count is taken.** The mark is set **immediately before** the first byte is handed to the
 socket, and it is never cleared for the life of the connection object. It is set inside the
@@ -312,8 +333,9 @@ count available: `sendall` does not report partial progress when it raises, and 
 "counted per successful call" is not the rule.
 
 **Where the claim can originate.** `NotExecuted` is raised from one place: the classifier's
-`connect()`, on a connection object whose mark is unset and whose socket its own `connect()`
-created, for an `Exception` raised by the `http.client` connect it wraps: name resolution, the TCP
+`connect()`, inside an executor run whose register is unmarked, on a connection object whose mark
+is unset and whose socket its own `connect()` created, for an `Exception` raised by the
+`http.client` connect it wraps: name resolution, the TCP
 connect, a proxy tunnel, the TLS handshake. DNS failure (`socket.gaierror`), refusal, connect
 timeout and a TLS handshake failure all raise there, before `send` has offered anything. The claim
 rests on the mark and not on the exception's type, so any `Exception` from that call is covered and
@@ -341,6 +363,8 @@ it on its first read, after the request was offered, so it is the original excep
 | Reset, broken pipe, read timeout after the request was offered | at least one byte | any | the original exception |
 | A `sendall` that raises part way | at least one byte, since the mark came first | any | the original exception |
 | Any failure on a connection object that offered bytes for an earlier request | at least one byte | reused | the original exception |
+| A second connection, of any kind, failing after a byte of the same executor run was offered | at least one byte, on another connection | fresh | the original exception |
+| Any failure outside an executor run, or on a thread without the executor's context | unknown | any | the original exception |
 | Any failure on a socket the caller set on the connection | unknown | the caller's | the original exception |
 | An HTTP response of any status | at least one byte | any | returned, or raised as `urllib` raises it; never `NotExecuted` (§2.4) |
 | An exception before any connection exists: a malformed URL, an unknown scheme | nothing | none | the original exception |
@@ -369,7 +393,9 @@ Four rows deserve their argument rather than a cell.
 a second connection, after the first request was delivered and answered; a `POST` answered with
 `303 See Other` may already have created the thing it redirects to. The classifier's opener has no
 redirect handler, so a `30x` comes back as `urllib.error.HTTPError` like any other status, and the
-executor decides what it means. **Proxies are honoured**, since the count is taken on the socket
+executor decides what it means. An opener somebody else built may follow one, with the classifier's
+connections inside it; the register then makes the second connection's failure the original
+exception, whoever built the opener (§12.2.2). **Proxies are honoured**, since the count is taken on the socket
 the classifier's connection writes to, whatever it is connected to: an unreachable proxy is a
 connection never established, and a proxy that accepted the request and then failed upstream
 returns a status.
@@ -426,6 +452,16 @@ That mapping is right and is what gets promoted. httpx does not expose a count o
 written after the connection is established, so the variant claims exactly one thing: **the
 connection was never established, on a client it built for this call with no connection reuse.**
 Where httpx cannot show that zero request bytes were written after connecting, it claims only that.
+
+Two amendments from the first independent review. **Behind a proxy it claims nothing** (§12.2.10):
+httpx reports an unreachable proxy and a TLS failure with the target after the proxy answered the
+`CONNECT` line with the same `ConnectError`, and §2.3's tunnel row counts that line as written, so
+where httpx's environment names a proxy both are `AFTER_REQUEST_SENT`. This applies to the
+gateway's forwarder as well, whose behaviour behind a proxy is therefore stricter than at 0.6.1.
+**`request()` shares the classifier's register** (§12.2.9): it claims only inside an executor run
+whose register is unmarked, and every call that may have written a byte marks it, so a request
+delivered through httpx and a refused `HTTPConnection` after it, or the other way round, are
+judged as one run.
 
 **The promotion.** `ctrlrun/gateway/transport.py` gains the observation function the forwarder
 uses today, private, and one public function built on it:
@@ -495,7 +531,10 @@ def request(method, url, *, content=None, headers=None, timeout) -> httpx.Respon
 else, and its opener carries the proxy, default-error and error-processor handlers and no redirect,
 `ftp:`, `file:` or `data:` handler. The two connection classes are drop-in subclasses: a caller who
 constructs one and calls `request()` / `getresponse()` gets `http.client`'s behaviour, plus
-`NotExecuted` from `connect()` where §2.3 proves it.
+`NotExecuted` from `connect()` where §2.3 proves it, which is only ever inside an executor run.
+
+**Nothing public was added for the register.** It is a private context variable in `ctrlrun.effect`,
+set by `Control` and read by the two classifiers; no name in §9 changes.
 
 `ctrlrun.transport` imports the standard library, `ctrlrun.errors` and `ctrlrun.effect`, and
 nothing else (T228). It is not re-exported from `ctrlrun/__init__.py`: an executor imports it by
@@ -1646,8 +1685,9 @@ received the byte** before it asserts anything else. Through `@protect` with an 
 `NotExecuted`, the receipt is `ambiguous`, the record is `AMBIGUOUS`, and a retry is refused.
 
 #### T221: Refused, DNS failure, connect timeout, TLS handshake failure are `NotExecuted`
-Each against a real target where one can be made: a loopback port bound and not listening; a
-connect that times out, bounded (a full loopback backlog where the platform drops rather than refuses,
+Each inside an executor run, against a real target where one can be made: a refused or timed-out connect
+to a loopback port with no listener (`ConnectionRefusedError` on Linux; macOS drops a SYN to a port that is
+bound and not listening, so there the test closes the listener instead, §12.2.1); a connect that times out, bounded (a full loopback backlog where the platform drops rather than refuses,
 and the test states which mechanism it used, because platforms differ); a loopback TLS server presenting
 a certificate the client's context rejects. DNS failure is the one case a test cannot produce reliably
 without a network, so `socket.getaddrinfo` is made to raise `socket.gaierror` for the test's host name,
@@ -1663,8 +1703,21 @@ the answer is the original exception.
 
 #### T223: A connection the classifier did not open never claims
 A socket the caller set on an `HTTPConnection`; a connection reused for a second request after the first
-succeeded and the server closed it; an opener the test built with `urllib` handlers of its own. Whatever
-each raises, it is never `NotExecuted`.
+succeeded and the server closed it; a redirect followed by an opener the test built with `urllib` handlers
+of its own. Whatever each raises, inside an executor run, it is never `NotExecuted`. An opener the test
+built whose only connection is refused before any byte of the run was offered **is** claimed, because
+the claim is then true (§12.2.2).
+
+#### T223b: A second connection in one executor run never claims after the first delivered
+The register of §2.3's third condition, against every shape the first review produced, each with a real
+peer that receives the whole request first: xmlrpc's retry-once on a new connection, `FancyURLopener`
+following a `303` (where the Python still has it), a `build_opener` handler that runs its connection on a
+worker thread, a caller's opener around the classifier's own handler and a redirect handler, an
+executor's own retry-once loop around `urlopen`, a nested protected call that delivered, and two plain
+`HTTPConnection`s. Each is the original exception, and under `@protect` the record is `AMBIGUOUS`. Also:
+outside any executor run nothing is claimed; a thread claims only under a copy of the executor's context;
+a request delivered on a connection by a thread with no register still marks that connection; a wrapper
+on `OpenerDirector.open` does not suppress a true claim; and no stack inspection remains in the module.
 
 #### T224: No HTTP status is `NotExecuted`
 Responses of 301, 303, 400, 401, 409, 429, 500 and 503: none becomes `NotExecuted`; the `30x` is not
@@ -1677,7 +1730,14 @@ unreachable proxy is `NotExecuted`; a refused `CONNECT` after the line was sent 
 #### T226: The httpx variant, and the gateway uses it
 `ctrlrun.gateway.transport.request`: a refused connection is `NotExecuted` chained from `httpx.ConnectError`;
 a reset after the request is the httpx exception; a pooled or caller-supplied client cannot be passed at all.
-`HTTPForwarder`'s fresh path calls the same private observation function, asserted by identity.
+`HTTPForwarder`'s fresh path calls the same private observation function, asserted by identity. **A read
+timeout after a delivered request** is `httpx.ReadTimeout` from `request()`, `AFTER_REQUEST_SENT` from the
+forwarder's fresh path and `-41010` through the gateway, each with the peer's receipt of the request asserted:
+the one-token mutation that maps `httpx.TimeoutException` where `httpx.ConnectTimeout` is meant survived the
+whole suite until this row. **Behind a proxy** (§2.5, §12.2.10), a refused `CONNECT`, a TLS failure with the
+target after the tunnel opened, and an unreachable proxy are each the httpx exception and
+`AFTER_REQUEST_SENT`, never a claim. And `request()` shares the classifier's register: a request delivered
+through one and a refused connection through the other, in either order, is not claimed.
 
 #### T227: One implementation of the rule
 `ctrlrun.gateway.outcome.Transport is ctrlrun.transport.Transport`, and the function the gateway's
@@ -1711,8 +1771,9 @@ red test rather than a count taken below the record layer.
 and exactly as wide as the rule: a connect to `192.0.2.1` (TEST-NET-1) is refused; a connect to `127.0.0.1` on a
 port the run did not bind (a listener the test opened before installing the guard) is refused; a `bind` to
 `0.0.0.0` is refused; a lookup of `localhost`, and a `connect(("localhost", port))` to a bound port, are refused;
-`::1` is refused; an `AF_UNIX` bind is refused; and a listener bound to port 0 is admitted at the port
-`getsockname()` reports. And G12 was graded, not `N/A` and not skipped.
+`::1` is refused; an `AF_UNIX` bind is refused; a UDP bind to a port admits no TCP connect to it and a
+datagram may not be connected or sent; a port whose socket has closed is refused; and a listener bound to port
+0 is admitted at the port `getsockname()` reports. And G12 was graded, not `N/A` and not skipped.
 
 #### T231: The gateway's `NotExecuted` carries its cause
 An intercepted `tools/call` against an upstream port that refuses: the effect is `FAILED`, the client gets
@@ -1988,10 +2049,11 @@ denominator and a false one is a false green (0.6.1 fixed exactly that). A faile
 
 #### G12: A byte written and the peer killed is `AMBIGUOUS`, never `FAILED`
 
-**Invariant.** `ctrlrun.transport` claims `NotExecuted` only for a connection it opened and handed no request
-byte; after one byte, every failure is the original exception and the effect is `AMBIGUOUS`.
+**Invariant.** `ctrlrun.transport` claims `NotExecuted` only for a connection it opened, that was handed no
+request byte, in an executor run that had offered none; after one byte, every failure is the original
+exception and the effect is `AMBIGUOUS`.
 
-**Descends from.** `v0.1 §5.5`, `v0.2 §6.8`, T220, T221.
+**Descends from.** `v0.1 §5.5`, `v0.2 §6.8`, T220, T221, T223b.
 
 **Requires.** One action the configuration can drive to `allow` or `approve`, as G10 requires (verify grants its
 own approval, `v0.4 §3.5`).
@@ -2004,20 +2066,34 @@ whose actions are allowed and merely ungranted, which is a false `N/A`. **Never 
 environment.** A sandbox that will not let verify bind a loopback socket is an internal error, exit 3
 (`v0.4 §3.8`), because it is a fact about the machine and not about the document.
 
-**Observable.** Verify binds a listener on the literal `127.0.0.1`, at an ephemeral port, through the socket
-class the guard patches, so the guard records it. The executor drives
+**Observable, four rows.** Verify binds each listener on the literal `127.0.0.1`, at an ephemeral port, through
+the socket class the guard patches, so the guard records it. The executor drives
 `ctrlrun.transport.HTTPConnection("127.0.0.1", port)` directly, **not** `urlopen`: `urlopen` honours
 `HTTP_PROXY`, and on a host that sets one the loopback request would go to the proxy, and G12 would fail for a
-reason that has nothing to do with the kernel. The listener reads at least one byte, **records that it did**
-(the scenario asserts this first), and resets. The exception is not `NotExecuted`; the receipt is `ambiguous`;
-where the action has an effect key the record is `AMBIGUOUS`.
+reason that has nothing to do with the kernel. Every row asserts first that its listener **received a request
+byte**, then that the exception is not `NotExecuted`, the receipt is `ambiguous`, and where the action has an
+effect key the record is `AMBIGUOUS`.
+
+1. **`byte_written`**: the listener reads at least one byte and resets.
+2. **`read_timeout`**: the listener reads the request and never answers, and the connection's read times out.
+3. **`reused`**: one connection delivers a request and is answered; the listener then closes and its port is
+   held by a socket that does not listen; the same connection's next request reconnects and fails.
+4. **`second_connection`**: one connection delivers a request and is answered; a second connection, in the same
+   executor run, fails to connect to a held, unlistening port.
+
+The last three were added after the first independent review, which found that a classifier with no evidence at
+all passed G12: the reset row fails inside `getresponse()`, and a claim can only originate in `connect()`, so
+nothing in G12 depended on the classifier's evidence. Each of the three is where a different wrong classifier is
+wrong: one that maps `TimeoutError` to `NotExecuted` fails row 2, one that ignores the connection's own byte mark
+fails row 3, and one that judges each connection alone with no register of the run fails row 4 (§12.2.11).
 
 **Control.** A loopback socket verify bound and did not listen on: the call raises `NotExecuted` chained from
-`ConnectionRefusedError`, the receipt is `failed`, and where there is a key the record is `FAILED`. A classifier
-that never claimed would pass the observable and fail this; one that always claimed would fail the observable.
-The guarantee is the asymmetry, so both directions are asserted or neither is, as G10's are. **The observable
-and the control use separate effect keys**, as G10's rows do (`verify/scenarios.py:1954-1958`), so each is a
-first attempt and an operator's `max_attempts: 1` cannot turn the control into a ceiling refusal.
+the connect's own exception, **a refusal on Linux and a timeout on macOS**, which drops a SYN to a port that is
+bound and not listening (§12.2.1); the receipt is `failed`, and where there is a key the record is `FAILED`. A
+classifier that never claimed would pass the observable rows and fail this; one that claimed where it should not
+fails one of them. The guarantee is the asymmetry, so both directions are asserted or neither is, as G10's are.
+**Every row uses its own effect key**, as G10's rows do (`verify/scenarios.py:1954-1958`), so each is a first
+attempt and an operator's `max_attempts: 1` cannot turn the control into a ceiling refusal.
 
 **What it amends.** `v0.4 §3.7`'s "no scenario opens a socket" becomes **verify opens no connection except to
 the store `--store-url` names and to loopback listeners it bound itself.** The old sentence was already untrue
@@ -2027,7 +2103,10 @@ exactly what the rule says and no more:
 
 - **It records every `(host, port)` bound through its patched socket class**, taken from `getsockname()`
   after the `bind`, not from the requested address, since verify binds port 0 and the kernel chooses the
-  port. It admits `connect` and `connect_ex` only to a recorded pair. Admitting any port on loopback would admit a local forwarding proxy, an
+  port. **Only a stream socket's bind is recorded, and a pair is forgotten when the last socket holding it
+  closes, detaches or is collected**: TCP and UDP are separate port spaces, so a UDP bind must admit nothing
+  on the TCP port of the same number, and a released port may be handed to another process at once. A
+  datagram socket may neither connect nor send. It admits `connect` and `connect_ex` only to a recorded pair. Admitting any port on loopback would admit a local forwarding proxy, an
   SSH tunnel or a container's published port, each of which leaves the host.
 - **It refuses any `bind` to an address other than `127.0.0.1`**, so a listener on `0.0.0.0` fails the run
   instead of passing it, and **it refuses every `AF_UNIX` bind and connect, on purpose**: verify needs none,
@@ -2353,9 +2432,12 @@ own, and none of them is configurable.
 
 | Condition | Result |
 |---|---|
-| A connection the classifier opened fresh fails in `connect()` with no request byte offered | `NotExecuted`, chained from the original; the record `FAILED` (§2.3) |
+| A connection the classifier opened fresh fails in `connect()` with no request byte offered, in an executor run that had offered none | `NotExecuted`, chained from the original; the record `FAILED` (§2.3) |
 | Any failure after one request byte was offered, including a `sendall` that raised part way | The original exception; `AMBIGUOUS` (§2.3) |
+| Any failure after a byte of the same executor run was offered, on any other connection or through `gateway.transport.request` | Never `NotExecuted` (§2.3, §12.2.9) |
+| Any failure outside an executor run, or on a thread without the executor's context | Never `NotExecuted` (§2.3) |
 | A connection the classifier did not open, or reused | Never `NotExecuted` (§2.3) |
+| An httpx connect error or a proxy error where the environment names a proxy | Never `NotExecuted`; `AMBIGUOUS` (§2.5, §12.2.10) |
 | An HTTP response of any status | Never `NotExecuted` from the classifier (§2.4) |
 | An exception before any connection exists, or inside the classifier's own bookkeeping | That exception; `AMBIGUOUS` (§2.3) |
 | A `30x` response | Not followed; returned or raised as a status (§2.3) |
@@ -2470,29 +2552,28 @@ timeout of one second, and it asserts `NotExecuted` chained from the connect's o
 says which mechanism the host used, and two runs on one host are identical. The cost is one
 second per verify run on macOS.
 
-#### 12.2.2 "An opener the classifier did not build" needed a mechanism, and the mechanism is the stack
+#### 12.2.2 "An opener the classifier did not build" was the wrong question
 
-**Closed: a connection inside a `urllib` opener other than `urlopen`'s never claims.** §2.3's first
-condition names the case and no mechanism. It is not a formality. `urllib.request.build_opener`
-includes the redirect handler, which follows a `303` with a second connection *after the first
-request was delivered*. A caller who wires `HTTPConnection` into a handler of their own would get
-a refused second connection judged on its own: `NotExecuted` about an effect that happened. T223
-reproduces it and asserts the precondition, which is that the first server received the request.
+**Closed: the stack heuristic is gone, and the register of §12.2.9 replaced it.** §2.3's first
+condition once said a connection opened by an opener the classifier did not build is not the
+classifier's to claim, and the first implementation answered that by walking the stack for
+`urllib.request.OpenerDirector.open` frames. The independent review took it apart. The walk sees
+only `urllib`'s own opener, on the current thread, so every one of these was a `NotExecuted`
+chained from `ConnectionRefusedError` after a real peer had received the whole request:
+`xmlrpc.client` with a `make_connection` returning the classifier's connection, whose `request`
+retries once on a new one; `FancyURLopener`, which follows a `303` through `URLopener.open`;
+a `build_opener` handler that runs its connection on a worker thread; the classifier's own private
+opener class plus a redirect handler, since a code object is not a capability; and an executor's
+own retry-once-on-reset loop around `urlopen`, which is the commonest shape there is and involves
+no opener at all. The heuristic also produced false `AMBIGUOUS`: any wrapper on
+`OpenerDirector.open`, such as `opentelemetry-instrumentation-urllib`, made `urlopen`'s own path
+look foreign.
 
-The connection finds out where it is from the frames on the stack at the moment it would claim. It
-looks for `urllib.request.OpenerDirector.open`, and it checks whether the caller of that frame is
-`urlopen`'s own opener, which overrides `open` only so that it has a code object of its own. It
-never reads a frame's locals, whose semantics changed in 3.13 (PEP 667); a code object means the
-same thing on every supported Python. The check can only remove a claim. If it raises, what propagates is its
-own exception, never `NotExecuted`, and T221's bookkeeping test pins that. **Rejected: a separate
-rule for nested opener calls.** `urlopen`'s opener has no redirect or authentication handler, so a
-second request can happen only inside an opener somebody else built, which the rule already
-refuses. A second guard would be subsumed by the first, with nothing to tell them apart.
-
-What remains is written in the class's docstring rather than hidden. Two requests on two
-connection objects in one executor are two claims, each about its own connection. An executor that
-delivered the effect on one and then failed to connect the other has made a composition no
-per-connection classifier can see.
+The question "who built the opener" was never the right one. **What matters is whether a request
+byte was offered in this executor run**, which is what the register answers, whoever opened the
+connection and on whichever thread. The condition in §2.3 is now that, the walk is deleted, and
+T223b drives every case above. An opener somebody else built whose *only* connection is refused
+before any byte is now claimed, because that claim is true.
 
 #### 12.2.3 A socket the connection did not open disqualifies it for life
 
@@ -2557,6 +2638,80 @@ on the kernel for a fact about the machine.
 is that the peer received a byte before it reset. If it received nothing, "not `NotExecuted`" proves
 nothing, so it cannot pass. Once the preflight above has shown the machine can reach its own
 listener, it is not the machine's fault either. T230 takes the byte away and asserts the result.
+
+#### 12.2.9 The register: one executor run, and what it cannot see
+
+**Closed: `Control` opens a private register around each `executor()` call, and the classifiers
+mark and read it.** A claim about one connection is not a claim about the effect. The register is a
+context variable in `ctrlrun.effect`, holding one small object per run; every classifier `send`
+marks it immediately before the first byte, exactly where the connection's own mark is set, and
+`ctrlrun.gateway.transport.request` marks it for any call that may have written. `connect()` claims
+only where the register exists and is unmarked, on top of the per-object checks. A run opened inside
+another (an executor calling a protected function) marks the one that contains it, so the outer
+effect knows that bytes went out through the inner one.
+
+**Outside a run there is no register and nothing is claimed.** That covers a thread the executor
+started without copying its context, and any use of the classifier outside `Control`, where no
+record is written and the claim would be read by nobody. It is the fail-closed direction, and it
+costs a true `NotExecuted` in scripts that call the classifier directly.
+
+**A resumed leg is its own run.** `Control.resume` reaches the executor through the same place, so
+a continuation gets a fresh register and does not know what the suspended leg sent. That is the
+right reading of `v0.2 §6.9`: a leg that ended in `input_required` is the remote saying it has not
+finished, and the continuation's own refused connection carried nothing. It is recorded here
+because it is the one place the register is deliberately narrower than the effect.
+
+**The per-object mark is not subsumed by it.** A thread with no register can deliver a request on a
+connection; when the executor's own thread reuses that connection and its reconnect is refused, the
+register saw nothing and the connection's own mark is what refuses the claim. T223b drives that.
+
+**The limit, stated in §2.3, in the module docstring and in the class docstring.** The register sees
+only the classifier's own sends. An executor that sends part of the effect through `requests`, or
+through httpx directly, or on a raw socket, or on a thread that did not copy the context, and then
+uses the classifier, can be handed a `NotExecuted` that is true of the classifier's connections and
+false of the effect. So can one that raises a claim while a sibling thread's request is still in
+flight. The claim holds where every request of the effect goes through the classifier on the
+executor's context, and that sentence is now in the three places a reader would look.
+
+**Nothing public was added.** The register is private, `Control` sets it, the two classifiers read
+it; `§9` is unchanged. A public name for it would be a §9 amendment and would have stopped the item.
+
+#### 12.2.10 Behind a proxy, the httpx variant claims nothing
+
+**Closed: `ConnectError` and `ConnectTimeout` are `AFTER_REQUEST_SENT` where a proxy is configured.**
+The review found `ctrlrun.gateway.transport.request` answering `NotExecuted` after a proxy had
+answered a `CONNECT` line and the TLS handshake with the *target* had then failed: httpx reports
+that with the same `ConnectError` as an unreachable proxy, and §2.3's tunnel row counts the
+`CONNECT` line as written. Two implementations of one rule disagreeing is what item 2 exists to
+remove, so the httpx side now fails closed: where a proxy may be in use, neither is claimed.
+
+"May be in use" is read from `urllib.request.getproxies()`, which is httpx's own source, with
+`NO_PROXY=*` honoured and a narrower `NO_PROXY` not consulted: a bypassed host is judged as if
+proxied, which costs a claim and never makes a false one. This is stricter than 0.6.1, where the
+gateway's forwarder mapped every `ConnectError` to `NEVER_CONNECTED` and therefore to a `failed`
+receipt and `-41011`; behind a proxy it is now `AMBIGUOUS` and `-41010`. The changelog says so.
+
+#### 12.2.11 G12 needed rows the evidence decides
+
+**Closed: three more observable rows, each with a mutant that fails only there.** G12 as first
+written passed a classifier that ignored every piece of evidence it had. Its reset row fails inside
+`getresponse()`, and a claim can only originate in `connect()`, so no row touched the byte mark, the
+foreign-socket record or the register. The review demonstrated it with a classifier that maps
+`TimeoutError`, `ConnectionRefusedError`, `socket.gaierror` and `ssl.SSLError` to `NotExecuted`
+wherever they arise, which passed G12 and turned a read timeout after 97 delivered bytes into a
+`FAILED` record.
+
+The rows are in §8.9: a read timeout, a reused connection, and a second connection in one run. The
+reused row needs a port that refuses *and* cannot pass to another process, so the listener closes
+and verify immediately re-binds the port with `SO_REUSEADDR`, not listening; if that bind fails
+somebody else took the port, and the row is an internal error rather than a request sent to a
+service verify did not start. T230 carries one mutant per row.
+
+**And the network guard was wider than its sentence** (the review's finding 7). It recorded any
+bind, so a UDP bind to `127.0.0.1:P` admitted a TCP connect to another process's listener on `P`,
+and a port stayed admitted after its socket closed and another process rebound it. It now records
+only stream sockets, forgets a pair when the last socket holding it closes, detaches or is
+collected, and refuses a datagram connect or send. T230 asserts each.
 
 ### 12.3a Item 3a: attempt numbers never repeat
 
