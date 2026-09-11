@@ -37,11 +37,40 @@ any change to one appears here.
   wrote back the attempt number it had read. A caller that retries one `Action` reuses its
   `action_id`, so the same `action_id` and state could come round again at a newer attempt between
   the read and the write. A human's `ctrlrun resolve` decided on attempt 1 then wrote `FAILED` at
-  1 over attempt 2's unknown outcome, and the next renewal handed out attempt 2 a second time. Every
-  write to an effect record is now also conditioned on the attempt it read, and a write whose
-  record moved is refused with `DuplicateEffect` and leaves the newer attempt as it is. The fix
-  for the renewal above depends on this one: it holds only because the number can no longer move
-  backwards.
+  1 over attempt 2's unknown outcome, and the next renewal handed out attempt 2 a second time.
+  **On Postgres**, every write to an effect record is now also conditioned on the attempt it read,
+  and a write whose record moved is re-read rather than landed (SQLite's writes are already inside
+  the `BEGIN IMMEDIATE` that holds their read, and are unchanged). The fix for the renewal above
+  depends on this one: it holds only because the number can no longer move backwards. What this
+  closes is the race between a write's own read and its write. The window a *human* stands in is
+  longer, because `ctrlrun resolve` carries no attempt number: someone who inspected attempt 1 can
+  still resolve attempt 2's ambiguity. An attempt argument on the CLI would close that, and it is
+  not in this change.
+- **A Postgres write that carried an outcome could be refused and drop it.** With the condition
+  above in place, a `commit_effect` or `mark_ambiguous` whose record moved under it wrote nothing
+  and raised, so the effect record, which is what gates the next renewal, said nothing about an
+  attempt that may have acted: a review measured a renewal to a third attempt with a committed
+  refund recorded on no record at all. Both are now re-issued once against the re-read, so the
+  outcome lands on the record as it stands. `begin_execution` and `fail_effect` are still refused
+  there, because `FAILED` asserts that nothing happened and the newer attempt may be running.
+- **A refused write on a moved record claimed the wrong thing.** All of these were
+  `DuplicateEffect(state="in_progress")`, which means *another attempt holds a live reservation*,
+  and after a stale `resolve_effect` the record is `AMBIGUOUS` at a newer attempt, which is nobody's
+  reservation. The refusal now takes its type from what the re-read found, `AmbiguousEffect` or
+  `DuplicateEffect` with `committed` or `in_progress`, and its message names the move.
+- **An unknown outcome could vanish when the store refused to record it**, on both backends and
+  since before 0.6. `Control` caught two store refusals around its outcome writes, and a record a
+  human resolved `FAILED` while the attempt was still running answers a third: an executor that
+  raised `TimeoutError` then produced no receipt and no `EXECUTION_AMBIGUOUS` event, and the caller
+  was handed a store error about its own effect key instead of its executor's exception. `Control`
+  now catches every `CTRLRunError` from an outcome write, writes the receipt and the event whatever
+  the store answered, names the refusal in both, and re-raises the caller's own exception. Nothing
+  is reconciled on a record the attempt could not mark.
+- **A lapsed Postgres approval could be marked expired over a consumption.** `_expire` wrote
+  `status = expired` on `approval_id` alone, from a read that saw `granted` past `expires_at`, so a
+  consumption committing in between was overwritten and an approval that authorised a real effect
+  read `expired`. It is now conditioned on the status it read, as every other write on that table
+  already was.
 - **After a lost `COMMIT`, a Postgres reservation could return an attempt number it did not
   write.** Where a reservation's `COMMIT` was lost and the re-read found the write absent, 0.6.1
   re-issued it and then returned the reservation it had first planned, discarding the re-issue's.
