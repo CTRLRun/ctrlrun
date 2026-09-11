@@ -20,7 +20,7 @@ from .approval import (
     ScriptedApprovalProvider,
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, Subject
-from .control import Control, context, protect, with_approval
+from .control import Control, context, idempotency_token, protect, with_approval
 from .effect import EffectRecord, EffectState, ReconcileOutcome
 from .errors import (
     ActionDenied,
@@ -111,6 +111,7 @@ __all__ = [
     "canonical_bytes",
     "canonicalize",
     "context",
+    "idempotency_token",
     "needs_approval",
     "parse_conditions",
     "protect",

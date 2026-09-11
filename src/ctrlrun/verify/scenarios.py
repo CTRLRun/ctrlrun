@@ -51,8 +51,14 @@ from ..authority import (
     Subject,
     contained_dimension,
 )
-from ..control import Control, context, protect
-from ..effect import EffectRecord, EffectState, resolve_effect_key, resolve_resource
+from ..control import Control, context, idempotency_token, protect
+from ..effect import (
+    EffectRecord,
+    EffectState,
+    idempotency_token_for,
+    resolve_effect_key,
+    resolve_resource,
+)
 from ..errors import (
     ActionDenied,
     AmbiguousEffect,
@@ -2300,6 +2306,128 @@ class Engine:
         finally:
             for store in opened:
                 store.close()
+
+    # --- G14: the provider token changes across a renewal ---------------------------------
+
+    def g14(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. As G5, it needs one action with an `effect:` template.
+
+        The observable is the renewal: attempt 1's executor reads the token and reports that
+        nothing happened, attempt 2's reads it and commits, the two differ, and each is the
+        derivation from its own receipt's `effect_key` and `attempt`. That last clause is what a
+        kernel returning a fresh random string on every read would fail.
+
+        The control runs **first**, and catches the two kernels the observable cannot: one whose
+        answer moves within a single attempt, and one that sets the context variable and never
+        resets it. The second would pass the observable, because every executor would still read
+        its own attempt's value; it fails where a caller outside any attempt is handed the last
+        attempt's token.
+        """
+        selection = self.select(needs_effect=True)
+        if selection is None:
+            return self.na(
+                "G14",
+                self.unselected(reg.NO_EFFECT_TEMPLATE),
+                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
+            )
+        control, store, recorder, _ = self._control_for("G14", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            key = str(selection.effect_key)
+            failed_attempt: list[str] = []
+
+            def read_twice_then_report_nothing() -> Any:
+                failed_attempt.append(idempotency_token())
+                failed_attempt.append(idempotency_token())
+                raise NotExecuted("ctrlrun-verify: the remote did nothing")
+
+            first = selection.build()
+            with suppress(NotExecuted):
+                self.execute(
+                    control,
+                    first,
+                    _Executor(read_twice_then_report_nothing),
+                    key,
+                    self.approve(control, store, first, selection),
+                )
+            _expect_control(
+                len(failed_attempt) == 2 and failed_attempt[0] == failed_attempt[1],
+                "one attempt reads one token, however often it asks",
+                f"the executor read {failed_attempt!r}",
+            )
+            answered: list[object] = []
+            try:
+                answered.append(idempotency_token())
+            except InvalidArgument:
+                pass
+            except Exception as raised:
+                answered.append(raised)
+            _expect_control(
+                not answered,
+                "the accessor outside any executor raises InvalidArgument",
+                f"a caller outside every attempt was answered with {answered[0]!r}"
+                if answered
+                else "",
+            )
+            failed = store.get_effect(key)
+            _expect_control(
+                failed is not None and failed.state is EffectState.FAILED,
+                "an executor that raises NotExecuted leaves the record FAILED and renewable",
+                f"the record is {None if failed is None else failed.state}",
+            )
+
+            renewed: list[str] = []
+
+            def read_then_commit() -> Any:
+                renewed.append(idempotency_token())
+                return f"{APPROVER}-result"
+
+            retry = selection.build()
+            admitted = self.execute(
+                control,
+                retry,
+                _Executor(read_then_commit),
+                key,
+                self.approve(control, store, retry, selection),
+            )
+            _expect_control(
+                admitted.result is ReceiptResult.COMMITTED and len(renewed) == 1,
+                "the renewal after NotExecuted is admitted and executes",
+                f"it ended {admitted.result} after {len(renewed)} reads",
+            )
+            _expect(
+                failed_attempt[0] != renewed[0],
+                "the renewal carries a different token from the attempt that failed",
+                "both attempts were given the same token, which a provider would answer with "
+                "the cached failure of the first",
+            )
+            ran = sorted(
+                (
+                    receipt
+                    for receipt in store.receipts()
+                    if receipt.effect_key == key
+                    and receipt.result in (ReceiptResult.FAILED, ReceiptResult.COMMITTED)
+                ),
+                key=lambda receipt: receipt.attempt or 0,
+            )
+            derived = [
+                idempotency_token_for(str(receipt.effect_key), receipt.attempt or 0)
+                for receipt in ran
+            ]
+            _expect(
+                derived == [failed_attempt[0], renewed[0]],
+                "each attempt's token is the derivation from its own receipt",
+                f"the receipts of attempts {[receipt.attempt for receipt in ran]} re-derive "
+                f"{derived!r}, and the executors read "
+                f"{[failed_attempt[0], renewed[0]]!r}",
+            )
+            detail["attempts"] = [receipt.attempt for receipt in ran]
+            detail["summary"] = "attempt 1 and its renewal carry different tokens"
+
+        try:
+            return self.graded("G14", selection, store, recorder, body)
+        finally:
+            store.close()
 
 
 @dataclass(frozen=True)
