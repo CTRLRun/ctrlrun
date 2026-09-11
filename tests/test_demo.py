@@ -97,6 +97,9 @@ SPEC_RECEIPT_FIELDS = (
     "policy_hash",
     "policy_version",
     "controls",
+    # SPEC-v0.7 §6.11: `ctrlrun.receipt/v4`. Fingerprints, never the state they hash.
+    "precondition_at_request",
+    "precondition_at_recheck",
 )
 
 

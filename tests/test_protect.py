@@ -685,6 +685,10 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         "policy_hash",
         "policy_version",
         "controls",
+        # SPEC-v0.7 §6.11: `ctrlrun.receipt/v4`. What the presenting pass compared, hashes
+        # only, and `null` here because nothing asked for a precondition.
+        "precondition_at_request",
+        "precondition_at_recheck",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")
