@@ -2126,14 +2126,16 @@ class Control:
             attempt=attempt,
         )
         if reserved and effect_key is not None:
-            try:
-                self._store.begin_execution(effect_key, action.action_id)
-                self._store.fail_effect(effect_key, action.action_id, error)
-            except CTRLRunError as refused:
-                # §5.7 — the record moved on while the ceiling was deciding. The refusal
-                # propagates, as `v0.1 §5.5` has a store's refusal propagate: `AMBIGUOUS` is not
-                # something this path may collapse to `FAILED`.
-                raise refused from None
+            # §5.7 — where the record moved on while the ceiling was deciding, one of these
+            # refuses and **that refusal propagates**, in place of the `ActionDenied` below, as
+            # `v0.1 §5.5` has a store's refusal propagate: `AMBIGUOUS` is not something this
+            # path may collapse to `FAILED`. It propagates by not being caught. A round of
+            # review found the `try`/`except CTRLRunError: raise` that used to stand here to be
+            # an equivalent mutant, green with the whole clause deleted, because it caught only
+            # to re-raise the same object. What is load-bearing is that the evidence above is
+            # written **first**, which T249 grades and which a reordering mutant kills.
+            self._store.begin_execution(effect_key, action.action_id)
+            self._store.fail_effect(effect_key, action.action_id, error)
         raise ActionDenied(
             f"{action.name} denied: {error}",
             reason=BLOCKED_ATTEMPT_CEILING,

@@ -923,12 +923,15 @@ answer, for an attempt that could never run. §5.5 states both, and neither is c
 what it costs: every later attempt on that key is also over the ceiling, so no approval spent here opens
 anything until the operator raises `max_attempts`, and nothing ever executes.
 
-**What a crash between the reservation and the release leaves.** The record is `RESERVED`, or
-`EXECUTING` if the crash fell after `begin_execution`, under a live lease. When the lease lapses the
-next reservation attempt declares it `AMBIGUOUS` (`v0.1 §5.3 E3`), and a human or a `reconcile` hook
-must resolve it **although nothing ran**. That is exactly what a crash between the reservation and the
-executor call leaves today, and it costs a human, never an execution. The fast path makes it rare,
-since only a race reaches the check after the reservation.
+**What a crash between the reservation and the release leaves, and what a failed release leaves with
+it.** The record is `RESERVED`, or `EXECUTING` if the crash fell after `begin_execution`, under a live
+lease. **A release the store refuses lands in exactly the same place** (§5.5 step 4): the record stays
+`RESERVED` at the refused attempt under its lease, and nothing distinguishes it from a process that
+stopped there. Either way, when the lease lapses the next reservation attempt declares it `AMBIGUOUS`
+(`v0.1 §5.3 E3`), and a human or a `reconcile` hook must resolve it **although nothing ran**. That is
+exactly what a crash between the reservation and the executor call leaves today, and it costs a human,
+never an execution. The fast path makes it rare, since only a race reaches the check after the
+reservation.
 
 ### 5.3 The key
 
@@ -1002,25 +1005,30 @@ and before `begin_execution`** (`control.py:712-719`). That is the check, and it
 where the attempt number is unique per key (§5.6), at most `max_attempts` reservations can ever carry
 a number within the ceiling, whatever the concurrency.
 
-Above the ceiling:
+Above the ceiling, **in the order the code does them**, because the order is the argument:
 
 1. **The executor is not called.**
-2. **The record is released as `FAILED`**, through `begin_execution` then `fail_effect`, with an
-   `error` naming the ceiling: `attempt 4 refused: max_attempts is 3 (SPEC-v0.7 §5)`. `FAILED` is true:
-   nothing ran. `begin_execution` here is a state transition that `fail_effect` requires, and
-   `EXECUTION_STARTED` is **not** appended, because that event is the claim that something started.
-3. **`EFFECT_RESERVATION_REFUSED` is appended** with `data.reason = "attempt_ceiling"`,
+2. **`EFFECT_RESERVATION_REFUSED` is appended** with `data.reason = "attempt_ceiling"`,
    `data.attempt` and `data.max_attempts`, on the existing event type, so the history says why.
-4. **A `blocked` receipt** is written, keeping the decision the policy reached (`v0.1 §4.2 A1`'s
+3. **A `blocked` receipt** is written, keeping the decision the policy reached (`v0.1 §4.2 A1`'s
    precedent) and carrying the approval where one was consumed or presented.
-5. **`ActionDenied(reason="attempt_ceiling")` is raised.**
+4. **The record is released as `FAILED`, where the release succeeds**, through `begin_execution`
+   then `fail_effect`, with an `error` naming the ceiling:
+   `attempt 4 refused: max_attempts is 3 (SPEC-v0.7 §5)`. `FAILED` is true: nothing ran.
+   `begin_execution` here is a state transition that `fail_effect` requires, and
+   `EXECUTION_STARTED` is **not** appended, because that event is the claim that something started.
+5. **`ActionDenied(reason="attempt_ceiling")` is raised**, unless step 4 refused, in which case the
+   store's own exception propagates instead.
 
-**The evidence is written before the release is attempted**, and a store refusal of any type is caught
-and re-raised after it. `begin_execution` and `fail_effect` can refuse with `DuplicateEffect` or
-`AmbiguousEffect` where the record moved (§5.7), and with `InvalidArgument` where it moved under a
-different `action_id` with a dead lease. On any of those the caller gets the store's exception, as
-`v0.1 §5.5` requires, and the event and the receipt exist either way: a refusal that took its own
-evidence with it would leave a `RESERVED` record nothing in the history explains.
+**Steps 2 and 3 come before step 4, and that is the whole of why the order is written down.**
+`begin_execution` and `fail_effect` can refuse: with `DuplicateEffect` or `AmbiguousEffect` where the
+record moved (§5.7), and with `InvalidArgument` where it moved under a different `action_id` with a
+dead lease. The caller then gets the store's exception, as `v0.1 §5.5` requires, and the event and the
+receipt exist either way, because they were written first: a refusal that took its own evidence with it
+would leave a `RESERVED` record nothing in the history explains. **Step 4 may therefore not happen at
+all**, and the record is then `RESERVED` at the refused attempt under a live lease while the receipt
+says `blocked` at that same attempt. What happens next is what §5.2's last paragraph describes, and it
+costs a human rather than an execution.
 
 **The refused number is spent.** The store assigned attempt *n* + 1 before the check could look at it,
 and releasing the record `FAILED` does not give it back: the next renewal is *n* + 2. So an operator
@@ -1078,6 +1086,20 @@ reader should assume there are others rather than read this as a closed set:
   reachable through a public route, with no seam" below, leaving the check with no seamless route and G15
   with nothing to grade it through. The cost is one wasted answer; the alternative is an unexercised
   guarantee, and `v0.4 §1.3`'s rule is that a guarantee that could not have failed is not a pass.
+  **And §6's precondition provider runs in front of the ceiling on this route, measured.** `_recheck`
+  sits immediately before each `_take` (§6.2), and this route takes twice, so under `max_attempts: 1` a
+  doomed attempt calls the operator's provider **three times** before it is refused: once on the request
+  pass that creates the approval, and twice on the retry. §6.6 says the provider is spent only where its
+  answer can matter, and here its answer cannot: the ceiling refuses whatever it returns. **Worse, a
+  provider that raises on that attempt changes the reason the operator is told**: the refusal is
+  `ApprovalMismatch(reason="precondition_unavailable")` and not `attempt_ceiling`, no effect record is
+  written, the record stays `AMBIGUOUS` at N, and the `reconcile` hook never runs. Both are consequences
+  of the ordering `v0.3 §4.3.1` fixes and §5.5 amends, not of either mechanism alone, and both are
+  stated here rather than closed: moving the ceiling in front of the fetch would mean resolving the
+  record before the approval gate on a route whose whole point is that it does not, which is the same
+  seam this bullet declines above. **The sequential route is clean**: where the record is already
+  `FAILED` at the ceiling the fast path refuses before the approval gate and the provider is called
+  **zero** times, which is §6.6's principle holding wherever the fast path can answer.
 - **`Control.evaluate` does not see the ceiling** (§7). An adapter decides whether to interrupt for a human
   through `ctrlrun.adapter.needs_approval`, which calls it (`adapter.py:408-450`); it takes an `Action`, not
   an effect key, and it writes nothing, so it cannot resolve a record to count on. A framework can therefore
@@ -3206,6 +3228,45 @@ per-entry-point enumeration item 4 owed for amending `v0.3 §4.3.1`'s order, wit
 and `Control.evaluate`'s docstring now says it does not see the ceiling. G15's title was 48 characters against
 `report._TITLE_WIDTH`'s 32, the only one over, so it is "renewal past the ceiling refused" and a test asserts
 no title ever exceeds the width again.
+
+**Round two found nothing blocking, and its seven notes are mostly about this document being wrong about the
+code.** Three were.
+
+*A guard that was an equivalent mutant, reported as a red row.* Round one's fix for the escaping
+`InvalidArgument` did two things: it moved the evidence above the release, and it wrapped the release in
+`try/except CTRLRunError: raise refused from None`. Only the first is load-bearing. The reviewer deleted the
+whole `try`/`except` and got 114 of 114 green, because it caught only to re-raise the same object and nothing
+observes `__suppress_context__` (which is `None` there in any case). The clause is **deleted**: a store refusal
+now propagates by not being caught, which is what §5.5's prose said all along, and the mutation table loses the
+row that claimed to grade it. **A red row for an equivalent mutant is a false green in the table**, which is
+worse than no row, and this one survived a round of review by looking like the fix for a real finding.
+
+*§5.5's numbered list was in the wrong order and too certain.* It put the release second, before the event and
+the receipt; the code does the event, the receipt, then the release, which is the fix round one made and the list
+did not follow. And the release **may not happen at all**: measured, after an `InvalidArgument` release the
+record sits `RESERVED` at the refused attempt under a live lease while the receipt says `blocked` at that same
+attempt. The list is renumbered to the code's order, step 4 is qualified "where the release succeeds", and
+§5.2's crash paragraph now says that a failed release lands in the same place a crash does, because it does.
+
+*§6's provider runs in front of the ceiling, and no section said so.* The merge put item 5's precondition
+recheck immediately before each `_take`, and the reconcile route takes twice, so under `max_attempts: 1` a
+doomed attempt calls the operator's provider **three times** before the check refuses: once on the request pass
+and twice on the retry. Worse, a provider that raises on that attempt makes the refusal
+`ApprovalMismatch(reason="precondition_unavailable")` rather than `attempt_ceiling`, writes no effect record, and
+never runs the `reconcile` hook, so the operator is told the wrong reason for an attempt that could never run.
+Both are measured, both are in §5.5's reconcile bullet, and both are stated rather than closed for the same
+reason the human's answer is: moving the ceiling in front of the fetch needs the seam that bullet already
+declines. The sequential route calls the provider **zero** times, which is §6.6's principle holding wherever the
+fast path can answer, and that is said too. Three tests pin all three numbers.
+
+The other four were smaller and all four were true. T247's overlap assertion is real, but the docstring claiming
+"nothing but this would notice" the catalogue swap was not: `tests/test_verify.py`'s catalogue test has asserted
+the same ordering since before this branch, and the reviewer showed both tests failing on the swap. The test
+stays for locality and for `BY_ID`'s own order, which the other one does not assert, and the docstring says so.
+T248's "the approval gate ran before the reconcile" was **inferred**: the hook answered the same whenever it ran,
+so the assertion held either way. It counts now, and asserts zero calls at the moment the human is asked.
+`_projection` **normalises** `CLOCK_SKEW_DETECTED`'s three volatile fields rather than dropping the event, so the
+comparison still counts them and still fixes where they fall.
 
 ### 12.5 Item 5: precondition fingerprints
 

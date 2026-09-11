@@ -30,11 +30,11 @@ any change to one appears here.
   `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
   on SQLite and the in-memory store because neither has a clock of its own.
 - **The attempt ceiling, `max_attempts`** (SPEC-v0.7 §5, item 4, and the amendment to
-  `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding the
-  **attempts** that may execute on one effect key, the first included: `max_attempts: 3` is the
-  first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version that
-  is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and a
-  mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
+  `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding
+  the **attempts** that may execute on one effect key, the first included: `max_attempts: 3` is
+  the first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version
+  that is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and
+  a mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
   is inside the policy hash, so a receipt records which one refused an attempt.
   **An attempt, not an executor invocation**: a `Suspended` executor holds its reservation and
   every `Control.resume` runs on that same attempt, so an elicitation loop is one dispatch however

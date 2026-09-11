@@ -35,6 +35,7 @@ import pytest
 from ctrlrun import (
     ActionDenied,
     AmbiguousEffect,
+    ApprovalMismatch,
     ApprovalRequired,
     Control,
     InMemoryStateStore,
@@ -144,6 +145,24 @@ class Remote:
         if isinstance(step, BaseException):
             raise step
         return f"re_txn_1-{self.calls}"
+
+
+class _Hook:
+    """A `reconcile` hook that counts its calls, so "before" and "after" are observed.
+
+    `reconcile=lambda key: "not_executed"` answers the same whenever it runs, so a test that
+    asserts only what the hook's answer produced cannot tell the order it ran in.
+    """
+
+    def __init__(self, answer: str = "not_executed") -> None:
+        self.calls = 0
+        self.keys: list[str] = []
+        self._answer = answer
+
+    def __call__(self, effect_key: str) -> str:
+        self.calls += 1
+        self.keys.append(effect_key)
+        return self._answer
 
 
 def _not_executed() -> NotExecuted:
@@ -384,19 +403,33 @@ def test_T241_the_check_after_the_reservation_never_calls_the_executor(stores, f
 # --- T242: the positive control -- under the ceiling, 0.6.1's behaviour -----------------
 
 
+#: The three fields of `CLOCK_SKEW_DETECTED` that differ between two measurements of the same
+#: thing: the microseconds measured, the instant, and the round trip's half (SPEC-v0.7 §3.4).
+_VOLATILE_SKEW_FIELDS = ("skew_us", "measured_at", "bound_us")
+
+
 def _projection(store):
     """What a run left behind, in the terms 0.6.1 and 0.7 must agree on.
 
-    `CLOCK_SKEW_DETECTED` is dropped, and only that: on Postgres every scratch store is opened
-    with this suite's frozen clock, so each one measures a real skew of several days and reports
-    it with its own microseconds (SPEC-v0.7 §1.4 item 6, §3.8). That is item 1's event and item
-    1's tests grade it; what this comparison is about is whether a ceiling under which nothing
-    is refused changes anything the ceiling owns.
+    `CLOCK_SKEW_DETECTED` is **normalised, not dropped**: on Postgres every scratch store is
+    opened with this suite's frozen clock, so each one measures a real skew of several days and
+    reports it with its own microseconds (SPEC-v0.7 §1.4 item 6, §3.8). Replacing those three
+    fields keeps the event in the sequence, so the comparison still counts them and still fixes
+    where they fall: dropping the event would let a capped run that opened one more store than
+    the uncapped one compare equal. Nothing reaches that today, and the stronger form is free.
     """
     events = [
-        (str(event.type), dict(event.data), event.effect_key)
+        (
+            str(event.type),
+            {
+                key: ("<volatile>" if key in _VOLATILE_SKEW_FIELDS else value)
+                for key, value in event.data.items()
+            }
+            if str(event.type) == "CLOCK_SKEW_DETECTED"
+            else dict(event.data),
+            event.effect_key,
+        )
         for event in store.events()
-        if str(event.type) != "CLOCK_SKEW_DETECTED"
     ]
     receipts = [
         (receipt.result, receipt.attempt, receipt.effect_key) for receipt in _receipts(store)
@@ -942,10 +975,17 @@ def test_T248_the_reconcile_route_asks_a_human_for_an_attempt_that_can_never_run
 
     requested_before = len(_events(store, EventType.APPROVAL_REQUESTED))
 
+    # **Counted, not inferred** (mutation pattern 4). "The approval gate ran before the
+    # reconcile" is the whole finding, and a request created *after* the hook had run would
+    # satisfy the count above just as well. The hook counts its own calls, and the assertion is
+    # that it had not been called when the human was asked.
+    hook = _Hook("not_executed")
+
     # Attempt 2 presents nothing and carries the hook. A NEW request is created and the caller
     # is told to go and find a human, although attempt 2 can never run under a ceiling of 1.
     with pytest.raises(ApprovalRequired) as asked:
-        _call(control, remote, reconcile=lambda key: "not_executed")
+        _call(control, remote, reconcile=hook)
+    assert hook.calls == 0, "the reconcile hook ran first, so this is not the route §5.5 names"
     assert len(_events(store, EventType.APPROVAL_REQUESTED)) == requested_before + 1, (
         "the approval gate ran before the reconcile, so a human was asked"
     )
@@ -955,8 +995,9 @@ def test_T248_the_reconcile_route_asks_a_human_for_an_attempt_that_can_never_run
     # The human says yes, the agent retries, and the yes is spent on the refusal.
     store.grant_approval(request_id, "ops@example.com")
     with pytest.raises(ActionDenied) as refused:
-        _call(control, remote, approval=request_id, reconcile=lambda key: "not_executed")
+        _call(control, remote, approval=request_id, reconcile=hook)
     assert refused.value.reason == CEILING
+    assert hook.calls == 1, "the retry is where the hook runs, once, after the approval gate"
     assert store.get_approval(request_id).status == "consumed", (
         "the reservation consumed it in the transaction the check then refused"
     )
@@ -1102,6 +1143,137 @@ def test_T249_a_store_refusal_of_any_type_still_leaves_the_evidence(stores, fake
     assert blocked.result is ReceiptResult.BLOCKED
     assert "max_attempts is 3" in (blocked.error or "")
     assert remote.calls == 3
+
+
+# --- §6's provider in front of the ceiling, on the route §5.5 states ---------------------
+
+
+def _with_provider(control, remote, provider, *, approval=None, reconcile=None):
+    """One attempt whose `@protect` names a precondition provider (SPEC-v0.7 §6.2)."""
+    extra = {"reconcile": reconcile} if reconcile is not None else {}
+
+    @protect(
+        "stripe.refund",
+        effect="refund:{payment_id}",
+        control=control,
+        preconditions=provider,
+        **extra,
+    )
+    def refund(payment_id: str, amount: int) -> str:
+        return remote()
+
+    with context(agent="refund-agent"):
+        if approval is None:
+            return refund(payment_id="txn_1", amount=200)
+        with with_approval(approval):
+            return refund(payment_id="txn_1", amount=200)
+
+
+class _Provider:
+    """A precondition provider that counts its calls and can be broken on demand."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.broken = False
+
+    def __call__(self, action):
+        self.calls += 1
+        if self.broken:
+            raise RuntimeError("ctrlrun-test: the precondition provider is down")
+        return {"balance": 0}
+
+
+def _strand_at_one(control, store, provider, remote):
+    """Attempt 1: ask, grant, dispatch, time out. Leaves the record AMBIGUOUS at 1."""
+    with pytest.raises(ApprovalRequired) as asked:
+        _with_provider(control, remote, provider)
+    store.grant_approval(asked.value.request_id, "ops@example.com")
+    with pytest.raises(TimeoutError):
+        _with_provider(control, remote, provider, approval=asked.value.request_id)
+    assert store.get_effect(KEY).state is EffectState.AMBIGUOUS
+
+
+def test_the_provider_runs_in_front_of_the_ceiling_on_the_reconcile_route(stores, fake_clock):
+    """§5.5's reconcile bullet, with the numbers it states (SPEC-v0.7 §5.5, §6.6).
+
+    `_recheck` sits immediately before each `_take`, and this route takes twice, so a doomed
+    attempt under `max_attempts: 1` spends the operator's provider three times before the check
+    refuses: once on the request pass and twice on the retry. §6.6's principle, that a provider
+    is spent only where its answer can matter, does not reach the ceiling, and the spec says so
+    rather than closing it.
+    """
+    store = stores()
+    control = _control(APPROVE_CEILING_1, store, fake_clock)
+    provider = _Provider()
+    remote = Remote(TimeoutError("the response was lost"), "never reached")
+    _strand_at_one(control, store, provider, remote)
+
+    before = provider.calls
+    hook = _Hook("not_executed")
+    with pytest.raises(ApprovalRequired) as asked:
+        _with_provider(control, remote, provider, reconcile=hook)
+    store.grant_approval(asked.value.request_id, "ops@example.com")
+    with pytest.raises(ActionDenied) as refused:
+        _with_provider(control, remote, provider, approval=asked.value.request_id, reconcile=hook)
+
+    assert refused.value.reason == CEILING
+    assert provider.calls - before == 3, (
+        "one call on the request pass and two on the retry, because _recheck runs per _take"
+    )
+    assert remote.calls == 1, "and none of the three could have changed the answer"
+
+
+def test_a_broken_provider_renames_the_refusal_of_an_attempt_that_could_never_run(
+    stores, fake_clock
+):
+    """The sharper half of the same ordering: the operator is told the wrong reason.
+
+    The provider runs first, so its failure is what refuses the call: `ApprovalMismatch` with
+    `precondition_unavailable`, not `ActionDenied` with `attempt_ceiling`. No effect record is
+    written, the record stays `AMBIGUOUS` at N, and the `reconcile` hook never runs.
+    """
+    store = stores()
+    control = _control(APPROVE_CEILING_1, store, fake_clock)
+    provider = _Provider()
+    remote = Remote(TimeoutError("the response was lost"), "never reached")
+    _strand_at_one(control, store, provider, remote)
+
+    hook = _Hook("not_executed")
+    with pytest.raises(ApprovalRequired) as asked:
+        _with_provider(control, remote, provider, reconcile=hook)
+    store.grant_approval(asked.value.request_id, "ops@example.com")
+
+    provider.broken = True
+    with pytest.raises(ApprovalMismatch) as refused:
+        _with_provider(control, remote, provider, approval=asked.value.request_id, reconcile=hook)
+    assert refused.value.reason == "precondition_unavailable"
+    assert hook.calls == 0, "the provider refused before the reconcile could run"
+    record = store.get_effect(KEY)
+    assert record.state is EffectState.AMBIGUOUS
+    assert record.attempt == 1, "nothing was reserved, so the ceiling never had an opinion"
+    assert remote.calls == 1
+
+
+def test_the_sequential_route_never_calls_the_provider(stores, fake_clock):
+    """§6.6's principle where the fast path can answer: zero calls, and the right reason."""
+    store = stores()
+    control = _control(APPROVE_CEILING_1, store, fake_clock)
+    provider = _Provider()
+    remote = Remote(_not_executed(), "never reached")
+
+    with pytest.raises(ApprovalRequired) as asked:
+        _with_provider(control, remote, provider)
+    store.grant_approval(asked.value.request_id, "ops@example.com")
+    with pytest.raises(NotExecuted):
+        _with_provider(control, remote, provider, approval=asked.value.request_id)
+    assert store.get_effect(KEY).state is EffectState.FAILED
+
+    before = provider.calls
+    with pytest.raises(ActionDenied) as refused:
+        _with_provider(control, remote, provider)
+    assert refused.value.reason == CEILING
+    assert provider.calls == before, "the fast path refuses before the approval gate"
+    assert remote.calls == 1
 
 
 # --- what the refused attempt number costs, and what the ceiling does not bound ----------
@@ -1545,8 +1717,16 @@ def test_T252_the_catalogue_is_in_id_order(tmp_path):
     """`BY_ID`'s insertion order is the report's order (SPEC-v0.7 §9.4).
 
     Items 3, 4 and 5 each appended after G13 on their own branch, so a textual merge yields
-    G13/G15/G14 as easily as a conflict, and nothing but this would notice: every count still
-    adds up and every id is still present, and the table simply prints out of order.
+    G13/G15/G14 as easily as a conflict, and the table then simply prints out of order while
+    every count still adds up and every id is still present.
+
+    **This is a second guard, not the only one, and the difference matters.** An earlier
+    docstring here claimed nothing else would have noticed the swap; a review checked and it is
+    untrue. `tests/test_verify.py`'s catalogue test has asserted the same ordering since before
+    this branch existed, and it fails on the same mutation. What this one adds is locality: the
+    merge that could produce the swap is item 4's, and a reader of item 4's tests should find
+    the assertion that governs it here rather than in another file. `BY_ID`'s own order is the
+    part `test_verify.py` does not assert.
     """
     from ctrlrun.verify import guarantees as reg
 
