@@ -92,8 +92,10 @@ def test_T108_the_authority_example_exercises_G7_G8_and_G9():
     assert results["G9"].detail["dimensions_exercised"] == list(DIMENSIONS)
     assert results["G9"].detail["dimensions_unconstrained"] == []
     assert report.exit_code == 0
-    assert report.passed == 12
-    assert report.applicable == 12
+    # Thirteen graded on SQLite, the one N/A being G13: SQLite has no clock of its own to
+    # diverge from (SPEC-v0.7 §8.9). On a Postgres --store-url it is fourteen of fourteen.
+    assert report.passed == 13
+    assert report.applicable == 13
 
 
 def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypatch):

@@ -137,9 +137,10 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 12/12"' in script
+    assert 'test "$AUTHORITY" = "verified 13/13"' in script
     assert 'test "$TEMPLATES" = "verified 7/7"' in script
-    assert 'test "$TEMPLATES_NA" = "5"' in script
+    assert 'test "$AUTHORITY_NA" = "1"' in script
+    assert 'test "$TEMPLATES_NA" = "7"' in script
 
 
 @pytest.mark.authority
@@ -151,11 +152,12 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    assert authority.badge["message"] == "verified 12/12"
-    assert authority.not_applicable == 0
+    assert authority.badge["message"] == "verified 13/13"
+    # G13 only: SQLite has no clock of its own to diverge from (SPEC-v0.7 §8.9).
+    assert authority.not_applicable == 1
     assert templates.badge is not None
     assert templates.badge["message"] == "verified 7/7"
-    assert templates.not_applicable == 5
+    assert templates.not_applicable == 7
 
 
 def test_T118_the_action_uploads_the_report_and_writes_a_job_summary():
@@ -198,8 +200,8 @@ def test_T119_the_denominator_is_applicable_and_never_the_catalogue_size():
     assert badge is not None
     assert badge["message"] == f"verified {report.passed}/{report.applicable}"
     assert report.applicable == 7
-    assert len(reg.GUARANTEES) == 12
-    assert "/12" not in badge["message"]
+    assert report.applicable < len(reg.GUARANTEES)
+    assert f"/{len(reg.GUARANTEES)}" not in badge["message"]
 
 
 def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
@@ -208,7 +210,7 @@ def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
     from ctrlrun.verify import scenarios
 
     passing = run(V1_PAYMENTS)
-    assert passing.not_applicable == 5
+    assert passing.not_applicable == 7
     assert passing.badge is not None
     assert passing.badge["color"] == BADGE_PASS_COLOR
 

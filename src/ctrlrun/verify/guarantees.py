@@ -19,7 +19,8 @@ from typing import Final
 #: SPEC-v0.6 §9.5 — `v2` adds G11 (§6.6). The version moves because the catalogue is a closed
 #: set a report is read against, and a reader that met an id it did not know would have no way
 #: to tell a new guarantee from a corrupted line.
-#: SPEC-v0.7 §9.4: `v3` is G1 to G16, and the version moves once for all five additions.
+#: SPEC-v0.7 §9.4: `v3` is G1 to G16. It moves once, with G13, and the other four join it as
+#: their items land; nothing is released in between.
 CATALOGUE: Final = "ctrlrun.guarantees/v3"
 
 
@@ -52,7 +53,29 @@ GUARANTEES: Final = (
     Guarantee(
         "G12",
         "a byte written then the peer killed is ambiguous",
-        ("v0.1 §5.5", "v0.2 §6.8", "v0.7 §8 T220", "v0.7 §8 T221"),
+        ("v0.1 §5.5", "v0.2 §6.8", "v0.7 §8 T220", "v0.7 §8 T221", "v0.7 §8 T223b"),
+    ),
+    Guarantee(
+        "G13",
+        "clock divergence is named",
+        (
+            "v0.1 §5.3 E3",
+            "v0.7 §8 T209",
+            "v0.7 §8 T210",
+            "v0.7 §8 T211",
+            "v0.7 §8 T212",
+            "v0.7 §8 T213",
+        ),
+    ),
+    Guarantee(
+        "G14",
+        "token changes across a renewal",
+        (
+            "v0.1 §5.4",
+            "v0.7 §8 T232",
+            "v0.7 §8 T233",
+            "v0.7 §8 T238",
+        ),
     ),
 )
 
@@ -126,6 +149,24 @@ GRANT_ALREADY_EXPIRED: Final = (
     "an injected clock"
 )
 
+#: G13's one N/A (SPEC-v0.7 §8.9). True of every run it appears on: SQLite has no clock of its
+#: own, so there is nothing for the application's to diverge from.
+STORE_READS_APPLICATION_CLOCK: Final = (
+    "the store verify was given reads only the application's clock, so there is no second clock "
+    "to diverge from; pass --store-url postgresql://… to grade this"
+)
+
+#: G14's note, printed once beneath the table (SPEC-v0.7 §8.9, §4.6). Not an N/A reason and not
+#: a finding: the token is a function of `(effect_key, attempt)` and nothing else, so two stores
+#: that share a provider account derive one token wherever their effect-key strings coincide.
+#: Verify sees one store and cannot check it, and a guarantee that stayed silent about the one
+#: thing it cannot see would be read as having checked it.
+EFFECT_KEY_SCOPE_NOTE: Final = (
+    "a token is unique only as far as your effect keys are: two stores sharing a provider "
+    "account must not produce the same effect-key string for different effects, and nothing "
+    "here can check that"
+)
+
 #: `--only` (§4.6).
 NOT_SELECTED: Final = "not selected"
 
@@ -137,6 +178,7 @@ __all__ = [
     "CANDIDATE_BOUND",
     "CATALOGUE",
     "CONTROL_FAILED",
+    "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
     "EVERY_ACTION_DENIED",
     "GRANT_ALREADY_EXPIRED",
@@ -153,6 +195,7 @@ __all__ = [
     "NO_GRANT_MATCHES",
     "PER_CONNECTION_BACKEND",
     "PROCESSES",
+    "STORE_READS_APPLICATION_CLOCK",
     "SYNTHETIC_PREFIX",
     "Guarantee",
 ]

@@ -18,9 +18,10 @@ are each a failure.
 **Not applicable is not a pass.** §2.4 allows exactly two N/As, each a property of the backend
 rather than of the harness: storage that cannot be opened from another process, and storage that
 does not outlive the object holding it. Both describe `InMemoryStateStore`, which says so in its
-own docstring, and `falsely-declares-no-url` is what keeps the declaration honest. Any third N/A
-is a failure, `report.ok` is `False` for a zero denominator, and there is no flag that folds one
-into the count.
+own docstring, and `falsely-declares-no-url` is what keeps the declaration honest. SPEC-v0.7
+§8 T214 adds exactly one more, also a property of the backend: a store that exposes no clock
+measurement, because it reads only the application's clock. Any other N/A is a failure,
+`report.ok` is `False` for a zero denominator, and there is no flag that folds one into the count.
 
 Nothing in the kernel imports this package, and `import ctrlrun` does not reach it (T140f).
 """

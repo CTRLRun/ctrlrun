@@ -120,10 +120,12 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 12/12"
-          test "$AUTHORITY_NA" = "0"
+          test "$AUTHORITY" = "verified 13/13"
+          # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
+          # to diverge from (SPEC-v0.7 §8.9).
+          test "$AUTHORITY_NA" = "1"
           test "$TEMPLATES" = "verified 7/7"
-          test "$TEMPLATES_NA" = "5"
+          test "$TEMPLATES_NA" = "7"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml
@@ -151,6 +153,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Shared, verbatim, with the `clones` job in `traffic.yml`: the two publishers of the
+    # `badges` branch. Without it both can fetch the same head, and the second push is rejected
+    # as a non-fast-forward -- which shows up as a badge that quietly stopped moving.
+    concurrency:
+      group: badges-branch
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

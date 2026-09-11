@@ -104,14 +104,30 @@ def test_T141_the_shipped_backends_pass(backend, tmp_path):
     assert report.ok, report.to_text()
 
 
-def test_T141_sqlite_reports_no_not_applicable(tmp_path):
-    """SQLite has durable, shareable storage, so nothing about it is inapplicable."""
+#: SPEC-v0.7 §8 T214. The one N/A T141 admits beyond §2.4's two, amended in the same commit as
+#: the case that produces it (§9.6 item 7): SQLite reads only the application's clock.
+NO_CLOCK = (
+    "this backend exposes no clock measurement; SQLite and the in-memory store read only the "
+    "application's clock and have none to expose"
+)
+
+
+def test_T141_sqlite_reports_only_the_clock_not_applicable(tmp_path):
+    """SQLite has durable, shareable storage, so nothing about its storage is inapplicable. The
+    one N/A is SPEC-v0.7's skew case, because SQLite has no clock of its own to measure."""
     report = run(SQLiteBackend(tmp_path))
-    assert report.not_applicable_cases == (), report.to_text()
+    na = [
+        (suite.name, case.id, case.reason)
+        for suite in report.suites
+        for case in suite.cases
+        if case.status is SuiteStatus.NOT_APPLICABLE
+    ]
+    assert na == [("clock", "skew-measured", NO_CLOCK)], report.to_text()
 
 
-def test_T141_in_memory_reports_only_the_two_honest_reasons(tmp_path):
-    """§2.4's table, by **reason**. A third reason from this backend is a failure, not a property.
+def test_T141_in_memory_reports_only_the_honest_reasons(tmp_path):
+    """§2.4's table, by **reason**, plus SPEC-v0.7 T214's clock case. Any other reason from this
+    backend is a failure, not a property.
 
     Counted by reason rather than by case: the cross-process family grew when contended cases
     were added for `consume_approval_and_reserve`, `take_continuation` and `grant`/`deny`, and
@@ -136,6 +152,7 @@ def test_T141_in_memory_reports_only_the_two_honest_reasons(tmp_path):
     assert reasons == {
         "this backend's storage cannot be opened from another process",
         "this backend's storage does not outlive the object that holds it",
+        NO_CLOCK,
     }, reasons
     for suite in report.suites:
         for case in suite.cases:

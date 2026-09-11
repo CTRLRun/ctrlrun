@@ -15,6 +15,41 @@ any change to one appears here.
   3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
   `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
   changed; the one test fix is below.
+- **Clock-skew detection** (SPEC-v0.7 §3, item 1). `PostgresStateStore` measures its server's
+  clock against the application's at open, and again when an expired lease is declared
+  `AMBIGUOUS` (at most once per `DEFAULT_LEASE`), in one round trip whose half is the
+  measurement's bound, so latency alone is never reported as skew. It keeps its latest
+  measurement as the optional, read-only `clock_skew` attribute, a `ctrlrun.state.ClockSkew`;
+  `Control` reads it at the start of every `execute` and `resume` and after an `AmbiguousEffect`,
+  and appends one new event type, `CLOCK_SKEW_DETECTED`, for a measurement past
+  `clock_skew_threshold` (default one second, at most `DEFAULT_LEASE`, and no value switches it
+  off). **It observes and reports, and changes no decision**: every lease is still evaluated
+  against the application clock exactly as at 0.6.1, no reservation outcome changes, and a
+  measurement that fails is logged and changes nothing. Verify gains G13, graded against a
+  Postgres `--store-url` and `N/A` on SQLite, and the catalogue moves to
+  `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
+  on SQLite and the in-memory store because neither has a clock of its own.
+- **The provider idempotency token** (SPEC-v0.7 §4, item 3). `ctrlrun.idempotency_token()`, a new
+  zero-argument accessor re-exported at package import, answers inside an executor with the token
+  of the attempt it is running: `ctrlrun.effect.idempotency_token_for(effect_key, attempt)`, a
+  SHA-256 over the canonical form of `(effect_key, attempt)` under the domain tag
+  `ctrlrun.idempotency/v1`, rendered as a 36-character UUID of version 8. Send it to a provider as
+  its idempotency key. **Derived from the attempt and not from the effect key alone**: the effect
+  key is stable across `SPEC-v0.1.md` §5.4's renewal, so a provider given it would answer the one
+  retry the kernel permits, permitted *because the executor proved nothing happened*, with the
+  cached failure of the attempt that failed. It is stable within one attempt, including across a
+  `Control.resume` of a suspended one, and different after a renewal. **What it is for is
+  reconciliation**: a deterministic handle to ask a provider what became of an attempt whose
+  outcome is unknown, by a key the provider already indexes. It does not make a retry safe, and
+  after an `AMBIGUOUS` outcome the kernel still refuses one. Nothing is stored: the token is a pure
+  function of two fields every receipt of an attempt that ran already carries, so a receipt
+  re-derives it and a `reconcile` hook reads the attempt off the record. The executor signature is
+  unchanged, and an executor that never calls the accessor runs exactly as it did at 0.6.1. Outside
+  an executor, for an action with no effect key, for an observe-mode attempt whose reservation was
+  refused, and on a thread started without a copy of the executor's context, it raises
+  `InvalidArgument`. Verify gains G14, with a note beneath the table: a token is unique only as far
+  as the operator's effect keys are, and a kernel that sees one store cannot check that two stores
+  sharing a provider account never produce one effect-key string for two different effects.
 - **`ctrlrun.transport`, the `NotExecuted` classifier, in core** (SPEC-v0.7 §2, build-list item
   2). `v0.1 §5.5` leaves the one decision the product exists to get right, `FAILED` or
   `AMBIGUOUS`, to the executor, and until now the correct rule was reachable only through
@@ -78,11 +113,87 @@ any change to one appears here.
 
 ### Fixed
 
+- **`PostgresStateStore.events()` read a missing `action_id` back as the string `"None"`.** An
+  event about no action (the three `DELEGATION_*` types, and now `CLOCK_SKEW_DETECTED` reported at
+  open) named a proposal called "None" on Postgres alone; SQLite and the in-memory store returned
+  `None`. It now returns `None` on all three.
+
 - **The migration tests' release fixtures could not build a venv on some interpreters.**
   `venv.create` copies the interpreter by default, and a copied binary from a shared-libpython
   build (uv's CPython 3.14 on macOS) aborted inside `ensurepip`, so all five release fixtures
   errored before a release was installed. The fixture now symlinks, as `python -m venv` does on
   POSIX.
+- **The Postgres store could hand out one attempt number twice** (`docs/SPEC-v0.7.md` §5.6).
+  0.6.1's renewal after `FAILED` read the record with a plain `SELECT` and then updated it on
+  `effect_key` and `state = 'failed'` alone. So a renewal planned against attempt *k* could land
+  after another process had renewed to *k+1*, run and failed, and write *k+1* a second time: two
+  dispatches, and two receipts, under one attempt number. The `UPDATE` is now also conditioned on
+  the attempt it was planned from, with the row count checked, and a stale renewal is refused with
+  `DuplicateEffect`. SQLite carries the same condition, where it was already unreachable because
+  `BEGIN IMMEDIATE` holds the read and the write together.
+- **A stale Postgres write could put an older attempt number back** (`docs/SPEC-v0.7.md` §5.6).
+  0.6.1's compare-and-set under `resolve_effect`, `extend_lease`, `hold_continuation`, the kept
+  `AMBIGUOUS` write and the four transitions matched `effect_key`, `action_id` and `state`, and
+  wrote back the attempt number it had read. A caller that retries one `Action` reuses its
+  `action_id`, so the same `action_id` and state could come round again at a newer attempt between
+  the read and the write. A human's `ctrlrun resolve` decided on attempt 1 then wrote `FAILED` at
+  1 over attempt 2's unknown outcome, and the next renewal handed out attempt 2 a second time.
+  **On Postgres**, every write to an effect record is now also conditioned on the attempt it read,
+  and a write whose record moved is re-read rather than landed (SQLite's writes are already inside
+  the `BEGIN IMMEDIATE` that holds their read, and are unchanged). The fix for the renewal above
+  depends on this one: it holds only because the number can no longer move backwards. What this
+  closes is the race between a write's own read and its write. The window a *human* stands in is
+  longer, because `ctrlrun resolve` carries no attempt number: someone who inspected attempt 1 can
+  still resolve attempt 2's ambiguity. An attempt argument on the CLI would close that, and it is
+  not in this change.
+- **A Postgres write that carried an outcome could be refused and drop it.** With the condition
+  above in place, a `commit_effect` or `mark_ambiguous` whose record moved under it wrote nothing
+  and raised, so the effect record, which is what gates the next renewal, said nothing about an
+  attempt that may have acted: a review measured a renewal to a third attempt with a committed
+  refund recorded on no record at all. Both are now re-issued once against the re-read, so the
+  outcome lands on the record as it stands. `begin_execution` and `fail_effect` are still refused
+  there, because `FAILED` asserts that nothing happened and the newer attempt may be running.
+- **A refused write on a moved record claimed the wrong thing.** All of these were
+  `DuplicateEffect(state="in_progress")`, which means *another attempt holds a live reservation*,
+  and after a stale `resolve_effect` the record is `AMBIGUOUS` at a newer attempt, which is nobody's
+  reservation. The refusal now takes its type from what the re-read found, `AmbiguousEffect` or
+  `DuplicateEffect` with `committed` or `in_progress`, and its message names the move.
+- **An unknown outcome could vanish when the store refused to record it**, on both backends and
+  since before 0.6. `Control` caught two store refusals around its outcome writes, and a record a
+  human resolved `FAILED` while the attempt was still running answers a third: an executor that
+  raised `TimeoutError` then produced no receipt and no `EXECUTION_AMBIGUOUS` event, and the caller
+  was handed a store error about its own effect key instead of its executor's exception. `Control`
+  now catches every `CTRLRunError` from an outcome write, writes the receipt and the event whatever
+  the store answered, names the refusal in both, and re-raises the caller's own exception. Nothing
+  is reconciled on a record the attempt could not mark.
+- **Two bounds on the Postgres store's re-issues reset each other.** The stale re-issue and the
+  lost-commit re-issue of `docs/SPEC-v0.6.md` §4.3.2 each carry a flag that permits one attempt,
+  and neither passed the other's flag on, so a lost `COMMIT` inside a re-issue and a re-issue
+  inside a lost `COMMIT` alternated without end: a review drove both halves at once and reached
+  `RecursionError`, which is outside this library's closed set of errors, so no caller can
+  classify it and the record is left stranded. Both flags now travel through both re-issues.
+- **A receipt for an outcome the store refused did not say what the executor had done.** An
+  executor that returned normally and one that raised `NotExecuted` produced identical receipts,
+  naming the store's refusal and nothing else. For the first the remote very likely acted and for
+  the second it very likely did not, and with the effect record carrying neither, that is the one
+  fact whoever runs `ctrlrun resolve` has to go on. The receipt now carries both.
+- **A lapsed Postgres approval could be marked expired over a consumption.** `_expire` wrote
+  `status = expired` on `approval_id` alone, from a read that saw `granted` past `expires_at`, so a
+  consumption committing in between was overwritten and an approval that authorised a real effect
+  read `expired`. It is now conditioned on the status it read, as every other write on that table
+  already was.
+- **After a lost `COMMIT`, a Postgres reservation could return an attempt number it did not
+  write.** Where a reservation's `COMMIT` was lost and the re-read found the write absent, 0.6.1
+  re-issued it and then returned the reservation it had first planned, discarding the re-issue's.
+  If another process had renewed, or inserted, and failed in between, the caller and its receipt
+  held attempt *k+1* while the record held *k+2*, and *k+1* was a number another dispatch had
+  already been handed. The reservation methods now return what the re-issue wrote.
+- **A lost `COMMIT` on a Postgres renewal could take another process's reservation for its own.**
+  0.6.1's re-read accepted any `RESERVED` record carrying the renewal's `action_id` as proof the
+  commit had landed. `docs/SPEC-v0.6.md` §4.3.3 had already ruled that out on the insert path,
+  because `action_id` is caller-supplyable, and a caller that rebuilt the same `Action` renews
+  under the same one. Two processes then held one attempt. The renewal's re-read now applies the
+  same whole-row identity check, and a row that is not its own write is refused.
 
 ### Documentation
 

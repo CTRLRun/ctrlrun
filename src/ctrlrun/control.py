@@ -11,6 +11,8 @@ import functools
 import inspect
 import logging
 import os
+import threading
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -43,6 +45,7 @@ from .effect import (
     _closed,
     _ExecutorRun,
     _opened,
+    idempotency_token_for,
     resolve_effect_key,
     resolve_resource,
     template_placeholders,
@@ -89,9 +92,21 @@ from .receipt import (
     iso_timestamp,
     new_receipt_id,
 )
-from .state import SQLiteStateStore, StateStore
+from .state import ClockSkew, SQLiteStateStore, StateStore
 
 _LOG = logging.getLogger(__name__)
+
+#: SPEC-v0.7 §3.6. Which kinds of unusable `clock_skew` value each store has already been logged
+#: for: once per store per kind, not once per action, which would flood a log exactly as the
+#: event's own rate limit exists to avoid. Keyed weakly so a store's entry goes with the store;
+#: a store that cannot be weakly referenced falls back to the reading `Control`'s own set.
+_SKEW_WARNED: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
+_SKEW_WARNED_LOCK = threading.Lock()
+_SKEW_NOT_A_MEASUREMENT: Final = "not a ClockSkew"
+_SKEW_READ_RAISED: Final = "read raised"
+_SKEW_APPEND_FAILED: Final = "append failed"
+#: The event's numbers are integer microseconds, exact, so a reader sees what the decision used.
+_MICROSECOND: Final = timedelta(microseconds=1)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -139,6 +154,60 @@ class _Invocation:
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
 _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
+
+#: SPEC-v0.7 §4.3. The token of the attempt whose executor is running, and nothing else. Set
+#: around `executor()` in `_outcome`, and only where the attempt holds its reservation.
+_IDEMPOTENCY_TOKEN: ContextVar[str | None] = ContextVar("ctrlrun_idempotency_token", default=None)
+
+
+@contextmanager
+def _attempt_token(held_key: str | None, attempt: int) -> Iterator[None]:
+    """Bind this attempt's token for exactly the executor's run (SPEC-v0.7 §4.3).
+
+    Nothing is bound where the attempt holds no reservation: `held_key` is `None` for an action
+    with no effect key and for an observe-mode attempt whose reservation was refused, and handing
+    the second one attempt 1's token would name the real holder's attempt (§4.3).
+    """
+    if held_key is None:
+        yield
+        return
+    token = _IDEMPOTENCY_TOKEN.set(idempotency_token_for(held_key, attempt))
+    try:
+        yield
+    finally:
+        _IDEMPOTENCY_TOKEN.reset(token)
+
+
+def idempotency_token() -> str:
+    """The provider idempotency token for the attempt this executor is running (SPEC-v0.7 §4).
+
+    Send it to the provider as its idempotency key. It is
+    `ctrlrun.effect.idempotency_token_for(effect_key, attempt)` for the attempt that holds the
+    reservation, so it is stable across a `Control.resume` of the same attempt and **different
+    after a renewal**: a token stable across v0.1 §5.4's renewal would have the provider answer
+    the one retry the kernel permits with the cached failure of the attempt that failed (§4.1).
+
+    What it is for is reconciliation: a deterministic handle to ask the provider what became of
+    an attempt whose outcome is unknown, by a key the provider already indexes (§4.7). It does
+    not make a retry safe, and after an `AMBIGUOUS` outcome the kernel still refuses one.
+
+    Nothing is stored: the token is a pure function of two fields every receipt of an attempt
+    that ran already carries, so a receipt re-derives it with `idempotency_token_for` and a
+    `reconcile` hook reads the attempt off the record (§4.5).
+
+    **Outside an executor this raises `InvalidArgument`**, because a token invented outside an
+    attempt identifies nothing. So does an executor whose action has no effect key, an
+    observe-mode attempt whose reservation was refused, and a thread the executor started
+    without copying its context: a missing value is refused rather than guessed (§4.3).
+    """
+    token = _IDEMPOTENCY_TOKEN.get()
+    if token is None:
+        raise InvalidArgument(
+            "idempotency_token() is defined only inside an executor running an attempt that "
+            "holds its effect key. There is no attempt here to name, so there is no token "
+            "(SPEC-v0.7 §4.3)"
+        )
+    return token
 
 
 @contextmanager
@@ -314,6 +383,10 @@ class Control:
         #: SPEC-v0.3 §3.2 — the provider-versus-context warning is emitted at most once per
         #: Control. A warning that repeats per call is a warning nobody reads.
         self._warned_about_principal = False
+        #: SPEC-v0.7 §3.6: the last clock measurement this Control reported, so the same one is
+        #: appended once however many actions read it.
+        self._skew_reported: ClockSkew | None = None
+        self._skew_warned: set[str] = set()
 
     @classmethod
     def from_file(
@@ -573,6 +646,7 @@ class Control:
         is the only authority besides a human that may move a record out of `AMBIGUOUS`
         (SPEC-v0.2 §2.2). It runs at most once per call.
         """
+        self._report_clock_skew()
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
         self._check_environment(action)
@@ -832,6 +906,9 @@ class Control:
         try:
             approval, reservation = self._observe_take(action, approval_id, effect_key, lease)
         except (DuplicateEffect, AmbiguousEffect) as refused:
+            if isinstance(refused, AmbiguousEffect):
+                # SPEC-v0.7 §3.6, as in `_secure`: observe mode reserves, so it meets E3 too.
+                self._report_clock_skew(action, effect_key)
             observation.block(_blocked_by(refused))
             self._append(
                 EventType.EFFECT_RESERVATION_REFUSED,
@@ -950,6 +1027,7 @@ class Control:
         An executor that raises `NotExecuted` itself is still believed, as `v0.1 §5.5` says it
         is; what changed is that nothing in this library will hand it one.
         """
+        self._report_clock_skew()
         held = self._store.take_continuation(continuation)
         action = held.action
         started_at, approval = self._resumed_context(action, held.record.created_at)
@@ -1065,6 +1143,11 @@ class Control:
 
         `observation` turns every terminal receipt below into an `observed` one carrying what
         the executor did and what enforce mode would have done (§6.3).
+
+        SPEC-v0.7 §4.3. The idempotency token is bound around `executor()` and nowhere else,
+        for the attempt named by the key this attempt holds and the number the store assigned
+        it. `execute` and `resume` both arrive here, which is why a resumed leg reads the token
+        of the attempt it is resuming: `resume` passes `held.record.attempt` unchanged (§4.4).
         """
         # SPEC-v0.7 §2.3, §12.2.9 — the register of what this run offered, for exactly the
         # executor's call. A classifier claims `NotExecuted` only inside it, and only while it is
@@ -1078,7 +1161,10 @@ class Control:
         run = _EXECUTOR_RUN.set(opened)
         try:
             try:
-                result = executor()
+                # Both bindings are for exactly the executor's call, and the token's is item 3's
+                # (§4.3): the register says what this run offered, the token names the attempt.
+                with _attempt_token(held_key, attempt):
+                    result = executor()
             finally:
                 # Its own `finally`, and first: a run left in `_OPEN_RUNS` would go on being
                 # marked by every context-less send for the life of the process, and one left
@@ -1103,13 +1189,25 @@ class Control:
                 # the one outcome that leaves the key retryable (§5.4).
                 try:
                     self._store.fail_effect(held_key, action.action_id, str(exc))
-                except (DuplicateEffect, AmbiguousEffect) as refused:
+                except CTRLRunError as refused:
                     # SPEC: §5.2 — the record moved on while the executor ran: this attempt's
                     # lease lapsed and another declared the effect AMBIGUOUS, which only a
                     # human moves it out of. The store's refusal is what propagates, not the
                     # NotExecuted: an agent that caught that would retry a key it lost.
+                    #
+                    # **Every refusal the store can answer with, not two of them.** A record a
+                    # human resolved while this attempt was still running answers
+                    # `InvalidArgument`, which escaped: no receipt, no event, and the caller
+                    # handed a store error about its own effect key. Found by review, round 2.
                     self._unrecorded(
-                        action, evaluation, started_at, held_key, attempt, refused, approval
+                        action,
+                        evaluation,
+                        started_at,
+                        held_key,
+                        attempt,
+                        refused,
+                        approval,
+                        did=f"the executor raised NotExecuted: {exc}",
                     )
                     raise
             self._append(
@@ -1150,12 +1248,26 @@ class Control:
                 try:
                     self._store.mark_ambiguous(held_key, action.action_id, error)
                     recorded = True
-                except (DuplicateEffect, AmbiguousEffect) as refused:
+                except CTRLRunError as refused:
                     # Recording an unknown outcome must never mask the exception that caused
-                    # it. A store that refuses here has the record in a state a human already
-                    # owns — where this attempt was trying to put it — and the receipt below
-                    # says `ambiguous` either way.
+                    # it, and must never be lost with the refusal either. The receipt and the
+                    # event below are written whatever the store answered, and they carry the
+                    # refusal, because where the store would not take the outcome the effect
+                    # record does not carry it: the evidence is then the only place it exists.
+                    #
+                    # **Every refusal, not two of them, and it is named rather than logged
+                    # away.** `DuplicateEffect` and `AmbiguousEffect` were caught and the
+                    # comment here said the record was in a state "a human already owns"; a
+                    # record a human resolved `FAILED` while this attempt was still running
+                    # answers `InvalidArgument` instead, which escaped this handler entirely,
+                    # so an unknown outcome reached no receipt and no event and the caller was
+                    # handed a store error in place of its executor's exception. Found by
+                    # review, round 2 (SPEC-v0.7 §12.3a).
                     _LOG.warning("%s: effect %s: %s", action.name, effect_key, refused)
+                    error = _storable(
+                        f"{error} (the effect record does not carry this outcome: the store "
+                        f"refused the write with {type(refused).__name__}: {refused})"
+                    )
             self._append(
                 EventType.EXECUTION_AMBIGUOUS,
                 action,
@@ -1185,13 +1297,20 @@ class Control:
         if held_key is not None:
             try:
                 self._store.commit_effect(held_key, action.action_id, result)
-            except (DuplicateEffect, AmbiguousEffect) as refused:
+            except CTRLRunError as refused:
                 # SPEC: §5.2 — the executor returned, but the key is no longer this attempt's
                 # to commit: the lease lapsed and the record is AMBIGUOUS until a human says
                 # otherwise. What happened at the remote is now as unknown as a timeout, so
                 # the attempt is recorded `ambiguous` rather than committed.
                 self._unrecorded(
-                    action, evaluation, started_at, held_key, attempt, refused, approval
+                    action,
+                    evaluation,
+                    started_at,
+                    held_key,
+                    attempt,
+                    refused,
+                    approval,
+                    did="the executor returned, so the remote may well have acted",
                 )
                 raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
@@ -1366,6 +1485,10 @@ class Control:
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
                 break
             except AmbiguousEffect as refused:
+                # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
+                # when an expired lease is declared AMBIGUOUS, and the report belongs beside this
+                # refusal, naming this attempt. It changes nothing about the refusal.
+                self._report_clock_skew(action, effect_key)
                 # SPEC-v0.2 §2.3 — the record is `AMBIGUOUS` now, whether it already was or
                 # was just moved there by an expired lease (v0.1 §5.4). Either way it is in
                 # the state reconciliation asks about, which is why the order is this way
@@ -1626,16 +1749,27 @@ class Control:
         started_at: datetime,
         effect_key: str,
         attempt: int,
-        refused: DuplicateEffect | AmbiguousEffect,
+        refused: CTRLRunError,
         approval: Approval | None,
+        *,
+        did: str,
     ) -> None:
         """Record an outcome the store refused to write (SPEC-v0.1 §5.2, §5.5).
 
         The executor finished, but the effect record moved on while it ran, so what happened
         at the remote is exactly as unknown as a timeout: `ambiguous`, whatever the executor
         returned or raised. A terminal action still gets its receipt (§6.1).
+
+        **`did` is what the executor did, and it belongs in the receipt beside the refusal.**
+        Recording only the refusal made two receipts identical that a human must be able to tell
+        apart: an executor that *returned* leaves a remote that very likely acted, and one that
+        raised `NotExecuted` leaves a remote that very likely did not. With the effect record
+        carrying neither, the receipt is the only place that fact exists, and whoever runs
+        `ctrlrun resolve` on this key has nothing else to go on. Found by review, round 3.
         """
-        error = f"{type(refused).__name__}: {refused}"
+        error = _storable(
+            f"{did}, and the outcome write was refused: {type(refused).__name__}: {refused}"
+        )
         self._append(
             EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, effect_key, approval=approval
         )
@@ -1794,6 +1928,98 @@ class Control:
                 "load a document with an 'authority:' key (SPEC-v0.3 §4.1)"
             )
         return self._authority
+
+    # --- clock skew (SPEC-v0.7 §3.6) ----------------------------------------------------
+
+    def _report_clock_skew(
+        self, action: Action | None = None, effect_key: str | None = None
+    ) -> None:
+        """Append `CLOCK_SKEW_DETECTED` for a new, exceeded measurement the store retained.
+
+        **It observes and decides nothing.** The store sits below `Control` and has no sink, and
+        `StateStore` is frozen, so a store with its own clock retains its latest measurement as
+        the optional `clock_skew` attribute and this pulls it. A store without the attribute
+        reports nothing, which is correct: only a store with a second clock has one to report.
+
+        The value is used only if it is a `ctrlrun.state.ClockSkew`. Anything else, a read that
+        raises, and an append the store refuses are logged once per store per kind and never
+        raised: an observation must not be able to fail the action it observes, and a refusal it
+        sits beside must reach the caller as the refusal it was. With no `action` the report is
+        about the deployment and carries no `action_id`; beside an `AmbiguousEffect` it names the
+        attempt whose refusal it accompanies. It does not say skew caused that refusal.
+
+        A report is marked as made only once the store has accepted it, so one the store could
+        not write is tried again by the next action, and sinks are handed only an event that was
+        stored, with the store's `event_id` (`v0.2 §4.1`).
+        """
+        try:
+            value = getattr(self._store, "clock_skew", None)
+            if value is None:
+                return
+            if not isinstance(value, ClockSkew):
+                self._warn_clock_skew(
+                    _SKEW_NOT_A_MEASUREMENT,
+                    f"it is a {type(value).__name__}, not a ctrlrun.state.ClockSkew",
+                )
+                return
+            if not value.exceeded or value == self._skew_reported:
+                return
+            data = {
+                "skew_us": value.skew // _MICROSECOND,
+                "bound_us": value.bound // _MICROSECOND,
+                "threshold_us": value.threshold // _MICROSECOND,
+                "direction": "ahead" if value.skew > timedelta(0) else "behind",
+                "trigger": value.trigger,
+                "measured_at": iso_timestamp(value.measured_at),
+            }
+        except Exception as broke:
+            self._warn_clock_skew(
+                _SKEW_READ_RAISED, f"reading it raised {type(broke).__name__}: {broke}"
+            )
+            return
+        try:
+            stored = self._store.append_event(
+                Event(
+                    type=EventType.CLOCK_SKEW_DETECTED,
+                    action_id=None if action is None else action.action_id,
+                    ts=self._clock(),
+                    data=data,
+                    effect_key=effect_key,
+                )
+            )
+        except Exception as broke:
+            # `Exception`, and the width is `_spend_unneeded_approval`'s argument: there is
+            # nothing to protect here. This is an observation; the action's own events, receipt
+            # and refusal are written by the paths that follow and raise as they always did.
+            self._warn_clock_skew(
+                _SKEW_APPEND_FAILED,
+                f"the store refused to append CLOCK_SKEW_DETECTED ({type(broke).__name__}: "
+                f"{broke}), so the report is retried by the next action",
+                ignored=False,
+            )
+            return
+        self._skew_reported = value
+        self._fan_out("on_event", stored, str(stored.type))
+
+    def _warn_clock_skew(self, kind: str, detail: str, *, ignored: bool = True) -> None:
+        with _SKEW_WARNED_LOCK:
+            try:
+                seen = _SKEW_WARNED.setdefault(self._store, set())
+            except TypeError:
+                seen = self._skew_warned
+            if kind in seen:
+                return
+            seen.add(kind)
+        _LOG.warning(
+            "%s: %s: %s. Nothing about any action changes (SPEC-v0.7 §3.6)",
+            type(self._store).__name__,
+            (
+                "its clock_skew attribute was ignored, so this store's clock skew is never reported"
+                if ignored
+                else "a clock skew report was not recorded"
+            ),
+            detail,
+        )
 
     def _append_delegation(self, type_: EventType, data: Mapping[str, Any]) -> None:
         """Append one of §7's three action-less events and fan it out.
