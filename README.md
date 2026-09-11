@@ -243,11 +243,19 @@ Every protected call, whichever way it arrives, goes through the same six steps.
    much autonomy does *this action* get?). Unknown action, missing policy or missing principal
    is `deny`.
 3. **Approve.** A human answers against the action hash. The approval is single-use, expires,
-   and matches nothing but that exact action.
+   and matches nothing but that exact action. Name a `preconditions=` provider and the approval
+   is also bound to the resource state it was granted against, rechecked strictly before the
+   reservation: that **narrows** the window between the answer and the execution, from minutes of
+   deliberation to milliseconds. It does not close it, because the recheck is a network call and
+   cannot run inside the atomic write.
 4. **Reserve.** The effect key, `refund:txn_1` or `namespace:prod-eu:checkout`, is taken in one
    atomic write. A second caller, in another process or on another host, is refused.
 5. **Execute.** Your function runs. Only `NotExecuted`, raised by you, means `FAILED`; every
-   other exception and every timeout means `AMBIGUOUS`.
+   other exception and every timeout means `AMBIGUOUS`. Deciding which one you are looking at is
+   the hard part, so `ctrlrun.transport` does it for you: `urlopen`, `HTTPConnection` and
+   `HTTPSConnection` from stdlib `urllib` and `http.client`, which raise `NotExecuted` only where
+   the connection they opened was handed no request byte. After one byte, every failure stays the
+   exception it was, and the outcome is `AMBIGUOUS`. No setting widens that.
 6. **Record.** A portable JSON receipt: who, what, decision, approval, effect key, outcome, and
    the hash of the policy that decided it, chained to the receipt before it.
 
@@ -255,7 +263,9 @@ State lives in SQLite by default, a file with no server and no ops, and the rese
 across processes rather than merely across threads. Point it at Postgres when more than one
 host writes: `pip install "ctrlrun[postgres]"`, one URL, the same guarantees graded by the same
 suite. Prove it in your own setup with `ctrlrun verify`, which runs the kernel's own failure
-scenarios against *your* policy in a scratch store, with no network.
+scenarios against *your* policy in a scratch store. It reaches no network: the only sockets it
+opens are to the store you named and to loopback listeners it bound itself, which is how it
+grades the transport classifier.
 
 <!-- generated from capabilities.yaml (readme) — edit the YAML, never this table -->
 | Guarantee | `@protect` | Gateway | Adapter |

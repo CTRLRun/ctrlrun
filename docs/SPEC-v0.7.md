@@ -3826,3 +3826,60 @@ so there is nothing there for verify to grade; T261b is where that residual is k
 and whichever lands second rebases the two lines.
 
 ### 12.6 Item 6: the release
+
+**The changelog is written as a release and not as six bullet lists**, because six items merged in
+parallel lanes and each wrote its own entry in the order it landed. A reader upgrading needs two
+things the concatenation did not give them: **every behaviour that became stricter, beside what
+0.6.1 did**, and **every residual, where an operator reads it rather than only in §12**. Both are
+their own section above `Added`, and the residual list is the one this section exists to argue
+for: the reconcile route's wasted human answer and three provider calls (§12.4), the ceiling
+bounding attempts and not executor invocations (§5.7), the refused attempt number being spent
+(§5.5), the register seeing only this library's own sends (§12.2.9), attempt identity under a
+reused `action_id` (§12.3a), §6.4's residual, and the recheck that narrows and does not close.
+A milestone whose specification states seven residuals and whose changelog states none would be
+the prevention-versus-attribution rule failing at the last surface it passes through.
+
+**The version bump broke two things nothing else would have caught, and both were real.** Both
+adapters declared `ctrlrun>=0.5,<0.7`, which **excludes** the kernel they ship beside, so
+`pip install ctrlrun-langgraph` would have refused to resolve or silently downgraded `ctrlrun` to
+0.6. That is the defect `0.5,<0.6` produced at 0.6.0 and the test written for it
+(`test_each_adapter_declares_a_kernel_range_that_contains_this_kernel`) caught this one the
+moment `pyproject.toml` moved. The range is now `>=0.5,<0.8` in all six places the two adapters
+state it, which is the guard beside it, `test_no_adapter_source_file_states_a_stale_kernel_range`.
+And `CITATION.cff` carried `0.6.1`. Neither is a release-pass edit anybody would have thought to
+make; both are tests written when the same thing went wrong before.
+
+**T271 runs the demo in a process with the network taken away.** The T11 fixture runs it in the
+test process through `CliRunner`, where nothing has been taken away, so "under 60 seconds with no
+network" was two claims of which only the first was measured. T271 runs the CLI in a subprocess
+whose `sitecustomize` is `conftest.py`'s one guard, the same one T107, T230, the examples and the
+cookbook use. Measured: 0.13 s, five scenarios, nothing reached.
+
+**The documentation repository's snippet harness had the second guard §12.2.7 warned about.**
+`tools/docs_audit/snippets.py` carried its own `NO_NETWORK`, which refused every connect, and the
+cookbook's `verify-in-github-actions` recipe runs `ctrlrun verify`, so once G12 existed that
+recipe exited 3 on a correct kernel. §12.2.7 moved the *library's* two copies onto one definition
+and did not know about this third one, in another repository. It is now a verbatim copy of
+`conftest.py`'s guard, with both edges tested there: a self-bound loopback port is admitted, and a
+loopback port the process did not bind is not.
+
+**`render_api` did not enumerate `ctrlrun.transport`, and could not have.** Its page list is
+`ctrlrun.__all__` plus a hand-written `EXTRA_NAMES` for what lives behind an extra. `transport.py`
+is core, stdlib and deliberately **not** imported by `import ctrlrun` (§2.8, T228), so it is in
+neither, and the five public names of the module that decides `FAILED` versus `AMBIGUOUS` had no
+reference page while `NotExecuted` had one. They are in `EXTRA_NAMES` now, with a comment saying
+why a module that needs no extra is in a list named for extras.
+
+**Seven `CLAIMS.md` rows cited a line that had become the end of a docstring.** The repointer
+refuses rather than guesses, so it reported them and wrote nothing, which is the behaviour that
+made this visible at all: they cite the branch where only `NotExecuted` maps to `FAILED`, which is
+a statement and not a definition, and the citation had been pointed at `control.py:1416` before
+item 3's token binding moved it. Repointed at the `except NotExecuted` clause; thirty more rows
+moved with the code.
+
+**What the readiness block says before the tag, and why it is left that way.** It reads *Version
+0.7.0 is in development; PyPI has 0.6.1*, because the generator takes "released" from the newest
+**dated** changelog heading and this release's heading is undated until the tag. That is the line
+flipping itself on the day the release lands, which is what it was built to do; regenerating the
+block is part of the tag and not of this pull request. The **No external security audit** line is
+untouched: it is gated on v0.12 (`ROADMAP.md`), never on this release.

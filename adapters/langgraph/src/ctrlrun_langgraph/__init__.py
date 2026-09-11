@@ -15,7 +15,7 @@ including a LangChain tool and a raw model call, with no adapter and no framewor
 buys one thing over it: the interrupt. If your graph has nowhere for a human to answer, or you
 are happy for `ApprovalRequired` to reach your own code, use `@protect` and stop here.
 
-Supported kernel range: `ctrlrun>=0.5,<0.7`. Supported framework range: `langgraph>=1.0,<2.0`.
+Supported kernel range: `ctrlrun>=0.5,<0.8`. Supported framework range: `langgraph>=1.0,<2.0`.
 `README.md` states both, and what this adapter's binding check is and is not.
 """
 
