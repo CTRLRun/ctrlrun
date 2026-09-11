@@ -113,9 +113,9 @@ def test_T100_the_authority_example_passes_every_non_authority_guarantee():
     report = run(AUTHORITY_PAYMENTS)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11", "G12"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G10"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G10", "G12"):
         assert results[gid].action == "stripe.refund", gid
     assert results["G3"].effect_key == "refund:ctrlrun-verify-payment_id"
     assert report.exit_code == 0
@@ -129,7 +129,7 @@ def test_T100_the_starter_policy_exercises_every_non_authority_guarantee():
     report = run(EXAMPLE_POLICY)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G10", "G11"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G10", "G11", "G12"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
     assert results["G1"].action == "k8s.delete_namespace"
     assert results["G10"].action == "customer.read"
@@ -167,12 +167,12 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
         # The `else` branch: either one reported `pass` is the defect this test exists for.
         assert results[gid].status is not Status.PASS
     assert report.applicable == report.passed + report.failed
-    # Ten in the catalogue; G1 and G2 for the missing approve band, G8 and G9 for the
-    # missing authority section. Six applicable, and the count is over those six.
-    assert report.applicable == 7
+    # Twelve in the catalogue; G1 and G2 for the missing approve band, G8 and G9 for the
+    # missing authority section. Eight applicable, and the count is over those eight.
+    assert report.applicable == 8
     assert report.not_applicable == 4
     text = report.to_text()
-    assert "8/8" not in text
+    assert "12/12" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
     assert "4 not applicable: G1, G2, G8, G9." in text
 
@@ -531,31 +531,6 @@ def test_T106_G4_contends_in_real_processes(tmp_path):
 
 # --- T107: verify reaches no network ---------------------------------------------------------
 
-_REFUSE_EVERY_SOCKET = '''\
-"""Imported by `site` at startup: nothing under verify may open a socket."""
-
-import socket
-
-_real = socket.socket
-
-
-class _Refusing(_real):
-    def connect(self, *args, **kwargs):
-        raise RuntimeError("verify tried to connect; verify runs with no network")
-
-    def connect_ex(self, *args, **kwargs):
-        raise RuntimeError("verify tried to connect; verify runs with no network")
-
-
-def _refuse(*args, **kwargs):
-    raise RuntimeError("verify tried to resolve a name; verify runs with no network")
-
-
-socket.socket = _Refusing
-socket.create_connection = _refuse
-socket.getaddrinfo = _refuse
-'''
-
 _ASSERT_THE_GUARD_IS_LIVE = """
 import socket, sys
 
@@ -574,11 +549,12 @@ sys.exit(report.exit_code)
 """
 
 
-def test_T107_a_full_run_completes_with_no_network(tmp_path):
+def test_T107_a_full_run_completes_with_no_network(tmp_path, no_network):
+    """SPEC-v0.7 §8.9 amends the rule to "no connection except to the store `--store-url` names
+    and to loopback listeners verify bound itself", and the guard, `conftest.py`'s one definition,
+    admits exactly that: G12's listener and nothing else. T230 asserts how wide it is."""
     path = _write(tmp_path, WITH_EFFECTS)
-    guard = tmp_path / "guard"
-    guard.mkdir()
-    (guard / "sitecustomize.py").write_text(_REFUSE_EVERY_SOCKET, encoding="utf-8")
+    guard = no_network
     script = tmp_path / "check.py"
     script.write_text(_ASSERT_THE_GUARD_IS_LIVE, encoding="utf-8")
 
@@ -785,8 +761,8 @@ def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
 
 
 def test_the_catalogue_is_closed_and_ordered():
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v2"
-    assert [guarantee.id for guarantee in reg.GUARANTEES] == [f"G{n}" for n in range(1, 12)]
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert [guarantee.id for guarantee in reg.GUARANTEES] == [f"G{n}" for n in range(1, 13)]
     for guarantee in reg.GUARANTEES:
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
@@ -859,9 +835,9 @@ def test_the_v1_payments_template_reports_five_over_five_with_five_not_applicabl
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (6, 6, 5)
+    assert (report.passed, report.applicable, report.not_applicable) == (7, 7, 5)
     text = report.to_text()
-    assert "6/6 declared guarantees pass." in text
+    assert "7/7 declared guarantees pass." in text
     assert "5 not applicable: G3, G4, G5, G8, G9." in text
     assert "10/10" not in text
 

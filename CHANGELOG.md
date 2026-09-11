@@ -15,6 +15,31 @@ any change to one appears here.
   3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
   `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
   changed; the one test fix is below.
+- **`ctrlrun.transport`, the `NotExecuted` classifier, in core** (SPEC-v0.7 §2, build-list item
+  2). `v0.1 §5.5` leaves the one decision the product exists to get right, `FAILED` or
+  `AMBIGUOUS`, to the executor, and until now the correct rule was reachable only through
+  `ctrlrun[gateway]`. `ctrlrun.transport.urlopen`, `HTTPConnection` and `HTTPSConnection` are
+  `urllib` and `http.client` with a counter: they raise `NotExecuted`, chained from the original
+  exception, **only** where the connection they opened fresh failed before a single request byte
+  was handed to its socket (DNS failure, refusal, connect timeout, a TLS handshake failure). Every
+  other failure is the original exception, which the kernel records `AMBIGUOUS`: a reset or a
+  timeout after the request was offered, a `sendall` that raised part way, a reused connection, a
+  socket the caller set, an opener the classifier did not build, a proxy that refused a tunnel
+  after its `CONNECT` line was sent. The count is taken from evidence, never from an exception's
+  type, and above TLS. No redirect is followed, no HTTP status is ever `NotExecuted`, and no
+  parameter, attribute or environment variable changes a classification. The module is stdlib
+  only and is not imported by `import ctrlrun`.
+
+  The rule itself, `ctrlrun.transport.effect_state`, is the one implementation: the gateway's
+  `Transport` is now the core one, and `gateway/outcome.py` asks the core rule rather than keeping
+  a copy. `ctrlrun.gateway.transport.request` offers the gateway's httpx mapping to an executor
+  that uses httpx, on a client built for the one call. The gateway's own `NotExecuted`, for an
+  upstream it never reached, is now chained from the httpx exception and its receipt names it.
+  `ctrlrun verify` gains **G12**, "a byte written then the peer killed is ambiguous", under
+  `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
+  loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
+  and to loopback listeners verify bound itself*, and the test suite's network guard admits
+  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound, and nothing else.
 
 ### Fixed
 

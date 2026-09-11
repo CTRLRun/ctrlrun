@@ -2452,6 +2452,112 @@ decided, not afterwards.
 
 ### 12.2 Item 2: the transport classifier
 
+#### 12.2.1 A port bound and not listening is refused on Linux and dropped on macOS
+
+**Closed: the tests refuse with a closed listener; G12's control keeps the bound socket and accepts
+either answer.** T221 and G12's control both name "a loopback port bound and not listening", and G12
+says the call is `NotExecuted` "chained from `ConnectionRefusedError`". Linux answers a SYN to such a
+port with a reset. macOS drops it, so the connect **times out**. Nothing is offered either way, so
+the claim is equally true, but the cause's type depends on the platform.
+
+The acceptance tests get a real refusal on every platform from a listener that is closed before the
+connect. G12 does not do that. A closed listener frees its port, and in the gap before the connect
+another local process could bind it. The guard would admit the connect, because verify recorded
+the pair, and the classifier would then send a synthetic request to a service verify did not
+start. So G12 keeps the socket bound, which holds the port. It gives the control's connect a
+timeout of one second, and it asserts `NotExecuted` chained from the connect's own exception,
+`ConnectionRefusedError` or `TimeoutError`. `detail.control_cause` records which one, so a report
+says which mechanism the host used, and two runs on one host are identical. The cost is one
+second per verify run on macOS.
+
+#### 12.2.2 "An opener the classifier did not build" needed a mechanism, and the mechanism is the stack
+
+**Closed: a connection inside a `urllib` opener other than `urlopen`'s never claims.** §2.3's first
+condition names the case and no mechanism. It is not a formality. `urllib.request.build_opener`
+includes the redirect handler, which follows a `303` with a second connection *after the first
+request was delivered*. A caller who wires `HTTPConnection` into a handler of their own would get
+a refused second connection judged on its own: `NotExecuted` about an effect that happened. T223
+reproduces it and asserts the precondition, which is that the first server received the request.
+
+The connection finds out where it is from the frames on the stack at the moment it would claim. It
+looks for `urllib.request.OpenerDirector.open`, and it checks whether the caller of that frame is
+`urlopen`'s own opener, which overrides `open` only so that it has a code object of its own. It
+never reads a frame's locals, whose semantics changed in 3.13 (PEP 667); a code object means the
+same thing on every supported Python. The check can only remove a claim. If it raises, what propagates is its
+own exception, never `NotExecuted`, and T221's bookkeeping test pins that. **Rejected: a separate
+rule for nested opener calls.** `urlopen`'s opener has no redirect or authentication handler, so a
+second request can happen only inside an opener somebody else built, which the rule already
+refuses. A second guard would be subsumed by the first, with nothing to tell them apart.
+
+What remains is written in the class's docstring rather than hidden. Two requests on two
+connection objects in one executor are two claims, each about its own connection. An executor that
+delivered the effect on one and then failed to connect the other has made a composition no
+per-connection classifier can see.
+
+#### 12.2.3 A socket the connection did not open disqualifies it for life
+
+**Closed: `sock` is a property, and any assignment outside the connection's own `connect()` marks it
+foreign.** The first draft checked only that `sock` was empty when `connect()` began. That missed a
+caller who set a socket and then cleared it: the object had held a socket it did not open, and the
+next `connect()` looked fresh. The mark is never cleared, like the byte mark, and `http.client`
+assigns `sock` only in `__init__`, `close` and the two `connect`s, all of which the property
+admits. T223 drives the set-and-cleared case against the control.
+
+#### 12.2.4 The core connection asks `effect_state` too
+
+**Closed: three paths, one function.** §2.1 required the gateway to call
+`ctrlrun.transport.effect_state`. The core connections now reach it as well. `connect()` turns its
+evidence into a `Transport` member, and `effect_state` decides whether that member is `FAILED`. So
+the spy of T227 is reached by `gateway/outcome.py`, by `ctrlrun.gateway.transport.request` and by
+`HTTPConnection`. A copy of the rule anywhere would leave one of the three unmoved by the spy.
+
+#### 12.2.5 `urlopen` refuses a scheme before its opener can reroute it
+
+**Closed: `http` and `https` only, checked on the `Request` before the opener runs, and `urllib`'s
+unknown-scheme handler kept as the backstop.** `ProxyHandler` sends an `ftp:` URL through an HTTP
+proxy when `ftp_proxy` is set, so "no `ftp:` handler" alone would not have kept an `ftp:` URL out.
+A refused scheme raises `urllib.error.URLError`, `urllib`'s own exception for it, and the kernel
+records it `AMBIGUOUS`, as §2.3's "exception before any connection" row says. The unknown-scheme
+handler is not one of the handlers §2.8 names, and it only raises. It is load-bearing:
+`http_proxy=socks5://...` names a proxy scheme `urllib` cannot speak, and without that handler
+the proxy handler's nested open finds nothing, the `http` chain carries on, and the request is
+sent in plain HTTP to the SOCKS port. With it, the answer is `URLError` and nothing is sent. T225
+drives both.
+
+#### 12.2.6 The gateway's cause travels beside the forwarder's answer, not inside it
+
+**Closed: a context variable in `gateway/transport.py`.** §2.5 says the forwarder keeps the exception
+beside the enum. `Forwarder`'s return is a four-tuple that a custom forwarder also returns, so the
+shape was not changed. `HTTPForwarder` stores the exception in a private context variable. The
+gateway's executor clears it before forwarding and reads it after, and only for a `Transport`
+observation. A context variable is right because the listener serves each request on its own
+thread and one forwarder is shared. A custom forwarder never sets it, and its `NotExecuted` stays
+unchained, as at 0.6.1. The receipt's `error` for a connection never established now reads
+`ctrlrun.upstream_not_executed: ConnectError: ...` rather than the bare token.
+
+#### 12.2.7 One network guard, and why the examples' guard moved with verify's
+
+**Closed: `tests/conftest.py`'s `_NO_NETWORK_GUARD` is the one definition, used by T107, T230, the
+examples and the cookbook.** The cookbook's `verify-in-github-actions` recipe runs `ctrlrun verify`
+under the examples' guard. Once G12 existed, that guard, which refused every connect, turned the
+recipe into an exit 3. Amending one copy and not the other would have left two guards with
+different widths, which is the drift the fixture's docstring was written to prevent. The shared
+guard admits what §8.9 admits and nothing more: an IPv4 connect to the `127.0.0.1` literal at a
+port the process bound, recorded from `getsockname()`. A self-bound loopback listener is not a
+network, so the examples' claim is unchanged.
+
+G12 also checks, without the classifier, that it can connect to a listener it bound, before the
+scenario runs. §8.9 names only a refused `bind` as an internal error. A sandbox that allows the
+bind and refuses the connect would otherwise have turned into a `control failed`, a failure blamed
+on the kernel for a fact about the machine.
+
+#### 12.2.8 A listener that received no byte is a failed control
+
+**Closed: `control failed`, never a pass and never an internal error.** The observable's precondition
+is that the peer received a byte before it reset. If it received nothing, "not `NotExecuted`" proves
+nothing, so it cannot pass. Once the preflight above has shown the machine can reach its own
+listener, it is not the machine's fault either. T230 takes the byte away and asserts the result.
+
 ### 12.3a Item 3a: attempt numbers never repeat
 
 ### 12.3 Item 3: the idempotency token

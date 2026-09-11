@@ -109,41 +109,99 @@ def authority_events_are_declared(request, monkeypatch):
     )
 
 
-_REFUSE_EVERY_SOCKET = '''\
-"""Imported by `site` at startup: nothing under examples/ may open a socket."""
+#: SPEC-v0.7 §8.9 (G12, T230). "No network" means **no connection except to a loopback
+#: listener this process bound itself**, which is the rule `v0.4 §3.7` became when verify gained a
+#: guarantee that needs a peer it controls. Everything else is refused: any other address, any
+#: bind that is not `127.0.0.1`, every `AF_UNIX` bind and connect, IPv6, and `localhost`, which
+#: is checked by the literal string inside `connect` because a C-level connect resolves a name
+#: without calling the patched `getaddrinfo`. One definition, used by T107, T230, the examples and
+#: the cookbook, so no copy can come to refuse less than another.
+_NO_NETWORK_GUARD = '''\
+"""Imported by `site` at startup: no connection except to a loopback listener bound here."""
 
 import socket
 
 _real = socket.socket
+_real_create_connection = socket.create_connection
+_real_getaddrinfo = socket.getaddrinfo
+_LOOPBACK = "127.0.0.1"
+#: Every (host, port) bound through the patched class, from getsockname() after the bind, so a
+#: bind to port 0 is recorded at the port the kernel chose.
+_bound = set()
 
 
-class _Refusing(_real):
-    """A socket that exists but will not connect, which is what a cut cable looks like.
+def _refuse(what):
+    raise RuntimeError(f"tried to {what}; this process runs with no network")
 
-    Replacing the *type* with a function breaks anything that subclasses it — `ssl` does —
-    so the refusal goes on the operations instead.
+
+def _literal(address):
+    """The one address admitted: a two-element tuple whose host is the string "127.0.0.1".
+
+    Every `AF_UNIX` address is a path and every IPv6 address a four-element tuple or another
+    string, so neither is ever this, and both are refused by this check alone. There is no
+    separate family check: it would refuse exactly what this refuses, with the same message.
+    """
+    return (
+        isinstance(address, tuple)
+        and len(address) == 2
+        and type(address[0]) is str
+        and address[0] == _LOOPBACK
+    )
+
+
+def _admitted(address):
+    return _literal(address) and (address[0], address[1]) in _bound
+
+
+class _Guarded(_real):
+    """A socket that binds only to 127.0.0.1 and connects only to what the process bound.
+
+    Replacing the *type* with a function breaks anything that subclasses it, and `ssl` does, so
+    the refusal goes on the operations instead.
     """
 
-    def connect(self, *args, **kwargs):
-        raise RuntimeError("an example tried to connect; examples must run with no network")
+    def bind(self, address):
+        if not _literal(address):
+            _refuse(f"bind {address!r}")
+        super().bind(address)
+        host, port = self.getsockname()[:2]
+        _bound.add((host, port))
 
-    def connect_ex(self, *args, **kwargs):
-        raise RuntimeError("an example tried to connect; examples must run with no network")
+    def connect(self, address):
+        if not _admitted(address):
+            _refuse(f"connect to {address!r}")
+        return super().connect(address)
+
+    def connect_ex(self, address):
+        if not _admitted(address):
+            _refuse(f"connect to {address!r}")
+        return super().connect_ex(address)
 
 
-def _refuse(*args, **kwargs):
-    raise RuntimeError("an example tried to resolve a name; examples run with no network")
+def _create_connection(address, *args, **kwargs):
+    if not _admitted(address):
+        _refuse(f"connect to {address!r}")
+    return _real_create_connection(address, *args, **kwargs)
 
 
-socket.socket = _Refusing
-socket.create_connection = _refuse
-socket.getaddrinfo = _refuse
+def _getaddrinfo(host, *args, **kwargs):
+    if type(host) is not str or host != _LOOPBACK:
+        _refuse(f"resolve {host!r}")
+    return _real_getaddrinfo(host, *args, **kwargs)
+
+
+socket.socket = _Guarded
+socket.create_connection = _create_connection
+socket.getaddrinfo = _getaddrinfo
 '''
 
 
 @pytest.fixture(scope="session")
 def no_network(tmp_path_factory):
-    """A `PYTHONPATH` entry whose `sitecustomize` refuses every socket (SPEC-v0.2 §1.1)."""
+    """A `PYTHONPATH` entry whose `sitecustomize` takes the network away (SPEC-v0.2 §1.1).
+
+    Everything but a loopback listener the process bound itself (SPEC-v0.7 §8.9).
+    """
     directory = tmp_path_factory.mktemp("no-network")
-    (directory / "sitecustomize.py").write_text(_REFUSE_EVERY_SOCKET, encoding="utf-8")
+    (directory / "sitecustomize.py").write_text(_NO_NETWORK_GUARD, encoding="utf-8")
     return directory

@@ -61,9 +61,10 @@ from .mcp import (
 from .outcome import (
     GatewayOutcome,
     Observed,
+    Transport,
     classify,
 )
-from .transport import STREAM, forwarded_headers
+from .transport import _CAUSE, STREAM, forwarded_headers
 from .wire import (
     _dump,
     _header,
@@ -594,9 +595,13 @@ class Gateway:
             params = dict(forwarded.get("params", {}))
             params["arguments"] = action.canonical_arguments
             forwarded["params"] = params
+            # Cleared first, so a cause left in this context by an earlier call can never be
+            # chained to this one's `NotExecuted`: a custom forwarder never sets it.
+            _CAUSE.set(None)
             observed, payload, status, response_headers = self._forward(
                 json.dumps(forwarded, separators=(",", ":")).encode(), headers, fresh=True
             )
+            cause = _CAUSE.get() if isinstance(observed, Transport) else None
             outcome = classify(observed, not_executed_on_error=options.not_executed_on_error)
             held["payload"] = payload
             held["status"] = status
@@ -613,7 +618,15 @@ class Gateway:
             if outcome.effect is EffectState.COMMITTED:
                 return payload
             if outcome.effect is EffectState.FAILED:
-                raise NotExecuted(str(outcome.token or observed))
+                token = str(outcome.token or observed)
+                if cause is not None:
+                    # SPEC-v0.7 §2.5: a connection never established carries the exception it
+                    # was observed from, so a gateway `failed` receipt names the same evidence a
+                    # `@protect` one does. A `FAILED` from the upstream's own answer (a
+                    # pre-dispatch code, the `401` rule) has no transport exception: its evidence
+                    # is the response, which is relayed unchanged.
+                    raise NotExecuted(f"{token}: {type(cause).__name__}: {cause}") from cause
+                raise NotExecuted(token)
             raise UpstreamAmbiguous(outcome)
 
         if isinstance(presented, str) and presented:

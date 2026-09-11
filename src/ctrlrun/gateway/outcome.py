@@ -14,15 +14,25 @@ Pure: it takes a description of what was observed and returns what to record and
 send. No sockets, no store, no policy. The gateway's transport layer is responsible for
 mapping its client's exceptions onto `Transport` honestly — in particular for using a fresh
 connection per intercepted call, without which `NEVER_CONNECTED` is not provable (§6.8).
+
+SPEC-v0.7 §2.1: the transport half of the rule lives in core, in `ctrlrun.transport`, and this
+module calls it. `Transport` here **is** `ctrlrun.transport.Transport`, and what a transport
+observation records is `ctrlrun.transport.effect_state`'s answer, looked up on that module at
+call time. What stays here is MCP's: the JSON-RPC codes and tokens, the pre-dispatch set, the
+observations of an upstream's answer, and the rule that a `401`, or a `403` carrying a
+challenge, is `FAILED`. That last rule is the product's one path from an HTTP status to
+`FAILED` (SPEC-v0.7 §2.4), and it rests on the MCP authorization specification putting the
+token check before the method.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Final
 
+from .. import transport as _core
 from ..effect import EffectState
+from ..transport import Transport as Transport
 
 #: SPEC-v0.2 §6.10 — the two codes this module synthesizes. Frozen in §11.
 AMBIGUOUS_CODE: Final = -41010
@@ -51,31 +61,6 @@ INPUT_REQUIRED: Final = "input_required"
 PRE_DISPATCH_ERROR_CODES: Final = frozenset(
     {-32700, -32600, -32601, -32602, -32020, -32021, -32022}
 )
-
-
-class Transport(StrEnum):
-    """What the transport observed, where no JSON-RPC message came back (SPEC-v0.2 §6.8)."""
-
-    #: DNS failure, connection refused, TLS handshake failure, connect timeout. The only
-    #: member that asserts non-execution, and only because no request byte can have been
-    #: written: a pooled connection the upstream closed while idle fails on *write*, which is
-    #: indistinguishable from a request that arrived, so intercepted calls never reuse one.
-    NEVER_CONNECTED = "never_connected"
-
-    #: Write timeout, read timeout, connection reset, protocol error, TLS failure after the
-    #: request was sent.
-    AFTER_REQUEST_SENT = "after_request_sent"
-
-    #: A body that is not valid JSON, or not a JSON-RPC message, or whose `id` does not
-    #: match; and any HTTP status with no parseable JSON-RPC body at all.
-    UNREADABLE_RESPONSE = "unreadable_response"
-
-    #: An SSE stream that closed before delivering a final response.
-    STREAM_ENDED_EARLY = "stream_ended_early"
-
-    #: The client went away mid-stream. Closing the stream is cancellation under this
-    #: revision, and the upstream may already have committed.
-    CLIENT_DISCONNECTED = "client_disconnected"
 
 
 @dataclass(frozen=True)
@@ -160,7 +145,10 @@ def classify(observed: Observed, *, not_executed_on_error: bool = False) -> Gate
 
 
 def _transport(observed: Transport) -> GatewayOutcome:
-    if observed is Transport.NEVER_CONNECTED:
+    # SPEC-v0.7 §2.1: the effect is the core rule's, reached through the module so that there is
+    # one implementation and a spy on it is the one this path reaches (T227). This function only
+    # adds the synthesized code and token around the answer.
+    if _core.effect_state(observed) is EffectState.FAILED:
         return _SYNTHESIZED_NOT_EXECUTED
     if observed is Transport.CLIENT_DISCONNECTED:
         return _CANCELLED

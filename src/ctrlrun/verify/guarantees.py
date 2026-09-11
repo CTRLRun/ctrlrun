@@ -19,7 +19,8 @@ from typing import Final
 #: SPEC-v0.6 §9.5 — `v2` adds G11 (§6.6). The version moves because the catalogue is a closed
 #: set a report is read against, and a reader that met an id it did not know would have no way
 #: to tell a new guarantee from a corrupted line.
-CATALOGUE: Final = "ctrlrun.guarantees/v2"
+#: SPEC-v0.7 §9.4: `v3` is G1 to G16, and the version moves once for all five additions.
+CATALOGUE: Final = "ctrlrun.guarantees/v3"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,11 @@ GUARANTEES: Final = (
     Guarantee("G9", "delegation cannot escalate", ("v0.3 §10 T76", "v0.3 §10 T81", "v0.3 §10 T75")),
     Guarantee("G10", "unknown exception is ambiguous", ("v0.1 §5.5", "v0.1 §7 T1", "v0.1 §7 T8")),
     Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
+    Guarantee(
+        "G12",
+        "a byte written then the peer killed is ambiguous",
+        ("v0.1 §5.5", "v0.2 §6.8", "v0.7 §8 T220", "v0.7 §8 T221"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.

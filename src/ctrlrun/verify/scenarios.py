@@ -28,8 +28,11 @@ import itertools
 import json
 import logging
 import os
+import socket
+import struct
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -197,7 +200,10 @@ class _Recorder:
 class _Executor:
     """An in-process fake. It counts, and it does whatever the scenario told it to do.
 
-    Verify never calls the operator's executor (§1.2) and no fake opens a socket (§3.7).
+    Verify never calls the operator's executor (§1.2). No fake opens a socket (§3.7) except G12's,
+    which connects only to a loopback listener verify bound itself: SPEC-v0.7 §8.9 amends §3.7 to
+    "verify opens no connection except to the store `--store-url` names and to loopback listeners
+    it bound itself".
     """
 
     def __init__(self, behaviour: Callable[[], Any] | None = None) -> None:
@@ -2124,6 +2130,255 @@ class Engine:
             return self.graded("G11", selection, store, recorder, body)
         finally:
             store.close()
+
+    # --- G12: a byte written and the peer killed is AMBIGUOUS, never FAILED ---------------
+
+    def g12(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. `ctrlrun.transport`, against a loopback peer verify owns.
+
+        **Observable.** A listener verify bound reads at least one request byte and resets. The
+        executor drives `ctrlrun.transport.HTTPConnection("127.0.0.1", port)` directly, not
+        `urlopen`, which honours `HTTP_PROXY` and on a host that sets one would send the request
+        somewhere else. The byte's arrival is asserted first: without it, "not `NotExecuted`"
+        would be true of a request that never left. Then: the exception is not `NotExecuted`, the
+        receipt is `ambiguous`, and where there is a key the record is `AMBIGUOUS`.
+
+        **Control.** A socket verify bound and never listened on: the call raises `NotExecuted`
+        chained from the connect's own exception, the receipt is `failed`, the record `FAILED`. A
+        classifier that never claimed would pass the observable and fail this; one that always
+        claimed would fail the observable. The two rows use separate effect keys, so each is a
+        first attempt.
+
+        `N/A` only where no action can be driven to `allow` or `approve`, with `unselected()`'s
+        reason, as G10's. Never because of the environment: a machine that will not let verify bind
+        or reach its own loopback listener is an internal error, exit 3.
+        """
+        selection = self.select()
+        if selection is None:
+            return self.na("G12", self.unselected(reg.EVERY_ACTION_DENIED))
+        # Here rather than at module scope: `http.client`, `urllib` and `ssl` load only when G12
+        # runs, and `import ctrlrun.verify` stays as light as it was.
+        from .. import transport
+
+        _loopback_reachable()
+        control, store, recorder, _ = self._control_for("G12", selection)
+
+        def attempt(
+            label: str, behaviour: Callable[[], Any]
+        ) -> tuple[BaseException | None, Receipt | None, str | None]:
+            action = selection.build()
+            key = (
+                None
+                if selection.effect_key is None
+                else f"{selection.effect_key}-{reg.SYNTHETIC_PREFIX}-{label}"
+            )
+            raised: BaseException | None = None
+            try:
+                self.execute(
+                    control,
+                    action,
+                    _Executor(behaviour),
+                    key,
+                    self.approve(control, store, action, selection),
+                )
+            except (VerifyRefused, VerifyInternalError):
+                raise
+            except Exception as exc:  # the observable is what was raised, and the receipt
+                raised = exc
+            return raised, _last_receipt(store, action.action_id), key
+
+        def graded_row(
+            raised: BaseException | None,
+            receipt: Receipt | None,
+            key: str | None,
+            expected: tuple[ReceiptResult, EffectState],
+            check: Callable[[bool, str, str], None],
+        ) -> str:
+            result, state = expected
+            check(
+                receipt is not None and receipt.result is result,
+                f"the receipt is {result}",
+                f"the receipt is {None if receipt is None else receipt.result}"
+                f" after {type(raised).__name__}: {raised}",
+            )
+            if key is not None:
+                record = store.get_effect(key)
+                check(
+                    record is not None and record.state is state,
+                    f"the record is {state}",
+                    f"the record is {None if record is None else record.state}",
+                )
+            return "" if receipt is None else str(receipt.result)
+
+        def body(detail: dict[str, Any]) -> None:
+            rows: dict[str, str] = {}
+
+            listener = _ResettingListener()
+            try:
+                raised, receipt, key = attempt(
+                    "byte_written",
+                    lambda: _post(
+                        transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_WAIT)
+                    ),
+                )
+            finally:
+                listener.close()
+            # First, the precondition that makes the observable mean anything.
+            _expect_control(
+                listener.received >= 1,
+                "the loopback listener received at least one request byte before it reset",
+                f"it received {listener.received} bytes",
+            )
+            _expect(
+                not isinstance(raised, NotExecuted),
+                "a failure after a request byte was written is not NotExecuted",
+                f"the classifier raised NotExecuted after the peer received a byte: {raised}",
+            )
+            rows["byte_written"] = graded_row(
+                raised, receipt, key, (ReceiptResult.AMBIGUOUS, EffectState.AMBIGUOUS), _expect
+            )
+
+            held = _loopback_socket()  # bound, and never listening
+            try:
+                port = held.getsockname()[1]
+                raised, receipt, key = attempt(
+                    "never_connected",
+                    lambda: _post(
+                        transport.HTTPConnection(_LOOPBACK, port, timeout=_G12_CONTROL_WAIT)
+                    ),
+                )
+            finally:
+                held.close()
+            cause = None if raised is None else raised.__cause__
+            _expect_control(
+                isinstance(raised, NotExecuted)
+                and isinstance(cause, (ConnectionRefusedError, TimeoutError)),
+                "a connection that never carried a byte raises NotExecuted, chained from the "
+                "connect's own exception",
+                f"it raised {type(raised).__name__}: {raised} (cause: {cause!r})",
+            )
+            rows["never_connected"] = graded_row(
+                raised, receipt, key, (ReceiptResult.FAILED, EffectState.FAILED), _expect_control
+            )
+            detail["rows"] = rows
+            detail["control_cause"] = type(cause).__name__
+
+        try:
+            return self.graded("G12", selection, store, recorder, body)
+        finally:
+            store.close()
+
+
+#: G12's loopback address: the literal, never `localhost` and never `::1` (SPEC-v0.7 §8.9).
+_LOOPBACK: Final = "127.0.0.1"
+
+#: How long G12 waits on any socket, so a broken classifier fails red rather than hanging (§3.6).
+_G12_WAIT: Final = 5.0
+
+#: The control's connect timeout. A SYN to a port that is bound and not listening is answered
+#: with a reset on Linux, so the connect is refused at once, and is dropped on macOS, so the
+#: connect times out after this. Either way no byte was offered and the claim is the same.
+_G12_CONTROL_WAIT: Final = 1.0
+
+#: How much G12's listener reads before it resets. Not a knob: T230 sets it to zero to show that
+#: a listener which received nothing fails the control rather than passing the observable.
+_READ_AT_MOST = 65536
+
+
+def _loopback_socket() -> socket.socket:
+    """A TCP socket bound to `127.0.0.1` at a port the kernel chooses (SPEC-v0.7 §8.9).
+
+    Through `socket.socket` as it is at call time, so a network guard that patches the class sees
+    the bind and records the port. A machine that will not let verify bind loopback is an internal
+    error, exit 3: a fact about the machine, never an `N/A` about the document and never a failure
+    of the kernel.
+    """
+    opened = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        opened.bind((_LOOPBACK, 0))
+    except Exception as refused:
+        opened.close()
+        raise VerifyInternalError(
+            f"G12: verify could not bind a loopback socket on {_LOOPBACK}: {refused}. G12 needs a "
+            "listener it binds itself; this is a fact about the machine, not the document "
+            "(SPEC-v0.7 §8.9)"
+        ) from refused
+    return opened
+
+
+def _loopback_reachable() -> None:
+    """Connect to a listener verify just bound, without the classifier, before G12 runs.
+
+    A sandbox that refuses the connection is then an internal error here, and a failure later in
+    the scenario is the classifier's or the kernel's to answer for.
+    """
+    listener = _loopback_socket()
+    try:
+        listener.listen(1)
+        listener.settimeout(_G12_WAIT)
+        port = listener.getsockname()[1]
+        try:
+            reached = socket.create_connection((_LOOPBACK, port), timeout=_G12_WAIT)
+            accepted, _ = listener.accept()
+        except Exception as refused:
+            raise VerifyInternalError(
+                f"G12: verify could not connect to a loopback listener it bound itself: {refused}. "
+                "This is a fact about the machine, not the document (SPEC-v0.7 §8.9)"
+            ) from refused
+        accepted.close()
+        reached.close()
+    finally:
+        listener.close()
+
+
+class _ResettingListener:
+    """G12's peer: it accepts, reads at least one request byte, records how many, and resets.
+
+    The reset is `SO_LINGER` zero, so the client's next read sees `ConnectionResetError`: the peer
+    killed after the byte arrived, which is the case where nobody knows whether the remote acted.
+    """
+
+    def __init__(self) -> None:
+        self.received = 0
+        self._socket = _loopback_socket()
+        self._socket.listen(1)
+        self._socket.settimeout(_G12_WAIT)
+        self.port: int = self._socket.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._socket.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(_G12_WAIT)
+            with suppress(OSError):
+                self.received = len(conn.recv(_READ_AT_MOST))
+            with suppress(OSError):
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+    def close(self) -> None:
+        """Wait for the peer to finish, bounded, so `received` is final when it is read."""
+        self._thread.join(_G12_WAIT * 2)
+        with suppress(OSError):
+            self._socket.close()
+
+
+def _post(connection: Any) -> str:
+    """The request both G12 rows send: a body, so there is a request byte to write."""
+    try:
+        connection.request(
+            "POST",
+            f"/{reg.SYNTHETIC_PREFIX}",
+            body=b'{"ctrlrun-verify":"G12"}',
+            headers={"Content-Type": "application/json"},
+        )
+        connection.getresponse()
+    finally:
+        connection.close()
+    return f"{APPROVER}-result"
 
 
 @dataclass(frozen=True)
