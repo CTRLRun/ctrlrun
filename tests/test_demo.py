@@ -562,7 +562,7 @@ def test_T271_demo_runs_offline_in_a_process_with_the_network_taken_away(tmp_pat
     fetch would fail here rather than in a reader's terminal.
     """
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = ":".join(
+    environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(no_network), environment.get("PYTHONPATH", "")) if part
     )
 
