@@ -2450,6 +2450,88 @@ decided, not afterwards.
 
 ### 12.1 Item 1: clock skew
 
+**Item 1 observes and reports.** No lease is evaluated differently, no reservation outcome changes and no
+store write changes: the measurement is one `SELECT clock_timestamp()` and one attribute assignment, and T213
+compares every decision and every record afterwards with both `plan_reservation` and a SQLite store driven
+through the same steps.
+
+**Where the `E3` re-measurement lives.** In `_ambiguate`, after the kept `AMBIGUOUS` write commits and before
+`_plan` raises the refusal, on that write's own fresh connection, which the commit has just left outside any
+transaction. So `_plan`, the reservation transaction and the lost-commit paths are untouched (item 3a changes
+those), and a measurement that fails cannot abort the transaction the refusal belongs to. A kept write that
+itself fails raises as at 0.6.1 and measures nothing, because it is no longer §3.5's moment.
+
+**The rate limit counts attempts, on the application clock.** A re-measurement is due unless the last one was
+at or before `now` and less than `DEFAULT_LEASE` ago. The attempt counts, not the success, so a failing query is
+not retried on every refusal either; a clock that moved backwards makes one due, since that is itself worth a
+reading. The application clock and not a monotonic one, because it is the clock the lease that just expired was
+judged by, and it is the only one a test can move (T215).
+
+**A round trip the application clock measured as negative** (an injected or stepped clock) is taken by its size:
+`bound = |t1 - t0| / 2`, `midpoint = min(t0, t1) + bound`. The doubt is the same whichever way the reads came.
+
+**`ClockSkew` checks its fields at construction**: `timedelta` for the three durations, a non-negative `bound`, a
+positive `threshold`, an aware `measured_at` and a `trigger` in the closed pair. A third-party store that builds a
+malformed one then fails where it built it, rather than inside the `Control` that would report it. `Control` still
+treats any exception from reading or rendering the value as §3.6's "read raised", because a subclass can override
+`exceeded`. The pair is private (`_CLOCK_SKEW_TRIGGERS`), so no public name is added beyond §9.2's.
+
+**"Not the measurement it last reported" is equality, not identity.** A store whose property builds a fresh
+`ClockSkew` on every read with the same fields is then reported once, not once per action. Two measurements that
+differ in any field are two reports, which is what T217's third step asserts.
+
+**"Once per store per kind" is two kinds**: the value is not a `ClockSkew` (whatever its type), and the read or
+its rendering raised. They are keyed on the store object, weakly, so a process that builds a `Control` per request
+around one store still logs each kind once; a store that cannot be weakly referenced falls back to the reading
+`Control`'s own set.
+
+**`getattr(store, "clock_skew", None)` treats a property that raises `AttributeError` as absent**, which is
+§3.6's literal read and is kept. The conformance case is where that store's author finds out: it asks for the
+attribute with `inspect.getattr_static` first, so a present property whose read raises `AttributeError` fails the
+case by name rather than earning the `not_applicable` reserved for an absent one. A forwarding wrapper whose
+`__getattr__` reaches a real attribute counts as exposing it.
+
+**The pull is the first statement of `execute` and of `resume`**, before argument checks and before
+`take_continuation`, so an at-open report precedes the first `ACTION_PROPOSED` (G13's observable). The pull after
+an `AmbiguousEffect` is the first statement of `_secure`'s handler, before reconciliation and before the refusal's
+own event, and observe mode's reservation refusal pulls too, because observe mode reserves and so meets `E3`.
+`evaluate`, `delegate` and `revoke` do not pull: §3.6 names `execute` and `resume`, and none of the three meets a
+lease.
+
+**`clock_timestamp()` against `now()` is an equivalent mutant as built**, and the mutation table says so rather
+than claiming it closed. Both measurements run outside any transaction (the store's connections are autocommit, and
+the `E3` one runs after its commit), so `now()` is the single statement's start and agrees with
+`clock_timestamp()` to within the statement. `clock_timestamp()` stays, per §3.4, so that a later caller who
+measures inside a transaction does not inherit an error the tests cannot see.
+
+**`data.measured_at` uses the event-data timestamp convention** (`iso_timestamp`, milliseconds, `Z`), as
+`lease_expires_at` does. The three numbers are integer microseconds, exact, as §3.6 requires.
+
+**A defect the event exposed, fixed here.** `PostgresStateStore.events()` read a NULL `action_id` back as the
+string `"None"`, so the three `DELEGATION_*` events have named a proposal called "None" on Postgres since that
+store shipped.
+T217's comparison of what a sink was handed with what `events()` returns found it. The fix is on the read path
+only; nothing is written differently.
+
+**The conformance case.** Suite `clock`, case `skew-measured`. It aligns by a first measurement against the
+host's real clock, as G13 does, and grades a store's retained measurement (`exceeded`), because the suite grades
+stores and not `Control`. Four broken-store fixtures keep each check live: a look-alike type, a read that raises, a
+detector that never fires and one that always fires.
+
+**G13 needs nothing from the document but the store.** It proposes an action no document names, so the policy
+denies it with `unknown_action`; the report under test is taken at the start of `execute`, before any decision, so
+a denial reaches it as surely as an allow. On Postgres it is therefore never `N/A`, which is what §8.9's
+*Requires* line says. Its catalogue title is *clock divergence is named*, short enough for the report's column.
+
+**What §3.8 predicted, measured.** Every verify scenario on Postgres now appends one `CLOCK_SKEW_DETECTED` per
+scratch store, because verify's clocks are anchored to the document. No scenario counted events, and all three
+shipped examples still pass every applicable guarantee under `--store-url postgresql://…`. No existing Postgres
+test asserted a complete event sequence against an injected clock, so none needed changing. SQLite runs of verify
+report G13 `N/A`, which moves the counts T113 and T116 pin by one.
+
+**`v0.1 §6.2`'s list is not edited in place.** v0.2 and v0.3 added nine event types without touching it, and
+§9.6 item 2 records this one where the others are recorded. `v0.6 §8` T141 is amended in place, as §8 T214 asks.
+
 ### 12.2 Item 2: the transport classifier
 
 ### 12.3a Item 3a: attempt numbers never repeat

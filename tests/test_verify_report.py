@@ -106,9 +106,10 @@ def test_T113_the_summary_is_the_last_line_and_names_the_not_applicable_ids(tmp_
 
     assert last == report.summary_line()
     assert last.startswith(f"{report.passed}/{report.applicable} declared guarantees pass.")
-    assert "5 not applicable: G3, G4, G5, G8, G9." in last
-    # The fraction is passes over applicable. A report with five N/As does not say 10/10.
-    assert "10/10" not in text
+    # G13 is N/A on every SQLite run (SPEC-v0.7 §8.9): SQLite has no clock of its own.
+    assert "6 not applicable: G3, G4, G5, G8, G9, G13." in last
+    # The fraction is passes over applicable. A report with six N/As does not say 12/12.
+    assert "12/12" not in text
 
 
 def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
@@ -131,9 +132,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
-        (ALL_APPLICABLE, "9/9 declared guarantees pass. 2 not applicable"),
-        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 5 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 11 not applicable"),
+        (ALL_APPLICABLE, "9/9 declared guarantees pass. 3 not applicable"),
+        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 6 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 12 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )
@@ -183,7 +184,7 @@ def test_T114_the_document_matches_the_schema_field_for_field(tmp_path):
 
     assert set(document) == TOP_LEVEL
     assert document["schema"] == REPORT_SCHEMA == "ctrlrun.verify/v1"
-    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v2"
+    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v3"
     assert set(document["policy"]) == {"path", "sha256", "schema", "mode", "actions"}
     assert document["authority"] is None
     assert document["store"] == {"backend": "sqlite", "scratch": True}
@@ -437,14 +438,14 @@ def test_T116_exit_3_for_an_internal_error(tmp_path, monkeypatch):
     assert "internal error" in result.stderr
 
 
-def test_T116_a_run_with_five_not_applicable_still_exits_0(tmp_path, monkeypatch):
+def test_T116_a_run_with_six_not_applicable_still_exits_0(tmp_path, monkeypatch):
     """N/A never changes the exit code by itself."""
     monkeypatch.chdir(tmp_path)
 
     result = _cli(tmp_path, WITH_NOT_APPLICABLE)
 
     assert result.exit_code == 0
-    assert "5 not applicable" in result.stdout
+    assert "6 not applicable" in result.stdout
 
 
 def test_T116_json_and_junit_can_be_combined(tmp_path, monkeypatch):

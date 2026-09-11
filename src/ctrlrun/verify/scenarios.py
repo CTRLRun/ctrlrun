@@ -75,7 +75,7 @@ from ..receipt import (
     new_receipt_id,
     verify_chain,
 )
-from ..state import InMemoryStateStore, SQLiteStateStore, StateStore
+from ..state import ClockSkew, InMemoryStateStore, SQLiteStateStore, StateStore
 from . import guarantees as reg
 from .report import Counterexample, GuaranteeResult, Status
 from .worker import OUTCOME_COMMITTED
@@ -97,6 +97,7 @@ SQLITE_STORE_URL: Final = "sqlite"
 WILDCARD: Final = "*"
 
 _ONE_HOUR: Final = timedelta(hours=1)
+_ONE_SECOND: Final = timedelta(seconds=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 #: Every loop is bounded (§3.6). A child that wedges makes G4 fail red rather than hanging CI.
@@ -170,6 +171,21 @@ class _Clock:
 
     def advance(self, delta: timedelta) -> None:
         self.now += delta
+
+
+class _HostClock:
+    """This host's real clock, shifted by a fixed offset (G13, SPEC-v0.7 §8.9).
+
+    The one scenario clock that is not anchored to the document, because G13 is about the host's
+    clock against the store's and an anchored clock would measure the anchor. It moves as a real
+    clock moves; nothing waits on it.
+    """
+
+    def __init__(self, offset: timedelta = timedelta(0)) -> None:
+        self.offset = offset
+
+    def __call__(self) -> datetime:
+        return datetime.now(UTC) + self.offset
 
 
 class _Recorder:
@@ -528,7 +544,7 @@ class Engine:
     def _on_postgres(self) -> bool:
         return self._store_url.startswith(("postgresql://", "postgres://"))
 
-    def _store_for(self, gid: str, clock: _Clock) -> tuple[StateStore, str]:
+    def _store_for(self, gid: str, clock: Callable[[], datetime]) -> tuple[StateStore, str]:
         """A scratch store for one guarantee, and the address a subprocess can open it by.
 
         **Verify never opens, migrates or writes to the operator's store**, and on Postgres that
@@ -2124,6 +2140,106 @@ class Engine:
             return self.graded("G11", selection, store, recorder, body)
         finally:
             store.close()
+
+    # --- G13: divergence between the store's clock and this host's is named ----------------
+
+    def g13(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. Graded against `--store-url postgresql://…`, `N/A` otherwise.
+
+        **Aligned, not the raw clock.** The host running verify is often a CI runner and not the
+        operator's production host, so the control is a store whose application clock is aligned
+        with the server's by the offset a first measurement found. A verify that failed because
+        a runner's clock drifted would be grading the wrong machine.
+
+        The action is one no document names, so the policy denies it (`unknown_action`) and the
+        guarantee needs nothing from the document but the store: the report under test is taken
+        at the start of `execute`, before any decision, and a denial reaches it as surely as an
+        allow. Every store here is a scratch schema verify made and drops (SPEC-v0.6 §4.1).
+
+        Both halves are asserted, `v0.4 §1.3`'s rule: a detector that always fires fails the
+        control, one that never fires fails the observable, and one that never runs fails the
+        control, because the measurement must be present.
+        """
+        if not self._on_postgres:
+            return self.na("G13", reg.STORE_READS_APPLICATION_CLOCK)
+        recorder = _Recorder()
+        opened: list[StateStore] = []
+
+        def store_at(label: str, offset: timedelta) -> tuple[StateStore, Control]:
+            clock = _HostClock(offset)
+            store, _ = self._store_for(f"G13-{label}", clock)
+            opened.append(store)
+            control = Control(
+                self.policy,
+                store,
+                LocalApprovalProvider(store, clock=clock),
+                clock=clock,
+                sinks=[recorder],
+                environment=self._default_environment,
+            )
+            return store, control
+
+        probe, _ = store_at("probe", timedelta(0))
+
+        def proposed(control: Control) -> list[Event]:
+            start = len(recorder.events)
+            action = Action(
+                name=f"{reg.SYNTHETIC_PREFIX}.clock-skew",
+                arguments={},
+                principal=Principal(agent=APPROVER),
+                environment=self._default_environment,
+            )
+            with suppress(ActionDenied):
+                control.execute(action, _Executor())
+            return recorder.events[start:]
+
+        def reported(events: Sequence[Event]) -> list[Event]:
+            return [event for event in events if event.type is EventType.CLOCK_SKEW_DETECTED]
+
+        def body(detail: dict[str, Any]) -> None:
+            first = getattr(probe, "clock_skew", None)
+            _expect_control(
+                isinstance(first, ClockSkew),
+                "the store measured its clock against this host's when it opened",
+                f"clock_skew is {first!r}",
+            )
+            assert isinstance(first, ClockSkew)
+            offset, threshold = -first.skew, first.threshold
+
+            aligned_store, aligned = store_at("aligned", offset)
+            events = proposed(aligned)
+            _expect_control(
+                isinstance(getattr(aligned_store, "clock_skew", None), ClockSkew),
+                "a store aligned with the server's clock is measured too",
+                "the aligned store retained no measurement",
+            )
+            _expect_control(
+                not reported(events),
+                "a clock aligned with the store's is not reported",
+                f"CLOCK_SKEW_DETECTED was appended: {[e.data for e in reported(events)]}",
+            )
+
+            for direction, sign in (("ahead", 1), ("behind", -1)):
+                _, shifted = store_at(direction, offset + sign * (threshold + _ONE_SECOND))
+                events = proposed(shifted)
+                head = events[0] if events else None
+                data = {} if head is None else dict(head.data)
+                _expect(
+                    head is not None
+                    and head.type is EventType.CLOCK_SKEW_DETECTED
+                    and data.get("direction") == direction
+                    and abs(int(data.get("skew_us", 0))) > int(data.get("threshold_us", 0)),
+                    f"the first action on a clock {direction} of the store's by the threshold "
+                    f"plus one second is preceded by CLOCK_SKEW_DETECTED(direction={direction!r})",
+                    f"events were {[str(e.type) for e in events]}",
+                )
+            detail["directions"] = ["ahead", "behind"]
+
+        try:
+            return self.graded("G13", None, probe, recorder, body)
+        finally:
+            for store in opened:
+                store.close()
 
 
 @dataclass(frozen=True)
