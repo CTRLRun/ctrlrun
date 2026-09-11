@@ -185,7 +185,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
     # merely untested: a row that grew back would otherwise pass.
     for badge in (
         "pypi/v/ctrlrun",
-        "pypi/dm/ctrlrun",
+        "downloads-badge.json",
         "clones-badge.json",
         "ci.yml/badge.svg",
         "fuzz.yml/badge.svg",
@@ -195,6 +195,11 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
         assert badge in head, badge
     for gone in ("pypi/pyversions/ctrlrun", "astral-sh/ruff", "mypy-strict"):
         assert gone not in head, gone
+    # `img.shields.io/pypi/dm` rendered the download count live, which means shields asking
+    # pypistats on behalf of every project it serves: it returned `rate limited by upstream
+    # service` the day it shipped. `traffic.yml` now asks once a day and publishes the answer.
+    # Pinned as an absence because the live form is the obvious thing to reach for again.
+    assert "pypi/dm/ctrlrun" not in head, "the live shields form is rate limited; use the endpoint"
     marker = "generated from capabilities.yaml (readme)"
     assert marker not in head, "the capability matrix is not the first screen"
     assert marker in text, "the capability matrix was moved, not dropped"

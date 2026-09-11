@@ -1,6 +1,6 @@
 name: Traffic
 
-# The clone count behind the README's `clones` badge.
+# The two counts behind the README's `clones` and `downloads` badges.
 #
 # GitHub publishes no clone badge, and for a reason worth respecting: `GET /repos/{owner}/{repo}
 # /traffic/clones` needs *push* access and keeps only the last fourteen days. So a badge that
@@ -19,6 +19,17 @@ name: Traffic
 # `TRAFFIC_TOKEN`. Absent that secret the job warns and exits 0, the same trade `notify-docs`
 # in `ci.yml` makes: a missing optional secret leaves a badge stale, and a red run every night
 # would teach us to ignore a red run.
+#
+# **Downloads is here for a different reason.** `img.shields.io/pypi/dm` renders the count
+# live from pypistats, and shields asks pypistats for every project on every render: the badge
+# came back `rate limited by upstream service` within an hour of shipping. pypistats' own API
+# answers a single caller instantly, so the fix is to stop being one of shields' many callers
+# and become one of pypistats' rare ones -- one request a day from here, published as an
+# endpoint document like the other three. The count is pypistats' `last_month`, which includes
+# mirrors and CI, and the badge is labelled per month for that reason.
+#
+# The two counts are independent. Either source can fail without taking the other's badge down,
+# and the publish step writes whichever documents were read.
 on:
   schedule:
     - cron: "43 2 * * *"
@@ -57,15 +68,57 @@ jobs:
             echo "read=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          curl -sS -f \
+          # `-f` alone exits 22 on any 4xx and prints the code and nothing else, which is the
+          # least useful thing to find in a log a year later: the two failures that actually
+          # happen here are a token that lacks `Administration: Read-only` and a fine-grained
+          # token the org has not approved, and both are 403. So the status is read explicitly
+          # and named.
+          status=$(curl -sS -o clones-api.json -w '%{http_code}' \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $TRAFFIC_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$REPOSITORY/traffic/clones" > clones-api.json
+            "https://api.github.com/repos/$REPOSITORY/traffic/clones")
+          if [ "$status" = "403" ] || [ "$status" = "404" ]; then
+            echo "::warning::TRAFFIC_TOKEN cannot read $REPOSITORY traffic (HTTP $status). It needs Administration: Read-only on this repository (fine-grained, resource owner CTRLRun) or the classic repo scope; a fine-grained token may also be waiting on org approval. The clones badge keeps its last value until then."
+            echo "read=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::traffic API returned HTTP $status" >&2
+            cat clones-api.json >&2
+            exit 1
+          fi
+          echo "read=true" >> "$GITHUB_OUTPUT"
+
+      - name: Read the download counts
+        id: downloads
+        run: |
+          set -eu
+          # No token: pypistats is public. `-f` is right here in a way it was not for the
+          # traffic API, because there is no 403 to explain -- but the body is still printed on
+          # a failure, since pypistats answering with an error document is the likely case.
+          if ! curl -sS -f -m 30 \
+            "https://pypistats.org/api/packages/ctrlrun/recent" > downloads-api.json; then
+            echo "::warning::pypistats did not answer; the downloads badge keeps its last value"
+            cat downloads-api.json >&2 || true
+            echo "read=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A body that parses but carries no `last_month` is a failure this would otherwise
+          # publish as the number 0, which is worse than publishing nothing.
+          if ! python -c "import json; d = json.load(open('downloads-api.json')); raise SystemExit(0 if isinstance(d.get('data', {}).get('last_month'), int) else 1)"; then
+            echo "::warning::pypistats answered without a last_month count; badge unchanged"
+            cat downloads-api.json >&2
+            echo "read=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "read=true" >> "$GITHUB_OUTPUT"
 
       - name: Merge into the history and publish
-        if: steps.traffic.outputs.read == 'true'
+        if: steps.traffic.outputs.read == 'true' || steps.downloads.outputs.read == 'true'
+        env:
+          CLONES_READ: ${{ steps.traffic.outputs.read }}
+          DOWNLOADS_READ: ${{ steps.downloads.outputs.read }}
         run: |
           set -eu
           git config user.name "github-actions[bot]"
@@ -77,8 +130,9 @@ jobs:
           else
             git switch --orphan badges
           fi
-          # `clones-api.json` is untracked, so it survives either path, which is the only file
-          # that must.
+          # `clones-api.json` and `downloads-api.json` are untracked, so they survive either
+          # path, which is the only thing that must.
+          if [ "${CLONES_READ:-}" = "true" ]; then
           python - <<'PY'
           import json
           from pathlib import Path
@@ -132,9 +186,49 @@ jobs:
           print(f"clones badge: {total:,} over {len(days)} days")
           PY
           test -s clones-badge.json
-          total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
-          git add -f clones-badge.json clones-history.json
-          git commit -m "clones: $total" || { echo "clones unchanged"; exit 0; }
+          fi
+          if [ "${DOWNLOADS_READ:-}" = "true" ]; then
+          python - <<'DOWNLOADS'
+          import json
+          from pathlib import Path
+
+          fresh = json.loads(Path("downloads-api.json").read_text(encoding="utf-8"))
+          month = fresh["data"]["last_month"]
+          # No history file for this one. pypistats already keeps the series and answers for
+          # any day; what this publishes is a reading, not an accumulation, so there is nothing
+          # for a stored file to make more correct. Contrast `clones-history.json`, which
+          # exists only because the traffic API forgets after a fortnight.
+          Path("downloads-badge.json").write_text(
+              json.dumps(
+                  {
+                      "schemaVersion": 1,
+                      "label": "downloads",
+                      "message": f"{month:,}/month",
+                      "color": "B8730A",
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(f"downloads badge: {month:,}/month")
+          DOWNLOADS
+          test -s downloads-badge.json
+          fi
+          # Whichever documents this run produced. `git add` of a path that does not exist is
+          # an error under `set -eu`, so each is added only when its source was read.
+          message=""
+          if [ "${CLONES_READ:-}" = "true" ]; then
+            total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
+            git add -f clones-badge.json clones-history.json
+            message="clones: $total"
+          fi
+          if [ "${DOWNLOADS_READ:-}" = "true" ]; then
+            month=$(python -c 'import json;print(json.load(open("downloads-badge.json"))["message"])')
+            git add -f downloads-badge.json
+            message="${message:+$message; }downloads: $month"
+          fi
+          git commit -m "$message" || { echo "badges unchanged"; exit 0; }
           # Belt as well as braces. The concurrency group serializes the two publishers this
           # repository has; a rejection can still arrive from a hand-run job or a future one,
           # and re-reading the branch is cheap next to a badge that stops moving. The history
@@ -148,6 +242,11 @@ jobs:
             git fetch origin badges:refs/remotes/origin/badges
             git reset --soft refs/remotes/origin/badges
             git checkout refs/remotes/origin/badges -- . 2>/dev/null || true
+            # The checkout above replaced both documents with the newer head's. Each is rebuilt
+            # from the untracked download this run already has: the clones history by the same
+            # date-keyed merge as the first attempt, the downloads badge by rewriting it, since
+            # a reading has nothing to merge with and the newer head's is simply older.
+            if [ "${CLONES_READ:-}" = "true" ]; then
             python - <<'MERGE'
           import json
           from pathlib import Path
@@ -197,9 +296,36 @@ jobs:
               encoding="utf-8",
           )
           MERGE
-            total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
-            git add -f clones-badge.json clones-history.json
-            git commit -m "clones: $total" || true
+            fi
+            if [ "${DOWNLOADS_READ:-}" = "true" ]; then
+            python - <<'REDOWNLOADS'
+          import json
+          from pathlib import Path
+
+          fresh = json.loads(Path("downloads-api.json").read_text(encoding="utf-8"))
+          month = fresh["data"]["last_month"]
+          Path("downloads-badge.json").write_text(
+              json.dumps(
+                  {
+                      "schemaVersion": 1,
+                      "label": "downloads",
+                      "message": f"{month:,}/month",
+                      "color": "B8730A",
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          REDOWNLOADS
+            fi
+            if [ "${CLONES_READ:-}" = "true" ]; then
+              git add -f clones-badge.json clones-history.json
+            fi
+            if [ "${DOWNLOADS_READ:-}" = "true" ]; then
+              git add -f downloads-badge.json
+            fi
+            git commit -m "$message" || true
           done
           echo "::warning::could not publish the clones badge after 3 attempts"
           exit 0
