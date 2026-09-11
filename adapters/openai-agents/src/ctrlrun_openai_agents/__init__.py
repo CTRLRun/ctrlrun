@@ -15,7 +15,7 @@ predicate the SDK may call more than once leaves no events behind.
 **You probably do not need this.** `@protect` covers anything in this process with no adapter
 and no framework support. This buys the interrupt and nothing else.
 
-Supported kernel range: `ctrlrun>=0.5,<0.7`.
+Supported kernel range: `ctrlrun>=0.5,<0.8`.
 Supported framework range: `openai-agents>=0.20,<1.0`.
 `README.md` states both, and states why this adapter's binding is **attribution** where
 LangGraph's is prevention.

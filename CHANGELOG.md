@@ -7,14 +7,210 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased]
+## [0.7.0] — unreleased — Execution boundary
+
+Every milestone before this one asked what holds *inside* CTRLRun. v0.7 asks whether it holds at
+the edges the kernel does not control. The kernel does not decide whether the remote acted, an
+executor does. It does not own the clock its leases are measured against, once the store is on
+another host. It does not know whether the world still looks the way it did when a human said
+yes. Six items answer those edges:
+
+| What it adds | Where |
+|---|---|
+| **`ctrlrun.transport`**, the `NotExecuted` classifier, in core and stdlib only. One rule, promoted out of `ctrlrun[gateway]` rather than copied, reachable from `@protect`. | §2 |
+| **Clock-skew detection.** `PostgresStateStore` measures its server's clock against this host's and names divergence with a new event. It observes and reports, and changes no decision. | §3 |
+| **Attempt numbers that never repeat.** Three Postgres defects that could hand one attempt number out twice, or move it backwards, fixed before v0.7 made the number load-bearing. | §5.6 |
+| **The provider idempotency token**, `ctrlrun.idempotency_token()`, derived from `(effect_key, attempt)`: a deterministic handle for reconciliation, and one that changes on a renewal. | §4 |
+| **The attempt ceiling**, `max_attempts`, a policy key bounding renewal after `FAILED`. Needs `ctrlrun.policy/v5`. | §5 |
+| **Precondition fingerprints**, an approval bound to the resource state it was granted against and rechecked strictly before the reservation. Needs `ctrlrun.receipt/v4`. | §6, §7 |
+
+Section numbers are `docs/SPEC-v0.7.md`, which is the contract; §9 freezes every public name
+added here. `ctrlrun verify` now grades sixteen guarantees under `ctrlrun.guarantees/v3`, G12 to
+G16 being new, each with a positive control and each `N/A` only for a reason that is true of the
+document it was handed. `pip install ctrlrun` still installs `pyyaml` and `click` and nothing
+else, `import ctrlrun` still imports no module from an extra, and `ctrlrun demo` still runs every
+scenario in under a minute with no network.
+
+### Stricter than 0.6.1, with what 0.6.1 did
+
+Everything here can refuse, or record as unknown, something 0.6.1 accepted or recorded as
+settled. Nothing here is a flag, and no setting relaxes any of it.
+
+- **A continuation leg never records `FAILED`.** A continuation exists only because the remote
+  answered and is holding the exchange, so nothing on that leg can say the remote did nothing.
+  At 0.6.1 a refused connection on a continuation, a pre-dispatch JSON-RPC code, the `401` rule
+  of `v0.2 §6.8` and a tool error under an operator's `not_executed_on_error: true` each recorded
+  `FAILED`, and the gateway answered the client `-41011` "not executed", **which permitted a
+  retry** of an effect the upstream may have been part-way through. The gateway now records
+  `AMBIGUOUS` and answers `-41010`, and the effect needs `ctrlrun resolve`. The upstream's own
+  response is relayed unchanged, tool error included.
+- **Behind a proxy the gateway claims nothing.** httpx reports an unreachable proxy and a TLS
+  failure with the *target* after the proxy answered the `CONNECT` line with the same
+  `ConnectError`, and a written `CONNECT` line is a written byte. At 0.6.1 the forwarder mapped
+  every `ConnectError` to `NEVER_CONNECTED`, therefore to a `failed` receipt and `-41011`. Where
+  `urllib.request.getproxies()` names a proxy, `ConnectError` and `ProxyError` are now an unknown
+  outcome: `AMBIGUOUS`, `-41010`, and a `ctrlrun resolve`. `NO_PROXY=*` is honoured and a
+  narrower `NO_PROXY` is not consulted, so a bypassed host is judged as if it were proxied, which
+  costs a claim and never makes a false one. With no proxy configured nothing changes.
+- **`ctrlrun.policy/v5`.** A document that declares `max_attempts` must declare `v5`; 0.6.1's
+  newest schema was `v4`, and a `v4` document naming the key is a `PolicyError` at load, with the
+  key, the action and the line. Every document that loaded at 0.6.1 loads unchanged and renews
+  without bound, because there is no default ceiling and no value of the key means "unlimited".
+  An 0.6.1 reader refuses a `v5` document, as it should.
+- **`ctrlrun.receipt/v4`.** Two new fields, `precondition_at_request` and
+  `precondition_at_recheck`. **Upgrade every reader before any writer**: a `v4` JSONL line handed
+  to 0.6.1 rehashes wrongly and reads as altered. Rendering is stricter in the other direction
+  too, and visibly: `to_dict()`, `ctrlrun receipts --json` and `ctrlrun inspect` render each
+  receipt under the schema it was written with, so a pre-v0.6 receipt shows its own `v1` or `v2`
+  label and keys where 0.6.1 showed `v3`. A key added to a stored receipt, a relabelled `schema`,
+  a removed one or an unknown one is `content_altered` at its `seq`, where a reader could have
+  missed it before.
+- **Migration `0005_precondition_fingerprint`, and a store no 0.6 process may still hold.** A
+  database built by 0.6.1's own code migrates keeping every row, and 0.6.1 then refuses it at
+  open, naming `0005`. **Stop every 0.6 process before any 0.7 process opens the store**: a store
+  checks migrations only at open, so a 0.6.1 process already running would consume a fingerprinted
+  approval with no comparison, *and* would rehash every `v4` receipt under `v3`'s keys and report
+  a correct chain as altered. The trigger is the first receipt a 0.7 process writes, not the first
+  caller that passes `preconditions=`.
+- **A precondition, once one exists, is never skipped.** An approval that carries a fingerprint,
+  presented by a call that names no provider, is refused rather than consumed: that includes the
+  gateway and the ACS hook, which name none. A provider that raises, hangs or returns something
+  with no canonical form refuses the action and reserves nothing. There is no
+  `skip_preconditions` and no timeout parameter.
+- **The attempt ceiling is stricter only where an operator asks for it**, and then it is
+  absolute: above the ceiling the executor is not called, on any route, and `ActionDenied` names
+  `attempt_ceiling`.
+- **`ctrlrun verify` opens loopback sockets it bound itself.** `v0.4 §3.7`'s "no scenario opens a
+  socket" becomes *no connection except to the store `--store-url` names and to loopback
+  listeners verify bound itself*, because G12 needs a peer that can receive a byte. The old
+  sentence was already untrue under `--store-url postgresql://remote-host/…`. The test suite's
+  network guard admits exactly that and no more: IPv4 to the `127.0.0.1` literal, at a port this
+  process bound through a stream socket that is still open. `localhost`, `::1`, `0.0.0.0`, every
+  `AF_UNIX` path and every datagram send are refused.
+
+### What this release does not close
+
+Stated here, and not only in the specification, because each one is a limit somebody operating
+this will meet.
+
+- **A precondition fingerprint narrows the window between a human's approval and the action's
+  execution, and does not close it.** The recheck is a network call, so it runs outside the atomic
+  reservation write, and a change that lands after the comparison and before the reservation is
+  not refused. It takes the exposure from minutes of human deliberation down to milliseconds,
+  which is worth having and is not prevention. T261b opens that residual window and asserts
+  exactly that.
+- **On the reconcile route a doomed attempt still costs a human answer and three provider
+  calls.** Under `max_attempts: 1` on an `approve` action whose retry carries a `reconcile` hook,
+  the approval gate runs before the ceiling's check: a new approval request can be created, a
+  human can grant it, and the reservation that consumes it is then refused with
+  `attempt_ceiling`. One wasted answer, never an execution. On that same route the precondition
+  provider is called **three times**, once on the request pass and twice on the retry, and a
+  provider that is down there makes the refusal `ApprovalMismatch(reason="precondition_unavailable")`
+  rather than `attempt_ceiling`, writes no effect record and never runs the `reconcile` hook, so
+  the operator is told the wrong reason for an attempt that could never have run. The ordinary
+  sequential route calls the provider zero times and refuses before any human is asked. Closing
+  either needs a seam that would make the ceiling's check unreachable from any public route, and
+  a guarantee that could not have failed is not a pass.
+- **`max_attempts` bounds attempts, not executor invocations.** A `Suspended` executor holds its
+  reservation and every `Control.resume` runs on that same attempt, so an elicitation loop is one
+  dispatch however many rounds it takes. The gateway bounds those with `max_elicitation_rounds`;
+  a direct `Control.resume` caller has no bound, and this release adds none.
+- **A refused attempt number is spent.** Raising `max_attempts` from 2 to 4 after a refusal buys
+  one further dispatch, not two.
+- **The classifier's register sees only this library's own sends.** A claim is about the executor
+  run, not about one connection, and `Control` marks a register on every send through
+  `ctrlrun.transport` or `ctrlrun.gateway.transport.request`. An executor that sends part of the
+  effect through `requests`, through httpx directly, or on a raw socket, and then uses the
+  classifier, can be handed a `NotExecuted` that is true of these connections and false of the
+  effect. So can one that raises a claim while a sibling thread's request is still in flight. The
+  claim holds where every request of the effect goes through the classifier on the executor's
+  context, and that sentence is in the module docstring, the class docstring and §2.3.
+- **A reused `action_id` still leaves the attempt a late write is about undecided**, on every
+  backend. The attempt number is now monotonic, so no two reservations of one key carry the same
+  number; what is not closed is attempt *identity*. A transition names its holder by `action_id`
+  alone, so attempt 1's write, arriving after its lease lapsed and after the same `Action` was
+  retried, can read attempt 2's record, find its own id in a state it expects, and land there. A
+  late `fail_effect` is the sharp case: it writes `FAILED` over an executing attempt 2, and
+  `FAILED` is the state that permits a renewal. A `mark_ambiguous` reaches the same place in one
+  more step, through a `reconcile` hook that is asked about the effect key and not about the
+  attempt, so it needs no person. `ctrlrun resolve` carries no attempt number either, so someone
+  who inspected attempt 1 can resolve attempt 2's ambiguity. The fix inside the frozen
+  `StateStore` protocol is a store-side memo of the attempt each reservation wrote, which is a
+  schema change of its own; §12.3a states the argument so the next milestone inherits it.
+- **An approval granted and presented inside `request()` is spent before `Control` knows the
+  request exists** (§6.4). What would take that away is a store call recording a request and its
+  fingerprint in one write, and `StateStore` is frozen.
+- **A malformed *value* of a key a receipt schema declares still raises out of `from_dict`.** One
+  `UPDATE` putting a float among a receipt's `controls` blinds `ctrlrun receipts`,
+  `receipts --verify-chain`, `inspect`, `stats` and G11 together, where the schema-level and
+  added-key cases are each reported at their `seq` and leave every other row readable. 0.6.1
+  behaves the same and v0.7 neither introduces nor widens it. Fixing it needs a new name in
+  `CHAIN_BREAKS`, a closed set on a `v0.6 §6.5` surface, or a reader that walks raw rows; it is a
+  named item on the roadmap before v1.0.
 
 ### Added
 
-- **Python 3.13 and 3.14 are tested and declared.** CI's `check` job runs the full suite on
-  3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
-  `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
-  changed; the one test fix is below.
+- **`ctrlrun.transport`, the `NotExecuted` classifier, in core** (SPEC-v0.7 §2, build-list item
+  2). `v0.1 §5.5` leaves the one decision the product exists to get right, `FAILED` or
+  `AMBIGUOUS`, to the executor, and until now the correct rule was reachable only through
+  `ctrlrun[gateway]`. `ctrlrun.transport.urlopen`, `HTTPConnection` and `HTTPSConnection` are
+  `urllib` and `http.client` with a counter: they raise `NotExecuted`, chained from the original
+  exception, **only** where the connection they opened fresh failed before a single request byte
+  was handed to its socket (DNS failure, refusal, connect timeout, a TLS handshake failure). Every
+  other failure is the original exception, which the kernel records `AMBIGUOUS`: a reset or a
+  timeout after the request was offered, a `sendall` that raised part way, a reused connection, a
+  socket the caller set, an opener the classifier did not build, a proxy that refused a tunnel
+  after its `CONNECT` line was sent. The count is taken from evidence, never from an exception's
+  type, and above TLS. No redirect is followed, no HTTP status is ever `NotExecuted`, and no
+  parameter, attribute or environment variable changes a classification. The module is stdlib
+  only and is not imported by `import ctrlrun`.
+
+  The rule itself, `ctrlrun.transport.effect_state`, is the one implementation: the gateway's
+  `Transport` is now the core one, and `gateway/outcome.py` asks the core rule rather than keeping
+  a copy. `ctrlrun.gateway.transport.request` offers the gateway's httpx mapping to an executor
+  that uses httpx, on a client built for the one call. The gateway's own `NotExecuted`, for an
+  upstream it never reached, is now chained from the httpx exception and its receipt names it.
+  `ctrlrun verify` gains **G12**, "a byte written is ambiguous", under
+  `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
+  loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
+  and to loopback listeners verify bound itself*, and the test suite's network guard admits
+  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound through a stream
+  socket that is still open, and nothing else.
+
+  **The claim is about the executor run, not about one connection.** An independent review showed
+  that every false `NotExecuted` it could produce came from two connections in one effect: the
+  first delivered the request, the second was refused, and a per-connection classifier judged the
+  second alone. `xmlrpc.client`'s retry, `FancyURLopener` following a `303`, an opener whose
+  handler runs on a worker thread, and an executor's own retry-once-on-reset loop all make that
+  pair. `Control` now opens a register around each executor call; every send through
+  `ctrlrun.transport` or `ctrlrun.gateway.transport.request` marks it before the first byte, and a
+  claim needs it unmarked as well as the connection's own evidence. Outside an executor run
+  nothing is claimed. **The limit is stated in the module, the class and the specification**: the
+  register sees only this library's own sends, so an executor that sends part of the effect
+  through another transport and then uses the classifier can be handed a claim that is true of
+  these connections and false of the effect. A send through this library on a thread that did not
+  copy the executor's context **is** seen: it belongs to no register, so it marks every register
+  open in the process, which costs claims in unrelated concurrent runs and never safety.
+
+  **A continuation leg never records `FAILED`, and 0.6.1 did.** A continuation exists only
+  because the remote answered and is holding the exchange, so nothing on that leg can say the
+  remote did nothing. `Control.resume` now runs with the register already marked, and the gateway
+  refuses to record `FAILED` for anything a continuation meets: a refused connection, a
+  pre-dispatch JSON-RPC code, the `401` rule of `v0.2 §6.8`, and a tool error under an
+  operator's `not_executed_on_error: true`, which asserts that *that tool* reports errors before
+  acting and cannot speak for a call it did not answer. At 0.6.1 each of those recorded
+  `FAILED` and, for a connection never established, answered the client `-41011` "not executed",
+  which permitted a retry of an effect the upstream may have been part-way through. The upstream's
+  own response is still relayed unchanged; what changes is the record, which is now `AMBIGUOUS`
+  and needs `ctrlrun resolve`.
+
+  **Behind a proxy the gateway is stricter than 0.6.1.** httpx reports an unreachable proxy and a
+  TLS failure with the target after the proxy answered the `CONNECT` line with the same
+  `ConnectError`, and `ctrlrun.transport` counts a written `CONNECT` line as a byte. Where the
+  environment names a proxy, `ConnectError` and `ProxyError` are now an unknown outcome: an
+  intercepted call that would have been recorded `FAILED` with `-41011` is recorded `AMBIGUOUS`
+  with `-41010`, and needs `ctrlrun resolve`. With no proxy configured nothing changes.
+
 - **Clock-skew detection** (SPEC-v0.7 §3, item 1). `PostgresStateStore` measures its server's
   clock against the application's at open, and again when an expired lease is declared
   `AMBIGUOUS` (at most once per `DEFAULT_LEASE`), in one round trip whose half is the
@@ -122,10 +318,12 @@ any change to one appears here.
   that verify does not read, and the report says so beneath the table; `not applicable` only where
   no action requires approval. The store conformance suite gains a `precondition-fingerprint` case
   and a broken-store fixture that fails it by name.
-
+- **Python 3.13 and 3.14 are tested and declared.** CI's `check` job runs the full suite on
+  3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
+  `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
+  changed; the one test fix is below.
 
 ### Changed
-
 
 - **An action entry may declare `max_attempts`, and a renewal over `FAILED` can now be bounded.**
   This is stricter than 0.6.1 only where an operator asks for it: an action that declares no
@@ -154,66 +352,6 @@ any change to one appears here.
 - **`APPROVAL_CONSUMED` carries what the presenting pass compared**, where a precondition was
   compared, so a suspended action's resumed leg, whose receipt is the only one it gets, records the
   comparison its first leg made.
-- **`ctrlrun.transport`, the `NotExecuted` classifier, in core** (SPEC-v0.7 §2, build-list item
-  2). `v0.1 §5.5` leaves the one decision the product exists to get right, `FAILED` or
-  `AMBIGUOUS`, to the executor, and until now the correct rule was reachable only through
-  `ctrlrun[gateway]`. `ctrlrun.transport.urlopen`, `HTTPConnection` and `HTTPSConnection` are
-  `urllib` and `http.client` with a counter: they raise `NotExecuted`, chained from the original
-  exception, **only** where the connection they opened fresh failed before a single request byte
-  was handed to its socket (DNS failure, refusal, connect timeout, a TLS handshake failure). Every
-  other failure is the original exception, which the kernel records `AMBIGUOUS`: a reset or a
-  timeout after the request was offered, a `sendall` that raised part way, a reused connection, a
-  socket the caller set, an opener the classifier did not build, a proxy that refused a tunnel
-  after its `CONNECT` line was sent. The count is taken from evidence, never from an exception's
-  type, and above TLS. No redirect is followed, no HTTP status is ever `NotExecuted`, and no
-  parameter, attribute or environment variable changes a classification. The module is stdlib
-  only and is not imported by `import ctrlrun`.
-
-  The rule itself, `ctrlrun.transport.effect_state`, is the one implementation: the gateway's
-  `Transport` is now the core one, and `gateway/outcome.py` asks the core rule rather than keeping
-  a copy. `ctrlrun.gateway.transport.request` offers the gateway's httpx mapping to an executor
-  that uses httpx, on a client built for the one call. The gateway's own `NotExecuted`, for an
-  upstream it never reached, is now chained from the httpx exception and its receipt names it.
-  `ctrlrun verify` gains **G12**, "a byte written is ambiguous", under
-  `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
-  loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
-  and to loopback listeners verify bound itself*, and the test suite's network guard admits
-  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound through a stream
-  socket that is still open, and nothing else.
-
-  **The claim is about the executor run, not about one connection.** An independent review showed
-  that every false `NotExecuted` it could produce came from two connections in one effect: the
-  first delivered the request, the second was refused, and a per-connection classifier judged the
-  second alone. `xmlrpc.client`'s retry, `FancyURLopener` following a `303`, an opener whose
-  handler runs on a worker thread, and an executor's own retry-once-on-reset loop all make that
-  pair. `Control` now opens a register around each executor call; every send through
-  `ctrlrun.transport` or `ctrlrun.gateway.transport.request` marks it before the first byte, and a
-  claim needs it unmarked as well as the connection's own evidence. Outside an executor run
-  nothing is claimed. **The limit is stated in the module, the class and the specification**: the
-  register sees only this library's own sends, so an executor that sends part of the effect
-  through another transport and then uses the classifier can be handed a claim that is true of
-  these connections and false of the effect. A send through this library on a thread that did not
-  copy the executor's context **is** seen: it belongs to no register, so it marks every register
-  open in the process, which costs claims in unrelated concurrent runs and never safety.
-
-  **A continuation leg never records `FAILED`, and 0.6.1 did.** A continuation exists only
-  because the remote answered and is holding the exchange, so nothing on that leg can say the
-  remote did nothing. `Control.resume` now runs with the register already marked, and the gateway
-  refuses to record `FAILED` for anything a continuation meets: a refused connection, a
-  pre-dispatch JSON-RPC code, the `401` rule of `v0.2 §6.8`, and a tool error under an
-  operator's `not_executed_on_error: true`, which asserts that *that tool* reports errors before
-  acting and cannot speak for a call it did not answer. At 0.6.1 each of those recorded
-  `FAILED` and, for a connection never established, answered the client `-41011` "not executed",
-  which permitted a retry of an effect the upstream may have been part-way through. The upstream's
-  own response is still relayed unchanged; what changes is the record, which is now `AMBIGUOUS`
-  and needs `ctrlrun resolve`.
-
-  **Behind a proxy the gateway is stricter than 0.6.1.** httpx reports an unreachable proxy and a
-  TLS failure with the target after the proxy answered the `CONNECT` line with the same
-  `ConnectError`, and `ctrlrun.transport` counts a written `CONNECT` line as a byte. Where the
-  environment names a proxy, `ConnectError` and `ProxyError` are now an unknown outcome: an
-  intercepted call that would have been recorded `FAILED` with `-41011` is recorded `AMBIGUOUS`
-  with `-41010`, and needs `ctrlrun resolve`. With no proxy configured nothing changes.
 
 ### Fixed
 
@@ -333,6 +471,20 @@ any change to one appears here.
   ceiling's own check deleted, a G5 that would have failed a correct kernel under `max_attempts: 1`,
   a receipt rule that let a fabricated field verify, three false `N/A` reasons, and a verify
   network rule that was already untrue under `--store-url`.
+
+- **`README.md`** now says what `ctrlrun.transport` is for beside the sentence that names
+  `NotExecuted`, says that `ctrlrun verify` binds loopback listeners of its own rather than
+  claiming it opens no socket at all, and says that a precondition fingerprint narrows the window
+  between a human's answer and the execution.
+
+- **The documentation site**, `CTRLRun/ctrlrun-docs`, carries the generated pages for this
+  release: every `ctrlrun.transport` name in the Python API reference, `ctrlrun.policy/v5` and
+  `ctrlrun.receipt/v4` in the schema references, G12 to G16 in `verify.md` and in the readiness
+  block, the classifier and the residual precondition window in `THREAT_MODEL.md`, and
+  `CLAIMS.md` regenerated so every cited line number resolves. `ROADMAP.md` marks v0.7 shipped and
+  carries two items named before v1.0: a malformed value of a schema-declared key blinding every
+  receipt reader, and the `state -> receipt -> policy -> authority -> state` import cycle, which
+  contradicts `ARCHITECTURE.md` §6.
 
 ## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
 

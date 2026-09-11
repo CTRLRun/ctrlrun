@@ -7,6 +7,8 @@ the files rather than the store wherever the spec names a file.
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import replace
 from fnmatch import fnmatch
@@ -544,6 +546,42 @@ def test_T11_demo_runs_in_under_sixty_seconds(demo_run):
     _, elapsed, _ = demo_run
 
     assert elapsed < 60
+
+
+def test_T271_demo_runs_offline_in_a_process_with_the_network_taken_away(tmp_path, no_network):
+    """The definition of done says *under 60 seconds with no network*, and the fixture above
+    cannot show it: it runs in this process, through `CliRunner`, where nothing has been taken
+    away. "Runs with no network" stays a claim until something takes the network away
+    (`CONTRIBUTING.md`), so this runs the installed console script in a subprocess whose
+    `sitecustomize` is `conftest.py`'s one guard, the same one T107, T230, the examples and the
+    cookbook use.
+
+    The guard admits exactly what `SPEC-v0.7.md` §8.9 admits and nothing more: an IPv4 connect
+    to the `127.0.0.1` literal at a port this process bound through a stream socket that is
+    still open. The demo binds none, so it reaches nothing at all, and a demo that grew a
+    fetch would fail here rather than in a reader's terminal.
+    """
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = ":".join(
+        part for part in (str(no_network), environment.get("PYTHONPATH", "")) if part
+    )
+
+    started = time.monotonic()
+    finished = subprocess.run(
+        [sys.executable, "-c", "from ctrlrun.cli.main import main; main()", "demo"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    elapsed = time.monotonic() - started
+
+    assert finished.returncode == 0, f"{finished.stdout}\n{finished.stderr}"
+    assert elapsed < 60, f"the demo took {elapsed:.1f}s with the network taken away"
+    for number, heading in enumerate(SCENARIO_HEADINGS, start=1):
+        assert f"{number}. {heading}" in finished.stdout
+    assert "runs with no network" not in finished.stderr
 
 
 def test_T93_demo_prints_all_five_scenario_headings(demo_run):
