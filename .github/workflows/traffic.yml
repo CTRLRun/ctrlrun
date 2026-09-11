@@ -33,6 +33,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # The `badge` job in `ci.yml` writes the same branch. Two publishers that fetched the same
+    # head make two different commits, and the loser of the race is rejected as a
+    # non-fast-forward -- so the badge that lost keeps yesterday's number and nothing says so.
+    # The group name is shared with that job verbatim: a concurrency group is a string, and
+    # these two are the only writers of `badges`. Queued rather than cancelled, because a
+    # cancelled publish is the stale badge this is here to prevent.
+    concurrency:
+      group: badges-branch
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -126,4 +135,71 @@ jobs:
           total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
           git add -f clones-badge.json clones-history.json
           git commit -m "clones: $total" || { echo "clones unchanged"; exit 0; }
-          git push origin badges
+          # Belt as well as braces. The concurrency group serializes the two publishers this
+          # repository has; a rejection can still arrive from a hand-run job or a future one,
+          # and re-reading the branch is cheap next to a badge that stops moving. The history
+          # is keyed by date, so re-applying this run's days onto a newer head is the same
+          # merge the job does anyway.
+          for attempt in 1 2 3; do
+            if git push origin badges; then
+              exit 0
+            fi
+            echo "badges moved under us; re-reading (attempt $attempt)"
+            git fetch origin badges:refs/remotes/origin/badges
+            git reset --soft refs/remotes/origin/badges
+            git checkout refs/remotes/origin/badges -- . 2>/dev/null || true
+            python - <<'MERGE'
+          import json
+          from pathlib import Path
+
+          # `clones-api.json` is still the untracked download, so the merge is re-run against
+          # whatever the newer head published rather than against what this job started with.
+          fresh = json.loads(Path("clones-api.json").read_text(encoding="utf-8"))
+          history_path = Path("clones-history.json")
+          history = (
+              json.loads(history_path.read_text(encoding="utf-8"))
+              if history_path.exists()
+              else {"days": {}}
+          )
+          days = history.get("days", {})
+          for day in fresh.get("clones", []):
+              days[day["timestamp"][:10]] = {
+                  "count": day["count"],
+                  "uniques": day["uniques"],
+              }
+          days = dict(sorted(days.items()))
+          total = sum(day["count"] for day in days.values())
+          uniques = sum(day["uniques"] for day in days.values())
+          history_path.write_text(
+              json.dumps(
+                  {
+                      "since": next(iter(days), None),
+                      "total": total,
+                      "uniques": uniques,
+                      "days": days,
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          Path("clones-badge.json").write_text(
+              json.dumps(
+                  {
+                      "schemaVersion": 1,
+                      "label": "clones",
+                      "message": f"{total:,}",
+                      "color": "B8730A",
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          MERGE
+            total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
+            git add -f clones-badge.json clones-history.json
+            git commit -m "clones: $total" || true
+          done
+          echo "::warning::could not publish the clones badge after 3 attempts"
+          exit 0
