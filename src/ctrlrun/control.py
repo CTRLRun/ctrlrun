@@ -941,6 +941,14 @@ class Control:
         one implementation of v0.1 §5.5 in this codebase, and a resumed call gets that one:
         a resumption that decided outcomes differently would be a second answer to the only
         question this library exists to answer.
+
+        **With one difference, and it is a narrowing: a continuation leg can never record
+        `FAILED`** (SPEC-v0.7 §12.2.12). A continuation exists only because the remote answered
+        once already and is holding the exchange, so nothing on this leg can say the remote did
+        nothing: `ctrlrun.transport` will not claim `NotExecuted` here, and the gateway records
+        an unknown outcome for everything it could otherwise call `FAILED` on a continuation.
+        An executor that raises `NotExecuted` itself is still believed, as `v0.1 §5.5` says it
+        is; what changed is that nothing in this library will hand it one.
         """
         held = self._store.take_continuation(continuation)
         action = held.action
@@ -1072,8 +1080,13 @@ class Control:
             try:
                 result = executor()
             finally:
-                _EXECUTOR_RUN.reset(run)
-                _closed(opened)
+                # Its own `finally`, and first: a run left in `_OPEN_RUNS` would go on being
+                # marked by every context-less send for the life of the process, and one left
+                # current in this context would be read by the next call on this thread.
+                try:
+                    _closed(opened)
+                finally:
+                    _EXECUTOR_RUN.reset(run)
         except Suspended as suspension:
             # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
             # and this attempt is not finished. Handled above the generic branch precisely so

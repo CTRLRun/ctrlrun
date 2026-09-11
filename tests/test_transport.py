@@ -1800,6 +1800,11 @@ actions:
   mcp.acme.create_refund:
     effect: "refund:{payment_id}"
     decision: allow
+  mcp.acme.reports_before_acting:
+    effect: "report:{payment_id}"
+    mcp:
+      not_executed_on_error: true
+    decision: allow
 """
 
 
@@ -1896,9 +1901,9 @@ def _mcp_reply(handler: Any, document: Any, status: int = 200, headers: Any = No
     handler.wfile.write(payload)
 
 
-def _mcp_call(gateway: Any, *, state: str | None = None) -> Any:
+def _mcp_call(gateway: Any, *, state: str | None = None, tool: str = "create_refund") -> Any:
     params: dict[str, Any] = {
-        "name": "create_refund",
+        "name": tool,
         "arguments": {"payment_id": "txn_1", "amount": 200},
     }
     if state is not None:
@@ -1907,7 +1912,7 @@ def _mcp_call(gateway: Any, *, state: str | None = None) -> Any:
     headers = {
         "MCP-Protocol-Version": MCP_REVISION,
         "Mcp-Method": "tools/call",
-        "Mcp-Name": "create_refund",
+        "Mcp-Name": tool,
     }
     response = gateway.handle(json.dumps(body).encode(), headers)
     return json.loads(response.body) if response.body else None
@@ -1939,6 +1944,19 @@ def _pre_dispatch(handler: Any) -> None:
     )
 
 
+def _tool_error(handler: Any) -> None:
+    """A tool-level error from an upstream whose operator asserted it reports errors only
+    before acting: `FAILED` on a first leg, by `v0.2 §3.1`'s claim."""
+    _mcp_reply(
+        handler,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"resultType": "complete", "isError": True, "content": []},
+        },
+    )
+
+
 def _unauthorized(handler: Any) -> None:
     _mcp_reply(
         handler,
@@ -1948,7 +1966,17 @@ def _unauthorized(handler: Any) -> None:
     )
 
 
-@pytest.mark.parametrize("case", ["transport", "pre_dispatch", "unauthorized"])
+#: Each case's continuation answer, the tool it goes through, and the key it records under. The
+#: fourth is the operator's own `not_executed_on_error` claim, which the rule overrides too.
+_CONTINUATION_CASES: dict[str, tuple[Any, str, str]] = {
+    "transport": (None, "create_refund", "refund:txn_1"),
+    "pre_dispatch": (_pre_dispatch, "create_refund", "refund:txn_1"),
+    "unauthorized": (_unauthorized, "create_refund", "refund:txn_1"),
+    "not_executed_on_error": (_tool_error, "reports_before_acting", "report:txn_1"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CONTINUATION_CASES))
 def test_T231b_a_gateway_continuation_never_records_FAILED(tmp_path, case):
     """The upstream answered `input_required`, so it has the request and is holding the exchange.
     Whatever the continuation itself meets, the effect's state is unknown.
@@ -1958,37 +1986,40 @@ def test_T231b_a_gateway_continuation_never_records_FAILED(tmp_path, case):
     that on a **first** leg is `FAILED` (the controls below).
     """
     pytest.importorskip("httpx", reason="the gateway extra is not installed")
-    replies = {"pre_dispatch": _pre_dispatch, "unauthorized": _unauthorized}
-    upstream = _McpUpstream(replies.get(case, _pre_dispatch))
+    reply, tool, key = _CONTINUATION_CASES[case]
+    upstream = _McpUpstream(reply or _pre_dispatch)
     try:
         with _mcp_gateway(tmp_path, upstream) as (gateway, opened):
-            first = _mcp_call(gateway)
+            first = _mcp_call(gateway, tool=tool)
             assert first["result"]["resultType"] == "input_required", first
             assert upstream.calls, "precondition: the upstream received the original call"
-            assert opened.get_effect("refund:txn_1").state is EffectState.EXECUTING
+            assert opened.get_effect(key).state is EffectState.EXECUTING
             if case == "transport":
                 upstream.die()
-            answer = _mcp_call(gateway, state="server-state-1")
-            record = opened.get_effect("refund:txn_1")
+            answer = _mcp_call(gateway, state="server-state-1", tool=tool)
+            record = opened.get_effect(key)
     finally:
         upstream.close()
 
     assert record.state is EffectState.AMBIGUOUS, (case, answer)
     if case == "transport":
         assert answer["error"]["code"] == -41010, answer
+    elif case == "not_executed_on_error":
+        # Relayed unchanged, the tool's own error included: only the record changes.
+        assert answer["result"]["isError"] is True, answer
     else:
         # The upstream's own answer is relayed unchanged; only what CTRLRun records changes.
         assert answer["error"]["code"] in (-32601, -32000), answer
 
 
-@pytest.mark.parametrize("case", ["transport", "pre_dispatch", "unauthorized"])
+@pytest.mark.parametrize("case", sorted(_CONTINUATION_CASES))
 def test_T231b_the_control_a_first_leg_still_records_FAILED(tmp_path, case, refused):
     """The other half: on a first leg each of those answers is still `FAILED` and still permits a
     retry. Without it, a gateway recording everything `AMBIGUOUS` would pass the test above."""
     pytest.importorskip("httpx", reason="the gateway extra is not installed")
 
-    replies = {"pre_dispatch": _pre_dispatch, "unauthorized": _unauthorized}
-    upstream = _McpUpstream(replies.get(case, _pre_dispatch))
+    reply, tool, key = _CONTINUATION_CASES[case]
+    upstream = _McpUpstream(reply or _pre_dispatch)
     # One entry already there, so the upstream's very first real call takes the second branch and
     # answers what this case is about, on a leg that is nobody's continuation.
     upstream.calls.append("the count starts at one")
@@ -1996,8 +2027,8 @@ def test_T231b_the_control_a_first_leg_still_records_FAILED(tmp_path, case, refu
         with _mcp_gateway(tmp_path, upstream) as (gateway, opened):
             if case == "transport":
                 upstream.die()
-            answer = _mcp_call(gateway)
-            record = opened.get_effect("refund:txn_1")
+            answer = _mcp_call(gateway, tool=tool)
+            record = opened.get_effect(key)
     finally:
         upstream.close()
 

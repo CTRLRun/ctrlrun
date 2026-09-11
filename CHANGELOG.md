@@ -61,7 +61,9 @@ any change to one appears here.
   because the remote answered and is holding the exchange, so nothing on that leg can say the
   remote did nothing. `Control.resume` now runs with the register already marked, and the gateway
   refuses to record `FAILED` for anything a continuation meets: a refused connection, a
-  pre-dispatch JSON-RPC code, or the `401` rule of `v0.2 §6.8`. At 0.6.1 each of those recorded
+  pre-dispatch JSON-RPC code, the `401` rule of `v0.2 §6.8`, and a tool error under an
+  operator's `not_executed_on_error: true`, which asserts that *that tool* reports errors before
+  acting and cannot speak for a call it did not answer. At 0.6.1 each of those recorded
   `FAILED` and, for a connection never established, answered the client `-41011` "not executed",
   which permitted a retry of an effect the upstream may have been part-way through. The upstream's
   own response is still relayed unchanged; what changes is the record, which is now `AMBIGUOUS`

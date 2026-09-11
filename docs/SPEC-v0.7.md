@@ -2762,13 +2762,20 @@ because the remote spoke.** `server.py` takes it from the upstream's own respons
 be acting on this reservation. So a resumed leg can never truthfully claim the remote did nothing,
 and `Control.resume` opens its register already marked.
 
-**The rule is general, and wider than the register.** On a continuation leg the gateway also
-refuses to record `FAILED` for a pre-dispatch JSON-RPC code and for the `401` rule of §2.4. Both
-are answers about the *continuation's* request; the upstream is holding the original, and a
-rejection of the second says nothing about what it did with the first. The upstream's own response
-is still relayed unchanged, so a client sees what the upstream said and CTRLRun records that the
-outcome is unknown. The price is a `ctrlrun resolve` where 0.6.1 permitted a retry, and the
-alternative is a retry of an effect the remote may be part-way through.
+**The rule is general, and wider than the register.** On a continuation leg the gateway refuses to
+record `FAILED` for **every** path that reaches it: a connection never established, a pre-dispatch
+JSON-RPC code, the `401` rule of §2.4, and the operator's own `not_executed_on_error` assertion of
+`v0.2 §3.1`. Each answers for the *continuation's* request; the upstream is holding the original,
+and a rejection of the second says nothing about what it did with the first.
+
+`not_executed_on_error` is worth naming rather than leaving to "every path", because `v0.2 §3.1`
+makes it the operator's claim, made by the person who knows the tool, and this overrides it. It
+overrides it in one direction only: the operator asserted that *this tool* reports errors before
+acting, which is true of the call it answers, and on a continuation the call it answers is not the
+one that carries the effect. The upstream's own response is still relayed unchanged, the tool's
+error included, so a client sees exactly what the tool said and CTRLRun records that the outcome is
+unknown. The price is a `ctrlrun resolve` where 0.6.1 permitted a retry, and the alternative is a
+retry of an effect the remote may be part-way through.
 
 #### 12.2.13 A thread that did not copy the context, and the price of seeing it
 
