@@ -2570,7 +2570,8 @@ The first is the interleaving: the obvious every-other-read pattern ends bounded
 compose, so the patterns come from a search over this proxy, and there are two, because `(0, 0, 1, 0)` is the
 one that catches the restage failing to pass `retrying` on and `(1, 0, 0, 0)` is the one that catches the
 lost-commit re-issue failing to pass `restaged` on. The second is the assertion. Dropping **both** flags
-recurses; dropping **one** does not recurse at all on any pattern of four reads or fewer, it simply permits one
+recurses; dropping **one** does not recurse at all on any pattern of six reads or fewer, measured rather than
+sampled, it simply permits one
 re-issue more than the bound allows, and that extra level terminates. So a test asserting only *"this did not
 blow the stack"* would be green for each flag taken alone, which is precisely the pair of mutants that say each
 is load-bearing. Each bound permits one re-issue, so three is the deepest nesting any interleaving may reach,
@@ -2693,7 +2694,12 @@ attempt agree on the path it can reach. T246 and T246b are the only tests of the
 
 **Two lines no test reaches, stated as such, and one that a test now does.** SQLite's `AND attempt = ?` is an
 equivalent mutant: with it removed the whole suite passes, Postgres included, because `BEGIN IMMEDIATE` holds the
-read and the write together (§5.6). And `_resolve_lost_renewal` ends in a refusal after `a2.row3.refuse` for the
+read and the write together (§5.6). So is `carries_outcome` at the re-issue's guard: reverting it to the older
+`state in _OUTCOMES` condition fails no test, because the only two callers reaching those states pass
+`carries_outcome=True` and nothing else transitions to `COMMITTED` or `AMBIGUOUS` through `_transition`. It is
+kept for the reason the paragraph above gives, that a future outcome-carrying transition must opt in deliberately
+rather than inherit the re-issue, and it is declared here as an equivalent mutant rather than counted as a
+mutation row, because a row that cannot fail is the false green this list exists to prevent. And `_resolve_lost_renewal` ends in a refusal after `a2.row3.refuse` for the
 case where `plan_reservation` grants. That case is unreachable, because the only record the planner grants over
 that a store writes is `FAILED`, which re-issued a line earlier; it is there because the function must return a
 reservation it wrote or raise. Replacing it with `return reservation` fails no test, and the mutation table says
