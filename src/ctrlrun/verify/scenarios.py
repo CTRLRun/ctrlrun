@@ -2270,12 +2270,14 @@ class Engine:
 
             listener = _Listener("hang")
             try:
-                result = attempt(
-                    "read_timeout",
-                    lambda: _post(
-                        transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_READ_WAIT)
-                    ),
-                )
+
+                def read_timeout() -> str:
+                    connection = transport.HTTPConnection(
+                        _LOOPBACK, listener.port, timeout=_G12_WAIT
+                    )
+                    return _post(connection, pause=_shorten_the_read(listener, connection))
+
+                result = attempt("read_timeout", read_timeout)
             finally:
                 listener.close()
             rows["read_timeout"] = delivered_then(
@@ -2290,10 +2292,13 @@ class Engine:
 
                 def reused() -> str:
                     connection = transport.HTTPConnection(
-                        _LOOPBACK, listener.port, timeout=_G12_CONTROL_WAIT
+                        _LOOPBACK, listener.port, timeout=_G12_WAIT
                     )
                     _post(connection, close=False)
                     listener.stop_and_hold()
+                    # The reconnect alone is the short wait: a held, unlistening port refuses at
+                    # once on Linux and drops the SYN on macOS.
+                    connection.timeout = _G12_CONTROL_WAIT
                     return _post(connection)
 
                 result = attempt("reused", reused)
@@ -2461,6 +2466,7 @@ class _Listener:
 
     def __init__(self, mode: str) -> None:
         self.received = 0
+        self.arrived = threading.Event()
         self._mode = mode
         self._held: socket.socket | None = None
         self._socket = _loopback_socket()
@@ -2480,16 +2486,27 @@ class _Listener:
             with suppress(OSError):
                 if self._mode == "reset":
                     self.received = len(conn.recv(_READ_AT_MOST))
+                    self.arrived.set()
                     conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 elif self._mode == "hang":
                     self.received = len(conn.recv(_READ_AT_MOST))
+                    self.arrived.set()
                     while conn.recv(_READ_AT_MOST):
                         pass
                 else:
                     self.received = _read_request(conn)
+                    self.arrived.set()
                     conn.sendall(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     )
+
+    def wait_for_the_request(self) -> None:
+        """Wait, bounded, until the peer has read the request.
+
+        The read-timeout row shortens the socket's timeout only after this, so a machine too busy
+        to schedule the peer thread cannot turn the row into a timeout with nothing delivered.
+        """
+        self.arrived.wait(_G12_WAIT)
 
     def stop_and_hold(self) -> None:
         """Close the listener and bind its port again, not listening, before anything else can.
@@ -2521,7 +2538,17 @@ class _Listener:
                     opened.close()
 
 
-def _post(connection: Any, *, close: bool = True) -> str:
+def _shorten_the_read(listener: _Listener, connection: Any) -> Callable[[], None]:
+    """Wait for the peer to read the request, then give the response read its short timeout."""
+
+    def pause() -> None:
+        listener.wait_for_the_request()
+        connection.sock.settimeout(_G12_READ_WAIT)
+
+    return pause
+
+
+def _post(connection: Any, *, close: bool = True, pause: Callable[[], None] | None = None) -> str:
     """The request every G12 row sends: a body, so there is a request byte to write."""
     try:
         connection.request(
@@ -2530,6 +2557,8 @@ def _post(connection: Any, *, close: bool = True) -> str:
             body=b'{"ctrlrun-verify":"G12"}',
             headers={"Content-Type": "application/json"},
         )
+        if pause is not None:
+            pause()
         connection.getresponse().read()
     finally:
         if close:

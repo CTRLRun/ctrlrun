@@ -593,12 +593,23 @@ def _full_backlog() -> tuple[socket.socket, list[socket.socket]]:
     fillers: list[socket.socket] = []
     for _ in range(1024):
         filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        filler.settimeout(0.25)
+        filler.settimeout(0.5)
         try:
             filler.connect((LOOPBACK, port))
         except TimeoutError:
+            # A filler may also time out because this machine is busy, which would leave a
+            # listener that still accepts and a test asserting nothing. Confirm with a probe
+            # of its own, and keep filling while it connects.
             filler.close()
-            return listener, fillers
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                probe.connect((LOOPBACK, port))
+            except TimeoutError:
+                probe.close()
+                return listener, fillers
+            fillers.append(probe)
+            continue
         except ConnectionRefusedError:  # pragma: no cover - depends on the platform
             filler.close()
             for opened in fillers:
