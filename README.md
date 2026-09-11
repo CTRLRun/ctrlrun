@@ -20,7 +20,7 @@
 <p align="center">
   <a href="https://github.com/CTRLRun/ctrlrun/blob/badges/clones-history.json"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/clones-badge.json" alt="Clones"></a>
   <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/v/ctrlrun?color=B8730A&label=pypi" alt="PyPI"></a>
-  <a href="https://pypistats.org/packages/ctrlrun"><img src="https://img.shields.io/pypi/dm/ctrlrun?color=B8730A&label=downloads" alt="Downloads"></a>
+  <a href="https://pypistats.org/packages/ctrlrun"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/downloads-badge.json" alt="Downloads"></a>
   <a href="https://ctrlrun.dev"><img src="https://img.shields.io/badge/docs-ctrlrun.dev-B8730A" alt="Docs"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
