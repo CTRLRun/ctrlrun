@@ -31,6 +31,17 @@ any change to one appears here.
   the attempt it was planned from, with the row count checked, and a stale renewal is refused with
   `DuplicateEffect`. SQLite carries the same condition, where it was already unreachable because
   `BEGIN IMMEDIATE` holds the read and the write together.
+- **A stale Postgres write could put an older attempt number back** (`docs/SPEC-v0.7.md` §5.6).
+  0.6.1's compare-and-set under `resolve_effect`, `extend_lease`, `hold_continuation`, the kept
+  `AMBIGUOUS` write and the four transitions matched `effect_key`, `action_id` and `state`, and
+  wrote back the attempt number it had read. A caller that retries one `Action` reuses its
+  `action_id`, so the same `action_id` and state could come round again at a newer attempt between
+  the read and the write. A human's `ctrlrun resolve` decided on attempt 1 then wrote `FAILED` at
+  1 over attempt 2's unknown outcome, and the next renewal handed out attempt 2 a second time. Every
+  write to an effect record is now also conditioned on the attempt it read, and a write whose
+  record moved is refused with `DuplicateEffect` and leaves the newer attempt as it is. The fix
+  for the renewal above depends on this one: it holds only because the number can no longer move
+  backwards.
 - **After a lost `COMMIT`, a Postgres reservation could return an attempt number it did not
   write.** Where a reservation's `COMMIT` was lost and the re-read found the write absent, 0.6.1
   re-issued it and then returned the reservation it had first planned, discarding the re-issue's.
