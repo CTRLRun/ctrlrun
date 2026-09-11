@@ -154,6 +154,66 @@ any change to one appears here.
 - **`APPROVAL_CONSUMED` carries what the presenting pass compared**, where a precondition was
   compared, so a suspended action's resumed leg, whose receipt is the only one it gets, records the
   comparison its first leg made.
+- **`ctrlrun.transport`, the `NotExecuted` classifier, in core** (SPEC-v0.7 §2, build-list item
+  2). `v0.1 §5.5` leaves the one decision the product exists to get right, `FAILED` or
+  `AMBIGUOUS`, to the executor, and until now the correct rule was reachable only through
+  `ctrlrun[gateway]`. `ctrlrun.transport.urlopen`, `HTTPConnection` and `HTTPSConnection` are
+  `urllib` and `http.client` with a counter: they raise `NotExecuted`, chained from the original
+  exception, **only** where the connection they opened fresh failed before a single request byte
+  was handed to its socket (DNS failure, refusal, connect timeout, a TLS handshake failure). Every
+  other failure is the original exception, which the kernel records `AMBIGUOUS`: a reset or a
+  timeout after the request was offered, a `sendall` that raised part way, a reused connection, a
+  socket the caller set, an opener the classifier did not build, a proxy that refused a tunnel
+  after its `CONNECT` line was sent. The count is taken from evidence, never from an exception's
+  type, and above TLS. No redirect is followed, no HTTP status is ever `NotExecuted`, and no
+  parameter, attribute or environment variable changes a classification. The module is stdlib
+  only and is not imported by `import ctrlrun`.
+
+  The rule itself, `ctrlrun.transport.effect_state`, is the one implementation: the gateway's
+  `Transport` is now the core one, and `gateway/outcome.py` asks the core rule rather than keeping
+  a copy. `ctrlrun.gateway.transport.request` offers the gateway's httpx mapping to an executor
+  that uses httpx, on a client built for the one call. The gateway's own `NotExecuted`, for an
+  upstream it never reached, is now chained from the httpx exception and its receipt names it.
+  `ctrlrun verify` gains **G12**, "a byte written is ambiguous", under
+  `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
+  loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
+  and to loopback listeners verify bound itself*, and the test suite's network guard admits
+  exactly that: IPv4 on the `127.0.0.1` literal, to a port the process bound through a stream
+  socket that is still open, and nothing else.
+
+  **The claim is about the executor run, not about one connection.** An independent review showed
+  that every false `NotExecuted` it could produce came from two connections in one effect: the
+  first delivered the request, the second was refused, and a per-connection classifier judged the
+  second alone. `xmlrpc.client`'s retry, `FancyURLopener` following a `303`, an opener whose
+  handler runs on a worker thread, and an executor's own retry-once-on-reset loop all make that
+  pair. `Control` now opens a register around each executor call; every send through
+  `ctrlrun.transport` or `ctrlrun.gateway.transport.request` marks it before the first byte, and a
+  claim needs it unmarked as well as the connection's own evidence. Outside an executor run
+  nothing is claimed. **The limit is stated in the module, the class and the specification**: the
+  register sees only this library's own sends, so an executor that sends part of the effect
+  through another transport and then uses the classifier can be handed a claim that is true of
+  these connections and false of the effect. A send through this library on a thread that did not
+  copy the executor's context **is** seen: it belongs to no register, so it marks every register
+  open in the process, which costs claims in unrelated concurrent runs and never safety.
+
+  **A continuation leg never records `FAILED`, and 0.6.1 did.** A continuation exists only
+  because the remote answered and is holding the exchange, so nothing on that leg can say the
+  remote did nothing. `Control.resume` now runs with the register already marked, and the gateway
+  refuses to record `FAILED` for anything a continuation meets: a refused connection, a
+  pre-dispatch JSON-RPC code, the `401` rule of `v0.2 §6.8`, and a tool error under an
+  operator's `not_executed_on_error: true`, which asserts that *that tool* reports errors before
+  acting and cannot speak for a call it did not answer. At 0.6.1 each of those recorded
+  `FAILED` and, for a connection never established, answered the client `-41011` "not executed",
+  which permitted a retry of an effect the upstream may have been part-way through. The upstream's
+  own response is still relayed unchanged; what changes is the record, which is now `AMBIGUOUS`
+  and needs `ctrlrun resolve`.
+
+  **Behind a proxy the gateway is stricter than 0.6.1.** httpx reports an unreachable proxy and a
+  TLS failure with the target after the proxy answered the `CONNECT` line with the same
+  `ConnectError`, and `ctrlrun.transport` counts a written `CONNECT` line as a byte. Where the
+  environment names a proxy, `ConnectError` and `ProxyError` are now an unknown outcome: an
+  intercepted call that would have been recorded `FAILED` with `-41011` is recorded `AMBIGUOUS`
+  with `-41010`, and needs `ctrlrun resolve`. With no proxy configured nothing changes.
 
 ### Fixed
 

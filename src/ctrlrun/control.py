@@ -37,6 +37,7 @@ from .approval import (
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
+    _EXECUTOR_RUN,
     COMMITTED_EFFECT,
     DEFAULT_LEASE,
     RECONCILED_STATES,
@@ -46,6 +47,9 @@ from .effect import (
     EffectState,
     ReconcileOutcome,
     Reservation,
+    _closed,
+    _ExecutorRun,
+    _opened,
     idempotency_token_for,
     resolve_effect_key,
     resolve_resource,
@@ -1260,6 +1264,14 @@ class Control:
         one implementation of v0.1 §5.5 in this codebase, and a resumed call gets that one:
         a resumption that decided outcomes differently would be a second answer to the only
         question this library exists to answer.
+
+        **With one difference, and it is a narrowing: a continuation leg can never record
+        `FAILED`** (SPEC-v0.7 §12.2.12). A continuation exists only because the remote answered
+        once already and is holding the exchange, so nothing on this leg can say the remote did
+        nothing: `ctrlrun.transport` will not claim `NotExecuted` here, and the gateway records
+        an unknown outcome for everything it could otherwise call `FAILED` on a continuation.
+        An executor that raises `NotExecuted` itself is still believed, as `v0.1 §5.5` says it
+        is; what changed is that nothing in this library will hand it one.
         """
         self._report_clock_skew()
         held = self._store.take_continuation(continuation)
@@ -1323,6 +1335,7 @@ class Control:
             _Reconciler(None, False),
             held_key=held.effect_key,
             observation=observation,
+            resumed=True,
             compared=compared,
         )
 
@@ -1377,6 +1390,7 @@ class Control:
         *,
         held_key: str | None,
         observation: _Observation | None = None,
+        resumed: bool = False,
         compared: _Compared | None = None,
     ) -> Receipt:
         """Run the executor and record what happened (SPEC-v0.1 §5.5).
@@ -1400,9 +1414,30 @@ class Control:
         it. `execute` and `resume` both arrive here, which is why a resumed leg reads the token
         of the attempt it is resuming: `resume` passes `held.record.attempt` unchanged (§4.4).
         """
+        # SPEC-v0.7 §2.3, §12.2.9 — the register of what this run offered, for exactly the
+        # executor's call. A classifier claims `NotExecuted` only inside it, and only while it is
+        # unmarked: a connection refused after another in the same run delivered proves nothing.
+        # A resumed leg starts **marked** (§12.2.12). A continuation exists only because the
+        # remote spoke, and the remote is holding the exchange, so nothing on that leg may say the
+        # remote did nothing: the same sentence the lease extension above makes, that the remote
+        # may already be acting on this reservation.
+        opened = _ExecutorRun(_EXECUTOR_RUN.get(), offered=resumed)
+        _opened(opened)
+        run = _EXECUTOR_RUN.set(opened)
         try:
-            with _attempt_token(held_key, attempt):
-                result = executor()
+            try:
+                # Both bindings are for exactly the executor's call, and the token's is item 3's
+                # (§4.3): the register says what this run offered, the token names the attempt.
+                with _attempt_token(held_key, attempt):
+                    result = executor()
+            finally:
+                # Its own `finally`, and first: a run left in `_OPEN_RUNS` would go on being
+                # marked by every context-less send for the life of the process, and one left
+                # current in this context would be read by the next call on this thread.
+                try:
+                    _closed(opened)
+                finally:
+                    _EXECUTOR_RUN.reset(run)
         except Suspended as suspension:
             # SPEC-v0.2 §6.9 — no outcome, no receipt: the remote has not said what happened
             # and this attempt is not finished. Handled above the generic branch precisely so

@@ -19,7 +19,7 @@ import select
 import socket
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,11 +59,14 @@ from .mcp import (
     parse_request,
 )
 from .outcome import (
+    AMBIGUOUS_CODE,
+    AMBIGUOUS_TOKEN,
     GatewayOutcome,
     Observed,
+    Transport,
     classify,
 )
-from .transport import STREAM, forwarded_headers
+from .transport import _CAUSE, STREAM, forwarded_headers
 from .wire import (
     _dump,
     _header,
@@ -584,6 +587,7 @@ class Gateway:
         held: dict[str, Any] = {"request_id": request_id}
         presented = parsed.document.get("params", {})
         presented = presented.get("requestState") if isinstance(presented, Mapping) else None
+        continuation = isinstance(presented, str) and bool(presented)
 
         def executor() -> Any:
             # §6.7 — the request the gateway sends is built from the action's *canonical*
@@ -594,10 +598,28 @@ class Gateway:
             params = dict(forwarded.get("params", {}))
             params["arguments"] = action.canonical_arguments
             forwarded["params"] = params
+            # Cleared first, so a cause left in this context by an earlier call can never be
+            # chained to this one's `NotExecuted`: a custom forwarder never sets it.
+            _CAUSE.set(None)
             observed, payload, status, response_headers = self._forward(
                 json.dumps(forwarded, separators=(",", ":")).encode(), headers, fresh=True
             )
+            cause = _CAUSE.get() if isinstance(observed, Transport) else None
             outcome = classify(observed, not_executed_on_error=options.not_executed_on_error)
+            if continuation and outcome.effect is EffectState.FAILED:
+                # SPEC-v0.7 §12.2.12 — **nothing claims `FAILED` on a continuation leg.** A
+                # continuation exists only because the upstream answered `input_required`: it has
+                # the original request and is holding the exchange. A refused connection, a
+                # pre-dispatch JSON-RPC code, or the `401` rule are then answers about *this*
+                # leg's request and say nothing about what the upstream did with the original,
+                # so the effect's state is unknown. The upstream's own response is still relayed
+                # unchanged (§6.8); only what CTRLRun records changes.
+                outcome = replace(
+                    outcome,
+                    effect=EffectState.AMBIGUOUS,
+                    code=None if outcome.relay else AMBIGUOUS_CODE,
+                    token=None if outcome.relay else AMBIGUOUS_TOKEN,
+                )
             held["payload"] = payload
             held["status"] = status
             held["headers"] = response_headers
@@ -613,7 +635,15 @@ class Gateway:
             if outcome.effect is EffectState.COMMITTED:
                 return payload
             if outcome.effect is EffectState.FAILED:
-                raise NotExecuted(str(outcome.token or observed))
+                token = str(outcome.token or observed)
+                if cause is not None:
+                    # SPEC-v0.7 §2.5: a connection never established carries the exception it
+                    # was observed from, so a gateway `failed` receipt names the same evidence a
+                    # `@protect` one does. A `FAILED` from the upstream's own answer (a
+                    # pre-dispatch code, the `401` rule) has no transport exception: its evidence
+                    # is the response, which is relayed unchanged.
+                    raise NotExecuted(f"{token}: {type(cause).__name__}: {cause}") from cause
+                raise NotExecuted(token)
             raise UpstreamAmbiguous(outcome)
 
         if isinstance(presented, str) and presented:
