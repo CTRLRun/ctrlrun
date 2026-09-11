@@ -29,6 +29,35 @@ any change to one appears here.
   Postgres `--store-url` and `N/A` on SQLite, and the catalogue moves to
   `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
   on SQLite and the in-memory store because neither has a clock of its own.
+- **The attempt ceiling, `max_attempts`** (SPEC-v0.7 §5, item 4, and the amendment to
+  `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding
+  the **attempts** that may execute on one effect key, the first included: `max_attempts: 3` is
+  the first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version
+  that is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and
+  a mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
+  is inside the policy hash, so a receipt records which one refused an attempt.
+  **An attempt, not an executor invocation**: a `Suspended` executor holds its reservation and
+  every `Control.resume` runs on that same attempt, so an elicitation loop is one dispatch however
+  many rounds it takes. The gateway bounds those with `max_elicitation_rounds`; a direct
+  `Control.resume` caller has no bound, and this adds none.
+  **The decision is taken on the attempt number the store assigned**, after the reservation and
+  before the executor, because two callers that both read attempt *N-1* would both pass a read
+  taken before reserving. Above the ceiling the executor is not called, the record is released as
+  `FAILED` with an error naming the ceiling, `EFFECT_RESERVATION_REFUSED` carries
+  `reason: "attempt_ceiling"` with the attempt and the ceiling, a `blocked` receipt is written,
+  and `ActionDenied(reason="attempt_ceiling")` is raised. The refused attempt number is **spent**:
+  raising `max_attempts` from 2 to 4 after a refusal buys one further dispatch, not two. A read of
+  the record before the approval gate refuses the ordinary sequential case earlier, writing
+  nothing, spending no presented approval and creating no approval request; it refuses only a
+  `FAILED` record and is never the guarantee. **On any other route the approval gate comes
+  first**, so on an `APPROVE` action a human can be asked, and answer, for an attempt that is then
+  refused: a wasted answer, never an execution, and `docs/SPEC-v0.7.md` §5.2 and §5.5 say so
+  rather than closing it. In observe mode the refusal is recorded as `would_have.blocked_reason:
+  "attempt_ceiling"` and the action runs. Verify gains **G15**, and G5 and G14 now select only an
+  action whose ceiling permits a renewal, reporting `N/A` where the ceiling is the only reason
+  they cannot, because each one's control *is* a renewal and `max_attempts: 1` would otherwise
+  report a correct kernel as a failure. No new error type, no new event type, no new `StateStore`
+  method, no new `Control` method, and no CLI change.
 - **The provider idempotency token** (SPEC-v0.7 §4, item 3). `ctrlrun.idempotency_token()`, a new
   zero-argument accessor re-exported at package import, answers inside an executor with the token
   of the attempt it is running: `ctrlrun.effect.idempotency_token_for(effect_key, attempt)`, a
@@ -94,7 +123,14 @@ any change to one appears here.
   no action requires approval. The store conformance suite gains a `precondition-fingerprint` case
   and a broken-store fixture that fails it by name.
 
+
 ### Changed
+
+
+- **An action entry may declare `max_attempts`, and a renewal over `FAILED` can now be bounded.**
+  This is stricter than 0.6.1 only where an operator asks for it: an action that declares no
+  `max_attempts` renews without bound, exactly as before, and every document that loaded at 0.6.1
+  loads unchanged. There is no default ceiling, and no value of the key means "unlimited".
 
 - **`ctrlrun.receipt/v4`**, with `precondition_at_request` and `precondition_at_recheck`, and the
   first receipt-schema bump that does not report older receipts as altered. A receipt read from a
@@ -107,8 +143,9 @@ any change to one appears here.
   own `v1` or `v2` label and keys where 0.6.1 showed `v3`. Upgrade every reader before any writer:
   a `v4` JSONL line handed to 0.6.1 rehashes wrongly.
 - **`ctrlrun verify` prints each distinct note once**, where it printed only the first note in the
-  report, which would have dropped G16's beneath G3's. CI's `verify` job expects `verified 12/12`
-  and `verified 7/7`.
+  report, which would have dropped G16's beneath G3's. CI's `verify` job expects `verified 13/13`
+  with two not applicable, and `verified 7/7` with eight, measured from a run of the merged
+  catalogue rather than carried over from either branch.
 - **A receipt chain reader no longer stops at a row it cannot hash.** A stored document holding a
   value with no canonical form (a float, a lone surrogate) made `verify_chain` raise, so one
   tampered row ended the walk: `ctrlrun receipts --verify-chain` exited with no report and a forged

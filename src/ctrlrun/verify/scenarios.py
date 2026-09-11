@@ -74,6 +74,7 @@ from ..errors import (
 )
 from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
 from ..receipt import (
+    BLOCKED_ATTEMPT_CEILING,
     Event,
     EventType,
     Receipt,
@@ -697,6 +698,9 @@ class Engine:
         *,
         decisions: Sequence[Decision] = (Decision.ALLOW, Decision.APPROVE),
         needs_effect: bool = False,
+        needs_renewal: bool = False,
+        needs_ceiling: bool = False,
+        ceiling_bound: int | None = None,
         grant_filter: Callable[[Grant], bool] | None = None,
         mutation: Mapping[str, Any] | None = None,
     ) -> _Selection | None:
@@ -706,10 +710,23 @@ class Engine:
         covers the action (§3.4), because an action nothing authorizes is refused by the
         authority axis before the policy axis is ever reached (`v0.3 §4.3`), and a scenario
         built on one would exercise a different guarantee than the one it claims.
+
+        SPEC-v0.7 §8.9 adds the ceiling axis, and it cuts both ways. `needs_renewal` skips an
+        action whose `max_attempts` forbids one, because G5's control *is* a renewal and under
+        `max_attempts: 1` a correct kernel refuses it, which would be reported as a `fail`.
+        `needs_ceiling` and `ceiling_bound` are G15's own requirement, which is the opposite: it
+        needs an action that declares one, and one verify can drive to the top of.
         """
         self._grant_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
+                continue
+            ceiling = self.policy.max_attempts(name)
+            if needs_renewal and ceiling is not None and ceiling < 2:
+                continue
+            if needs_ceiling and ceiling is None:
+                continue
+            if ceiling_bound is not None and ceiling is not None and ceiling > ceiling_bound:
                 continue
             for decision in decisions:
                 synthesized = self._synthesize(name, decision, mutation)
@@ -1361,16 +1378,33 @@ class Engine:
             pids.add(int(document["pid"]))
         return read, len(list(counters.iterdir())), pids
 
+    def _renewal_unselected(self, reason: str) -> tuple[str, dict[str, Any]]:
+        """Why a guarantee that needs a renewal found nothing (SPEC-v0.7 §8.9).
+
+        **Precedence, and it is the whole of this function.** The ceiling sentence is printed
+        only where the ceiling is the *only* reason nothing is selectable, which is established
+        by selecting again with the ceiling filter removed: where that selection also finds
+        nothing, the reason is `unselected()`'s, as before. A document whose uncapped action is
+        deny-only, or allowed and covered by no grant, has not had its guarantee taken away by a
+        ceiling, and saying so would be a false `N/A` reason on an `N/A` that is otherwise right.
+        """
+        without_the_ceiling = self.select(needs_effect=True)
+        if without_the_ceiling is not None:
+            return reg.CEILING_FORBIDS_RENEWAL, {}
+        # `select()` has just run again, so `_grant_miss` describes the unfiltered attempt,
+        # which is the one `unselected()` is being asked about.
+        return self.unselected(reason), self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE)
+
     # --- G5: an ambiguous outcome blocks a blind retry -----------------------------------
 
     def g5(self) -> GuaranteeResult:
-        selection = self.select(needs_effect=True)
+        # SPEC-v0.7 §8.9 — only an action whose ceiling admits a renewal, because G5's control
+        # is a renewal: under `max_attempts: 1` a correct kernel refuses it, and grading the
+        # document anyway would report that correct kernel as `fail`.
+        selection = self.select(needs_effect=True, needs_renewal=True)
         if selection is None:
-            return self.na(
-                "G5",
-                self.unselected(reg.NO_EFFECT_TEMPLATE),
-                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
-            )
+            reason, detail = self._renewal_unselected(reg.NO_EFFECT_TEMPLATE)
+            return self.na("G5", reason, **detail)
         control, store, recorder, _ = self._control_for("G5", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -2325,13 +2359,14 @@ class Engine:
         its own attempt's value; it fails where a caller outside any attempt is handed the last
         attempt's token.
         """
-        selection = self.select(needs_effect=True)
+        # SPEC-v0.7 §8.9 — as G5, and for the identical reason: G14's observable **is** a
+        # renewal, so under `max_attempts: 1` a correct kernel refuses attempt 2 and G14 would
+        # report it as a `fail`. Item 4 built the filter and the precedence; this reuses both
+        # unchanged rather than growing a second copy.
+        selection = self.select(needs_effect=True, needs_renewal=True)
         if selection is None:
-            return self.na(
-                "G14",
-                self.unselected(reg.NO_EFFECT_TEMPLATE),
-                **self.unselected_detail(reg.EFFECT_TEMPLATE_NOTE),
-            )
+            reason, detail = self._renewal_unselected(reg.NO_EFFECT_TEMPLATE)
+            return self.na("G14", reason, **detail)
         control, store, recorder, _ = self._control_for("G14", selection)
 
         def body(detail: dict[str, Any]) -> None:
@@ -2430,6 +2465,175 @@ class Engine:
             return self.graded("G14", selection, store, recorder, body)
         finally:
             store.close()
+
+    # --- G15: a renewal past the operator's ceiling is refused ----------------------------
+
+    def g15(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. Graded where the document declares a ceiling verify can reach.
+
+        **The route is the guarantee.** An earlier draft drove N+1 sequential `NotExecuted`
+        attempts, which §5.5's fast path alone refuses, so G15 passed with the check on the
+        assigned attempt number deleted: green with the guarantee's own mechanism gone. This
+        drives §5.5's public route instead. Attempt N ends `AMBIGUOUS` through a `TimeoutError`,
+        so the fast path reads a record that is not `FAILED` and lets the call through; attempt
+        N+1's `reconcile` hook answers `not_executed`, the record moves to `FAILED` at N, the
+        second take renews it to N+1, and only the check after the reservation can refuse that.
+
+        **The control is that every attempt up to N executed**, so for N of 2 or more a kernel
+        that refused every renewal fails here. At N = 1 there is no renewal to admit and the
+        control cannot tell such a kernel from a correct one; §8.9 says what that leaves
+        ungraded, and the G5 amendment is the other half of the same sentence.
+        """
+        selection = self.select(
+            needs_effect=True, needs_ceiling=True, ceiling_bound=reg.CEILING_BOUND
+        )
+        if selection is None:
+            # The fallback drops the bound and **keeps** every other filter, so what it finds is
+            # an action verify could otherwise drive. `CEILING_ABOVE_BOUND` is worded to say
+            # exactly that and no more: a deny-only action's low ceiling is not something this
+            # selection ever looked at, and a sentence claiming "every declared" would be false
+            # of the operator's document (§8.9's opening MUST).
+            if self.select(needs_effect=True, needs_ceiling=True) is not None:
+                return self.na("G15", reg.CEILING_ABOVE_BOUND)
+            return self.na("G15", self.unselected(reg.NO_CEILING_DECLARED))
+        ceiling = self.policy.max_attempts(selection.action)
+        assert ceiling is not None
+        control, store, recorder, _ = self._control_for("G15", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            key = str(selection.effect_key)
+            detail["max_attempts"] = ceiling
+            remote = _Executor(_raises(NotExecuted("ctrlrun-verify: the remote did nothing")))
+            for _ in range(ceiling - 1):
+                proposal = selection.build()
+                # `ActionDenied` too, and deliberately: a kernel that refused a renewal *below*
+                # the ceiling is what the control below is for, and letting it escape here would
+                # report that kernel as verify's own internal error rather than as a failure.
+                with suppress(NotExecuted, ActionDenied):
+                    self.execute(
+                        control,
+                        proposal,
+                        remote,
+                        key,
+                        self.approve(control, store, proposal, selection),
+                    )
+            _expect_control(
+                remote.calls == ceiling - 1,
+                f"the {ceiling - 1} renewals below the ceiling are admitted",
+                f"the executor was called {remote.calls} times",
+            )
+
+            lost = _Executor(
+                _raises(
+                    TimeoutError("ctrlrun-verify: the response was lost after the remote acted")
+                )
+            )
+            timed_out = selection.build()
+            with suppress(TimeoutError, ActionDenied):
+                self.execute(
+                    control,
+                    timed_out,
+                    lost,
+                    key,
+                    self.approve(control, store, timed_out, selection),
+                )
+            record = store.get_effect(key)
+            _expect_control(
+                record is not None
+                and record.state is EffectState.AMBIGUOUS
+                and record.attempt == ceiling,
+                f"attempt {ceiling} leaves the record AMBIGUOUS at {ceiling}",
+                f"the record is {None if record is None else (record.state, record.attempt)}",
+            )
+            _expect_control(
+                lost.calls == 1,
+                f"attempt {ceiling} reached the executor",
+                f"the executor was called {lost.calls} times",
+            )
+
+            over = selection.build()
+            before = len(recorder.events)
+            refusal = self.refused(
+                lambda: self._reconciled_attempt(control, over, key, selection, store),
+                (ActionDenied,),
+                f"ActionDenied on attempt {ceiling + 1}",
+                f"the attempt past max_attempts: {ceiling} reached the remote",
+            )
+            _expect(
+                getattr(refusal, "reason", None) == BLOCKED_ATTEMPT_CEILING,
+                "the refusal names the ceiling",
+                f"it was refused with reason {getattr(refusal, 'reason', None)!r}",
+            )
+            _expect(
+                remote.calls + lost.calls == ceiling,
+                f"the executor was called exactly {ceiling} times",
+                f"it was called {remote.calls + lost.calls} times",
+            )
+            appended = [event for event in recorder.events[before:] if event.effect_key == key]
+            types = [str(event.type) for event in appended]
+            _expect(
+                "EFFECT_RESERVED" in types
+                and "EFFECT_RESERVATION_REFUSED" in types
+                and types.index("EFFECT_RESERVED") < types.index("EFFECT_RESERVATION_REFUSED"),
+                "the store reserved the attempt and the check then refused it",
+                f"the refused attempt appended {types}",
+            )
+            refused_event = next(
+                event for event in appended if str(event.type) == "EFFECT_RESERVATION_REFUSED"
+            )
+            _expect(
+                refused_event.data.get("reason") == BLOCKED_ATTEMPT_CEILING,
+                "EFFECT_RESERVATION_REFUSED names the ceiling",
+                f"its reason is {refused_event.data.get('reason')!r}",
+            )
+            after = store.get_effect(key)
+            _expect(
+                after is not None
+                and after.state is EffectState.FAILED
+                and after.attempt == ceiling + 1,
+                f"the refused attempt leaves the record FAILED at {ceiling + 1}",
+                f"the record is {None if after is None else (after.state, after.attempt)}",
+            )
+            blocked = _last_receipt(store, over.action_id)
+            _expect(
+                blocked is not None and blocked.result is ReceiptResult.BLOCKED,
+                "the refused attempt's receipt is `blocked`",
+                f"the receipt is {None if blocked is None else blocked.result}",
+            )
+
+        try:
+            return self.graded("G15", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    def _reconciled_attempt(
+        self,
+        control: Control,
+        action: Action,
+        effect_key: str,
+        selection: _Selection,
+        store: StateStore,
+    ) -> Receipt:
+        """One attempt carrying §5.5's `reconcile` hook, and an approval where one is needed.
+
+        The hook is what makes G15's route public: it moves the `AMBIGUOUS` record the previous
+        attempt left to `FAILED`, so the second take renews rather than refusing, and the check
+        on the assigned attempt number is the only thing that can stop what follows.
+        """
+        from ..control import with_approval
+
+        approval_id = self.approve(control, store, action, selection)
+        executor = _Executor(_raises(NotExecuted("ctrlrun-verify: the remote did nothing")))
+
+        def attempt() -> Receipt:
+            return control.execute(
+                action, executor, effect_key, reconcile=lambda _key: "not_executed"
+            )
+
+        if approval_id is None:
+            return attempt()
+        with with_approval(approval_id):
+            return attempt()
 
     # --- G16: a moved precondition is refused before the reservation ---------------------
 

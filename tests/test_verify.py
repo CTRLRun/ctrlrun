@@ -170,16 +170,17 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
         assert results[gid].status is not Status.PASS
     assert report.applicable == report.passed + report.failed
     # G1, G2 and G16 for the missing approve band, G8 and G9 for the missing authority
-    # section, and G13, which is N/A on every SQLite run: SQLite has no clock of its own
-    # (SPEC-v0.7 §8.9). The rest are applicable, G14 among them, and the count is over those.
+    # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
+    # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
+    # G14 among them, and the count is over those.
     assert report.applicable == 8
-    assert report.not_applicable == 6
+    assert report.not_applicable == 7
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with five N/As a
     # thirteen-guarantee catalogue must not report thirteen over thirteen.
     assert f"{len(reg.GUARANTEES)}/{len(reg.GUARANTEES)}" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
-    assert "6 not applicable: G1, G2, G8, G9, G13, G16." in text
+    assert "7 not applicable: G1, G2, G8, G9, G13, G15, G16." in text
 
 
 def test_T101b_zero_applicable_guarantees_is_not_a_pass(tmp_path):
@@ -872,13 +873,13 @@ def test_the_v1_payments_template_reports_seven_over_seven():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (7, 7, 7)
+    assert (report.passed, report.applicable, report.not_applicable) == (7, 7, 8)
     text = report.to_text()
     assert "7/7 declared guarantees pass." in text
-    # G13 is N/A on SQLite, which has no clock of its own, and G14 joins G3, G4 and G5 where
-    # the effect template lives in the @protect decorator verify does not read (SPEC-v0.7 §8.9).
-    # G16 is graded: verify brings its own precondition provider (§8.9).
-    assert "7 not applicable: G3, G4, G5, G8, G9, G13, G14." in text
+    # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
+    # the effect template lives in the @protect decorator verify does not read, and where the
+    # document names no `max_attempts`. G16 is graded: verify brings its own provider (§8.9).
+    assert "8 not applicable: G3, G4, G5, G8, G9, G13, G14, G15." in text
     assert "10/10" not in text
 
 
