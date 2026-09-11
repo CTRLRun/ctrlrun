@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -1025,3 +1026,262 @@ def test_T219_a_detector_that_never_runs_fails_G13s_control(tmp_path, monkeypatc
     result = _g13(tmp_path)
     assert result.status is Status.FAIL
     assert result.reason == reg.CONTROL_FAILED
+
+
+# ============================================================================================
+# Review of #136: an observation that cannot be stored, and links slower than the margin
+# ============================================================================================
+
+
+class _RefusesSkewEvents(_MeasuresOnRefusal):
+    """A store whose `append_event` fails for `CLOCK_SKEW_DETECTED` alone, as a store whose
+    database is briefly locked might. Every other event is stored."""
+
+    refusing = True
+
+    def append_event(self, event):
+        if self.refusing and event.type is EventType.CLOCK_SKEW_DETECTED:
+            raise RuntimeError("the events table is locked")
+        return super().append_event(event)
+
+
+def _drive(store, clock, document: str = ALLOW):
+    """One allow, one duplicate refusal and one expired lease, through one Control.
+
+    Returns what each call came to, the receipts' shapes and the event types, with the skew
+    events left out, so a run on a store that could not store its report is compared with one
+    that had nothing to report."""
+    control = Control(Policy.from_yaml(document), store, clock=clock)
+    outcomes = []
+    for key in ("refund:one", "refund:one", "refund:lapsed"):
+        if key == "refund:lapsed":
+            store.reserve_effect(key, "act_holder", timedelta(seconds=1))
+            store.begin_execution(key, "act_holder")
+            clock.advance(timedelta(seconds=2))
+        action = Action("refund", {"key": key, "n": len(outcomes)}, Principal("skew-agent"))
+        try:
+            receipt = control.execute(action, lambda: "ok", key)
+        except Exception as refused:
+            outcomes.append(
+                (type(refused).__name__, re.sub(r"act_[0-9a-f]{32}", "act_*", str(refused)))
+            )
+        else:
+            outcomes.append((str(receipt.result), receipt.decision_reason, receipt.attempt))
+    receipts = [
+        (str(r.result), r.decision_reason, r.effect_key, r.attempt, r.error is None)
+        for r in store.receipts()
+    ]
+    types = [
+        str(event.type)
+        for event in store.events()
+        if event.type is not EventType.CLOCK_SKEW_DETECTED
+    ]
+    return outcomes, receipts, types
+
+
+OBSERVE = "schema: ctrlrun.policy/v3\nmode: observe\nactions:\n  refund:\n    decision: allow\n"
+
+
+@pytest.mark.parametrize("document", [ALLOW, OBSERVE], ids=["enforce", "observe"])
+def test_T216_a_report_the_store_cannot_append_changes_no_outcome(document, tmp_path, caplog):
+    """Review of #136, finding 3. The report is an observation, so a store that cannot write it
+    must leave every outcome, receipt and refusal exactly as a run with no skew leaves them: the
+    allow, the duplicate refusal, and the `AmbiguousEffect` beside which the second report would
+    have gone."""
+    plain_clock = Frozen(T)
+    plain = SQLiteStateStore(tmp_path / "plain.db", clock=plain_clock)
+    expected = _drive(plain, plain_clock, document)
+    assert [o[0] for o in expected[0]] == (
+        ["committed", "DuplicateEffect", "AmbiguousEffect"]
+        if document == ALLOW
+        else ["observed", "observed", "observed"]
+    ), "the precondition: the run reaches an allow, a duplicate and an expired lease"
+
+    clock = Frozen(T)
+    store = _RefusesSkewEvents(tmp_path / "refusing.db", clock=clock)
+    store.measurement = EXCEEDED
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        got = _drive(store, clock, document)
+
+    assert got == expected
+    assert skew_events(store.events()) == []
+    warned = [r for r in caplog.records if "CLOCK_SKEW_DETECTED" in r.getMessage()]
+    assert len(warned) == 1, "once per store per kind, not once per action"
+    assert "the events table is locked" in warned[0].getMessage()
+
+
+def test_T216_a_report_that_could_not_be_appended_is_tried_again(tmp_path):
+    """`_skew_reported` moves only after the store accepted the event, so a measurement whose
+    report was lost is reported by the next action that can store it."""
+    clock = Frozen(T)
+    store = _RefusesSkewEvents(tmp_path / "state.db", clock=clock)
+    store.measurement = EXCEEDED
+    sink = Recording()
+    control = Control(Policy.from_yaml(ALLOW), store, clock=clock, sinks=[sink])
+    control.execute(an_action("p1"), lambda: "ok", "refund:p1")
+    assert skew_events(store.events()) == [] and skew_events(sink.events) == []
+
+    store.refusing = False
+    control.execute(an_action("p2"), lambda: "ok", "refund:p2")
+    stored = skew_events(store.events())
+    assert len(stored) == 1 and stored[0].data["skew_us"] == 7_000_005
+    assert skew_events(sink.events) == stored, "a sink is handed only an event that was stored"
+
+
+def test_T216_resume_survives_a_report_the_store_cannot_append(tmp_path):
+    from ctrlrun import Suspended
+
+    clock = Frozen(T)
+    store = _RefusesSkewEvents(tmp_path / "state.db", clock=clock)
+    control = Control(Policy.from_yaml(ALLOW), store, clock=clock)
+
+    def suspend():
+        raise Suspended("refused-report")
+
+    with pytest.raises(Suspended):
+        control.execute(an_action(), suspend, "refund:suspended")
+    store.measurement = EXCEEDED
+    receipt = control.resume("refused-report", lambda: "ok")
+    assert str(receipt.result) == "committed"
+    assert skew_events(store.events()) == []
+
+
+# --- the conformance case on a link slower than its margin (review of #136, finding 2) -------
+
+
+class _SlowLinkStore(SQLiteStateStore):
+    """A store with a clock of its own, **honest within its bound**, behind a slow link.
+
+    Its clock is this host's, so the true skew is exactly the injected clock minus now. It
+    reports that plus an error no larger than the bound it states, and each open is handed its
+    `(error, bound)` from a script, so a test can give the probe a slow round trip and the
+    later opens a fast one, or the reverse. Everything it decides is SQLite's own."""
+
+    def __init__(self, path, *, clock, error: timedelta, bound: timedelta) -> None:
+        super().__init__(path, clock=clock)
+        midpoint = datetime.now(UTC)
+        self._measured = ClockSkew(
+            skew=(clock() - midpoint) + error,
+            bound=bound,
+            threshold=ONE_SECOND,
+            measured_at=midpoint,
+            trigger="open",
+        )
+
+    @property
+    def clock_skew(self):
+        return self._measured
+
+
+class _SlowLinkBackend(SQLiteBackend):
+    name = "slow-link"
+
+    def __init__(self, root, script) -> None:
+        super().__init__(root)
+        self._script = list(script)
+        self.opens = 0
+
+    def _next(self):
+        step = self._script[min(self.opens, len(self._script) - 1)]
+        self.opens += 1
+        return step
+
+    def open(self):
+        return self.open_with_clock(lambda: datetime.now(UTC))
+
+    def open_with_clock(self, clock):
+        error, bound = self._next()
+        store = _SlowLinkStore(self._path, clock=clock, error=error, bound=bound)
+        self._open.append(store)
+        return store
+
+
+def _seconds(error: float, bound: float) -> tuple[timedelta, timedelta]:
+    return timedelta(seconds=error), timedelta(seconds=bound)
+
+
+def test_T214_a_conforming_store_behind_a_slow_link_passes(tmp_path):
+    """A round trip whose half is six seconds: a skew of the threshold plus five is inside the
+    store's own doubt, so a conforming store reports nothing, and a fixed margin would fail it.
+    The case must widen the injection until it is decisive against the bound it measured."""
+    backend = _SlowLinkBackend(tmp_path, [_seconds(0, 6)])
+    case = _skew_case(run_conformance(backend, only=("skew-measured",)))
+    assert case.status is SuiteStatus.PASS, case.reason
+
+
+def test_T214_a_probe_slower_than_the_store_is_measured_again(tmp_path):
+    """The probe's own doubt is the alignment's. Here it is off by five seconds, inside its six
+    second bound, and the aligned store, on a fast link, honestly reports that five. That is the
+    probe's error, not a detector firing on an aligned clock, so the case aligns again."""
+    backend = _SlowLinkBackend(tmp_path, [_seconds(5, 6), _seconds(0, 0.001), _seconds(0, 0.001)])
+    case = _skew_case(run_conformance(backend, only=("skew-measured",)))
+    assert case.status is SuiteStatus.PASS, case.reason
+
+
+def test_T214_a_link_it_can_never_outrun_says_so_and_blames_no_store(tmp_path):
+    """Every open's bound ten times the last: no injection is ever decisive. Bounded, and the
+    reason names the link rather than claiming the store failed to report."""
+    backend = _SlowLinkBackend(
+        tmp_path, [_seconds(0, 0.001), _seconds(0, 0.001)] + [_seconds(0, 10**k) for k in range(8)]
+    )
+    case = _skew_case(run_conformance(backend, only=("skew-measured",)))
+    assert case.status is SuiteStatus.FAIL
+    assert "could not establish" in (case.reason or ""), case.reason
+    assert "was not reported" not in (case.reason or "")
+    assert backend.opens <= 12, "every retry loop is bounded"
+
+
+# --- G13 on a slow link (review of #136, finding 1) ------------------------------------------
+
+
+def _slow_after(monkeypatch, *, first: tuple[float, float], rest: tuple[float, float]):
+    """Real latency on the server-clock read: `(before, after)` seconds around it for the first
+    measurement, and `rest` for every later one."""
+    from ctrlrun.postgres import PostgresStateStore
+
+    original = PostgresStateStore._read_server_clock
+    calls = [0]
+
+    def slow(store, connection):
+        before, after = first if calls[0] == 0 else rest
+        calls[0] += 1
+        time.sleep(before)
+        read = original(store, connection)
+        time.sleep(after)
+        return read
+
+    monkeypatch.setattr(PostgresStateStore, "_read_server_clock", slow)
+
+
+@postgres
+def test_T219_G13_on_a_link_slower_than_its_margin_passes(tmp_path, monkeypatch):
+    """A 2.1 s round trip after the probe. The threshold plus one second is then inside a
+    conforming store's bound, so it reports nothing; G13 must widen the injection from the bound
+    the shifted store measured, not report a FAIL the kernel did not earn."""
+    _slow_after(monkeypatch, first=(0, 0), rest=(1.05, 1.05))
+    result = _g13(tmp_path)
+    assert result.status is Status.PASS, (result.reason, result.counterexample)
+
+
+@postgres
+def test_T219_G13_says_when_it_cannot_establish_divergence(tmp_path, monkeypatch):
+    """Given one attempt on that link, G13 cannot put a skew past a conforming store's bound. It
+    says so as verify's internal error, exit 3, and never as a FAIL."""
+    from ctrlrun.verify import scenarios
+    from ctrlrun.verify.scenarios import VerifyInternalError
+
+    monkeypatch.setattr(scenarios, "_SKEW_ATTEMPTS", 1)
+    _slow_after(monkeypatch, first=(0, 0), rest=(1.05, 1.05))
+    with pytest.raises(VerifyInternalError) as raised:
+        _g13(tmp_path)
+    assert "could not establish" in str(raised.value)
+
+
+@postgres
+def test_T219_G13_aligns_again_when_the_probe_was_slow(tmp_path, monkeypatch):
+    """A probe whose 2.4 s round trip fell entirely before the server read is off by 1.2 s,
+    inside its bound. The aligned store, on a fast link, honestly reports that 1.2 s: the
+    probe's error, not a detector firing on an aligned clock, so G13 aligns again."""
+    _slow_after(monkeypatch, first=(2.4, 0), rest=(0, 0))
+    result = _g13(tmp_path)
+    assert result.status is Status.PASS, (result.reason, result.counterexample)

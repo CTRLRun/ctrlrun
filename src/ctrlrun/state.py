@@ -455,6 +455,47 @@ class ClockSkew:
         return abs(self.skew) > self.threshold + self.bound
 
 
+# --- grading a measurement: G13 and the store conformance suite's clock case ------------------
+#
+# Both inject a skew and ask whether it was reported. A conforming store reports only past
+# `threshold + bound`, so an injection sized without looking at the bound grades the link and
+# not the store: a round trip slow enough that half of it exceeds the margin makes a correct
+# store stay silent, and a fixed margin then reports that silence as a defect. One definition,
+# so verify and the suite cannot come to disagree about when a silence is a finding.
+
+
+def _decisive(injected: timedelta, measured: ClockSkew, alignment: timedelta) -> bool:
+    """Must a store honest within `measured.bound` report a skew of `injected`?
+
+    The clock was aligned by a first measurement whose own doubt is `alignment`, so the true
+    skew is `injected` within `alignment`, and the store may read it anywhere within its bound
+    of that. It reports only past `threshold + bound`. So only an injection past
+    `threshold + 2 * bound + alignment` leaves a conforming store no room to stay silent.
+    """
+    return abs(injected) > measured.threshold + 2 * measured.bound + alignment
+
+
+def _wider_margin(measured: ClockSkew, alignment: timedelta, base: timedelta) -> timedelta:
+    """The margin past the threshold that would have been decisive against `measured`."""
+    return 2 * measured.bound + alignment + base
+
+
+def _explained_by_alignment(measured: ClockSkew, alignment: timedelta) -> bool:
+    """Could this report on a clock meant to be aligned be the aligning measurement's error?
+
+    Only where the measurement is past the threshold by more than its own bound, and by no more
+    than the alignment's doubt beyond that. A report the store's own rule does not allow is a
+    detector firing when it must not, and one past both bounds contradicts the measurement the
+    alignment came from: both are findings, and neither is excused here.
+
+    The rule is recomputed from the fields rather than read from `exceeded`, so a store whose
+    `exceeded` always answers true is caught by the first branch instead of being excused by
+    this one.
+    """
+    past = abs(measured.skew) - measured.threshold
+    return measured.bound < past <= measured.bound + alignment
+
+
 class StateStore(ApprovalStore, Protocol):
     """Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence."""
 

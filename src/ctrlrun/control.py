@@ -99,6 +99,7 @@ _SKEW_WARNED: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictiona
 _SKEW_WARNED_LOCK = threading.Lock()
 _SKEW_NOT_A_MEASUREMENT: Final = "not a ClockSkew"
 _SKEW_READ_RAISED: Final = "read raised"
+_SKEW_APPEND_FAILED: Final = "append failed"
 #: The event's numbers are integer microseconds, exact, so a reader sees what the decision used.
 _MICROSECOND: Final = timedelta(microseconds=1)
 
@@ -1800,11 +1801,16 @@ class Control:
         the optional `clock_skew` attribute and this pulls it. A store without the attribute
         reports nothing, which is correct: only a store with a second clock has one to report.
 
-        The value is used only if it is a `ctrlrun.state.ClockSkew`. Anything else, and a read
-        that raises, is logged once per store per kind and never raised: an observation must not
-        be able to fail the action it observes. With no `action` the report is about the
-        deployment and carries no `action_id`; beside an `AmbiguousEffect` it names the attempt
-        whose refusal it accompanies. It does not say skew caused that refusal.
+        The value is used only if it is a `ctrlrun.state.ClockSkew`. Anything else, a read that
+        raises, and an append the store refuses are logged once per store per kind and never
+        raised: an observation must not be able to fail the action it observes, and a refusal it
+        sits beside must reach the caller as the refusal it was. With no `action` the report is
+        about the deployment and carries no `action_id`; beside an `AmbiguousEffect` it names the
+        attempt whose refusal it accompanies. It does not say skew caused that refusal.
+
+        A report is marked as made only once the store has accepted it, so one the store could
+        not write is tried again by the next action, and sinks are handed only an event that was
+        stored, with the store's `event_id` (`v0.2 §4.1`).
         """
         try:
             value = getattr(self._store, "clock_skew", None)
@@ -1831,19 +1837,31 @@ class Control:
                 _SKEW_READ_RAISED, f"reading it raised {type(broke).__name__}: {broke}"
             )
             return
-        self._skew_reported = value
-        stored = self._store.append_event(
-            Event(
-                type=EventType.CLOCK_SKEW_DETECTED,
-                action_id=None if action is None else action.action_id,
-                ts=self._clock(),
-                data=data,
-                effect_key=effect_key,
+        try:
+            stored = self._store.append_event(
+                Event(
+                    type=EventType.CLOCK_SKEW_DETECTED,
+                    action_id=None if action is None else action.action_id,
+                    ts=self._clock(),
+                    data=data,
+                    effect_key=effect_key,
+                )
             )
-        )
+        except Exception as broke:
+            # `Exception`, and the width is `_spend_unneeded_approval`'s argument: there is
+            # nothing to protect here. This is an observation; the action's own events, receipt
+            # and refusal are written by the paths that follow and raise as they always did.
+            self._warn_clock_skew(
+                _SKEW_APPEND_FAILED,
+                f"the store refused to append CLOCK_SKEW_DETECTED ({type(broke).__name__}: "
+                f"{broke}), so the report is retried by the next action",
+                ignored=False,
+            )
+            return
+        self._skew_reported = value
         self._fan_out("on_event", stored, str(stored.type))
 
-    def _warn_clock_skew(self, kind: str, detail: str) -> None:
+    def _warn_clock_skew(self, kind: str, detail: str, *, ignored: bool = True) -> None:
         with _SKEW_WARNED_LOCK:
             try:
                 seen = _SKEW_WARNED.setdefault(self._store, set())
@@ -1853,9 +1871,13 @@ class Control:
                 return
             seen.add(kind)
         _LOG.warning(
-            "%s: its clock_skew attribute was ignored, so this store's clock skew is never "
-            "reported: %s. Nothing about any action changes (SPEC-v0.7 §3.6)",
+            "%s: %s: %s. Nothing about any action changes (SPEC-v0.7 §3.6)",
             type(self._store).__name__,
+            (
+                "its clock_skew attribute was ignored, so this store's clock skew is never reported"
+                if ignored
+                else "a clock skew report was not recorded"
+            ),
             detail,
         )
 

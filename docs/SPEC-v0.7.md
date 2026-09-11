@@ -2529,6 +2529,27 @@ shipped examples still pass every applicable guarantee under `--store-url postgr
 test asserted a complete event sequence against an injected clock, so none needed changing. SQLite runs of verify
 report G13 `N/A`, which moves the counts T113 and T116 pin by one.
 
+**An injection is sized against the bound, never fixed (review of #136).** G13 and the conformance case both
+inject a skew and ask whether it was reported, and both first used a fixed margin past the threshold. The bound is
+half the round trip to the store, so on a link whose half exceeds that margin a *conforming* store reports nothing
+and the fixed margin calls that silence a defect: verify would have graded the link and blamed the kernel. Both now
+widen the injection from the bound the shifted store measured, until a store honest within its bound would have to
+report it (`threshold + 2 * bound + alignment`, one definition in `state.py` so the two cannot drift apart), and
+both retry a bounded number of times. A report on the clock they meant to align, where the aligning measurement's
+own doubt could explain it, is met by aligning again rather than by a FAIL. A link that cannot be outrun is
+**verify's internal error, exit 3** (`v0.4 §3.8`: a fact about the machine, never a verdict on the kernel) and, in
+the suite, a failure whose reason names the link and says it is not a report the store failed to make. The test for
+each injects real latency rather than simulating it. Whether the alignment's own doubt excuses a report is decided
+by recomputing the rule from the measurement's fields rather than by reading `exceeded`, so a store whose
+`exceeded` always answers true is still caught by the control.
+
+**A report the store cannot store changes nothing (review of #136).** `append_event` can fail, and it sat
+unguarded, so a locked database would have raised out of `execute` before the action was decided, and out of the
+`AmbiguousEffect` handler in place of the refusal the caller was owed: an observation deciding an outcome, which is
+the one thing §3 says it never does. The append is now guarded like the read, logged once per store per kind, and
+`_skew_reported` moves only after the store accepted the event, so a report that was lost is made by the next
+action that can store it and a sink is handed only an event that was stored.
+
 **`v0.1 §6.2`'s list is not edited in place.** v0.2 and v0.3 added nine event types without touching it, and
 §9.6 item 2 records this one where the others are recorded. `v0.6 §8` T141 is amended in place, as §8 T214 asks.
 
