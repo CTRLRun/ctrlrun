@@ -57,11 +57,26 @@ jobs:
             echo "read=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          curl -sS -f \
+          # `-f` alone exits 22 on any 4xx and prints the code and nothing else, which is the
+          # least useful thing to find in a log a year later: the two failures that actually
+          # happen here are a token that lacks `Administration: Read-only` and a fine-grained
+          # token the org has not approved, and both are 403. So the status is read explicitly
+          # and named.
+          status=$(curl -sS -o clones-api.json -w '%{http_code}' \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $TRAFFIC_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$REPOSITORY/traffic/clones" > clones-api.json
+            "https://api.github.com/repos/$REPOSITORY/traffic/clones")
+          if [ "$status" = "403" ] || [ "$status" = "404" ]; then
+            echo "::warning::TRAFFIC_TOKEN cannot read $REPOSITORY traffic (HTTP $status). It needs Administration: Read-only on this repository (fine-grained, resource owner CTRLRun) or the classic repo scope; a fine-grained token may also be waiting on org approval. The clones badge keeps its last value until then."
+            echo "read=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::traffic API returned HTTP $status" >&2
+            cat clones-api.json >&2
+            exit 1
+          fi
           echo "read=true" >> "$GITHUB_OUTPUT"
 
       - name: Merge into the history and publish
