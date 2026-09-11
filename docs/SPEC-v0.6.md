@@ -804,6 +804,12 @@ The shape of one reservation, inside one transaction:
    `DuplicateEffect(state=in_progress)`, because the record changed under us. SQLite already does
    exactly this, and the `WHERE` clause is the same one.
 
+*Amended by `SPEC-v0.7.md` §5.6 (its §9.6, item 8):* step 6's `UPDATE` is also conditioned on the
+attempt the plan renewed from, and every later compare-and-set below (`_transition`, and the write
+under `resolve_effect`, `extend_lease`, `hold_continuation` and §4.2.2's kept `AMBIGUOUS` write) on the
+attempt it read, because each writes that number back and `action_id` and `state` alone can come round
+again at a newer attempt. §12.3a there says what 0.6.1 did without it.
+
 **The retry at step 5 is bounded at one**, and the bound is not a performance choice. A second
 zero would mean the winner's record vanished between the re-read and the insert, which nothing in
 this protocol can do — there is no `DELETE` on `effects` anywhere in the codebase — so a second
@@ -1016,6 +1022,11 @@ A store that takes any branch of §4.3.2 MUST say which one, on the `ctrlrun.pos
 | `a2.row1.landed` | Table A2: the record is in the state we were writing, and ours; the commit landed |
 | `a2.row2.reissue` | Table A2: the record is still in a pre-state the operation may be issued from; the conditional `UPDATE` is re-issued |
 | `a2.row3.refuse` | Table A2: anything else; back through the same predicate, which refuses |
+
+*Amended by `SPEC-v0.7.md` §12.3a (its §9.6, item 8):* on a **renewal**, `a2.row1.landed` now requires
+§4.3.3's whole-row identity, as `a1.row1.ours` does, rather than `RESERVED` under our `action_id`: a
+second process renewing under the same `action_id` produced exactly that record. Anything else a
+renewal's re-read finds, other than `FAILED`, is `a2.row3.refuse`.
 
 **`a2.row2.reissue` does not mean "still ours", and saying so would claim more than the code
 checks.** On a *transition* the row is ours — `action_id` and a pre-state in `expected`. On a

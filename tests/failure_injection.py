@@ -102,11 +102,36 @@ def is_commit(kind: bytes, body: bytes) -> bool:
     return body.split(b"\x00", 1)[0].strip().upper() == b"COMMIT"
 
 
+def statement_of(kind: bytes, body: bytes) -> bytes | None:
+    """The SQL text one client message carries, or `None` if it carries none.
+
+    A simple Query carries it whole. A parameterised statement, which is how psycopg sends every
+    `cursor.execute` with arguments, is Parse/Bind/Execute, and the text is in the **Parse**:
+    `name NUL query NUL ...`. The Bind carries the arguments, so an effect key that happens to
+    contain `UPDATE` is never mistaken for one, for the reason `is_commit` parses frames at all.
+
+    psycopg carries the text on a query's **first six executions** on one connection, and a
+    review measured it rather than reading it off the default: executions 1 to 5 are unnamed
+    Parses, execution 6 is the named Parse that prepares it (`prepare_threshold`, five), and from
+    7 on the Bind names the prepared statement and no text travels, so this returns `None`. Every
+    statement the tests hold is the first or second execution of its query on its connection, and
+    every test that holds one asserts `holding.wait(BOUND)`, so a statement that had already been
+    prepared fails the test rather than slipping past it.
+    """
+    if kind == b"Q":
+        return body.split(b"\x00", 1)[0]
+    if kind == b"P":
+        parts = body.split(b"\x00", 2)
+        return parts[1] if len(parts) > 2 else None
+    return None
+
+
 @dataclass
 class Proxy:
     """A TCP relay in front of Postgres, with a switch for each way it can break.
 
-    Four modes, each named for the row of §4.3's Table A it produces:
+    Four modes, each named for the row of §4.3's Table A it produces, and a fifth, `arm()`, which
+    produces none and opens a window instead (SPEC-v0.7 §5.6):
 
     - `kill_on_commit` -- forward the `COMMIT` to the server, let it land, then drop the client.
       The server very likely committed and the client will never know: **ambiguous**, and the
@@ -125,6 +150,16 @@ class Proxy:
       client sees a stall, not a reset, and `partition = False` genuinely restores the connection,
       which is §4.5's "and restore it". Discarding instead would make the restore unexercisable:
       the query the server never received cannot arrive late.
+    - `arm(predicate)` -- a predicate over each parsed client message, `(type, body)`. The first
+      message it accepts is **held**: the chunk carrying it is not forwarded, `holding` is set,
+      and the pump waits for `release()`. One statement on one connection, where `partition`
+      stops every connection at once. It is what opens a window *inside* a store method, between
+      one statement and the next, which SPEC-v0.7 §5.6's windows need and nothing else here could
+      reach: the statements before it have run, the held one has not, and every other connection
+      carries on. It fires once and disarms; `arm()` again for the next window, which it refuses
+      while one is armed or held. The chunk is held whole, which for a client that waits for each
+      statement's reply before sending the next (psycopg does) is the held statement's own
+      Parse/Bind/Execute/Sync and nothing else.
     """
 
     upstream_host: str
@@ -158,6 +193,13 @@ class Proxy:
     #: `COMMIT` would ever be recognised -- a test asserting `commits_seen` would fail loudly, but
     #: this says why. Local connections in CI negotiate no TLS.
     tls_negotiated: bool = False
+    _hold_when: Callable[[bytes, bytes], bool] | None = None
+    #: Set the moment an armed hold fires, so a test waits on the window with a bound rather than
+    #: sleeping and hoping the statement has arrived.
+    holding: threading.Event = field(default_factory=threading.Event)
+    #: Messages held, so a test can assert the window it describes was opened.
+    holds: int = 0
+    _released: threading.Event = field(default_factory=threading.Event)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def start(self) -> Proxy:
@@ -188,6 +230,56 @@ class Proxy:
             self.commits_seen = 0
             self.clients_killed = 0
             self.commits_dropped = 0
+            self.holds = 0
+
+    def arm(self, predicate: Callable[[bytes, bytes], bool]) -> None:
+        """Hold the next client message `predicate` accepts, until `release()`.
+
+        **Each arming starts clean.** The first version was one-shot and did not say so: `holding`
+        and the release event were never cleared, so a second hold reported itself held before its
+        statement arrived and forwarded that statement at once, while `holds` counted a window
+        that never opened. `holding` is cleared **in place**, because a test may already be
+        waiting on it for the hold it is about to arm (T246b's insert variant arms from `on_drop`,
+        after it has started waiting). The release event is **replaced**, so a pump still waking
+        from the previous release is released by that one and never by a later one. And it refuses
+        to arm over a hold that is armed and has not fired, or has fired and not been released,
+        rather than silently replacing a window a test is relying on.
+        """
+        with self._lock:
+            if self._hold_when is not None:
+                raise RuntimeError("a hold is already armed and has not fired")
+            if self.holding.is_set() and not self._released.is_set():
+                raise RuntimeError("a statement is still held; release() it before arming again")
+            self.holding.clear()
+            self._released = threading.Event()
+            self._hold_when = predicate
+
+    def release(self) -> None:
+        """Forward what the armed hold is holding. Safe when nothing is held, and more than once.
+
+        **It releases a hold that has fired, and never one that has not.** Releasing an armed hold
+        before its statement arrived pre-released it: the statement was then forwarded the moment
+        it was parsed, `holding` was set and `holds` counted it, which is the lie `arm()` exists to
+        remove, in a narrower form. A test whose `finally` releases, or which releases the wrong
+        hold, would have opened no window and passed. Found by review, round 2.
+        """
+        with self._lock:
+            if not self.holding.is_set():
+                return
+            released = self._released
+        released.set()
+
+    def _holds(self, kind: bytes, body: bytes) -> threading.Event | None:
+        """If the armed predicate claims this message: disarm, mark it held, and return the event
+        its release will set. `None` otherwise."""
+        with self._lock:
+            predicate = self._hold_when
+            if predicate is None or not predicate(kind, body):
+                return None
+            self._hold_when = None
+            self.holds += 1
+            self.holding.set()
+            return self._released
 
     def url(self, template: str) -> str:
         """`template` with its host and port pointed at this proxy."""
@@ -256,8 +348,11 @@ class Proxy:
                 injecting is the exact false green this file exists to eliminate.
                 """
                 commit_at = -1
+                held: threading.Event | None = None
                 if frontend is not None:
                     for kind, body, offset in frontend.feed(data):
+                        if held is None:
+                            held = self._holds(kind, body)
                         if not is_commit(kind, body):
                             continue
                         with self._lock:
@@ -268,6 +363,16 @@ class Proxy:
                     # The server accepted an SSLRequest. Everything after is ciphertext.
                     with self._lock:
                         self.tls_negotiated = True
+
+                if held is not None:
+                    # Parsed already, so the frame parser stays aligned; only the forwarding
+                    # waits. The server has not seen the held statement and the client is blocked
+                    # on its reply, so nothing on this connection moves until `release()`. The
+                    # wait ends on `stop()` too, so a test that fails before releasing cannot
+                    # leave this pump running.
+                    while not held.wait(0.2):
+                        if self._stop.is_set():
+                            return False
 
                 dropping = False
                 if commit_at >= 0:
