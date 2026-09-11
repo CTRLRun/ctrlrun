@@ -174,7 +174,7 @@ any change to one appears here.
   a copy. `ctrlrun.gateway.transport.request` offers the gateway's httpx mapping to an executor
   that uses httpx, on a client built for the one call. The gateway's own `NotExecuted`, for an
   upstream it never reached, is now chained from the httpx exception and its receipt names it.
-  `ctrlrun verify` gains **G12**, "a byte written then the peer killed is ambiguous", under
+  `ctrlrun verify` gains **G12**, "a byte written is ambiguous", under
   `ctrlrun.guarantees/v3`, with the refused connection as its positive control. G12 needs a
   loopback peer, so verify's rule becomes *no connection except to the store `--store-url` names
   and to loopback listeners verify bound itself*, and the test suite's network guard admits
