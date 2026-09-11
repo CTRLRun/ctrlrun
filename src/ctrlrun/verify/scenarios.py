@@ -63,6 +63,7 @@ from ..errors import (
     ActionDenied,
     AmbiguousEffect,
     ApprovalMismatch,
+    ApprovalRequired,
     AuthorityDenied,
     AuthorityEscalation,
     CTRLRunError,
@@ -850,13 +851,14 @@ class Engine:
         executor: _Executor,
         effect_key: str | None,
         approval_id: str | None,
+        preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         if approval_id is None:
-            return control.execute(action, executor, effect_key)
+            return control.execute(action, executor, effect_key, preconditions=preconditions)
         from ..control import with_approval
 
         with with_approval(approval_id):
-            return control.execute(action, executor, effect_key)
+            return control.execute(action, executor, effect_key, preconditions=preconditions)
 
     def refused(
         self,
@@ -2426,6 +2428,112 @@ class Engine:
 
         try:
             return self.graded("G14", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G16: a moved precondition is refused before the reservation ---------------------
+
+    def g16(self) -> GuaranteeResult:
+        """SPEC-v0.7 §8.9. The precondition recheck, against the kernel in this configuration,
+        with verify's own provider standing in for the operator's code.
+
+        **Graded as G5 and G10 are, and never `N/A` for want of a fingerprint in the document**:
+        a provider is named in code (`@protect(preconditions=...)`), not in any document verify
+        reads, so "the configuration names no fingerprint" is a sentence verify has no way to
+        make true. The note printed beneath the table says so. `N/A` only where no action reaches
+        `approve`, which is G1's reason and G1's one weakness, inherited and stated.
+
+        The approval still being `granted` after the refusal is what proves the refusal came
+        before the store call that consumes it; the missing `EFFECT_RESERVED` proves it came
+        before the reservation, where there is a key to reserve. The positive control is the
+        same approval presented once the provider reports the world the human saw again, which
+        must commit: without it, a kernel that refused every presentation would pass.
+
+        What this grades is the refusal of a change landing **before** the comparison. The
+        residual window after it, which the recheck narrows and does not close, is not a
+        property verify could grade: a correct kernel does not refuse it (§6.7).
+        """
+        selection = self.select(decisions=(Decision.APPROVE,))
+        if selection is None:
+            return self.na("G16", self.unselected(reg.NO_APPROVE_RULE), **self.unselected_detail())
+        control, store, recorder, _ = self._control_for("G16", selection)
+        seen = f"{reg.SYNTHETIC_PREFIX}-the-state-a-human-approved"
+        world = {"state": seen}
+
+        def provider(action: Action) -> Mapping[str, Any]:
+            return {"resource": world["state"]}
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["note"] = reg.PRECONDITION_NOTE
+            action = selection.build()
+            key = selection.effect_key
+            asked = self.refused(
+                lambda: self.execute(control, action, _Executor(), key, None, provider),
+                (ApprovalRequired,),
+                "ApprovalRequired on the request pass",
+                "an action that requires approval ran without one",
+            )
+            request_id = str(getattr(asked, "request_id", ""))
+            store.grant_approval(request_id, APPROVER)
+
+            world["state"] = f"{reg.SYNTHETIC_PREFIX}-the-state-it-moved-to"
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(control, action, executor, key, request_id, provider),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='precondition_changed') before the reservation",
+                "the approval opened the action in a world that moved after it was granted",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "precondition_changed",
+                "ApprovalMismatch(reason='precondition_changed')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            record = store.get_approval(request_id)
+            _expect(
+                record is not None and record.status is ApprovalStatus.GRANTED,
+                "the approval is still granted, so the refusal came before the store call "
+                "that consumes it",
+                f"the approval is {None if record is None else record.status}",
+            )
+            if key is not None:
+                reserved = [
+                    event
+                    for event in recorder.events
+                    if event.type is EventType.EFFECT_RESERVED and event.effect_key == key
+                ]
+                _expect(
+                    not reserved and store.get_effect(key) is None,
+                    f"nothing reserved {key!r}",
+                    f"{len(reserved)} EFFECT_RESERVED and a record in "
+                    f"{getattr(store.get_effect(key), 'state', None)}",
+                )
+            _expect(
+                _named_event(
+                    recorder, EventType.APPROVAL_INVALIDATED, reason="precondition_changed"
+                ),
+                "APPROVAL_INVALIDATED with reason 'precondition_changed'",
+                f"events were {recorder.types()}",
+            )
+
+            world["state"] = seen
+            committed = _Executor()
+            receipt = self.execute(control, action, committed, key, request_id, provider)
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same approval, presented once the world is the one the human saw, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G16", selection, store, recorder, body)
         finally:
             store.close()
 

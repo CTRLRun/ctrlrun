@@ -72,6 +72,15 @@ GUARANTEES: Final = (
             "v0.7 §8 T238",
         ),
     ),
+    Guarantee(
+        "G16",
+        # Not "a moved precondition is refused": a precondition that moves after the comparison
+        # is not refused (§6.7), and a title is the shortest sentence this project writes about
+        # a guarantee. What is compared is the fingerprint, and what G16 grades is one that had
+        # already moved when the recheck read it.
+        "a moved fingerprint is refused",
+        ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -128,6 +137,15 @@ GRANT_RESOURCE_NOTE: Final = (
     "`ctrlrun-verify-*` resource to make those guarantees applicable"
 )
 NO_DELEGABLE_GRANT: Final = "no grant is delegable"
+
+#: SPEC-v0.7 §8.9, G16's note, printed once beneath the table as `EFFECT_TEMPLATE_NOTE` is. G16
+#: is graded against verify's own stand-in for the operator's provider, because a provider is
+#: named in code and not in any document verify reads; this says so where a reader looks.
+PRECONDITION_NOTE: Final = (
+    "verify supplies its own precondition provider; whether your @protect declares one is in "
+    "your code, which verify does not read. The gateway and the ACS hook cannot name a "
+    "provider at all, and refuse an approval that carries a fingerprint"
+)
 
 #: G4's second N/A (§2.2). No backend in v0.4 reaches it — `SQLiteStateStore` refuses
 #: `:memory:` precisely so that it cannot — and the row exists so a v0.6 backend that cannot

@@ -15,14 +15,14 @@ import json
 import os
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 from .action import Principal, canonical_bytes
-from .errors import InvalidArgument
+from .errors import CTRLRunError, InvalidArgument
 from .policy import Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
@@ -32,7 +32,44 @@ from .policy import Decision
 #: `policy_version` and `controls`. Every `v2` field keeps its meaning, and `Receipt.from_dict`
 #: reads all five with `.get`, so a `v2` receipt on disk still parses -- which is the rule every
 #: reader upgrades before any writer switches.
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v3"
+#: SPEC-v0.7 §6.11. `v4` adds `precondition_at_request` and `precondition_at_recheck`, and it is
+#: the first bump that does not rehash every older receipt: a receipt read from a store is
+#: hashed as the document it was read from, and renders under its own schema's label and keys.
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v4"
+
+_V1: Final = "ctrlrun.receipt/v1"
+_V2: Final = "ctrlrun.receipt/v2"
+_V3: Final = "ctrlrun.receipt/v3"
+_V4: Final = "ctrlrun.receipt/v4"
+
+#: SPEC-v0.7 §6.11: each schema's top-level key set, exactly its released writers': `v1`, 19
+#: keys, by 0.1.0 and 0.2.0; `v2`, 21, by 0.3.0rc1 to 0.5.0; `v3`, 26, by 0.6.0 and 0.6.1;
+#: `v4`, 28. Counted from those releases' own `to_dict`, not from memory.
+_V1_KEYS: Final = (
+    "schema",
+    "receipt_id",
+    "action_id",
+    "action",
+    "action_hash",
+    "principal",
+    "resource",
+    "arguments",
+    "environment",
+    "decision",
+    "decision_reason",
+    "approval_id",
+    "approver",
+    "effect_key",
+    "attempt",
+    "result",
+    "error",
+    "started_at",
+    "finished_at",
+)
+_V2_KEYS: Final = (*_V1_KEYS[:16], "execution", "would_have", *_V1_KEYS[16:])
+_V3_KEYS: Final = (*_V2_KEYS, "seq", "prev_hash", "policy_hash", "policy_version", "controls")
+_V4_KEYS: Final = (*_V3_KEYS, "precondition_at_request", "precondition_at_recheck")
+_KEYS: Final = {_V1: _V1_KEYS, _V2: _V2_KEYS, _V3: _V3_KEYS, _V4: _V4_KEYS}
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
 #: SPEC-v0.6 §6.2. The `prev_hash` of receipt 1, and the hash the head row starts at (§3.7), so
@@ -252,7 +289,21 @@ def _controls_of(value: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Receipt:
-    """Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1)."""
+    """Portable evidence of one action that reached a terminal state (SPEC-v0.1 §6.1).
+
+    `ctrlrun.receipt/v4` (SPEC-v0.7 §6.11) adds `precondition_at_request` and
+    `precondition_at_recheck`: the fingerprint the approval was requested with, and the one
+    computed on the presenting pass, each `None` where there was none. Hashes only, never the
+    state they were computed from. On a refusal they say which side moved or was missing; on a
+    committed action they are equal, and the receipt records that the world was compared
+    before the reservation. That comparison narrows the window between a human's decision and
+    the effect and does not close it (§6.7).
+
+    `schema` is the schema the receipt is written under. A receipt read from a store keeps the
+    one it was written with, renders under that schema's label and keys, and is hashed as the
+    document it was read from, so a `v3` receipt a released 0.6 wrote still rehashes to its
+    stored hash under a `v4` binary.
+    """
 
     receipt_id: str
     action_id: str
@@ -309,6 +360,28 @@ class Receipt:
     #: `verify_chain` compare stored against recomputed without the protocol growing a second
     #: reader (§9.1).
     hash: str | None = None
+    #: SPEC-v0.7 §6.11: the fingerprint the presented approval was requested with, and the one
+    #: the presenting pass computed. `None` where there was none. Read only from a `v4`
+    #: document, so no reader surfaces the value of a key a document's schema does not declare.
+    precondition_at_request: str | None = None
+    precondition_at_recheck: str | None = None
+    #: The schema this receipt is written under (§6.11). A receipt this binary builds is
+    #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`
+    #: where it declared none, which renders with no `schema` key at all.
+    schema: str = RECEIPT_SCHEMA
+    #: SPEC-v0.7 §6.11: **hash what was stored.** The document this receipt was read from, set
+    #: by the store read path *after* its own `replace(..., hash=...)`, and `None` on a receipt
+    #: this binary built. `chain_hash()` hashes it when present.
+    #:
+    #: Not an `__init__` parameter and not carried through `dataclasses.replace()` (rule (a)):
+    #: a modified copy has no stored document and is hashed from what it now says, so G11's own
+    #: tamper, `replace(target, decision_reason=...)`, is still `content_altered`, and a read-back
+    #: receipt written again is hashed from the dictionary `put_receipt` serializes. Excluded from
+    #: equality, because two receipts saying the same thing are the same evidence however each
+    #: was obtained.
+    _stored_document: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def chain_hash(self) -> str:
         """This receipt's own hash: `sha256:` + SHA-256 of its canonical form (§6.2).
@@ -319,13 +392,37 @@ class Receipt:
 
         The canonical form is `v0.1 §2.3`'s, through `canonical_bytes`. A second canonicalizer
         is the drift this codebase must not have (§6.2).
+
+        SPEC-v0.7 §6.11: a receipt read from a store is hashed as **the document it was read
+        from**, not as this binary would render it. Every schema then rehashes to its stored
+        hash, and every tamper the schema bump could hide (a key added, a label changed or
+        removed, a label nobody knows) changes that document and is `content_altered` by
+        construction, with no rule about key sets for a reader to get wrong.
         """
-        return "sha256:" + hashlib.sha256(canonical_bytes(self.to_dict())).hexdigest()
+        document = self._stored_document
+        return _document_hash(self.to_dict() if document is None else document)
 
     def to_dict(self) -> dict[str, Any]:
-        """The receipt as plain JSON-serializable data, in the field order of SPEC §6.1."""
+        """The receipt as plain JSON-serializable data, in the field order of SPEC §6.1.
+
+        Rendered under its own schema's label and key set (SPEC-v0.7 §6.11): a `v4` receipt as
+        `v4`, a `v3` one as the `v3` document, and a `v1` or `v2` one under that version's label
+        and keys, where 0.6.1 rendered all three under the `v3` label. A label this binary does
+        not know renders under `v3`'s keys, the widest set it reads whatever the label says,
+        and never shows the two `v4` fields it did not read. The hash no longer depends on
+        this rendering for a receipt read from a store.
+        """
+        full = self._full_document()
+        keys = _KEYS.get(self.schema, _V3_KEYS)
+        if self.schema == _V1:
+            full["principal"] = {"agent": self.principal.agent, "user": self.principal.user}
+        if not self.schema:
+            keys = keys[1:]
+        return {key: full[key] for key in keys}
+
+    def _full_document(self) -> dict[str, Any]:
         return {
-            "schema": RECEIPT_SCHEMA,
+            "schema": self.schema,
             "receipt_id": self.receipt_id,
             "action_id": self.action_id,
             "action": self.action,
@@ -351,6 +448,8 @@ class Receipt:
             "policy_hash": self.policy_hash,
             "policy_version": self.policy_version,
             "controls": list(self.controls),
+            "precondition_at_request": self.precondition_at_request,
+            "precondition_at_recheck": self.precondition_at_recheck,
         }
 
     def to_json(self) -> str:
@@ -359,7 +458,17 @@ class Receipt:
 
     @classmethod
     def from_dict(cls, document: Mapping[str, Any]) -> Receipt:
-        """The inverse of `to_dict`: a receipt read back out of a store or a JSONL file."""
+        """The inverse of `to_dict`: a receipt read back out of a store or a JSONL file.
+
+        SPEC-v0.7 §6.11: **never raises over the schema or over a key.** `receipts()` builds
+        every row through here, so a raise on one tampered row would blind every reader at
+        once; an absent or unknown `schema`, or an extra key, is left to the hash to report. The
+        two precondition fields are read only from a `v4` document, so no reader surfaces the
+        value of a key the document's schema does not declare. A row that cannot be parsed at
+        all -- not an object, or missing a field every schema has -- raises as it did at 0.6.1.
+        """
+        declared = document.get("schema")
+        schema = declared if isinstance(declared, str) else ""
         principal = document["principal"]
         expires_at = principal.get("expires_at")
         return cls(
@@ -407,6 +516,13 @@ class Receipt:
             policy_hash=document.get("policy_hash"),
             policy_version=document.get("policy_version"),
             controls=_controls_of(document.get("controls")),
+            precondition_at_request=(
+                document.get("precondition_at_request") if schema == _V4 else None
+            ),
+            precondition_at_recheck=(
+                document.get("precondition_at_recheck") if schema == _V4 else None
+            ),
+            schema=schema,
         )
 
     @classmethod
@@ -414,6 +530,28 @@ class Receipt:
         """Parse one JSONL line written by `to_json`."""
         document: dict[str, Any] = json.loads(line)
         return cls.from_dict(document)
+
+
+def _document_hash(document: Mapping[str, Any]) -> str:
+    """`"sha256:" + hex(SHA-256(canonical_bytes(document)))`, the chain's one hash (§6.2).
+
+    One function, so `chain_hash()` and a store's `put_receipt` cannot come to hash two
+    different things. `put_receipt` hashes the exact dictionary it serializes (SPEC-v0.7 §6.11
+    rule (b)), and this is what it hashes it with.
+    """
+    return "sha256:" + hashlib.sha256(canonical_bytes(document)).hexdigest()
+
+
+def _stored_receipt(document: Mapping[str, Any], stored_hash: str | None) -> Receipt:
+    """A receipt as a store read it: its stored hash, and the document it was read from.
+
+    SPEC-v0.7 §6.11: the stored document is set **after** `replace(..., hash=...)`, because
+    rule (a) makes `replace()` drop it; setting it first would build a receipt and then throw
+    away the one thing the read was for. The only writer of the private field.
+    """
+    receipt = replace(Receipt.from_dict(document), hash=stored_hash)
+    object.__setattr__(receipt, "_stored_document", document)
+    return receipt
 
 
 class EventSink(Protocol):
@@ -485,6 +623,11 @@ class JSONLEventSink:
 #: §6.5's closed set of break names. A chain that only catches the easy case is worse than none,
 #: because it gets quoted as though it caught all of them -- so a break is reported *by name* and
 #: at a `seq`, never as a bare "invalid".
+#: What `link_broken` and `head_mismatch` say a row hashes to when nothing can: §6.5's names are
+#: a closed set, so a document the canonicalizer refuses is `content_altered` like any other
+#: altered document, and the rows that link to it are told why the comparison has no left side.
+_NO_HASH: Final = "<no canonical form>"
+
 CHAIN_BREAKS: Final = (
     "content_altered",
     "hash_missing",
@@ -607,7 +750,30 @@ def verify_chain(store: ChainSource) -> ChainReport:
             # Resync on what is actually there, so one hole reports one gap rather than
             # renumbering every receipt after it.
             expected_seq = seq
-        recomputed = receipt.chain_hash()
+        try:
+            recomputed = receipt.chain_hash()
+        except CTRLRunError as refused:
+            # SPEC-v0.7 §6.11: a stored document this reader cannot canonicalize is a document
+            # nothing in this library wrote -- `put_receipt` hashes what it serializes, so every
+            # row it wrote canonicalizes by construction. It is therefore **altered**, and named
+            # here rather than raised out of the walk: one such row used to stop the whole read,
+            # so `ctrlrun receipts --verify-chain` exited with no report at all and a forgery at
+            # another `seq` went unnamed.
+            #
+            # By its type, never its message: the canonicalizer quotes what it refused, and a
+            # lone surrogate in a report is a report that cannot be printed.
+            breaks.append(
+                ChainBreak(
+                    "content_altered",
+                    seq,
+                    f"the stored document has no canonical form ({type(refused).__name__}), so "
+                    "its hash cannot be recomputed; nothing that writes receipts could have "
+                    "stored it",
+                )
+            )
+            expected_prev = _NO_HASH
+            expected_seq = seq + 1
+            continue
         stored = receipt.hash
         if stored is None:
             # A chained row whose stored hash is gone. **Not a skip.** This was the only check

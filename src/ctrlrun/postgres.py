@@ -70,7 +70,7 @@ from .errors import (
     MissingDependency,
 )
 from .migrations import migrate
-from .receipt import Event, EventType, Receipt
+from .receipt import RECEIPT_SCHEMA, Event, EventType, Receipt, _document_hash, _stored_receipt
 from .state import (
     ClockSkew,
     DelegationRecord,
@@ -692,8 +692,8 @@ class PostgresStateStore:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
-                "granted_at, expires_at, consumed_at, policy_hash_at_approval "
-                f"FROM {self._q}.approvals WHERE approval_id = %s",
+                "granted_at, expires_at, consumed_at, policy_hash_at_approval, "
+                f"precondition_fingerprint FROM {self._q}.approvals WHERE approval_id = %s",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -707,6 +707,7 @@ class PostgresStateStore:
                 created_at=datetime.fromisoformat(str(row[5])),
                 expires_at=datetime.fromisoformat(str(row[7])),
                 policy_hash=None if row[9] is None else str(row[9]),
+                precondition_fingerprint=None if row[10] is None else str(row[10]),
             ),
             status=ApprovalStatus(row[2]),
             approver=row[4],
@@ -1461,8 +1462,8 @@ class PostgresStateStore:
                     f"INSERT INTO {self._q}.approvals("
                     "approval_id, action_hash, status, action_json, "
                     "approver, created_at, granted_at, expires_at, consumed_at, "
-                    "policy_hash_at_approval) "
-                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s)",
+                    "policy_hash_at_approval, precondition_fingerprint) "
+                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s,%s)",
                     (
                         request.request_id,
                         request.action_hash,
@@ -1471,6 +1472,7 @@ class PostgresStateStore:
                         _iso(request.created_at),
                         _iso(request.expires_at),
                         request.policy_hash,
+                        request.precondition_fingerprint,
                     ),
                 )
         except Exception as duplicate:
@@ -1860,8 +1862,15 @@ class PostgresStateStore:
                         "the receipt chain has no head row; this database predates "
                         "0002_receipt_chain and was not migrated"
                     )
-                chained = replace(receipt, seq=int(head[0]), prev_hash=str(head[1]))
-                digest = chained.chain_hash()
+                # SPEC-v0.7 §6.11 rule (b), as SQLite's: one dictionary, hashed and serialized.
+                chained = replace(
+                    receipt,
+                    schema=RECEIPT_SCHEMA,
+                    seq=int(head[0]),
+                    prev_hash=str(head[1]),
+                )
+                document = chained.to_dict()
+                digest = _document_hash(document)
                 cursor.execute(
                     f"INSERT INTO {self._q}.receipts("
                     "receipt_id, action_id, effect_key, result, json, ts, seq, prev_hash, hash) "
@@ -1871,7 +1880,7 @@ class PostgresStateStore:
                         chained.action_id,
                         chained.effect_key,
                         str(chained.result),
-                        json.dumps(chained.to_dict(), sort_keys=True),
+                        json.dumps(document, sort_keys=True),
                         _iso(chained.finished_at),
                         chained.seq,
                         chained.prev_hash,
@@ -1907,9 +1916,7 @@ class PostgresStateStore:
         # `json` here is `json.dumps(..., sort_keys=True)` and SQLite's is `to_json()`, which are
         # different byte strings -- and the chain does not care, because `chain_hash` recomputes
         # the canonical form from the parsed document rather than hashing whatever was stored.
-        return tuple(
-            replace(Receipt.from_dict(json.loads(str(row[0]))), hash=row[1]) for row in rows
-        )
+        return tuple(_stored_receipt(json.loads(str(row[0])), row[1]) for row in rows)
 
     def chain_head(self) -> tuple[int, str] | None:
         with self._connection().cursor() as cursor:

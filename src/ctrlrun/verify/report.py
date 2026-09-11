@@ -244,16 +244,20 @@ class Report:
             f"store      {self.store['backend']}, scratch (created and destroyed for this run)"
         )
         lines.append("")
-        noted = False
+        noted: set[str] = set()
         for result in self.guarantees:
             lines.append(_result_line(result))
             note = result.detail.get("note")
-            if note and not noted:
+            if note and str(note) not in noted:
                 # §4.1's example prints the `@protect` sentence once, under the first
                 # guarantee the missing template takes out. Every one of them carries it in
                 # `detail.note` (T102); repeating it on three consecutive lines would push
                 # the rows that differ off the reader's screen.
-                noted = True
+                #
+                # **Once per note, not once per report** (SPEC-v0.7 §8.9): G16's note is a
+                # different sentence, and a report that printed only the first note it met
+                # would drop G16's on every document that also lacks an `effect:` template.
+                noted.add(str(note))
                 lines += _wrapped_note(str(note))
             if result.counterexample is not None:
                 lines += [f"     {line}" for line in result.counterexample.to_text().split("\n")]

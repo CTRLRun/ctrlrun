@@ -133,9 +133,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
-        (ALL_APPLICABLE, "10/10 declared guarantees pass. 3 not applicable"),
-        (WITH_NOT_APPLICABLE, "6/6 declared guarantees pass. 7 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 13 not applicable"),
+        (ALL_APPLICABLE, "11/11 declared guarantees pass. 3 not applicable"),
+        (WITH_NOT_APPLICABLE, "7/7 declared guarantees pass. 7 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 14 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )

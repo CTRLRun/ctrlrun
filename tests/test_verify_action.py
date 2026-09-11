@@ -137,10 +137,10 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 11/11"' in script
-    assert 'test "$TEMPLATES" = "verified 6/6"' in script
+    assert 'test "$AUTHORITY" = "verified 13/13"' in script
+    assert 'test "$TEMPLATES" = "verified 7/7"' in script
     assert 'test "$AUTHORITY_NA" = "1"' in script
-    assert 'test "$TEMPLATES_NA" = "6"' in script
+    assert 'test "$TEMPLATES_NA" = "7"' in script
 
 
 @pytest.mark.authority
@@ -152,11 +152,11 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    assert authority.badge["message"] == "verified 12/12"
+    assert authority.badge["message"] == "verified 13/13"
     # G13 only: SQLite has no clock of its own to diverge from (SPEC-v0.7 §8.9).
     assert authority.not_applicable == 1
     assert templates.badge is not None
-    assert templates.badge["message"] == "verified 6/6"
+    assert templates.badge["message"] == "verified 7/7"
     assert templates.not_applicable == 7
 
 
@@ -199,9 +199,9 @@ def test_T119_the_denominator_is_applicable_and_never_the_catalogue_size():
 
     assert badge is not None
     assert badge["message"] == f"verified {report.passed}/{report.applicable}"
-    assert report.applicable == 6
+    assert report.applicable == 7
     assert report.applicable < len(reg.GUARANTEES)
-    assert "/10" not in badge["message"]
+    assert f"/{len(reg.GUARANTEES)}" not in badge["message"]
 
 
 def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
@@ -285,7 +285,7 @@ def test_T120_a_configuration_with_not_applicable_guarantees_still_writes_a_badg
 
     assert report.exit_code == 0
     assert report.badge is not None
-    assert report.badge["message"] == "verified 6/6"
+    assert report.badge["message"] == "verified 7/7"
 
 
 def test_T120_a_failing_run_writes_a_red_badge_and_a_non_zero_exit(tmp_path, monkeypatch):
