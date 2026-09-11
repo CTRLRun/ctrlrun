@@ -720,9 +720,13 @@ def approval_precondition_fingerprint(
     recheck reads back must be one, and a store that drops it makes every approval requested
     with a provider come back without one.
 
-    That is a refusal and never a skip in `Control` (`precondition_missing`), so a dropping store
-    is safe and useless: every such approval is refused at every presentation. This case is what
-    tells an implementer why, by name, before an operator does.
+    A dropping store is safe and useless, and both halves are the kernel's doing rather than this
+    store's: the request pass reads its own request back and refuses where the fingerprint is not
+    there, withdrawing the request so that nothing can spend it later (SPEC-v0.7 §6.4), and a
+    presentation of an approval carrying one on one side only is `precondition_missing`. So an
+    operator whose store drops this column can request no approval at all for an action that
+    names a provider. This case is what tells an implementer why, by name, before an operator
+    does.
     """
     title = approval_precondition_fingerprint.title
     store = _clocked(backend, lambda: T0)

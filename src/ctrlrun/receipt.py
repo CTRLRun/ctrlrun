@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from .action import Principal, canonical_bytes
-from .errors import InvalidArgument
+from .errors import CTRLRunError, InvalidArgument
 from .policy import Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
@@ -614,6 +614,11 @@ class JSONLEventSink:
 #: §6.5's closed set of break names. A chain that only catches the easy case is worse than none,
 #: because it gets quoted as though it caught all of them -- so a break is reported *by name* and
 #: at a `seq`, never as a bare "invalid".
+#: What `link_broken` and `head_mismatch` say a row hashes to when nothing can: §6.5's names are
+#: a closed set, so a document the canonicalizer refuses is `content_altered` like any other
+#: altered document, and the rows that link to it are told why the comparison has no left side.
+_NO_HASH: Final = "<no canonical form>"
+
 CHAIN_BREAKS: Final = (
     "content_altered",
     "hash_missing",
@@ -736,7 +741,30 @@ def verify_chain(store: ChainSource) -> ChainReport:
             # Resync on what is actually there, so one hole reports one gap rather than
             # renumbering every receipt after it.
             expected_seq = seq
-        recomputed = receipt.chain_hash()
+        try:
+            recomputed = receipt.chain_hash()
+        except CTRLRunError as refused:
+            # SPEC-v0.7 §6.11: a stored document this reader cannot canonicalize is a document
+            # nothing in this library wrote -- `put_receipt` hashes what it serializes, so every
+            # row it wrote canonicalizes by construction. It is therefore **altered**, and named
+            # here rather than raised out of the walk: one such row used to stop the whole read,
+            # so `ctrlrun receipts --verify-chain` exited with no report at all and a forgery at
+            # another `seq` went unnamed.
+            #
+            # By its type, never its message: the canonicalizer quotes what it refused, and a
+            # lone surrogate in a report is a report that cannot be printed.
+            breaks.append(
+                ChainBreak(
+                    "content_altered",
+                    seq,
+                    f"the stored document has no canonical form ({type(refused).__name__}), so "
+                    "its hash cannot be recomputed; nothing that writes receipts could have "
+                    "stored it",
+                )
+            )
+            expected_prev = _NO_HASH
+            expected_seq = seq + 1
+            continue
         stored = receipt.hash
         if stored is None:
             # A chained row whose stored hash is gone. **Not a skip.** This was the only check

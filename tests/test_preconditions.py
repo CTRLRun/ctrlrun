@@ -109,6 +109,17 @@ class World:
         return dict(self.state) if isinstance(self.state, dict) else self.state
 
 
+def _counting(make):
+    """A provider that hands back exactly what `make()` returns, and counts its calls."""
+
+    def provider(action: Action) -> Any:
+        provider.calls += 1  # type: ignore[attr-defined]
+        return make()
+
+    provider.calls = 0  # type: ignore[attr-defined]
+    return provider
+
+
 class Executor:
     def __init__(self, behaviour: Any = None) -> None:
         self.calls = 0
@@ -557,7 +568,9 @@ def test_T259_resume_never_calls_the_provider(control, state_store):
 
     assert receipt.result is ReceiptResult.COMMITTED
     assert world.calls == before, "Control.resume called the provider"
-    assert receipt.precondition_at_recheck is None, "a resumed leg did not recheck"
+    # It did not recheck, and its receipt still says what the leg that consumed the approval
+    # compared: that receipt is the only one this action gets (review finding 6b).
+    assert receipt.precondition_at_recheck == fingerprint(AT_REQUEST)
 
 
 # --- T260: raw provider output reaches no evidence --------------------------------------------
@@ -719,8 +732,14 @@ def test_T262_an_expired_approval_never_reaches_the_provider(control, state_stor
 
     assert mismatch.reason == "expired"
     assert world.calls == before
-    assert state_store.get_approval(request_id).status is ApprovalStatus.EXPIRED, (
-        "0.6.1 records the lapse, and so must this path"
+    # **Nothing is written for it** (review finding 2): whose clock decides expiry is the
+    # store's, and this refusal is `Control`'s own read. The lapse is in `APPROVAL_EXPIRED`,
+    # and `check_consumable` refuses the grant at every later presentation.
+    record = state_store.get_approval(request_id)
+    assert record.status is ApprovalStatus.GRANTED and record.consumed_at is None
+    assert any(
+        event.type is EventType.APPROVAL_EXPIRED and event.approval_id == request_id
+        for event in state_store.events()
     )
 
 
@@ -1913,8 +1932,21 @@ def _docstrings() -> str:
     )
 
 
+def _guarantee_titles() -> str:
+    """Every `verify` guarantee title, as a sentence each (review finding 9).
+
+    A title is the shortest sentence this project writes about a guarantee and the one an
+    operator reads first, so it is scanned with the rest: G16's said "a moved precondition is
+    refused", and a precondition that moves after the comparison is not.
+    """
+    from ctrlrun.verify.guarantees import GUARANTEES
+
+    return "\n\n".join(f"{item.id}: {item.title}." for item in GUARANTEES)
+
+
 SCANNED = {
     "README.md": lambda: (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
+    "guarantee titles": _guarantee_titles,
     "CHANGELOG.md": lambda: (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
     "SPEC-v0.7 §6": _spec_section_six,
     "SPEC-v0.7 §12.5": _spec_section_twelve_five,
@@ -1948,14 +1980,21 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
 #: new one has no way to see.
 ANOTHER_SUBJECT: dict[str, tuple[str, ...]] = {
     "CHANGELOG.md": (
-        '"a moved precondition is refused" before the reservation, under `ctrlrun.guarantees/v3`.',
+        '"a moved fingerprint is refused" before the reservation, under `ctrlrun.guarantees/v3`.',
     ),
     "SPEC-v0.7 §6": (
         "the alternative is a path that cannot recheck spending an approval that was granted "
         "conditional on a recheck.",
         "so the comparison cannot be made, and **a check that cannot be made is not a check that "
         "passed**",
-        "The kernel cannot detect that process from the new one, so the rule is operational",
+        # What closing §6.4's residual would take, which is a store method rather than a claim
+        # about the recheck (review finding 1).
+        "Closing that needs a store call that records the request and its fingerprint together",
+    ),
+    "SPEC-v0.7 §12.5": (
+        # The same residual, and a module path that happens to contain the word "guarantees".
+        "closing that needs a store call that records the request and its fingerprint together",
+        "It went into `verify.guarantees.__all__` and not into §9.2",
     ),
 }
 
@@ -2058,25 +2097,39 @@ def test_T269_G16_fails_where_the_recheck_is_gone(monkeypatch):
     assert report.exit_code == 1
 
 
-def test_T269_G16_fails_where_the_capture_is_gone(monkeypatch):
-    """A kernel that never records the fingerprint at request time: the presenting pass then
-    meets a provider and an approval without one, which is `precondition_missing` -- and G16's
-    assertion on the reason, not on the type, is what tells the two apart."""
+def test_T269_G16_fails_where_the_fingerprint_is_lost_after_the_request(monkeypatch):
+    """A kernel whose stored fingerprint goes missing between the request and the presentation,
+    which is §6.4's database restored from before the migration: the presenting pass meets a
+    provider and an approval without one, and that is `precondition_missing` and not
+    `precondition_changed`. **G16's assertion on the reason, not on the type, is what tells the
+    two apart**, and this is the test that pins it.
+
+    The loss is after the request pass on purpose: dropping it earlier is caught by the
+    request-pass read-back (review finding 1), which is a different guard and a different test.
+    """
     from dataclasses import replace
 
-    import ctrlrun.approval as approval
+    from ctrlrun.state import SQLiteStateStore
     from ctrlrun.verify import Status
 
-    original = approval.build_request
-    monkeypatch.setattr(
-        approval,
-        "build_request",
-        lambda *args, **kwargs: replace(original(*args, **kwargs), precondition_fingerprint=None),
-    )
+    original = SQLiteStateStore.get_approval
+    reads: list[str] = []
+
+    def losing(self, approval_id):
+        record = original(self, approval_id)
+        reads.append(approval_id)
+        if record is None or len(reads) <= 1:
+            return record
+        return replace(
+            record, request=replace(record.request, precondition_fingerprint=None)
+        )
+
+    monkeypatch.setattr(SQLiteStateStore, "get_approval", losing)
 
     _, result = _g16(V1_PAYMENTS)
 
     assert result.status is Status.FAIL, result.status
+    assert result.reason != "control failed"
     assert "precondition_missing" in (result.reason or ""), result.reason
 
 
@@ -2333,3 +2386,717 @@ def test_where_a_precondition_is_in_play_a_divergent_clock_spends_nothing_that_r
     assert mismatch.reason == "expired"
     assert executor.calls == 0 and world.calls == before
     assert state_store.get_effect(KEY) is None
+
+
+# =================================================================================================
+# The independent review of efb3b42: ten findings, each a test before it was a fix.
+# =================================================================================================
+
+
+class _DroppingStore:
+    """A store that accepts a fingerprint and reads it back as `None` (review finding 1).
+
+    The shape of a backend that never applied `0005`, a restore from before it, or a wrapper
+    that rebuilds records: the request goes in carrying a fingerprint and comes out without one.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def get_approval(self, approval_id: str):
+        from dataclasses import replace as _replace
+
+        record = self._inner.get_approval(approval_id)
+        if record is None:
+            return None
+        return _replace(record, request=_replace(record.request, precondition_fingerprint=None))
+
+    def approvals_for(self, action_hash: str):
+        return tuple(
+            self.get_approval(r.approval_id) for r in self._inner.approvals_for(action_hash)
+        )
+
+
+class ThirdPartyProvider:
+    """An `ApprovalProvider` from outside the package (review finding 1).
+
+    `build_request` is package-internal, so a third-party provider builds its own
+    `ApprovalRequest` and records no fingerprint, however the store behaves. `on_request` is
+    what the race variants use to act inside the window `Control` has not seen yet.
+    """
+
+    def __init__(self, store, clock, on_request=None) -> None:
+        self._store = store
+        self._clock = clock
+        self._on_request = on_request
+
+    def request(self, action: Action, ttl: timedelta = timedelta(minutes=15)):
+        from ctrlrun.approval import ApprovalRequest, new_request_id
+
+        now = self._clock()
+        request = ApprovalRequest(
+            request_id=new_request_id(),
+            action_hash=action.action_hash,
+            action=action,
+            created_at=now,
+            expires_at=now + ttl,
+        )
+        self._store.put_approval_request(request)
+        if self._on_request is not None:
+            self._on_request(request)
+        return request
+
+    def wait(self, request_id: str, timeout: timedelta | None = None):
+        return None
+
+
+def _requested_id(store) -> str:
+    ids = [
+        event.approval_id
+        for event in store.events()
+        if event.type is EventType.APPROVAL_REQUESTED and event.approval_id
+    ]
+    assert ids, "no request was created"
+    return ids[-1]
+
+
+def test_R1_a_fingerprint_the_store_did_not_record_refuses_the_request_pass(tmp_path, fake_clock):
+    """**Blocking finding 1.** A request pass that names a provider computes a fingerprint; if
+    the store hands it back without one, every later presentation that names no provider (the
+    gateway's and the ACS hook's shape) would consume it with no comparison at all, because
+    neither side has a fingerprint and that is 0.6.1's path. §6.4's *never a skip* was false for
+    exactly the store §6.4 names.
+
+    So the request pass reads its own request back and refuses where the fingerprint is not
+    there, before any human is asked."""
+    inner = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    store = _DroppingStore(inner)
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+    world = World()
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=world)
+
+    assert denied.value.reason == MISSING
+    receipt = last_receipt(store, action)
+    assert receipt.result is ReceiptResult.DENIED and str(receipt.decision) == "approve"
+    assert receipt.precondition_at_request is None
+    assert receipt.precondition_at_recheck == fingerprint(AT_REQUEST)
+    request_id = _requested_id(store)
+    data = invalidated(store, request_id)[0].data
+    assert data["reason"] == MISSING
+    assert data["precondition_at_request"] is None
+    assert data["precondition_at_recheck"] == fingerprint(AT_REQUEST)
+    inner.close()
+
+
+@pytest.mark.parametrize("shape", ["a store that drops it", "a third-party provider"])
+def test_R1_the_leftover_request_cannot_be_granted_and_spent_by_a_no_provider_call(
+    tmp_path, fake_clock, shape
+):
+    """**Blocking finding 1's requirement.** Refusing the request pass is not enough on its own:
+    the request the provider already recorded is still there, and a human could grant it and any
+    call naming no provider could then spend it unchecked. It is withdrawn through the store's
+    own `deny_approval`, so `check_consumable` refuses it for ever, by the reason a denial
+    gives."""
+    inner = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    if shape == "a store that drops it":
+        store: Any = _DroppingStore(inner)
+        approvals = None
+    else:
+        store = inner
+        approvals = ThirdPartyProvider(inner, fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, approvals, clock=fake_clock)
+    world = World()
+    action = an_action(control)
+    with pytest.raises(ActionDenied):
+        control.execute(action, Executor(), KEY, preconditions=world)
+    request_id = _requested_id(store)
+
+    assert inner.get_approval(request_id).status is ApprovalStatus.DENIED, (
+        "the request the provider recorded is still answerable, so a human can grant it and a "
+        "call naming no provider can spend it with no comparison"
+    )
+    with pytest.raises(ApprovalMismatch):
+        inner.grant_approval(request_id, "human:alice")
+
+    executor = Executor()
+    with pytest.raises(ActionDenied) as refused_:
+        present(control, action, request_id, None, executor)
+
+    assert refused_.value.reason == "approval_denied"
+    assert executor.calls == 0
+    assert store.get_effect(KEY) is None
+    inner.close()
+
+
+def test_R1_a_grant_that_lands_inside_the_request_is_withdrawn_by_spending_it(tmp_path, fake_clock):
+    """The same requirement where the window is not empty: a provider that answers its own
+    request before returning (a scripted approver, an automation on the webhook notification)
+    leaves a *granted* approval carrying no fingerprint. `deny_approval` refuses a record that
+    is no longer pending, so it is withdrawn by being spent: consumed, on nothing."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    granted_in_the_window: list[str] = []
+
+    def answers_at_once(request):
+        store.grant_approval(request.request_id, "human:alice")
+        granted_in_the_window.append(request.request_id)
+
+    provider = ThirdPartyProvider(store, fake_clock, on_request=answers_at_once)
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    request_id = granted_in_the_window[0]
+    assert store.get_approval(request_id).status is ApprovalStatus.CONSUMED, (
+        "a grant that landed inside the window is still spendable by a call with no provider"
+    )
+    executor = Executor()
+    with pytest.raises(ApprovalMismatch) as refused_:
+        present(control, action, request_id, None, executor)
+    assert refused_.value.reason == "consumed"
+    assert executor.calls == 0 and store.get_effect(KEY) is None
+    store.close()
+
+
+def test_R1_the_residual_a_presentation_inside_the_request_is_not_refused(tmp_path, fake_clock):
+    """**The residual this fix leaves, stated as T261b states its own.**
+
+    `Control` learns a request exists only when the provider returns, so an approval granted
+    *and presented* before that is spent before there is anything to withdraw. This test drives
+    exactly that: a third-party provider that grants its own request and presents it through a
+    call naming no provider, inside `request()`. **The nested action is not refused**, and
+    closing that window needs a store call that records the fingerprint and the request
+    together, which `StateStore` has no method for: a finding for the maintainer, not a method
+    this item adds.
+
+    What the fix does leave true: the request is unusable **afterwards**, and the evidence says
+    a fingerprint was computed and never recorded."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    ran: list[str] = []
+    control: list[Control] = []
+
+    def grants_and_spends_it(request):
+        store.grant_approval(request.request_id, "human:alice")
+        with with_approval(request.request_id):
+            control[0].execute(an_action(control[0]), Executor(lambda: ran.append("nested")), KEY)
+
+    provider = ThirdPartyProvider(store, fake_clock, on_request=grants_and_spends_it)
+    control.append(Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock))
+    action = an_action(control[0])
+
+    with pytest.raises(ActionDenied) as denied:
+        control[0].execute(action, Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    assert ran == ["nested"], (
+        "this test no longer opens the window it is named for: nothing ran inside the request"
+    )
+    assert store.get_effect(KEY) is not None, "the nested action reserved nothing"
+    store.close()
+
+
+def test_R2_an_expiry_only_this_clock_sees_writes_nothing_to_the_store(state_store, fake_clock):
+    """**Finding 2.** The pre-read sent an expired grant to `consume_approval`, and a store
+    whose clock still called it live consumed it: the row said `consumed` while the events said
+    `APPROVAL_EXPIRED` and `APPROVAL_INVALIDATED` with no `APPROVAL_CONSUMED`, and the receipt
+    said expired. Safe, and untrue.
+
+    Whose clock decides is `v0.1 §4.2 A3`'s question, and the answer stays the store's: where a
+    precondition is in play `Control` raises the refusal its own read found and **writes
+    nothing**, so the row keeps the status the store gave it and the evidence agrees with it."""
+    control, ahead = _divergent(state_store, fake_clock)
+    world = World()
+    action = an_action(control)
+    request_id = granted(control, action, world)
+    ahead.by = timedelta(minutes=20)  # expired for Control, one minute of life for the store
+    executor = Executor()
+
+    mismatch = refused(control, action, request_id, world, executor)
+
+    assert mismatch.reason == "expired"
+    record = state_store.get_approval(request_id)
+    assert record.status is ApprovalStatus.GRANTED, (
+        f"the store wrote {record.status} for an expiry only Control's clock sees"
+    )
+    assert record.consumed_at is None
+    types = [str(event.type) for event in state_store.events() if event.approval_id == request_id]
+    assert "APPROVAL_CONSUMED" not in types, types
+    assert types[-2:] == ["APPROVAL_EXPIRED", "APPROVAL_INVALIDATED"], types
+    assert executor.calls == 0 and state_store.get_effect(KEY) is None
+
+
+def _tamper_one(database, seq: int, change) -> str:
+    connection = sqlite3.connect(database)
+    try:
+        (text,) = connection.execute("SELECT json FROM receipts WHERE seq = ?", (seq,)).fetchone()
+        connection.execute(
+            "UPDATE receipts SET json = ? WHERE seq = ?",
+            (json.dumps(change(json.loads(text))), seq),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return text
+
+
+UNHASHABLE = {
+    "an added key holding a float": lambda document: {**document, "x_extra": 1.5},
+    "an added key holding a lone surrogate": lambda document: {**document, "x_extra": "\ud800"},
+}
+
+
+@pytest.mark.parametrize("label", sorted(UNHASHABLE))
+def test_R3_a_row_the_canonicalizer_refuses_is_content_altered_and_not_a_raised_walk(
+    tmp_path, fake_clock, label
+):
+    """**Finding 3.** A key holding a float or a lone surrogate made `chain_hash()` raise out of
+    `verify_chain`, so one tampered row stopped the walk: `ctrlrun receipts --verify-chain`
+    exited 1 with no report, and a forged `decision_reason` at another `seq` went unnamed. A
+    reader that cannot hash a stored document has not found it intact; the row is reported.
+
+    Sound because `put_receipt` writes only what canonicalized: a document this refuses is one
+    nothing in this library wrote."""
+    from ctrlrun.receipt import verify_chain
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+    for customer in ("C1", "C2", "C3"):
+        control.execute(an_action(control, customer, "customer.read"), Executor(), None)
+    store.close()
+    _tamper_one(database, 2, UNHASHABLE[label])
+
+    reopened = SQLiteStateStore(database, clock=fake_clock)
+    receipts = reopened.receipts()  # MUST NOT raise
+    report = verify_chain(reopened)
+
+    assert len(receipts) == 3
+    assert not report.ok
+    named = [(item.name, item.seq) for item in report.breaks]
+    assert ("content_altered", 2) in named, named
+    assert ("link_broken", 3) in named, "the next receipt's link was left unquestioned"
+    # And it says *why* it has no left side to compare against. A reader told that receipt 3's
+    # link is broken against a hash carried over from receipt 1 would go looking at the wrong
+    # row; there is no hash for receipt 2, and the break says so.
+    link = next(item for item in report.breaks if (item.name, item.seq) == ("link_broken", 3))
+    assert "<no canonical form>" in link.detail, link.detail
+    altered = next(item for item in report.breaks if item.seq == 2)
+    assert "InvalidArgument" in altered.detail and "1.5" not in altered.detail
+    assert report.verified == 1
+    reopened.close()
+
+
+def test_R3_the_cli_reports_every_break_even_where_one_row_cannot_be_hashed(tmp_path, fake_clock):
+    """The consequence an operator sees: a forged `decision_reason` at one `seq` and an
+    unhashable row at another. Both are named, and the command still exits non-zero."""
+    from click.testing import CliRunner
+
+    from ctrlrun.cli import main as cli
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+    for customer in ("C1", "C2", "C3"):
+        control.execute(an_action(control, customer, "customer.read"), Executor(), None)
+    store.close()
+    _tamper_one(database, 2, lambda document: {**document, "decision_reason": "forged"})
+    _tamper_one(database, 3, lambda document: {**document, "x_extra": 1.5})
+
+    result = CliRunner().invoke(
+        cli.main, ["receipts", "--verify-chain", "--store-url", f"sqlite://{database}"]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    assert "seq 2" in result.output and "seq 3" in result.output, result.output
+    assert result.output.count("content_altered") >= 2, result.output
+
+
+def test_R6_a_refusal_that_would_have_happened_anyway_still_says_what_the_approval_carried(
+    control, state_store
+):
+    """**Finding 6a.** `compared.reset()` left `precondition_at_request` null on a receipt for
+    an approval that does carry a fingerprint, so the evidence for a consumed or expired grant
+    said "no precondition" about an approval requested with one. The pre-read knows it."""
+    world = World()
+    action = an_action(control)
+    request_id = granted(control, action, world)
+    present(control, action, request_id, world)
+    world.state = dict(MOVED)
+
+    refused(control, action, request_id, world)
+
+    receipt = last_receipt(state_store, action)
+    assert receipt.result is ReceiptResult.BLOCKED
+    assert receipt.precondition_at_request == fingerprint(AT_REQUEST), (
+        "the receipt says the approval carried no fingerprint, and it carried one"
+    )
+    assert receipt.precondition_at_recheck is None, "nothing was compared on this pass"
+
+
+def test_R6_a_resumed_legs_receipt_records_the_first_legs_comparison(control, state_store):
+    """**Finding 6b.** A suspended action's only receipt is the resumed leg's, and it said
+    `precondition_at_recheck: null`, so the comparison that did happen left no trace and
+    §6.11's *on a committed action they are equal* was false there. The first leg records what
+    it compared on `APPROVAL_CONSUMED`, and the resumed leg reads it back."""
+    world = World()
+    action = an_action(control)
+    request_id = granted(control, action, world)
+
+    def suspend() -> Any:
+        raise Suspended("continuation-C123")
+
+    with pytest.raises(Suspended):
+        present(control, action, request_id, world, Executor(suspend))
+
+    consumed = [
+        event
+        for event in state_store.events()
+        if event.type is EventType.APPROVAL_CONSUMED and event.approval_id == request_id
+    ]
+    assert len(consumed) == 1
+    assert consumed[0].data["precondition_at_request"] == fingerprint(AT_REQUEST)
+    assert consumed[0].data["precondition_at_recheck"] == fingerprint(AT_REQUEST)
+
+    receipt = control.resume("continuation-C123", lambda: "deleted")
+
+    assert receipt.result is ReceiptResult.COMMITTED
+    assert receipt.precondition_at_request == fingerprint(AT_REQUEST)
+    assert receipt.precondition_at_recheck == fingerprint(AT_REQUEST), (
+        "the resumed leg's receipt is the only one this action gets, and it does not say the "
+        "world was compared before the reservation"
+    )
+
+
+def test_R6_an_approval_consumed_with_no_precondition_carries_no_fields(control, state_store):
+    """The other direction: absent means absent on the event too."""
+    action = an_action(control)
+    request_id = granted(control, action, None)
+    present(control, action, request_id, None)
+
+    consumed = [
+        event for event in state_store.events() if event.type is EventType.APPROVAL_CONSUMED
+    ]
+    assert consumed and "precondition_at_request" not in consumed[-1].data
+
+
+def test_R7_a_canonicalizer_message_that_quotes_the_state_reaches_no_evidence(
+    tmp_path, fake_clock, caplog
+):
+    """**Finding 7.** `canonical_bytes` names what it refused: *"payload.state.balance has a int
+    key 7310042"*. A mutant recording `str(exc)` instead of the type name passed every test,
+    because no provider in the suite returned state the canonicalizer quoted."""
+    caplog.set_level(logging.DEBUG, logger="ctrlrun")
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    sink = JSONLEventSink(tmp_path / "jsonl")
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock, sinks=[sink])
+    quoted = 7310042
+    world = World()
+    action = an_action(control, "C1")
+    request_id = granted(control, action, world, "delete:C1")
+    world.state = {"balance": {quoted: "the sentinel is the key"}}
+
+    mismatch = refused(control, action, request_id, world, key="delete:C1")
+
+    assert mismatch.reason == UNAVAILABLE
+    # The negative precondition: this test proves nothing unless the canonicalizer really does
+    # put what it refused into its message.
+    with pytest.raises(InvalidArgument) as raised:
+        canonical_bytes({"schema": "ctrlrun.precondition/v1", "state": world.state})
+    assert str(quoted) in str(raised.value), (
+        "the canonicalizer no longer quotes what it refused, so this test proves nothing"
+    )
+    store.close()
+    assert str(quoted) not in _every_row(tmp_path / "state.db"), "the state reached a table"
+    for path in (sink.receipts_path, sink.events_path):
+        assert str(quoted) not in path.read_text(encoding="utf-8"), path.name
+    for record in caplog.records:
+        assert str(quoted) not in record.getMessage(), record
+
+
+def test_R8_a_return_value_whose_type_raises_is_unavailable_and_not_an_escape(control, state_store):
+    """**Finding 8.** `isinstance(state, Mapping)` sat outside the `try`, and `isinstance` reads
+    `__class__`: an object whose `__class__` raises carried its message out of `Control` as a
+    raw `ValueError`, with no receipt and no refusal reason. Everything a provider hands back is
+    inside the `try` now."""
+
+    class Hostile:
+        @property
+        def __class__(self):
+            raise ValueError("balance=" + SENTINEL)
+
+    world = World()
+    action = an_action(control)
+    request_id = granted(control, action, world)
+    # Handed back by the provider itself: `World` asks `isinstance` of its own state, which
+    # would raise inside the provider call and be caught there, masking what this is about.
+    hostile = _counting(Hostile)
+    executor = Executor()
+
+    mismatch = refused(control, action, request_id, hostile, executor)
+
+    assert mismatch.reason == UNAVAILABLE
+    assert SENTINEL not in str(mismatch)
+    assert executor.calls == 0 and state_store.get_effect(KEY) is None
+    data = invalidated(state_store, request_id)[0].data
+    assert data["error"] == "ValueError" and SENTINEL not in json.dumps(dict(data))
+
+
+def test_R8_the_request_pass_refuses_the_same_return_value(control, state_store):
+    class Hostile:
+        @property
+        def __class__(self):
+            raise ValueError(SENTINEL)
+
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=_counting(Hostile))
+
+    assert denied.value.reason == UNAVAILABLE
+    assert SENTINEL not in str(denied.value)
+
+
+READER_061 = textwrap.dedent("""
+    import sys
+    from ctrlrun.receipt import verify_chain
+    from ctrlrun.state import SQLiteStateStore
+
+    store = SQLiteStateStore(sys.argv[1])
+    print("OPEN", flush=True)
+    sys.stdin.readline()
+    report = verify_chain(store)
+    print("BREAKS", [(b.name, b.seq) for b in report.breaks], flush=True)
+""")
+
+WRITER_061 = textwrap.dedent("""
+    import sys
+    from ctrlrun import Action, Control, Policy, Principal, with_approval
+    from ctrlrun.state import SQLiteStateStore
+
+    store = SQLiteStateStore(sys.argv[1])
+    control = Control(Policy.from_yaml(sys.argv[2]), store)
+    print("OPEN", flush=True)
+    request_id = sys.stdin.readline().strip()
+    action = Action(name="customer.delete", arguments={"customer_id": "C123"},
+                    principal=Principal(agent="ops-agent", user="ada"))
+    with with_approval(request_id):
+        receipt = control.execute(action, lambda: "deleted by 0.6.1", "delete:C123")
+    print("RESULT", receipt.result, flush=True)
+""")
+
+
+def test_R4_a_061_reader_open_across_the_migration_misreports_the_chain(
+    release_061, tmp_path, fake_clock
+):
+    """**Finding 4.** The upgrade rule was written as *stop every 0.6 process before the first
+    caller passes `preconditions=`*, and the trigger is earlier than that: the first receipt any
+    0.7 process writes is `v4`, and a 0.6.1 reader still holding the store open rehashes it
+    under `v3`'s keys and calls a correct chain altered. Nothing here uses `preconditions=`.
+
+    The rule is *stop every 0.6 process before any 0.7 process opens the store*, and this is
+    what it is for."""
+    database = tmp_path / "state.db"
+    reader = subprocess.Popen(
+        [str(release_061), "-c", READER_061, str(database)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=releases._clean_env(),
+        cwd=tmp_path,
+    )
+    try:
+        assert reader.stdout is not None
+        opened = reader.stdout.readline().strip()
+        assert opened == "OPEN", (opened, reader.stderr.read() if reader.stderr else "")
+        # 0.7 opens the database 0.6.1 created, migrates it to `0005`, and writes one `v4`
+        # receipt. Nothing here passes `preconditions=`.
+        store = SQLiteStateStore(database, clock=fake_clock)
+        control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+        control.execute(an_action(control, "C1", "customer.read"), Executor(), None)
+        store.close()
+        out, err = reader.communicate("go\n", timeout=120)
+    finally:
+        reader.kill()
+
+    assert "BREAKS" in out, (out, err)
+    breaks = out.split("BREAKS", 1)[1].strip()
+    assert breaks != "[]", (
+        "0.6.1 read a v4 receipt without complaint, so the upgrade rule this documents is "
+        f"no longer what it is for: {out}"
+    )
+    assert "content_altered" in breaks or "head_mismatch" in breaks, breaks
+
+
+def test_R4_a_061_writer_open_across_the_migration_spends_a_fingerprinted_approval(
+    release_061, tmp_path
+):
+    """The other half of the same rule: a 0.6.1 process holding the store open consumes an
+    approval 0.7 fingerprinted, with no comparison, because it knows neither the column nor the
+    check. The kernel has no way to see that process, which is why the rule is operational."""
+    database = tmp_path / "state.db"
+    writer = subprocess.Popen(
+        [str(release_061), "-c", WRITER_061, str(database), POLICY],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=releases._clean_env(),
+        cwd=tmp_path,
+    )
+    try:
+        assert writer.stdout is not None
+        opened = writer.stdout.readline().strip()
+        assert opened == "OPEN", (opened, writer.stderr.read() if writer.stderr else "")
+        # Real clocks on both sides: the 0.6.1 process has its own, and an approval this test
+        # dated in the past would be expired for it before it could spend anything.
+        store = SQLiteStateStore(database)
+        control = Control(Policy.from_yaml(POLICY), store)
+        world = World()
+        action = an_action(control)
+        request_id = granted(control, action, world)
+        assert store.get_approval(request_id).request.precondition_fingerprint is not None
+        world.state = dict(MOVED)
+        out, err = writer.communicate(request_id + "\n", timeout=120)
+    finally:
+        writer.kill()
+
+    assert "RESULT committed" in out, (out, err)
+    assert store.get_approval(request_id).status is ApprovalStatus.CONSUMED
+    assert world.calls == 1, "0.6.1 called the provider, which it has no way to do"
+    store.close()
+
+
+def test_R5_a_third_party_store_hashes_from_to_dict_and_the_spec_says_so():
+    """**Finding 5.** `_stored_receipt` is private and v0.7 adds no public name, so a store
+    outside this package hashes its read-back receipts from `to_dict()`, as 0.6.1 did: an
+    untouched `v3` or `v4` row still verifies, and a key added to a stored document does not
+    show. §6.11 has to say that rather than leave an implementer to find it."""
+    from dataclasses import replace as _replace
+
+    from ctrlrun.receipt import Receipt, verify_chain
+
+    store = InMemoryStateStore()
+    written = [
+        store.put_receipt(
+            _replace(
+                Receipt(
+                    receipt_id=f"ctr_{index:032d}",
+                    action_id=f"act_{index}",
+                    action="customer.read",
+                    action_hash="sha256:" + "0" * 64,
+                    principal=Principal(agent="ops-agent"),
+                    resource=None,
+                    arguments={},
+                    environment="production",
+                    decision="allow",  # type: ignore[arg-type]
+                    decision_reason="decision",
+                    result=ReceiptResult.COMMITTED,
+                    started_at=datetime(2026, 9, 1, tzinfo=UTC),
+                    finished_at=datetime(2026, 9, 1, tzinfo=UTC),
+                )
+            )
+        )
+        for index in range(3)
+    ]
+
+    class ThirdPartyChain:
+        """What a store that never learned the private setter hands a reader."""
+
+        def receipts(self):
+            return tuple(
+                _replace(
+                    Receipt.from_dict({**item.to_dict(), "x_added": "a key nobody wrote"}),
+                    hash=item.hash,
+                )
+                for item in written
+            )
+
+        def chain_head(self):
+            return store.chain_head()
+
+    assert verify_chain(store).ok
+    assert verify_chain(ThirdPartyChain()).ok, (
+        "a third-party store's read-back receipts no longer verify, which is a stronger claim "
+        "than §6.11 makes for them"
+    )
+    spec = (REPO_ROOT / "docs" / "SPEC-v0.7.md").read_text(encoding="utf-8")
+    section = spec[spec.index("### 6.11") : spec.index("## 7. ")]
+    assert "A store outside this package" in section, (
+        "§6.11 does not say what a third-party store gets, and an implementer would have to "
+        "find it by reading a private name"
+    )
+
+
+def test_R9_the_guarantee_titles_are_scanned_and_G16s_is_qualified():
+    """**Finding 9.** "a moved precondition is refused" is unqualified, and a precondition that
+    moves after the comparison is not refused. The title says what is compared, and the titles
+    are scanned by T268 like every other sentence this item writes."""
+    from ctrlrun.verify import guarantees as reg
+
+    assert "guarantee titles" in SCANNED
+    assert reg.BY_ID["G16"].title == "a moved fingerprint is refused"
+    assert len(reg.BY_ID["G16"].title) <= max(len(g.title) for g in reg.GUARANTEES)
+
+
+def test_R10_the_note_is_not_a_public_name():
+    """**Finding 10.** `PRECONDITION_NOTE` went into `__all__` and not into §9.2, and §9.2 is
+    the list of what v0.7 adds. Nothing public needs it: `scenarios.py` reads it as an
+    attribute, as it reads every other reason in that module."""
+    from ctrlrun.verify import guarantees as reg
+
+    assert "PRECONDITION_NOTE" not in reg.__all__
+    assert reg.PRECONDITION_NOTE.startswith("verify supplies its own")
+
+
+def test_R6_a_resumed_leg_takes_no_fingerprint_from_a_tampered_event(tmp_path, fake_clock):
+    """An event's data is JSON, and a row-writer can put anything in one. A resumed leg reads
+    the first leg's comparison out of `APPROVAL_CONSUMED`, so what it reads is a string or it is
+    nothing: the receipt says `null` rather than whatever was found there."""
+    from dataclasses import replace as _replace
+
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+
+    class Rewritten:
+        """The store with one event's data rewritten underneath the reader."""
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def events(self):
+            return tuple(
+                _replace(event, data={**event.data, "precondition_at_recheck": 50000})
+                if event.type is EventType.APPROVAL_CONSUMED
+                else event
+                for event in self._inner.events()
+            )
+
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+    world = World()
+    action = an_action(control)
+    request_id = granted(control, action, world)
+
+    def suspend() -> Any:
+        raise Suspended("continuation-C123")
+
+    with pytest.raises(Suspended):
+        present(control, action, request_id, world, Executor(suspend))
+
+    resuming = Control(Policy.from_yaml(POLICY), Rewritten(store), clock=fake_clock)
+    receipt = resuming.resume("continuation-C123", lambda: "deleted")
+
+    assert receipt.precondition_at_recheck is None
+    assert receipt.precondition_at_request == fingerprint(AT_REQUEST)
+    store.close()

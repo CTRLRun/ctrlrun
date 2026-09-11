@@ -25,6 +25,7 @@ from .approval import (
     Approval,
     ApprovalProvider,
     ApprovalRecord,
+    ApprovalRequest,
     ApprovalStatus,
     LocalApprovalProvider,
     _precondition_at_request,
@@ -129,6 +130,11 @@ _PRECONDITION_UNAVAILABLE: Final = "precondition_unavailable"
 _PRECONDITION_REASONS: Final = frozenset(
     {_PRECONDITION_CHANGED, _PRECONDITION_MISSING, _PRECONDITION_UNAVAILABLE}
 )
+
+#: SPEC-v0.7 §6.4 — who a request withdrawn by the kernel was answered by. Not a human and not
+#: a policy: the fingerprint the request pass computed was not recorded, so the request is made
+#: unanswerable through `deny_approval`, and the approver says which of the two it was.
+_WITHDRAWN_BY: Final = "ctrlrun:precondition-not-recorded"
 
 #: Where `Control.from_file` keeps its store, and the env var that overrides it (SPEC §8).
 STATE_ENV_VAR: Final = "CTRLRUN_STATE"
@@ -301,6 +307,16 @@ class _Compared:
             data["error"] = self.error
         return data
 
+    def spent(self) -> dict[str, Any]:
+        """The two fields for `APPROVAL_CONSUMED`, and nothing at all where nothing was
+        compared: absent means absent on an event as much as on a receipt (§6.11)."""
+        if self.at_request is None and self.at_recheck is None:
+            return {}
+        return {
+            "precondition_at_request": self.at_request,
+            "precondition_at_recheck": self.at_recheck,
+        }
+
 
 _Preconditions = Callable[[Action], Mapping[str, Any]]
 
@@ -321,15 +337,27 @@ def _fetched(provider: _Preconditions, action: Action) -> tuple[str | None, str 
     try:
         # `object`, not the annotation's `Mapping`: the annotation is what the operator
         # promised, and the check below is what happens when the promise is not kept.
+        #
+        # **Every line that touches what the provider handed back is inside this `try`**, the
+        # `isinstance` included: `isinstance` reads `__class__`, and an object whose `__class__`
+        # raises used to carry its own message out of `Control` as a raw exception, with no
+        # refusal reason and no receipt. A provider's return value is the operator's data, and
+        # nothing about it may escape as anything but `precondition_unavailable`.
         state: object = provider(action)
-    except Exception as exc:
-        return None, type(exc).__name__
-    if not isinstance(state, Mapping):
-        return None, f"returned {type(state).__name__}, not a mapping"
-    try:
+        if not isinstance(state, Mapping):
+            return None, f"returned {type(state).__name__}, not a mapping"
         return _precondition_fingerprint(state), None
     except Exception as exc:
         return None, type(exc).__name__
+
+
+def _hash_or_none(value: object) -> str | None:
+    """A fingerprint read back out of an event's data, or `None` for anything else.
+
+    Events are JSON, and a row-writer can put anything in one. A fingerprint is a string or it
+    is nothing, and a resumed leg's receipt says `null` rather than whatever was found.
+    """
+    return value if isinstance(value, str) else None
 
 
 def _checked_preconditions(preconditions: object, where: str) -> _Preconditions | None:
@@ -1091,7 +1119,7 @@ class Control:
         """
         held = self._store.take_continuation(continuation)
         action = held.action
-        started_at, approval, at_request = self._resumed_context(action, held.record.created_at)
+        started_at, approval, compared = self._resumed_context(action, held.record.created_at)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -1150,34 +1178,46 @@ class Control:
             _Reconciler(None, False),
             held_key=held.effect_key,
             observation=observation,
-            compared=_Compared(at_request),
+            compared=compared,
         )
 
     def _resumed_context(
         self, action: Action, fallback: datetime
-    ) -> tuple[datetime, Approval | None, str | None]:
+    ) -> tuple[datetime, Approval | None, _Compared]:
         """Recover the original attempt's evidence, including after a process restart.
 
         EXECUTION_STARTED durably binds the consumed approval to this action ID. Looking
         up a grant by action hash instead could attribute a later, unrelated approval.
         These events already exist in every supported store, including older databases;
         no continuation schema change or in-process cache is needed.
+
+        SPEC-v0.7 §6.11 — and the first leg's comparison, off its `APPROVAL_CONSUMED`. This leg
+        rechecks nothing (§6.8), and its receipt is the only one the action gets: recording what
+        the leg that consumed the approval compared is what makes *on a committed action they
+        are equal* true of a resumed one too.
         """
         proposed = fallback
         started = fallback
         approval_id = None
+        compared = _Compared()
         for event in self._store.events():
             if event.action_id != action.action_id:
                 continue
             if event.type is EventType.ACTION_PROPOSED:
                 proposed = event.ts
+            elif event.type is EventType.APPROVAL_CONSUMED:
+                compared.at_request = _hash_or_none(event.data.get("precondition_at_request"))
+                compared.at_recheck = _hash_or_none(event.data.get("precondition_at_recheck"))
             elif event.type is EventType.EXECUTION_STARTED:
                 started = proposed
                 approval_id = event.approval_id
         record = None if approval_id is None else self._store.get_approval(approval_id)
         approval = None if record is None else record.as_approval()
-        at_request = None if record is None else record.request.precondition_fingerprint
-        return started, approval, at_request
+        if compared.at_request is None and record is not None:
+            # An approval consumed before this event carried the comparison, or by a path that
+            # compared nothing: the record still says what it was requested with.
+            compared.at_request = record.request.precondition_fingerprint
+        return started, approval, compared
 
     def _outcome(
         self,
@@ -1515,6 +1555,10 @@ class Control:
         for reconciled in (False, True):
             try:
                 if approval_id is not None:
+                    # **Immediately before `_take`, and nothing between them.** The window this
+                    # narrows is the time from the provider's fetch to the store call; anything
+                    # inserted here widens it, and a later item adding a check on this path
+                    # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
                 break
@@ -1604,10 +1648,14 @@ class Control:
                 raise
 
         if approval is not None:
+            # SPEC-v0.7 §6.11 — what was compared, on the event that says the grant was spent.
+            # A suspended action writes no receipt on this leg, and the resumed leg's is the
+            # only receipt it ever gets, so without this the one comparison that happened would
+            # leave no trace at all. Hashes only, and absent where nothing was compared.
             self._append(
                 EventType.APPROVAL_CONSUMED,
                 action,
-                {"approver": approval.approver},
+                {"approver": approval.approver, **compared.spent()},
                 effect_key,
                 approval_id=approval.approval_id,
             )
@@ -1846,6 +1894,9 @@ class Control:
         # fingerprint travels beside it, by the same route and for the same reason.
         with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
             request = self._approvals.request(action, self._approval_ttl)
+        # The request exists in the store from here, whatever happens next, so it is recorded
+        # before anything is decided about it: a row with no `APPROVAL_REQUESTED` behind it is
+        # evidence nobody can read.
         self._append(
             EventType.APPROVAL_REQUESTED,
             action,
@@ -1853,6 +1904,16 @@ class Control:
             effect_key,
             approval_id=request.request_id,
         )
+        if fingerprint is not None and not self._recorded(request, fingerprint):
+            # SPEC-v0.7 §6.4: **never a skip**, and without this it was one. A provider that
+            # builds its own `ApprovalRequest` (`build_request` is package-internal) and a store
+            # that does not persist the column both leave an approval that was requested with a
+            # fingerprint carrying none -- and an approval with none, presented by a call that
+            # names no provider, is 0.6.1's path: consumed with nothing compared. The request
+            # pass is where that is visible, so it is where it is refused.
+            self._refuse_unrecorded_request(
+                action, evaluation, started_at, effect_key, request, fingerprint
+            )
         raise ApprovalRequired(
             f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
             f"then retry inside ctrlrun.with_approval({request.request_id!r})",
@@ -1901,6 +1962,113 @@ class Control:
         )
         raise ActionDenied(message, reason=_PRECONDITION_UNAVAILABLE, action_id=action.action_id)
 
+    def _recorded(self, request: ApprovalRequest, fingerprint: str) -> bool:
+        """Did the fingerprint reach the record a later presentation will read? (§6.4)
+
+        Both halves, because either can lose it: the provider builds the `ApprovalRequest`, and
+        the store persists it. The read-back is the one that matters -- a presentation reads the
+        store and not this object -- and it is one `get_approval`, on the request pass only.
+        """
+        if request.precondition_fingerprint != fingerprint:
+            return False
+        record = self._store.get_approval(request.request_id)
+        return record is not None and record.request.precondition_fingerprint == fingerprint
+
+    def _refuse_unrecorded_request(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        request: ApprovalRequest,
+        fingerprint: str,
+    ) -> NoReturn:
+        """Refuse, and leave nothing behind that another path could spend (SPEC-v0.7 §6.4).
+
+        Refusing this call alone would not be enough: the request the provider already recorded
+        is answerable, and a human granting it would leave a grant any call naming no provider
+        could spend with nothing compared. It is withdrawn through `deny_approval`, an existing
+        store method, so `check_consumable` refuses it for ever with a denial's own reason; a
+        grant that landed inside the window is withdrawn by being spent instead, on nothing.
+
+        The residual is stated rather than hidden: `Control` learns the request exists only when
+        the provider returns, so an approval granted **and presented** before that is spent
+        before there is anything to withdraw. Closing that needs a store call that records the
+        request and its fingerprint together, and `StateStore` is frozen (`v0.6 §9.2`).
+        """
+        withdrawn = self._withdraw(request)
+        compared = _Compared()
+        compared.at_recheck = fingerprint
+        _LOG.warning(
+            "%s: the precondition fingerprint was not recorded with approval request %s, so the "
+            "request is withdrawn (%s) and the action is refused (SPEC-v0.7 §6.4)",
+            action.name,
+            request.request_id,
+            withdrawn,
+        )
+        self._append(
+            EventType.APPROVAL_INVALIDATED,
+            action,
+            {
+                "reason": _PRECONDITION_MISSING,
+                "action_hash": action.action_hash,
+                "withdrawn": withdrawn,
+                **compared.data(),
+            },
+            effect_key,
+            approval_id=request.request_id,
+        )
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {"reason": _PRECONDITION_MISSING},
+            effect_key,
+            approval_id=request.request_id,
+        )
+        message = (
+            f"{action.name}: the precondition fingerprint was not recorded with approval "
+            f"request {request.request_id}, so no presentation of it could compare anything; "
+            f"the request is withdrawn ({withdrawn})"
+        )
+        self._record(
+            action,
+            evaluation,
+            ReceiptResult.DENIED,
+            started_at,
+            error=message,
+            approval_id=request.request_id,
+            effect_key=effect_key,
+            compared=compared,
+        )
+        raise ActionDenied(message, reason=_PRECONDITION_MISSING, action_id=action.action_id)
+
+    def _withdraw(self, request: ApprovalRequest) -> str:
+        """Make a request nobody may answer, with the methods a store already has (§6.4).
+
+        `deny_approval` for a request still pending, which is the ordinary case and leaves a
+        record `check_consumable` refuses by `approval_denied`. A record that is no longer
+        pending refuses that, so a grant that landed inside the window is spent instead: a
+        consumed approval authorizes nothing either, and nothing was reserved or run for it.
+        Returns what was done, for the event.
+        """
+        try:
+            self._store.deny_approval(request.request_id, _WITHDRAWN_BY)
+            return "denied"
+        except CTRLRunError as refused:
+            _LOG.info("%s could not be denied (%s); it is not pending", request.request_id, refused)
+        record = self._store.get_approval(request.request_id)
+        if record is not None and record.status is ApprovalStatus.GRANTED:
+            try:
+                self._store.consume_approval(request.request_id, record.action_hash)
+                return "consumed"
+            except CTRLRunError as refused:
+                _LOG.warning(
+                    "%s was granted inside the window and could not be spent (%s)",
+                    request.request_id,
+                    refused,
+                )
+        return "unknown" if record is None else str(record.status)
+
     def _recheck(
         self,
         action: Action,
@@ -1917,12 +2085,20 @@ class Control:
         not arise and the store call is 0.6.1's exactly.
 
         **Where the verdict is a refusal, the provider is not called** (§6.6), and the refusal
-        is raised from this read with the reason 0.6.1 gives. Not from the store call: a
-        `pending` record a human grants between this read and that call would then be consumed
-        with no recheck, which is a skip. An expired grant still reaches the store, through
-        `consume_approval` and never through a reservation, so the lapse is recorded as 0.6.1
-        records it; a store whose clock disagreed would at most spend a grant this clock calls
-        expired, with nothing reserved and nothing run.
+        is raised from this read, with the reason 0.6.1 gives, and **nothing is written to the
+        store**. Not from the store call: a `pending` record a human grants between this read
+        and that call would then be consumed with no recheck, which is a skip. And nothing
+        written, because the only write this read could ask for is the lapse of an expired
+        grant, and whose clock decides that is `v0.1 §4.2 A3`'s question: the answer stays the
+        store's. A `Control` whose clock ran ahead of its store's used to send the grant to
+        `consume_approval`, the store consumed it by its own clock, and the row then said
+        `consumed` while the events said expired and the receipt said blocked. Safe, and untrue.
+        The row keeps what the store gave it, `APPROVAL_EXPIRED` records the lapse this clock
+        saw, and `check_consumable` refuses the grant at every later presentation anyway.
+
+        What the record carried is recorded either way (§6.11): a refusal that would have
+        happened whatever the world did still says which fingerprint the approval was
+        requested with.
 
         This narrows the window between the human's decision and the reservation to the time
         between this fetch and that store call, and does not close it (§6.7).
@@ -1932,10 +2108,9 @@ class Control:
         stored = None if record is None else record.request.precondition_fingerprint
         if preconditions is None and stored is None:
             return
+        compared.at_request = stored
         verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.refusal is not None:
-            if verdict.expire:
-                self._store.consume_approval(approval_id, action.action_hash)
             raise verdict.refusal
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)

@@ -28,8 +28,12 @@ any change to one appears here.
   gateway and the ACS hook, which name no provider), and `precondition_unavailable` where the
   provider raises or returns something that is not a canonicalizable mapping. Every refusal reserves
   nothing and leaves the approval granted. On the request pass a provider that fails refuses the
-  action with `ActionDenied(reason="precondition_unavailable")` before any human is asked. `ALLOW`,
-  `DENY` and `Control.resume` never call the provider; observe mode compares, records and runs.
+  action with `ActionDenied(reason="precondition_unavailable")` before any human is asked, and a
+  fingerprint that is computed and then **not recorded** (a store without the column, a third-party
+  `ApprovalProvider` building its own request) refuses with
+  `ActionDenied(reason="precondition_missing")` and **withdraws the request it left behind**, so
+  nothing can grant it and spend it unchecked later. `ALLOW`, `DENY` and `Control.resume` never call
+  the provider; observe mode compares, records and runs.
   The comparison is a network call, so it runs outside the atomic reservation write, and a change
   that lands after the comparison and before the reservation is not refused: T261b opens that
   window and asserts exactly that. Raw provider output reaches no receipt, event, log line or
@@ -37,11 +41,13 @@ any change to one appears here.
   and no timeout parameter: a provider that hangs holds the call and reserves nothing.
 - **Migration `0005_precondition_fingerprint`** adds `approvals.precondition_fingerprint`, `NULL` on
   every existing row, on SQLite and Postgres. A database built by 0.6.1's own code migrates keeping
-  every row, and 0.6.1 refuses the migrated database at open naming `0005`. **Stop every 0.6
-  process before the first caller passes `preconditions=`**: a store checks migrations only at
-  open, so a 0.6.1 process already running would consume a fingerprinted approval with no
-  comparison, and nothing in the new process can see it.
-- **G16 in `ctrlrun verify`**, "a moved precondition is refused" before the reservation, under
+  every row, and 0.6.1 refuses the migrated database at open naming `0005`. **Stop every 0.6 process
+  before any 0.7 process opens the store**: a store checks migrations only at open, so a 0.6.1
+  process already running would consume a fingerprinted approval with no comparison, *and* would
+  rehash every `v4` receipt under `v3`'s keys and report a correct chain as altered. The trigger is
+  the first receipt a 0.7 process writes, not the first caller that passes `preconditions=`, and
+  nothing in the new process can see the old one.
+- **G16 in `ctrlrun verify`**, "a moved fingerprint is refused" before the reservation, under
   `ctrlrun.guarantees/v3`. Verify supplies its own provider, because a provider is named in code
   that verify does not read, and the report says so beneath the table; `not applicable` only where
   no action requires approval. The store conformance suite gains a `precondition-fingerprint` case
@@ -62,6 +68,14 @@ any change to one appears here.
 - **`ctrlrun verify` prints each distinct note once**, where it printed only the first note in the
   report, which would have dropped G16's beneath G3's. CI's `verify` job expects `verified 12/12`
   and `verified 7/7`.
+- **A receipt chain reader no longer stops at a row it cannot hash.** A stored document holding a
+  value with no canonical form (a float, a lone surrogate) made `verify_chain` raise, so one
+  tampered row ended the walk: `ctrlrun receipts --verify-chain` exited with no report and a forged
+  field at another `seq` went unnamed. Such a row is `content_altered` at its `seq`, named by the
+  refusal's type and never its message.
+- **`APPROVAL_CONSUMED` carries what the presenting pass compared**, where a precondition was
+  compared, so a suspended action's resumed leg, whose receipt is the only one it gets, records the
+  comparison its first leg made.
 
 ### Fixed
 

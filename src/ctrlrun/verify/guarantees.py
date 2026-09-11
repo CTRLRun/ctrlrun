@@ -51,7 +51,11 @@ GUARANTEES: Final = (
     Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
     Guarantee(
         "G16",
-        "a moved precondition is refused",
+        # Not "a moved precondition is refused": a precondition that moves after the comparison
+        # is not refused (§6.7), and a title is the shortest sentence this project writes about
+        # a guarantee. What is compared is the fingerprint, and what G16 grades is one that had
+        # already moved when the recheck read it.
+        "a moved fingerprint is refused",
         ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
     ),
 )
@@ -161,7 +165,6 @@ __all__ = [
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
     "PER_CONNECTION_BACKEND",
-    "PRECONDITION_NOTE",
     "PROCESSES",
     "SYNTHETIC_PREFIX",
     "Guarantee",
