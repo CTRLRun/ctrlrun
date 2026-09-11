@@ -1081,7 +1081,14 @@ class Control:
                     # `InvalidArgument`, which escaped: no receipt, no event, and the caller
                     # handed a store error about its own effect key. Found by review, round 2.
                     self._unrecorded(
-                        action, evaluation, started_at, held_key, attempt, refused, approval
+                        action,
+                        evaluation,
+                        started_at,
+                        held_key,
+                        attempt,
+                        refused,
+                        approval,
+                        did=f"the executor raised NotExecuted: {exc}",
                     )
                     raise
             self._append(
@@ -1177,7 +1184,14 @@ class Control:
                 # otherwise. What happened at the remote is now as unknown as a timeout, so
                 # the attempt is recorded `ambiguous` rather than committed.
                 self._unrecorded(
-                    action, evaluation, started_at, held_key, attempt, refused, approval
+                    action,
+                    evaluation,
+                    started_at,
+                    held_key,
+                    attempt,
+                    refused,
+                    approval,
+                    did="the executor returned, so the remote may well have acted",
                 )
                 raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
@@ -1614,14 +1628,25 @@ class Control:
         attempt: int,
         refused: CTRLRunError,
         approval: Approval | None,
+        *,
+        did: str,
     ) -> None:
         """Record an outcome the store refused to write (SPEC-v0.1 §5.2, §5.5).
 
         The executor finished, but the effect record moved on while it ran, so what happened
         at the remote is exactly as unknown as a timeout: `ambiguous`, whatever the executor
         returned or raised. A terminal action still gets its receipt (§6.1).
+
+        **`did` is what the executor did, and it belongs in the receipt beside the refusal.**
+        Recording only the refusal made two receipts identical that a human must be able to tell
+        apart: an executor that *returned* leaves a remote that very likely acted, and one that
+        raised `NotExecuted` leaves a remote that very likely did not. With the effect record
+        carrying neither, the receipt is the only place that fact exists, and whoever runs
+        `ctrlrun resolve` on this key has nothing else to go on. Found by review, round 3.
         """
-        error = f"{type(refused).__name__}: {refused}"
+        error = _storable(
+            f"{did}, and the outcome write was refused: {type(refused).__name__}: {refused}"
+        )
         self._append(
             EventType.EXECUTION_AMBIGUOUS, action, {"error": error}, effect_key, approval=approval
         )

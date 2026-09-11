@@ -1226,8 +1226,9 @@ def test_a_stale_expire_never_overwrites_a_consumption(proxy, schema, home):
 # --- the outcome itself: never lost, whatever the store answers ------------------------------
 
 
+@pytest.mark.parametrize("did", ["raised TimeoutError", "returned", "raised NotExecuted"])
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, tmp_path):
+def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, did, tmp_path):
     """`v0.1 §5.5` through `Control`, when the outcome write itself is refused.
 
     The round-2 review drove this through the public API on SQLite, so the store is not the
@@ -1243,9 +1244,17 @@ def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, t
     written whatever the store says, they name the refusal, and the caller gets its own exception
     back. What the effect record says afterwards is the human's claim and not this attempt's, which
     is the residual §12.3a states and the reason the receipt has to carry the truth.
+
+    **And the receipt says what the executor did**, which is the fact a human resolving the effect
+    needs most. All three outcomes end here: a timeout, an executor that returned normally (so the
+    remote very likely acted), and one that raised `NotExecuted` (so it very likely did not). A
+    review found the last two producing byte-identical receipts, because the refusal was recorded
+    and the outcome was not. A human reading *"DuplicateEffect: ..."* cannot tell a refund that
+    probably landed from one that certainly did not.
     """
     from ctrlrun.action import Action, Principal
     from ctrlrun.control import Control
+    from ctrlrun.errors import NotExecuted
     from ctrlrun.policy import Policy
     from ctrlrun.receipt import EventType, ReceiptResult
     from ctrlrun.state import SQLiteStateStore
@@ -1288,11 +1297,16 @@ def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, t
         finally:
             other.close()
         ran.append("the executor ran, and nobody knows what the remote did")
+        if did == "returned":
+            return {"refund": "re_1"}
+        if did == "raised NotExecuted":
+            raise NotExecuted("the gateway refused the request before dispatching it")
         raise TimeoutError("the refund response never arrived")
 
     try:
         before = len(store.receipts())
-        with pytest.raises(TimeoutError):
+        expected = TimeoutError if did == "raised TimeoutError" else CTRLRunError
+        with pytest.raises(expected):
             control.execute(action, executor, "refund:re_1")
         assert ran, "the executor never ran; this test is about what happens after it does"
 
@@ -1302,10 +1316,20 @@ def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, t
             "the outcome write and the evidence went with it"
         )
         assert written[0].result is ReceiptResult.AMBIGUOUS, written[0].result
-        assert "TimeoutError" in (written[0].error or ""), written[0].error
         assert "refused" in (written[0].error or ""), (
             f"the receipt says {written[0].error!r}; it must say the outcome could not be written, "
             "because the effect record does not say it either"
+        )
+        says = {
+            "raised TimeoutError": "TimeoutError",
+            "returned": "returned",
+            "raised NotExecuted": "NotExecuted",
+        }[did]
+        assert says in (written[0].error or ""), (
+            f"the executor {did} and the receipt says {written[0].error!r}, which does not. An "
+            "executor that returned and one that proved it did not act must not leave the same "
+            "receipt: for the first the remote very likely acted, and a human resolving this "
+            "effect has nothing else to go on"
         )
         assert EventType.EXECUTION_AMBIGUOUS in [event.type for event in store.events()], (
             "no EXECUTION_AMBIGUOUS event: the one unknown outcome here is recorded nowhere"
@@ -1321,7 +1345,7 @@ def test_an_unknown_outcome_the_store_refuses_to_record_is_never_lost(backend, t
 
 
 @postgres
-def test_the_outcome_re_issue_is_bounded_at_one(schema):
+def test_the_outcome_re_issue_is_bounded_at_one(schema, caplog):
     """*Every loop in this project is bounded*, and the re-issue above is a loop.
 
     `T155f` is the precedent: the lost-commit re-issue had no bound, and driven with a proxy that
@@ -1352,6 +1376,7 @@ def test_the_outcome_re_issue_is_bounded_at_one(schema):
             self.reads += 1
             return replace(record, attempt=record.attempt + self.reads)
 
+    caplog.set_level("WARNING", logger="ctrlrun.postgres")
     key = "refund:bounded-reissue"
     store = KeepsMoving(URL, schema=schema, clock=lambda: T0)
     try:
@@ -1368,6 +1393,14 @@ def test_the_outcome_re_issue_is_bounded_at_one(schema):
             f"the record was read {store.reads} times: the re-issue never ran, so this test is "
             "not about the bound"
         )
+        # And the restage that then refused is in the log. It used to be written only after the
+        # re-issue returned, so the one case an operator would go looking for left no line.
+        restages = [r for r in caplog.records if getattr(r, "restage", None)]
+        assert len(restages) == 1, (
+            f"{len(restages)} restage lines for a re-issue that ran and then refused; §4.3.4's "
+            "rule is that which branch ran is observable, and this is the branch that wrote "
+            "nothing"
+        )
     finally:
         store.moving = False
         store.close()
@@ -1376,3 +1409,101 @@ def test_the_outcome_re_issue_is_bounded_at_one(schema):
     record = stored(schema, key)
     assert record is not None
     assert (record.state, record.attempt) == (EffectState.EXECUTING, 1), record
+
+
+@postgres
+def test_the_two_re_issue_bounds_compose(proxy, schema):
+    """Two bounds that reset each other are one unbounded loop, and this drives both at once.
+
+    `restaged` bounds the stale re-issue; `retrying` bounds the lost-commit re-issue of `v0.6`
+    §4.3.2 Table A2. Each was tested alone. A review composed them: a `COMMIT` lost *inside* a
+    restage re-entered the lost-commit path, which re-issued without `restaged`, which restaged
+    again without `retrying`, and the two alternated to `RecursionError` at 113 deep. That is
+    T155f's failure mode exactly, and T155f's comment says why it matters: `RecursionError` is
+    outside this library's closed set of errors, so no caller can classify it and the record is
+    left stranded.
+
+    Both halves are driven the way each is driven alone. The lost `COMMIT` is the **real** proxy at
+    `drop_before_commit = 1000`, which is T155f's injection; the record that keeps moving is the
+    bound test's seam, which is what a same-`action_id` renewal leaves behind. Neither invents a
+    store answer: one is a connection dying mid-`COMMIT`, the other is a row a rival advanced.
+    """
+    from dataclasses import replace
+
+    from ctrlrun.postgres import PostgresStateStore
+
+    moves = (0, 0, 1, 0)
+
+    class LosesCommitsAndKeepsMoving(PostgresStateStore):
+        breaking = False
+        reads = 0
+        depth = 0
+        deepest = 0
+
+        def _read_effect(self, connection, effect_key):  # type: ignore[no-untyped-def]
+            record = super()._read_effect(connection, effect_key)
+            if record is None or not self.breaking:
+                return record
+            # The pattern a review's search over read patterns found: the rival moves the row on
+            # the third read of each cycle. Whether two bounds compose is a property of the
+            # interleaving, and this is the interleaving that catches it; the obvious
+            # every-other-read pattern happens to end bounded even when they do not compose,
+            # which is the mutation-pattern-4 trap one layer up from the store.
+            moved = moves[self.reads % len(moves)]
+            self.reads += 1
+            return replace(record, attempt=record.attempt + 1) if moved else record
+
+        def _transition(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            self.depth += 1
+            self.deepest = max(self.deepest, self.depth)
+            try:
+                return super()._transition(*args, **kwargs)
+            finally:
+                self.depth -= 1
+
+    key = "refund:composed-bounds"
+    setup = direct(schema)
+    try:
+        setup.reserve_effect(key, REUSED, LEASE)
+        setup.begin_execution(key, REUSED)
+    finally:
+        setup.close()
+
+    store = LosesCommitsAndKeepsMoving(proxy.url(URL), schema=schema, clock=lambda: T0)
+    raised: BaseException | None = None
+    try:
+        proxy.reset_counters()
+        proxy.drop_before_commit = 1000  # every COMMIT from here on, as T155f does
+        store.breaking = True
+        try:
+            store.mark_ambiguous(key, REUSED, "nobody knows what the remote did")
+        except BaseException as broke:
+            raised = broke
+    finally:
+        store.breaking = False
+        proxy.drop_before_commit = 0
+        store.close()
+
+    assert proxy.commits_dropped >= 2, (
+        f"only {proxy.commits_dropped} COMMIT was swallowed; the lost-commit half of this "
+        "composition never ran"
+    )
+    assert store.reads >= 2, "the record never moved; the restage half never ran"
+    assert not isinstance(raised, RecursionError), (
+        f"the two bounds reset each other and the re-issues alternated to a RecursionError at "
+        f"{store.deepest} deep: outside the closed error set, so no caller can classify it"
+    )
+    assert isinstance(raised, CTRLRunError), (
+        f"the composition ended as {type(raised).__name__ if raised else 'a clean return'}; a "
+        "write nobody could land must refuse inside the taxonomy"
+    )
+    assert store.deepest <= 4, (
+        f"the transition nested {store.deepest} deep; each bound permits one re-issue, so the "
+        "composition of the two is bounded and small"
+    )
+
+    record = stored(schema, key)
+    assert record is not None
+    assert (record.state, record.attempt) == (EffectState.EXECUTING, 1), (
+        f"the record is {record.state} at {record.attempt}; no COMMIT was allowed to land"
+    )

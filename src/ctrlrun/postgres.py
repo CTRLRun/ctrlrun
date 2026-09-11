@@ -1026,13 +1026,32 @@ class PostgresStateStore:
         self._transition(effect_key, action_id, EffectState.EXECUTING, _RESERVED)
 
     def commit_effect(self, effect_key: str, action_id: str, result: Any) -> None:
-        self._transition(effect_key, action_id, EffectState.COMMITTED, _EXECUTING, result=result)
+        # `carries_outcome`: what the executor did, so a record that moved under this write is
+        # re-issued against rather than refused (SPEC-v0.7 §5.6). It is passed here, at the call
+        # site, and never inferred from the target state: `_transition` is generic, and a later
+        # transition to `COMMITTED` or `AMBIGUOUS` that is somebody's *decision* rather than an
+        # executor's outcome -- a human's resolution is exactly that -- must not inherit it.
+        self._transition(
+            effect_key,
+            action_id,
+            EffectState.COMMITTED,
+            _EXECUTING,
+            result=result,
+            carries_outcome=True,
+        )
 
     def fail_effect(self, effect_key: str, action_id: str, error: str) -> None:
         self._transition(effect_key, action_id, EffectState.FAILED, _EXECUTING, error=error)
 
     def mark_ambiguous(self, effect_key: str, action_id: str, error: str) -> None:
-        self._transition(effect_key, action_id, EffectState.AMBIGUOUS, _UNFINISHED, error=error)
+        self._transition(
+            effect_key,
+            action_id,
+            EffectState.AMBIGUOUS,
+            _UNFINISHED,
+            error=error,
+            carries_outcome=True,
+        )
 
     def _transition(
         self,
@@ -1045,6 +1064,7 @@ class PostgresStateStore:
         error: str | None = None,
         retrying: bool = False,
         restaged: bool = False,
+        carries_outcome: bool = False,
     ) -> None:
         """One compare-and-set, with the row count checked (§4.2).
 
@@ -1093,7 +1113,10 @@ class PostgresStateStore:
                 found = _checked(
                     self._read_effect(connection, effect_key), effect_key, action_id, expected, now
                 )
-                if state in _OUTCOMES and not restaged:
+                # The set is the assertion, not the condition: only these two states can carry
+                # an executor's outcome, and a caller that says otherwise is a wiring bug.
+                assert not carries_outcome or state in _OUTCOMES, state
+                if carries_outcome and not restaged:
                     # The predicate passed: the record is still ours and still in a state this
                     # transition may be made from, and only the attempt or the pre-state moved
                     # under us. **An outcome is not dropped here** (SPEC-v0.7 §5.6). Refusing
@@ -1114,6 +1137,25 @@ class PostgresStateStore:
                 raise _moved(found, record, effect_key)
         except _Restage as moved:
             self._rollback(connection)
+            # Logged **before** the re-issue, not after it. Logging afterwards told the operator
+            # about a restage only when it went on to succeed, so a restage that then refused left
+            # no line at all and §4.3.4's rule -- which branch ran is observable -- did not hold
+            # for the one case worth reading a log about. Found by review, round 3.
+            _LOG.warning(
+                "effect %r moved to attempt %s while %s was being recorded; re-issuing the "
+                "outcome against the record as it now stands (SPEC-v0.7 5.6)",
+                effect_key,
+                moved.found.attempt,
+                state,
+                extra={"effect_key": effect_key, "attempt": moved.found.attempt, "restage": True},
+            )
+            # **Both bounds travel, and neither resets the other.** `retrying` is passed on
+            # because this re-issue's own `COMMIT` can be lost, and a lost commit that re-entered
+            # here with `retrying` cleared alternated with the restage bound forever: a review
+            # composed the two halves -- every `COMMIT` lost, and a record that keeps moving --
+            # and measured `RecursionError` at 113 deep, which is T155f's failure mode returning
+            # by another door. Every loop in this project is bounded, and two bounds that reset
+            # each other are not a bound.
             self._transition(
                 effect_key,
                 action_id,
@@ -1121,15 +1163,9 @@ class PostgresStateStore:
                 expected,
                 result=result,
                 error=error,
+                retrying=retrying,
                 restaged=True,
-            )
-            _LOG.warning(
-                "effect %r moved to attempt %s while %s was being recorded; the outcome was "
-                "re-issued against the record as it now stands (SPEC-v0.7 5.6)",
-                effect_key,
-                moved.found.attempt,
-                state,
-                extra={"effect_key": effect_key, "attempt": moved.found.attempt},
+                carries_outcome=carries_outcome,
             )
             return
         except AmbiguousWrite:
@@ -1149,7 +1185,16 @@ class PostgresStateStore:
                 # could classify it -- leaving the record stranded `EXECUTING`. Found by review.
                 # *Every loop in this project is bounded*, and a re-read path is a loop.
                 raise
-            self._resolve_lost_update(effect_key, action_id, state, expected, result, error)
+            self._resolve_lost_update(
+                effect_key,
+                action_id,
+                state,
+                expected,
+                result,
+                error,
+                restaged=restaged,
+                carries_outcome=carries_outcome,
+            )
 
     def _resolve_lost_update(
         self,
@@ -1159,6 +1204,9 @@ class PostgresStateStore:
         expected: frozenset[EffectState],
         result: Any,
         error: str | None,
+        *,
+        restaged: bool = False,
+        carries_outcome: bool = False,
     ) -> None:
         """§4.3.2 Table A2: a lost `COMMIT` on a compare-and-set.
 
@@ -1181,8 +1229,18 @@ class PostgresStateStore:
             return  # the commit landed
         if found.action_id == action_id and found.state in expected:
             _took(A2_REISSUE, effect_key)
+            # `restaged` travels with `retrying` for the reason the restage handler passes
+            # `retrying` on: a bound that another path clears is not a bound (SPEC-v0.7 §12.3a).
             self._transition(
-                effect_key, action_id, state, expected, result=result, error=error, retrying=True
+                effect_key,
+                action_id,
+                state,
+                expected,
+                result=result,
+                error=error,
+                retrying=True,
+                restaged=restaged,
+                carries_outcome=carries_outcome,
             )
             return
         _took(A2_REFUSE, effect_key)

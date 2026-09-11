@@ -66,6 +66,17 @@ any change to one appears here.
   now catches every `CTRLRunError` from an outcome write, writes the receipt and the event whatever
   the store answered, names the refusal in both, and re-raises the caller's own exception. Nothing
   is reconciled on a record the attempt could not mark.
+- **Two bounds on the Postgres store's re-issues reset each other.** The stale re-issue and the
+  lost-commit re-issue of `docs/SPEC-v0.6.md` §4.3.2 each carry a flag that permits one attempt,
+  and neither passed the other's flag on, so a lost `COMMIT` inside a re-issue and a re-issue
+  inside a lost `COMMIT` alternated without end: a review drove both halves at once and reached
+  `RecursionError`, which is outside this library's closed set of errors, so no caller can
+  classify it and the record is left stranded. Both flags now travel through both re-issues.
+- **A receipt for an outcome the store refused did not say what the executor had done.** An
+  executor that returned normally and one that raised `NotExecuted` produced identical receipts,
+  naming the store's refusal and nothing else. For the first the remote very likely acted and for
+  the second it very likely did not, and with the effect record carrying neither, that is the one
+  fact whoever runs `ctrlrun resolve` has to go on. The receipt now carries both.
 - **A lapsed Postgres approval could be marked expired over a consumption.** `_expire` wrote
   `status = expired` on `approval_id` alone, from a read that saw `granted` past `expires_at`, so a
   consumption committing in between was overwritten and an approval that authorised a real effect

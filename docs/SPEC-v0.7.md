@@ -2554,6 +2554,33 @@ retry beside a running dispatch; `begin_execution` claims a reservation this att
 an outcome to the newer attempt is the residual below; dropping it is a lost outcome, and between the two the
 fail-closed direction is to land it.
 
+**Two bounds that reset each other are not a bound, and that took a third round to see.** `restaged` bounds the
+stale re-issue and `retrying` bounds `v0.6 §4.3.2` Table A2's lost-commit re-issue. Each was tested alone and
+each held alone. Composed, they cleared each other: the restage re-issued without passing `retrying` on, and the
+lost-commit re-issue re-issued without passing `restaged` on, so a `COMMIT` lost inside a restage reset the
+restage bound and a restage inside a lost-commit re-issue reset the lost-commit bound. A review drove both
+halves at once, every `COMMIT` lost and a record that keeps moving, and measured `RecursionError` at 113 deep,
+which is T155f's failure mode arriving by another door and outside the closed set of errors, so no caller can
+classify it. Both flags now travel through both re-issues. The composition is the property, not either flag, and
+its test drives both halves the way each is driven alone: the real proxy at `drop_before_commit = 1000` for the
+lost `COMMIT`, and the seam below for the record that moves. **The interleaving matters**: the obvious
+every-other-read pattern ends bounded even when the flags do not compose, and the pattern a search found,
+`(0, 0, 1, 0)`, does not. A test that had picked the obvious one would have been mutation pattern 4 one layer up
+from the store.
+
+**The re-issue is asked for at the call site rather than inferred from the state it writes.** It was keyed on
+the target state, `COMMITTED` or `AMBIGUOUS`, which is right for every path there is today and wrong the moment
+a transition to one of those states is somebody's *decision* rather than an executor's outcome. A human's
+resolution is exactly that, and it reaches `_write_effect` today, but `_transition` is generic and the next
+transition to land there would have inherited the re-issue silently. `commit_effect` and `mark_ambiguous` now
+pass `carries_outcome=True`, and the state set survives as an assertion: a caller that claims to carry an
+outcome into any other state is a wiring bug rather than a re-issue.
+
+**A restage that then refuses says so.** The line naming it was written after the nested call returned, so it
+appeared only when the re-issue succeeded, and the case an operator would actually go looking for, a stale
+outcome that was re-issued and still refused, left no line at all. It is written before the re-issue now, which
+is `v0.6 §4.3.4`'s rule applied to a branch that section does not enumerate: which branch ran is observable.
+
 **The bound has its own test, at the store's own read, because no proxy can drive it.** A second move under the
 re-issue needs a rival interleaved *inside* the re-issue, and a hold fires once. `v0.6`'s T155f is the precedent
 for what an unbounded re-issue costs: driven by a proxy that swallowed every `COMMIT`, the lost-commit path
@@ -2579,11 +2606,22 @@ while the attempt was still running answers `InvalidArgument`, which escaped. Th
 about its own effect key instead of its executor's exception: the unknown outcome existed nowhere. The store's
 answer to an outcome write may be a refusal; the evidence may not. `Control` now catches every `CTRLRunError`
 from the three outcome writes, writes the event and the receipt whatever the answer was, and **names the
-refusal in them**, because where the store would not take the outcome the effect record does not carry it and
+refusal in them**, with what the executor did beside it: an executor that returned leaves a remote that very
+likely acted and one that raised `NotExecuted` leaves a remote that very likely did not, and recording only the
+refusal made those two receipts identical for whoever runs `ctrlrun resolve`, because where the store would not take the outcome the effect record does not carry it and
 the receipt is the only place it exists. The caller's own exception propagates, and eager reconciliation stays
 gated on the write having landed, so nothing is retried on the strength of a refused outcome write. What the
 record says afterwards is the human's claim, not this attempt's, and that is the one thing the evidence can
-still contradict. T246d is the test, on both backends.
+still contradict. T246d is the test, on both backends and for all three outcomes.
+
+**What the wider catch also absorbs, said plainly.** Each of those three `except` clauses wraps exactly one
+store call, so no approval, authority or reservation refusal passes through it. But `CTRLRunError` includes
+`InvalidArgument`, and a mis-wired `held_key` raises `InvalidArgument("no reservation for effect ...")`, which
+now becomes an `ambiguous` receipt naming the refusal rather than an exception at the caller. That is the right
+trade and it is a trade: a wiring bug on this path surfaces in the evidence instead of at the call site, and it
+surfaces as an unknown outcome, which is the fail-closed reading of *the store would not record what the
+executor did*. The receipt names the exception type, so the bug is legible; what it no longer does is stop the
+attempt from being recorded at all.
 
 **What that does not close, stated without softening, because the first draft of this paragraph softened it in
 three places.** The attempt number is now monotonic, so no two reservations of one key carry the same number.
@@ -2592,11 +2630,20 @@ transition names its holder by `action_id` alone, so attempt 1's write, arriving
 contender ambiguated the record and the same `Action` was retried, reads attempt 2's record, finds its own id
 in a state it expects, and lands there. Three corrections to how that was stated:
 
-- **It is not only misattribution.** A late `commit_effect` or `mark_ambiguous` records the wrong attempt's
-  outcome, which is bad evidence. A late `fail_effect` is worse than that: it writes `FAILED` over attempt 2
-  **while attempt 2 is executing**, and `FAILED` is the one state that permits a renewal, so attempt 3 may be
-  dispatched beside a dispatch that is still running. That is a concurrent double execution, and calling it
-  attribution would be this repository's own prevention-versus-attribution error.
+- **It is not only misattribution.** A late `commit_effect` records the wrong attempt's outcome, which is bad
+  evidence. A late `fail_effect` is worse: it writes `FAILED` over attempt 2 **while attempt 2 is executing**,
+  and `FAILED` is the one state that permits a renewal, so attempt 3 may be dispatched beside a dispatch that is
+  still running. That is a concurrent double execution, and calling it attribution would be this repository's
+  own prevention-versus-attribution error.
+- **And `mark_ambiguous` reaches the same place in one more step, which is why the asymmetry above is argued on
+  this ground and not on the state's name.** A late or re-issued `mark_ambiguous` lands `AMBIGUOUS` on attempt
+  2; the write succeeded, so `Control` counts the outcome as recorded and eager reconciliation runs; a hook
+  answering `not_executed` resolves the record `FAILED`, because the hook is asked about the **effect key** and
+  not about the attempt; and attempt 3 may then be reserved while attempt 2 is still executing. The step that
+  `fail_effect` takes in one, `mark_ambiguous` takes in two, and the second is taken by a hook that cannot see
+  which attempt it is answering about. Recording the unknown outcome is still right, and the store must still
+  never drop it; what the pair shows is that the residual is about attempt *identity* and is not closed by
+  refusing one transition.
 - **It does not need a human.** A reconcile hook answering `not_executed` moves an `AMBIGUOUS` record to
   `FAILED` with no person involved (`control.py`, `_reconciled`), so the sequence runs unattended.
 - **There is a fix inside the frozen protocol, and it is declined here rather than unavailable.** A store-side
