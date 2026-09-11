@@ -24,6 +24,30 @@ any change to one appears here.
   errored before a release was installed. The fixture now symlinks, as `python -m venv` does on
   POSIX.
 
+### Documentation
+
+- **`docs/SPEC-v0.7.md`**: the v0.7 "Execution boundary" contract, a delta over v0.1 to v0.6. No
+  code lands with it. It asks one question: *does it hold at the edges the kernel does not
+  control?* The kernel does not decide whether the remote acted, an executor does; it does not own
+  the clock its leases are measured against once the store is on another host; and it does not know
+  whether the world still looks the way it did when a human said yes. Five items answer those
+  edges: the `NotExecuted` classifier promoted from the gateway into core as `ctrlrun.transport`,
+  clock-skew detection, a provider idempotency token derived from `(effect_key, attempt)`, an
+  operator-set ceiling on renewal after `FAILED` (`max_attempts`, written as an amendment to
+  `SPEC-v0.1.md` §5.4), and precondition fingerprints, which **narrow** the window between a
+  human's approval and the action's execution and do not close it. Tests come from §8
+  (T209 to T271, because T182 to T208 already belong to `SPEC-mcp-operator.md` and `SPEC-scan.md`);
+  public names are frozen in §9; guarantees G12 to G16 join `ctrlrun.guarantees/v3`.
+
+  **Reading the code changed nine things the plan had assumed**, and §1.4 lists them. Four matter
+  beyond this document: on Postgres a renewal could reuse an attempt number, which v0.7 makes
+  load-bearing, so item 4 tightens that `UPDATE`; bumping the receipt schema the ordinary way would
+  have reported every receipt a released 0.6 wrote as altered, so a receipt now renders under the
+  schema it was written with; one human approval buys one dispatch, not unlimited ones, because
+  every renewal of an approved action needs a new approval, so the unbounded case the ceiling
+  exists for is the action the policy allows outright; and `max_attempts` needs
+  `ctrlrun.policy/v5`.
+
 ## [0.6.1] - 2026-09-07 — The audit's fixes, and the gateway's transport
 
 Everything found after `v0.6.0` was tagged: twenty-nine defects from an audit of the shipped
