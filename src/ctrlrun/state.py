@@ -399,6 +399,103 @@ class DelegationRecord:
         return self.revoked_at is not None
 
 
+#: SPEC-v0.7 §3.5. What caused a measurement: the store opening, or an expired lease being
+#: declared `AMBIGUOUS` (`v0.1 §5.3 E3`). A closed set, like every vocabulary a reader parses.
+_CLOCK_SKEW_TRIGGERS: Final = frozenset({"open", "lease_expired"})
+
+
+@dataclass(frozen=True)
+class ClockSkew:
+    """One measurement of a store's clock against the application's (SPEC-v0.7 §3.4, §3.6).
+
+    `skew` is the application's time at the midpoint of one round trip minus the store's reading,
+    so a positive value means the application clock is **ahead**. `bound` is half that round
+    trip: the store read its clock somewhere inside it, so the true offset lies within
+    `skew ± bound`. `measured_at` is the application's midpoint and `trigger` is `"open"` or
+    `"lease_expired"`.
+
+    **It observes and decides nothing.** No lease is evaluated against it (§3.2): it is what a
+    store with its own clock retains, as the optional `clock_skew` attribute, for `Control` to
+    report as `CLOCK_SKEW_DETECTED`. `Control` reports only an instance of this class, so a store
+    that exposes one constructs it; a look-alike with the same fields is ignored.
+
+    Fields are checked at construction, so a measurement that is malformed fails where it was
+    made rather than inside the `Control` that would report it.
+    """
+
+    skew: timedelta
+    bound: timedelta
+    threshold: timedelta
+    measured_at: datetime
+    trigger: str
+
+    def __post_init__(self) -> None:
+        for name in ("skew", "bound", "threshold"):
+            if not isinstance(getattr(self, name), timedelta):
+                raise InvalidArgument(f"ClockSkew.{name} must be a timedelta")
+        if self.bound < timedelta(0):
+            raise InvalidArgument("ClockSkew.bound is half a round trip and cannot be negative")
+        if self.threshold <= timedelta(0):
+            raise InvalidArgument("ClockSkew.threshold must be positive")
+        if not isinstance(self.measured_at, datetime) or self.measured_at.utcoffset() is None:
+            raise InvalidArgument("ClockSkew.measured_at must be a timezone-aware datetime")
+        if self.trigger not in _CLOCK_SKEW_TRIGGERS:
+            raise InvalidArgument(
+                f"ClockSkew.trigger must be one of {sorted(_CLOCK_SKEW_TRIGGERS)}, "
+                f"got {self.trigger!r}"
+            )
+
+    @property
+    def exceeded(self) -> bool:
+        """Past the threshold by more than the measurement's own uncertainty (§3.4).
+
+        A slow link widens `bound` and raises the bar exactly as far as the doubt it added, so
+        latency alone can never produce a report.
+        """
+        return abs(self.skew) > self.threshold + self.bound
+
+
+# --- grading a measurement: G13 and the store conformance suite's clock case ------------------
+#
+# Both inject a skew and ask whether it was reported. A conforming store reports only past
+# `threshold + bound`, so an injection sized without looking at the bound grades the link and
+# not the store: a round trip slow enough that half of it exceeds the margin makes a correct
+# store stay silent, and a fixed margin then reports that silence as a defect. One definition,
+# so verify and the suite cannot come to disagree about when a silence is a finding.
+
+
+def _decisive(injected: timedelta, measured: ClockSkew, alignment: timedelta) -> bool:
+    """Must a store honest within `measured.bound` report a skew of `injected`?
+
+    The clock was aligned by a first measurement whose own doubt is `alignment`, so the true
+    skew is `injected` within `alignment`, and the store may read it anywhere within its bound
+    of that. It reports only past `threshold + bound`. So only an injection past
+    `threshold + 2 * bound + alignment` leaves a conforming store no room to stay silent.
+    """
+    return abs(injected) > measured.threshold + 2 * measured.bound + alignment
+
+
+def _wider_margin(measured: ClockSkew, alignment: timedelta, base: timedelta) -> timedelta:
+    """The margin past the threshold that would have been decisive against `measured`."""
+    return 2 * measured.bound + alignment + base
+
+
+def _explained_by_alignment(measured: ClockSkew, alignment: timedelta) -> bool:
+    """Could this report on a clock meant to be aligned be the aligning measurement's error?
+
+    Only where the measurement is past the threshold by more than its own bound, and by no more
+    than the alignment's doubt beyond that. A report the store's own rule does not allow is a
+    detector firing when it must not, and one past both bounds contradicts the measurement the
+    alignment came from: both are findings, and neither is excused here.
+
+    The rule is recomputed from the fields rather than read from `exceeded`, so a store whose
+    `exceeded` always answers true is caught by the first branch instead of being excused by
+    this one.
+    """
+    past = abs(measured.skew) - measured.threshold
+    return measured.bound < past <= measured.bound + alignment
+
+
 class StateStore(ApprovalStore, Protocol):
     """Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence."""
 

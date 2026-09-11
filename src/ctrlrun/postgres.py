@@ -37,7 +37,7 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from .action import Action
@@ -72,6 +72,7 @@ from .errors import (
 from .migrations import migrate
 from .receipt import Event, EventType, Receipt
 from .state import (
+    ClockSkew,
     DelegationRecord,
     HeldContinuation,
     _action_from_json,
@@ -146,6 +147,59 @@ def _took(branch: str, effect_key: str) -> None:
 #: ordinary short read does not fail a cleanup, short enough that a forgotten open transaction
 #: produces an error rather than a hung run.
 DROP_LOCK_TIMEOUT: Final = "10s"
+
+#: SPEC-v0.7 §3.7. How far this host's clock may disagree with the store's, beyond the
+#: measurement's own bound, before it is reported. A third of a percent of `DEFAULT_LEASE`: early
+#: enough to name drift before it produces its first unexplained `AMBIGUOUS`, and far past what a
+#: synchronized clock drifts by. The operator may set it, up to `DEFAULT_LEASE`; nothing turns
+#: the measurement off.
+DEFAULT_CLOCK_SKEW_THRESHOLD: Final = timedelta(seconds=1)
+
+#: SPEC-v0.7 §3.5. What caused a measurement (`ClockSkew.trigger`).
+_OPENED: Final = "open"
+_LEASE_EXPIRED: Final = "lease_expired"
+
+
+def _checked_threshold(value: object) -> timedelta:
+    """SPEC-v0.7 §3.7: a positive `timedelta` up to `DEFAULT_LEASE`, or `InvalidArgument`.
+
+    No value turns detection off, so there is no value to accept that would: zero, a negative,
+    `None` and a number are all refused rather than read as "never report". A threshold above
+    the default lease would stay silent while a default-lease reservation was declared
+    `AMBIGUOUS` by skew alone, which is the harm the measurement exists to name.
+    """
+    if not isinstance(value, timedelta):
+        raise InvalidArgument(
+            f"clock_skew_threshold must be a timedelta, got {type(value).__name__} (SPEC-v0.7 §3.7)"
+        )
+    if value <= timedelta(0) or value > DEFAULT_LEASE:
+        raise InvalidArgument(
+            f"clock_skew_threshold must be positive and at most DEFAULT_LEASE "
+            f"({DEFAULT_LEASE}), got {value}. No value turns the measurement off "
+            "(SPEC-v0.7 §3.7)"
+        )
+    return value
+
+
+def _measurement(
+    before: datetime, server: datetime, after: datetime, threshold: timedelta, trigger: str
+) -> ClockSkew:
+    """SPEC-v0.7 §3.4's arithmetic, on one round trip.
+
+    The server read its clock somewhere between `before` and `after`, so the best estimate of
+    the application's time at that instant is the midpoint, and the true offset lies within
+    half the round trip of it. A round trip the application clock measured as negative (an
+    injected or stepped clock) is taken by its size: the doubt is the same either way.
+    """
+    half = abs(after - before) / 2
+    midpoint = min(before, after) + half
+    return ClockSkew(
+        skew=midpoint - server,
+        bound=half,
+        threshold=threshold,
+        measured_at=midpoint,
+        trigger=trigger,
+    )
 
 
 def _psycopg() -> Any:
@@ -288,6 +342,7 @@ class PostgresStateStore:
         *,
         clock: Callable[[], datetime] = _utc_now,
         schema: str = "public",
+        clock_skew_threshold: timedelta = DEFAULT_CLOCK_SKEW_THRESHOLD,
     ) -> None:
         if not url:
             raise InvalidArgument("a Postgres store needs a connection URL")
@@ -296,12 +351,103 @@ class PostgresStateStore:
         self._url = url
         self._schema = schema
         self._clock = clock
+        self._clock_skew_threshold = _checked_threshold(clock_skew_threshold)
+        self._clock_skew: ClockSkew | None = None
+        self._skew_lock = threading.Lock()
+        self._remeasured_at: datetime | None = None
         self._local = threading.local()
         self._open: set[Any] = set()
         self._open_lock = threading.Lock()
         connection = self._connection()
         self._refuse_without_ddl_rights(connection)
         migrate(connection, self._clock(), dialect="postgres")
+        self._measure_clock_skew(connection, _OPENED)
+
+    # --- clock skew (SPEC-v0.7 §3) ------------------------------------------------------
+    #
+    # Everything in this section observes and reports. No lease is evaluated against what it
+    # measures, no refusal depends on it, and a measurement that fails changes nothing (§3.2,
+    # §3.5). It exists because a lease written by one host is read by another, and v0.6 put the
+    # store on a third, so two clocks can disagree and nothing else would name it.
+
+    @property
+    def clock_skew(self) -> ClockSkew | None:
+        """The most recent measurement of this store's clock against the application's.
+
+        SPEC-v0.7 §3.6: an **optional store attribute**, not a `StateStore` method. `Control`
+        reads it at the start of every `execute` and `resume`, and after a reservation is
+        refused with `AmbiguousEffect`, and appends `CLOCK_SKEW_DETECTED` for a measurement
+        that is `exceeded` and new. Retained whether or not it exceeded the threshold; `None`
+        means no measurement has succeeded. Read-only.
+        """
+        return self._clock_skew
+
+    def _read_server_clock(self, connection: Any) -> datetime:
+        """The server's own clock, read once (§3.4).
+
+        `clock_timestamp()` and not `now()`: `now()` is the transaction's start time, so a
+        reading taken inside a transaction would be off by however long it had run.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT clock_timestamp()")
+            row = cursor.fetchone()
+        reading = None if row is None else row[0]
+        if not isinstance(reading, datetime) or reading.utcoffset() is None:
+            raise TypeError(f"clock_timestamp() returned {reading!r}, not an aware datetime")
+        return reading.astimezone(UTC)
+
+    def _measure_clock_skew(self, connection: Any, trigger: str) -> None:
+        """Take one measurement and retain it (§3.4, §3.5). Never raises an `Exception`.
+
+        A measurement that fails is logged and leaves the retained one as it was: it never
+        refuses an open and never alters a refusal, because an observation that could fail
+        the thing it observes would be a decision.
+        """
+        try:
+            before = self._clock()
+            server = self._read_server_clock(connection)
+            after = self._clock()
+            measured = _measurement(before, server, after, self._clock_skew_threshold, trigger)
+        except Exception as broke:
+            _LOG.warning(
+                "could not measure this host's clock against the store's (%s): %s: %s. Nothing "
+                "is refused and no decision changes (SPEC-v0.7 §3.5)",
+                trigger,
+                type(broke).__name__,
+                broke,
+                extra={"trigger": trigger},
+            )
+            return
+        self._clock_skew = measured
+        if measured.exceeded:
+            _LOG.warning(
+                "this host's clock is %s the store's by %s (within %s; threshold %s; "
+                "measured on %s). Leases are still decided by this host's clock, so an expired "
+                "lease it declares AMBIGUOUS may be one its holder is still inside "
+                "(SPEC-v0.7 §3)",
+                "ahead of" if measured.skew > timedelta(0) else "behind",
+                abs(measured.skew),
+                measured.bound,
+                measured.threshold,
+                trigger,
+                extra={"trigger": trigger},
+            )
+
+    def _remeasure_after_expiry(self, connection: Any, now: datetime) -> None:
+        """§3.5's second measurement: an expired lease was just declared `AMBIGUOUS`.
+
+        That is the moment skew does its harm, so a measurement then puts a stated disagreement
+        beside a refusal that would otherwise have no cause on the record. At most once per
+        `DEFAULT_LEASE` per store, by the application clock: one skewed host must not flood a
+        sink with a report per expired lease. The attempt counts, not the success, so a failing
+        query is not retried on every refusal either.
+        """
+        with self._skew_lock:
+            last = self._remeasured_at
+            if last is not None and last <= now < last + DEFAULT_LEASE:
+                return
+            self._remeasured_at = now
+        self._measure_clock_skew(connection, _LEASE_EXPIRED)
 
     @staticmethod
     def create_schema(url: str, schema: str) -> None:
@@ -839,6 +985,10 @@ class PostgresStateStore:
                 record,
             )
             self._commit(connection)
+            # SPEC-v0.7 §3.5: after the write is kept and before `_plan` raises the refusal, on
+            # this connection, which the commit has just left outside any transaction. It
+            # cannot raise, so the refusal that follows is the one 0.6.1 raised.
+            self._remeasure_after_expiry(connection, now)
         finally:
             with contextlib.suppress(Exception):
                 connection.close()
@@ -1671,7 +1821,11 @@ class PostgresStateStore:
                 event_id=int(row[0]),
                 ts=datetime.fromisoformat(str(row[1])),
                 type=EventType(row[2]),
-                action_id=str(row[3]),
+                # NULL stays `None`. `str(row[3])` read it back as the string "None", so an
+                # event about no action (the three `DELEGATION_*` types, and SPEC-v0.7's
+                # at-open `CLOCK_SKEW_DETECTED`) named a proposal called "None" on this backend
+                # alone. T217 found it by comparing what a sink was handed with `events()`.
+                action_id=None if row[3] is None else str(row[3]),
                 effect_key=row[4],
                 approval_id=row[5],
                 data=json.loads(str(row[6])),
