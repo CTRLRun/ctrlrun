@@ -8,7 +8,7 @@ reused number gives two dispatches one token and lets a ceiling of N admit N+1.
 **Every window here is opened on purpose** (mutation pattern 4). Two processes renewing
 concurrently open none of them: each needs one store stalled at a precise point inside a
 reservation method while a second process renews, runs and fails. The proxy the tests own does the
-stalling, and it holds one statement on one connection (`failure_injection.Proxy.hold_when`) or
+stalling, and it holds one statement on one connection (`failure_injection.Proxy.arm`) or
 swallows one `COMMIT` and acts before the re-read (`drop_before_commit`, `on_drop`).
 
 **What was run, stated first, as `test_cross_host.py` does.** The store under test and the store
@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -62,9 +64,9 @@ REPO_SRC = str(Path(__file__).resolve().parents[1] / "src")
 #: keeps that true if they ever stop sharing it.
 METHODS = ["reserve_effect", "consume_approval_and_reserve"]
 
-#: One child: open a store, optionally wait to be told to go, take one reservation, and optionally
-#: run and fail it. It reports the reservation it was handed, or the refusal, and every §4.3.4
-#: branch its store took, as JSON on stdout.
+#: One child: open a store, optionally wait to be told to go, then run a script of store calls,
+#: each at its own frozen instant. It stops at the first refusal and reports every step's outcome
+#: and every §4.3.4 branch its store took, as JSON on stdout.
 CHILD = textwrap.dedent("""
     import json, logging, os, sys, time
     from datetime import datetime, timedelta
@@ -75,6 +77,7 @@ CHILD = textwrap.dedent("""
     assert _WHERE.startswith(os.path.realpath(job["src"])), (
         "the child imported ctrlrun from %s, not the tree under test at %s"
         % (_WHERE, job["src"]))
+    from ctrlrun.effect import EffectState
     from ctrlrun.postgres import PostgresStateStore
 
     branches = []
@@ -89,10 +92,15 @@ CHILD = textwrap.dedent("""
     log.addHandler(Branches())
     log.setLevel(logging.WARNING)
 
-    frozen = datetime.fromisoformat(job["now"])
-    store = PostgresStateStore(job["url"], schema=job["schema"], clock=lambda: frozen)
-    out = {"ctrlrun": _WHERE, "attempt": None, "action_id": None, "error": None,
-           "state": None, "message": None, "branches": branches}
+    OPS = ("reserve", "begin", "fail", "ambiguous", "resolve")
+    for step in job["steps"]:
+        if step["op"] not in OPS:
+            raise SystemExit("unknown step %r" % step["op"])
+    now = [datetime.fromisoformat(job["steps"][0]["now"])]
+    store = PostgresStateStore(job["url"], schema=job["schema"], clock=lambda: now[0])
+    results = []
+    out = {"ctrlrun": _WHERE, "results": results, "branches": branches}
+    lease = timedelta(minutes=5)
     try:
         if job["ready"]:
             # Readiness through the filesystem, as test_cross_host's holders do. The store is
@@ -103,25 +111,58 @@ CHILD = textwrap.dedent("""
                 if time.monotonic() > deadline:
                     raise SystemExit("the child was never told to go")
                 time.sleep(0.01)
-        lease = timedelta(minutes=5)
-        if job["approval_id"]:
-            _, reservation = store.consume_approval_and_reserve(
-                job["approval_id"], job["action_hash"], job["key"], job["action_id"], lease)
-        else:
-            reservation = store.reserve_effect(job["key"], job["action_id"], lease)
-        out["attempt"] = reservation.attempt
-        out["action_id"] = reservation.action_id
-        if job["then_fail"]:
-            store.begin_execution(job["key"], job["action_id"])
-            store.fail_effect(job["key"], job["action_id"], "the remote refused before acting")
-    except Exception as refused:
-        out["error"] = type(refused).__name__
-        out["state"] = getattr(refused, "state", None)
-        out["message"] = str(refused)
+        for step in job["steps"]:
+            now[0] = datetime.fromisoformat(step["now"])
+            op, key, actor = step["op"], step["key"], step["action_id"]
+            done = {"op": op, "attempt": None, "error": None, "state": None, "message": None}
+            results.append(done)
+            try:
+                if op == "reserve":
+                    if step.get("approval_id"):
+                        _, reservation = store.consume_approval_and_reserve(
+                            step["approval_id"], step["action_hash"], key, actor, lease)
+                    else:
+                        reservation = store.reserve_effect(key, actor, lease)
+                    done["attempt"] = reservation.attempt
+                elif op == "begin":
+                    store.begin_execution(key, actor)
+                elif op == "fail":
+                    store.fail_effect(key, actor, "the remote refused before acting")
+                elif op == "ambiguous":
+                    store.mark_ambiguous(key, actor, "the outcome was lost")
+                else:
+                    resolved = store.resolve_effect(key, EffectState(step["to"]), step["resolver"])
+                    done["attempt"] = resolved.attempt
+            except Exception as refused:
+                done["error"] = type(refused).__name__
+                done["state"] = getattr(refused, "state", None)
+                done["message"] = str(refused)
+                break
     finally:
         store.close()
     sys.stdout.write(json.dumps(out))
 """)
+
+
+def step(op: str, key: str, action_id: str, now: datetime, **extra: Any) -> dict[str, Any]:
+    """One store call for a child to make, at its own frozen instant."""
+    return {"op": op, "key": key, "action_id": action_id, "now": now.isoformat(), **extra}
+
+
+def reserving(
+    key: str,
+    action_id: str,
+    now: datetime,
+    *,
+    then_fail: bool = False,
+    approval: tuple[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """A reservation, through the approval when there is one, and optionally a run that fails."""
+    extra = {"approval_id": approval[0], "action_hash": approval[1]} if approval else {}
+    script = [step("reserve", key, action_id, now, **extra)]
+    if then_fail:
+        script += [step("begin", key, action_id, now), step("fail", key, action_id, now)]
+    return script
 
 
 class Child:
@@ -134,13 +175,16 @@ class Child:
         *,
         url: str,
         schema: str,
-        key: str,
-        action_id: str,
-        now: datetime,
         gated: bool,
+        key: str = "",
+        action_id: str = "",
+        now: datetime = T0,
         then_fail: bool = False,
         approval: tuple[str, str] | None = None,
+        steps: list[dict[str, Any]] | None = None,
     ) -> None:
+        if steps is None:
+            steps = reserving(key, action_id, now, then_fail=then_fail, approval=approval)
         script = home / "child.py"
         if not script.exists():
             script.write_text(CHILD, encoding="utf-8")
@@ -161,15 +205,10 @@ class Child:
                     "src": REPO_SRC,
                     "url": url,
                     "schema": schema,
-                    "key": key,
-                    "action_id": action_id,
-                    "now": now.isoformat(),
+                    "steps": steps,
                     "ready": str(self.ready) if gated else None,
                     "go": str(self.go_marker),
                     "bound": BOUND,
-                    "then_fail": then_fail,
-                    "approval_id": approval[0] if approval else None,
-                    "action_hash": approval[1] if approval else None,
                 }
             )
         )
@@ -204,6 +243,12 @@ class Child:
         assert out["ctrlrun"].startswith(REPO_SRC), (
             f"{self.name} imported ctrlrun from {out['ctrlrun']!r}, not the tree under test"
         )
+        # The first step's number, and the first refusal, which is where the script stopped.
+        results = out["results"]
+        refused = next((done for done in results if done["error"]), None)
+        out["attempt"] = results[0]["attempt"] if results else None
+        for field in ("error", "state", "message"):
+            out[field] = refused[field] if refused else None
         return out
 
     def kill(self) -> None:
@@ -314,7 +359,7 @@ def stored(schema: str, key: str):
 
 
 def effects_statement(verb: bytes, schema: str):
-    """A `hold_when` predicate: a statement on this schema's `effects` table beginning `verb`."""
+    """A `Proxy.arm` predicate: a statement on this schema's `effects` table beginning `verb`."""
     table = f'"{schema}".effects'.encode()
 
     def matches(kind: bytes, body: bytes) -> bool:
@@ -328,7 +373,7 @@ def effects_statement(verb: bytes, schema: str):
 
 
 def test_the_hold_trigger_reads_the_parse_and_not_a_bind_parameter():
-    """`hold_when` sees SQL text only where the protocol puts it.
+    """The hold sees SQL text only where the protocol puts it.
 
     No server needed, and the reason is `test_cross_host`'s first control: a trigger that grepped
     the byte stream fired on a Bind parameter. An effect key containing `UPDATE` travels in a Bind
@@ -352,6 +397,90 @@ def test_the_hold_trigger_reads_the_parse_and_not_a_bind_parameter():
     assert matches(*parse)
     assert not matches(*bind)
     assert not effects_statement(b"UPDATE", "other")(*parse), "another schema's table matched"
+
+
+def test_the_hold_can_be_armed_twice_and_refuses_to_arm_over_a_pending_hold():
+    """`Proxy.arm` is reusable, which items 3 and 4 need, and it says no rather than lie.
+
+    No server: a loopback listener stands in for Postgres and records what it receives, over real
+    sockets, so "held" means the bytes did not arrive and "released" means they did. The first
+    version was one-shot: its `holding` and release events were never cleared, so a second hold
+    reported itself held at once and forwarded its statement straight through, with `holds`
+    counting a window that never opened.
+    """
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    upstream.bind(("127.0.0.1", 0))
+    upstream.listen(1)
+    received = bytearray()
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def serve() -> None:
+        connection, _ = upstream.accept()
+        connection.settimeout(0.1)
+        with connection:
+            while not stop.is_set():
+                try:
+                    data = connection.recv(65536)
+                except TimeoutError:
+                    continue
+                if not data:
+                    return
+                with lock:
+                    received.extend(data)
+
+    def arrived(marker: bytes, within: float) -> bool:
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            with lock:
+                if marker in received:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def framed(kind: bytes, body: bytes) -> bytes:
+        return kind + struct.pack("!i", 4 + len(body)) + body
+
+    def statement(text: bytes):
+        return lambda kind, body: statement_of(kind, body) == text
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    proxy = Proxy("127.0.0.1", upstream.getsockname()[1]).start()
+    client = socket.create_connection(("127.0.0.1", proxy.port), timeout=BOUND)
+    try:
+        startup = struct.pack("!i", 196608) + b"user\x00bob\x00\x00"
+        client.sendall(struct.pack("!i", 4 + len(startup)) + startup)
+        assert arrived(b"user\x00bob", BOUND), "the relay is not forwarding at all"
+
+        proxy.arm(statement(b"UPDATE one"))
+        with pytest.raises(RuntimeError):
+            proxy.arm(statement(b"UPDATE other"))  # armed and not yet fired
+        client.sendall(framed(b"P", b"\x00UPDATE one\x00\x00\x00"))
+        assert proxy.holding.wait(BOUND), "the first hold never fired"
+        assert not arrived(b"UPDATE one", 0.5), "the first held statement reached the server"
+        with pytest.raises(RuntimeError):
+            proxy.arm(statement(b"UPDATE other"))  # fired and not yet released
+        proxy.release()
+        assert arrived(b"UPDATE one", BOUND), "the release did not forward the held statement"
+
+        proxy.arm(statement(b"UPDATE two"))
+        assert not proxy.holding.is_set(), "the second hold reported itself held before firing"
+        client.sendall(framed(b"P", b"\x00UPDATE two\x00\x00\x00"))
+        assert proxy.holding.wait(BOUND), "the second hold never fired"
+        assert not arrived(b"UPDATE two", 0.5), (
+            "the second hold forwarded its statement at once: it inherited the first hold's "
+            "release, so a test using it would open no window and pass"
+        )
+        assert proxy.holds == 2
+        proxy.release()
+        assert arrived(b"UPDATE two", BOUND)
+    finally:
+        stop.set()
+        proxy.release()
+        client.close()
+        proxy.stop()
+        upstream.close()
 
 
 # --- T246: a stale renewal never lands ------------------------------------------------------
@@ -411,7 +540,7 @@ def test_T246_a_stale_renewal_on_postgres_never_lands(proxy, schema, home, metho
     try:
         held.wait_ready()
         proxy.reset_counters()
-        proxy.hold_when = held_at(window, schema)
+        proxy.arm(held_at(window, schema))
         held.go()
 
         assert proxy.holding.wait(BOUND), (
@@ -580,7 +709,7 @@ def test_T246b_insert_a_lost_commit_returns_the_attempt_the_re_issue_wrote(
         return seen[0] == 2
 
     def arm_the_hold() -> None:
-        proxy.hold_when = the_re_issues_planning_read
+        proxy.arm(the_re_issues_planning_read)
 
     held = Child(
         home,
@@ -737,3 +866,234 @@ def test_T246b_landed_a_renewal_re_read_that_finds_our_action_id_is_not_proof_it
             "the held process was refused, and its own consumption was rolled back with the lost "
             "COMMIT; the approval must still be there for the attempt that runs"
         )
+
+
+@postgres
+@pytest.mark.parametrize("method", METHODS)
+def test_T246b_insert_refuse_a_rival_that_failed_before_the_re_read_is_not_ours(
+    proxy, schema, home, method
+):
+    """Table A1 row 3 when the rival's record is one the planner would renew over.
+
+    A review found this row's last line untested. The held process's `INSERT` loses its `COMMIT`;
+    before its re-read, another process inserts attempt 1, runs it and fails it. The re-read finds
+    `FAILED` at 1 under the rival: not our write, and a record `plan_reservation` *grants* over,
+    so the refusal is not the planner's but the line after it. Replacing that line with `return
+    reservation` handed the held process attempt 1, the rival's number, on a record it never wrote,
+    and no test failed.
+    """
+    key = f"refund:lost-insert-refuse-{method}"
+    direct(schema).close()  # migrated, and no record: attempt 1 is an INSERT
+    approval = granted_for(schema, method, key)
+    rivals: list[dict[str, Any]] = []
+
+    def another_process_inserts_and_fails() -> None:
+        rivals.append(
+            Child(
+                home,
+                "rival",
+                url=URL,
+                schema=schema,
+                gated=False,
+                steps=reserving(key, "act_rival", T0 + timedelta(seconds=2), then_fail=True),
+            ).result()
+        )
+
+    held = Child(
+        home,
+        "held",
+        url=proxy.url(URL),
+        schema=schema,
+        gated=True,
+        steps=reserving(key, "act_held", T0 + timedelta(seconds=1), approval=approval),
+    )
+    try:
+        held.wait_ready()
+        proxy.reset_counters()
+        proxy.on_drop = another_process_inserts_and_fails
+        proxy.drop_before_commit = 1
+        held.go()
+        outcome = held.result()
+    finally:
+        held.kill()
+
+    assert proxy.commits_dropped == 1, "no COMMIT was swallowed; the window never opened"
+    assert len(rivals) == 1, "the rival never ran between the lost COMMIT and the re-read"
+    assert rivals[0]["error"] is None and rivals[0]["attempt"] == 1, rivals[0]
+    assert outcome["branches"] == ["a1.row3.refuse"], outcome["branches"]
+    assert outcome["attempt"] is None, (
+        f"the held process was handed attempt {outcome['attempt']}, the number the rival ran and "
+        "failed under, for an INSERT that never landed"
+    )
+    assert outcome["error"] == "DuplicateEffect" and outcome["state"] == "in_progress", outcome
+
+    record = stored(schema, key)
+    assert record is not None
+    found = (record.state, record.attempt, record.action_id)
+    assert found == (EffectState.FAILED, 1, "act_rival"), found
+    if approval is not None:
+        assert approval_status(schema, approval) == "granted"
+
+
+# --- T246c: no stale write moves an attempt number backwards ---------------------------------
+
+
+def stale_write(proxy, home, schema: str, key: str, held_steps, rival_steps):
+    """Hold `held_steps`' first `UPDATE` on the effects table while `rival_steps` run, then
+    release it. Returns (what the held process reported, what the rival reported, the record the
+    held process read). The shape of T246, for every write that is not a renewal."""
+    held = Child(home, "held", url=proxy.url(URL), schema=schema, gated=True, steps=held_steps)
+    try:
+        held.wait_ready()
+        proxy.reset_counters()
+        proxy.arm(effects_statement(b"UPDATE", schema))
+        held.go()
+        assert proxy.holding.wait(BOUND), (
+            "the held write's UPDATE never reached the proxy, so the window was never opened"
+        )
+        read = stored(schema, key)
+        rival = Child(
+            home, "rival", url=URL, schema=schema, gated=False, steps=rival_steps
+        ).result()
+        assert rival["error"] is None, f"the rival did not complete its steps: {rival}"
+        assert held.running(), "the held process finished while its UPDATE was being held"
+        proxy.release()
+        outcome = held.result()
+    finally:
+        proxy.release()
+        held.kill()
+    assert proxy.holds == 1
+    return outcome, rival, read
+
+
+REUSED = "act_reused"
+
+
+@postgres
+def test_T246c_a_stale_resolve_never_rewinds_a_newer_attempt(proxy, schema, home):
+    """A review's reproduction, made a test: `resolve_effect` wrote the attempt it had read.
+
+    Attempt 1 is `AMBIGUOUS` under an `action_id` the caller reuses, which is what retrying one
+    `Action` object does. Human H1 reads it to resolve it `FAILED`, and the proxy holds H1's
+    `UPDATE`. Meanwhile H2 resolves it `FAILED`, the owner retries the same `Action`, is handed
+    attempt 2, dispatches and times out: `AMBIGUOUS` at 2 under the same id. 0.6.1's `WHERE
+    effect_key AND action_id AND state` matched that, and H1's write put the record back to
+    `FAILED` at **1**: the next renewal would hand out 2 again, and attempt 2's unknown outcome
+    was settled by a human who had looked at attempt 1.
+    """
+    key = "refund:stale-resolve"
+    setup = direct(schema)
+    try:
+        setup.reserve_effect(key, REUSED, LEASE)
+        setup.begin_execution(key, REUSED)
+        setup.mark_ambiguous(key, REUSED, "attempt 1 timed out")
+    finally:
+        setup.close()
+    later = T0 + timedelta(seconds=3)
+    outcome, rival, read = stale_write(
+        proxy,
+        home,
+        schema,
+        key,
+        [step("resolve", key, REUSED, T0 + timedelta(seconds=1), to="failed", resolver="h1")],
+        [
+            step("resolve", key, REUSED, T0 + timedelta(seconds=2), to="failed", resolver="h2"),
+            step("reserve", key, REUSED, later),
+            step("begin", key, REUSED, later),
+            step("ambiguous", key, REUSED, later),
+        ],
+    )
+    assert read is not None and (read.state, read.attempt) == (EffectState.AMBIGUOUS, 1), read
+    assert rival["results"][1]["attempt"] == 2
+
+    record = stored(schema, key)
+    assert record is not None
+    assert (record.state, record.attempt) == (EffectState.AMBIGUOUS, 2), (
+        f"H1's resolution, decided on attempt 1, left the record {record.state} at "
+        f"{record.attempt}: attempt 2's unknown outcome was overwritten, and a renewal from here "
+        "hands out an attempt number that has already been dispatched"
+    )
+    assert outcome["error"] == "DuplicateEffect", outcome
+
+
+@postgres
+def test_T246c_a_stale_ambiguate_never_rewinds_a_newer_attempt(proxy, schema, home):
+    """§4.2.2's kept write, made by a contender that is not the owner, from a stale read.
+
+    Attempt 1 is `EXECUTING` under a reused `action_id`. A contender whose clock is past the lease
+    reads it, plans the `AMBIGUOUS` write, and the proxy holds that `UPDATE`. Meanwhile the owner
+    fails attempt 1, retries the same `Action` and begins attempt 2, live. 0.6.1's condition matched
+    `EXECUTING` under that id and wrote `AMBIGUOUS` at **1** over attempt 2 in flight.
+    """
+    key = "refund:stale-ambiguate"
+    setup = direct(schema)
+    try:
+        setup.reserve_effect(key, REUSED, LEASE)
+        setup.begin_execution(key, REUSED)
+    finally:
+        setup.close()
+    owner = T0 + timedelta(minutes=8)  # attempt 2's lease runs to 12:13, past the contender's now
+    outcome, rival, read = stale_write(
+        proxy,
+        home,
+        schema,
+        key,
+        [step("reserve", key, "act_contender", T0 + timedelta(minutes=10))],
+        [
+            step("fail", key, REUSED, owner),
+            step("reserve", key, REUSED, owner),
+            step("begin", key, REUSED, owner),
+        ],
+    )
+    assert read is not None and (read.state, read.attempt) == (EffectState.EXECUTING, 1), read
+    assert rival["results"][1]["attempt"] == 2
+
+    record = stored(schema, key)
+    assert record is not None
+    found = (record.state, record.attempt, record.action_id)
+    assert found == (EffectState.EXECUTING, 2, REUSED), (
+        f"the contender's stale AMBIGUOUS write left the record {found}: attempt 2, in flight, was "
+        "rewound to attempt 1"
+    )
+    assert outcome["error"] == "DuplicateEffect", outcome
+
+
+@postgres
+def test_T246c_a_stale_transition_never_rewinds_a_newer_attempt(proxy, schema, home):
+    """`_transition`, the compare-and-set under `begin`, `commit`, `fail` and `mark_ambiguous`.
+
+    Attempt 1 is `EXECUTING` under a reused `action_id`; its `mark_ambiguous` reads it and the proxy
+    holds the `UPDATE`. Meanwhile the same id fails attempt 1, renews to 2 and begins it. 0.6.1
+    matched `EXECUTING` under that id and wrote `AMBIGUOUS` at **1**.
+    """
+    key = "refund:stale-transition"
+    setup = direct(schema)
+    try:
+        setup.reserve_effect(key, REUSED, LEASE)
+        setup.begin_execution(key, REUSED)
+    finally:
+        setup.close()
+    later = T0 + timedelta(seconds=2)
+    outcome, rival, read = stale_write(
+        proxy,
+        home,
+        schema,
+        key,
+        [step("ambiguous", key, REUSED, T0 + timedelta(seconds=1))],
+        [
+            step("fail", key, REUSED, later),
+            step("reserve", key, REUSED, later),
+            step("begin", key, REUSED, later),
+        ],
+    )
+    assert read is not None and (read.state, read.attempt) == (EffectState.EXECUTING, 1), read
+    assert rival["results"][1]["attempt"] == 2
+
+    record = stored(schema, key)
+    assert record is not None
+    found = (record.state, record.attempt, record.action_id)
+    assert found == (EffectState.EXECUTING, 2, REUSED), (
+        f"attempt 1's stale mark_ambiguous left the record {found}: attempt 2, in flight, was "
+        "rewound to attempt 1"
+    )
+    assert outcome["error"] == "DuplicateEffect", outcome

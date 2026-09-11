@@ -8,8 +8,9 @@ processes* -- has to be re-earned.
 **The mechanism.** `UNIQUE(effect_key)` plus `INSERT … ON CONFLICT DO NOTHING`, under `READ
 COMMITTED`, which is Postgres's default and which this store does **not** set. The guarantee is
 the unique index, not the isolation level. Every later transition is a compare-and-set --
-`UPDATE … WHERE effect_key = %s AND state = %s AND action_id = %s` -- with **the row count
-checked**.
+`UPDATE … WHERE effect_key = %s AND state = %s AND action_id = %s AND attempt = %s` -- with **the
+row count checked**. The attempt is SPEC-v0.7 §5.6's: every write is conditioned on the attempt
+number it read, so none can put an older one back.
 
 **The decisions stay where they are.** `plan_reservation`, `plan_lease_extension`,
 `check_consumable` and `check_answerable` are pure functions in `effect.py` and `approval.py`, and
@@ -203,6 +204,12 @@ def _is_our_own_write(found: EffectRecord, expected: EffectRecord) -> bool:
     here are what make the *realistic* collision detectable: a second attempt under the same id
     at any other instant, with any other lease, or at a different `attempt` number, differs in a
     column and is refused. SPEC-v0.6 §4.3.3 carries the argument.
+
+    **On the renewal path `created_at` separates nothing**, and the paragraph above should not be
+    read as if it did there. A renewal keeps the record's `created_at` (`_reserved` takes it from
+    the record it renews), so the expected row takes it from the record the re-read found and it
+    is equal by construction. What tells a rival's renewal from ours is `attempt`,
+    `lease_expires_at` and `updated_at` (SPEC-v0.7 §12.3a).
     """
     return (
         found.effect_key == expected.effect_key
@@ -800,8 +807,11 @@ class PostgresStateStore:
             # second time: two dispatches, one attempt. `plan_reservation` renews to
             # `record.attempt + 1` (effect.py), so the planned-from attempt is one below the
             # reservation's, and it is taken from the plan, never from `previous`, which is a
-            # second read and may already be the newer record. The attempt number only ever
-            # moves by a renewal, so this closes the race rather than narrowing it.
+            # second read and may already be the newer record. That closes the race rather than
+            # narrowing it only because the attempt number only ever moves by a renewal, and that
+            # is true only because every other `UPDATE` on this table is conditioned on the
+            # attempt it read as well (`_write_effect`, `_transition`). At 0.6.1 they were not,
+            # and a stale one could write an older number back (T246c).
             planned_from = reservation.attempt - 1
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -908,6 +918,15 @@ class PostgresStateStore:
 
         `was` is the record this write was planned against. It is optional only so the one caller
         that has already established the pre-state under a row lock need not repeat it.
+
+        **And on the attempt it was planned against** (SPEC-v0.7 §5.6). The `SET` writes the
+        attempt number it read, so a condition on `action_id` and `state` alone let a stale write
+        put an older number back: a caller that retries one `Action` reuses its `action_id`, so
+        `AMBIGUOUS` at 1 could become `AMBIGUOUS` at 2 under the same id between this read and
+        this write, and a `resolve_effect` decided on attempt 1 then wrote `FAILED` at **1** over
+        it. The next renewal handed out 2 again. A review reproduced it; T246c is the test.
+        `resolve_effect`, `extend_lease`, `hold_continuation` and §4.2.2's kept `AMBIGUOUS` write
+        all come here.
         """
         expected = was if was is not None else record
         with connection.cursor() as cursor:
@@ -915,7 +934,7 @@ class PostgresStateStore:
                 f"UPDATE {self._q}.effects SET "
                 f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                 "result_json=%s, error=%s, updated_at=%s, resolved_by=%s "
-                "WHERE effect_key=%s AND action_id=%s AND state=%s",
+                "WHERE effect_key=%s AND action_id=%s AND state=%s AND attempt=%s",
                 (
                     str(record.state),
                     record.action_id,
@@ -928,6 +947,7 @@ class PostgresStateStore:
                     record.effect_key,
                     expected.action_id,
                     str(expected.state),
+                    expected.attempt,
                 ),
             )
             if cursor.rowcount != 1:
@@ -992,11 +1012,14 @@ class PostgresStateStore:
             )
             moved = _transitioned(record, state, now, result=result, error=error)
             with connection.cursor() as cursor:
+                # Conditioned on the attempt read, as `_write_effect` is and for its reason: the
+                # `SET` writes that number back, and `action_id` and `state` can come round again
+                # at a newer attempt under a reused `action_id` (SPEC-v0.7 §5.6, T246c).
                 cursor.execute(
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=%s, error=%s, updated_at=%s "
-                    "WHERE effect_key=%s AND action_id=%s AND state=%s",
+                    "WHERE effect_key=%s AND action_id=%s AND state=%s AND attempt=%s",
                     (
                         str(moved.state),
                         moved.action_id,
@@ -1008,6 +1031,7 @@ class PostgresStateStore:
                         effect_key,
                         action_id,
                         str(record.state),
+                        record.attempt,
                     ),
                 )
                 updated = cursor.rowcount
