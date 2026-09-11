@@ -2343,6 +2343,8 @@ Each in the item that makes it true, and each recorded here so it can be found.
 8. **`v0.6 §4.2`'s renewal compare-and-set** is conditioned on the planned-from attempt as well as the state,
    and **`v0.6 §4.3.2`'s lost-commit re-issue** returns the reservation it wrote rather than the one first
    planned (**item 3a**, its own pull request with an independent review, stacked before item 3; §5.6).
+   **Table A2 row 1 on a renewal** applies `v0.6 §4.3.3`'s whole-row identity check, which only the insert
+   path applied before (item 3a, §12.3a).
 
 ---
 
@@ -2370,6 +2372,7 @@ own, and none of them is configurable.
 | A crash between that reservation and its release | `AMBIGUOUS` once the lease lapses; a human or a hook resolves it; never `FAILED` (§5.2) |
 | A Postgres renewal planned against a stale attempt number | Matches no row; refused (§5.6, item 3a) |
 | A lost `COMMIT` on a reservation, resolved by re-issuing it | The attempt the re-issue wrote is the one returned, never the one first planned (§5.6, item 3a) |
+| A lost `COMMIT` on a Postgres renewal whose re-read finds our `action_id` on a row that is not our own write | Not ours: `a2.row3.refuse`, refused through `plan_reservation`; nothing returned (§12.3a, item 3a) |
 | A store whose `clock_skew` is not a `ClockSkew`, or whose read raises | Ignored with a log line; the action is unaffected (§3.6) |
 | A stored receipt document with an added key, a changed or removed `schema`, or an unknown one | A hash mismatch: `content_altered` at its `seq`. `receipts()` does not raise, and no reader surfaces an undeclared key (§6.11) |
 | A presented approval whose fingerprint differs from the recheck | `ApprovalMismatch(reason="precondition_changed")`; nothing reserved; approval `granted` (§6.3) |
@@ -2453,6 +2456,56 @@ decided, not afterwards.
 ### 12.2 Item 2: the transport classifier
 
 ### 12.3a Item 3a: attempt numbers never repeat
+
+Both defects §5.6 names were reproduced before they were fixed, each by a test that was red on 0.6.1's
+store for the reason it names: T246 with two reservations carrying attempt 2; T246b's renewal variant with the
+method returning 2 while the record held 3; T246b's insert variant with 1 returned and 2 stored. All of them run
+in separate OS processes against a local Postgres, with the parent holding the proxy, and every wait bounded.
+Both reservation methods, `reserve_effect` and `consume_approval_and_reserve`, run through every window,
+because §5.5 says *every* reservation method returns the number it wrote.
+
+**A third path, found while building: the renewal's "landed" row trusted `action_id`.** Table A2 row 1 on a
+renewal (`_resolve_lost_renewal`) concluded that a lost `COMMIT` had landed from two facts: the record was
+`RESERVED`, and it carried the renewal's `action_id`. `v0.6 §4.3.3` explains why that is not enough and applied
+the fix to the insert path only: `action_id` is caller-supplyable, and a caller that rebuilt the same `Action`
+after a restart renews under the same one. So a renewal whose `COMMIT` was lost, followed by a second process
+renewing the key under the same `action_id`, left the first concluding the row was its own write: two
+dispatches holding one attempt, and a number returned that the method never wrote, which is §5.5's MUST
+failing on the third branch of the same function. The row now applies §4.3.3's check, `_is_our_own_write`,
+against the row the renewal would have written, so a rival's lease or `updated_at` makes it `a2.row3.refuse`.
+The identical-in-every-column residual §4.3.3 states is unchanged, and it needs a clock frozen across processes.
+The test is T246b's third variant, `landed`. It was red on 0.6.1 in both methods, and a check on `attempt`
+alone would not pass it, because the rival renewed to the same number. §9.6 item 8 and §10 carry the row.
+
+**The planned-from attempt is the plan's, and T246 opens two windows to show it.** `_reserve_locked` reads the
+record a second time, for `created_at`, between `_plan`'s read and the `UPDATE`. A condition taken from that
+second read would pass a test that holds only the `UPDATE`, because both reads precede the hold and see the same
+record. So T246 runs at two points: holding the `UPDATE` (§8.3a's window) and holding the second read, where
+that read sees the rival's attempt. The condition is `reservation.attempt - 1`, which is the attempt
+`plan_reservation` renewed from (`effect.py`, `record.attempt + 1`). Taking it from the second read fails the
+second window and passes the first.
+
+**The store conformance suite gains no case: `v0.6 §2.4` holds here.** Its barrier releases contenders
+together and cannot stop one between its `SELECT` and its `UPDATE`, because that is inside `reserve_effect`
+and reaching it needs a hook in shipping code (`v0.6 §2.5`). It cannot lose a `COMMIT` either. The suite states
+both properties in the `retry-table` case, which already asserts that the returned attempt and the stored
+attempt agree on the path it can reach. T246 and T246b are the only tests of the defence, as §5.6 anticipated.
+
+**Two lines no test reaches, stated as such.** SQLite's `AND attempt = ?` is an equivalent mutant: with it
+removed the whole suite passes, Postgres included, because `BEGIN IMMEDIATE` holds the read and the write
+together (§5.6). And `_resolve_lost_renewal` now ends in a refusal after `a2.row3.refuse` for the case where
+`plan_reservation` grants. That case is unreachable, because the only record the planner grants over that a
+store writes is `FAILED`, which re-issued a line earlier. It is there because the function must return a
+reservation it wrote or raise, and the insert path ends the same way. Replacing it with `return reservation`
+fails no test, and the mutation table says so.
+
+**The proxy grew a mode, not a sibling.** `failure_injection.Proxy` gained `hold_when`: a predicate over each
+parsed client message, which holds the first match (one statement, on one connection) until `release()`.
+`partition` already held traffic, but on every connection at once and at a moment the test chose rather than at
+a statement. The predicate reads SQL from the Parse message, never from a Bind parameter, for the reason
+`is_commit` parses frames, and a fixture test pins that. The tests that hold a statement assert that the hold
+fired, so a statement psycopg had already prepared, which carries no text, would fail them rather than pass
+them.
 
 ### 12.3 Item 3: the idempotency token
 

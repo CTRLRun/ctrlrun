@@ -23,6 +23,26 @@ any change to one appears here.
   build (uv's CPython 3.14 on macOS) aborted inside `ensurepip`, so all five release fixtures
   errored before a release was installed. The fixture now symlinks, as `python -m venv` does on
   POSIX.
+- **The Postgres store could hand out one attempt number twice** (`docs/SPEC-v0.7.md` §5.6).
+  0.6.1's renewal after `FAILED` read the record with a plain `SELECT` and then updated it on
+  `effect_key` and `state = 'failed'` alone. So a renewal planned against attempt *k* could land
+  after another process had renewed to *k+1*, run and failed, and write *k+1* a second time: two
+  dispatches, and two receipts, under one attempt number. The `UPDATE` is now also conditioned on
+  the attempt it was planned from, with the row count checked, and a stale renewal is refused with
+  `DuplicateEffect`. SQLite carries the same condition, where it was already unreachable because
+  `BEGIN IMMEDIATE` holds the read and the write together.
+- **After a lost `COMMIT`, a Postgres reservation could return an attempt number it did not
+  write.** Where a reservation's `COMMIT` was lost and the re-read found the write absent, 0.6.1
+  re-issued it and then returned the reservation it had first planned, discarding the re-issue's.
+  If another process had renewed, or inserted, and failed in between, the caller and its receipt
+  held attempt *k+1* while the record held *k+2*, and *k+1* was a number another dispatch had
+  already been handed. The reservation methods now return what the re-issue wrote.
+- **A lost `COMMIT` on a Postgres renewal could take another process's reservation for its own.**
+  0.6.1's re-read accepted any `RESERVED` record carrying the renewal's `action_id` as proof the
+  commit had landed. `docs/SPEC-v0.6.md` §4.3.3 had already ruled that out on the insert path,
+  because `action_id` is caller-supplyable, and a caller that rebuilt the same `Action` renews
+  under the same one. Two processes then held one attempt. The renewal's re-read now applies the
+  same whole-row identity check, and a row that is not its own write is refused.
 
 ### Documentation
 

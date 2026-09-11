@@ -601,24 +601,20 @@ class PostgresStateStore:
                 raise
             if effect_key is None or plan.reservation is None:
                 raise
-            if plan.renews:
-                self._resolve_lost_renewal(
-                    effect_key,
-                    plan.reservation,
-                    now,
-                    approval_id=approval_id,
-                    action_hash=action_hash,
-                    lease=lease,
-                )
-            else:
-                self._resolve_lost_insert(
-                    effect_key,
-                    plan.reservation,
-                    now,
-                    approval_id=approval_id,
-                    action_hash=action_hash,
-                    lease=lease,
-                )
+            # SPEC-v0.7 §5.6: the reservation returned is the one on the record. Returning
+            # `plan.reservation` here after a re-issue handed the caller the number first
+            # planned while the store held the number the re-issue wrote, which another process
+            # had already been handed.
+            resolve = self._resolve_lost_renewal if plan.renews else self._resolve_lost_insert
+            written = resolve(
+                effect_key,
+                plan.reservation,
+                now,
+                approval_id=approval_id,
+                action_hash=action_hash,
+                lease=lease,
+            )
+            return (approved.as_approval() if approved is not None else None), written
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
     def _resolve_lost_renewal(
@@ -630,13 +626,14 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
-    ) -> None:
-        """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`.
+    ) -> Reservation:
+        """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`. Returns the
+        reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
 
         A renewal's pre-state is `FAILED` (`v0.1 §5.4`'s one automatic retry). If the commit
         landed the record is ours and `RESERVED`; if it did not, the record is still `FAILED` and
         the renewal simply re-issues -- safe because that `UPDATE` is conditional on
-        `state = 'failed'`.
+        `state = 'failed'` and on the attempt it was planned from.
 
         Routing a renewal through Table A1 turned a **proven non-execution** into a refusal
         carrying a `state` that misdescribed the record: the collapse §4.3.2 exists to forbid,
@@ -645,9 +642,14 @@ class PostgresStateStore:
         found = self._fresh_read_effect(effect_key)
         if found is None:
             raise InvalidArgument(f"no reservation for effect {effect_key!r}")
-        if found.action_id == reservation.action_id and found.state is EffectState.RESERVED:
+        # §4.3.3's identity check, which the insert path had and this one did not. `RESERVED`
+        # under our `action_id` is not proof the commit landed: `action_id` is caller-supplyable,
+        # so another process renewing under the same one produced exactly that record, and 0.6.1
+        # concluded it was ours. Both processes then held one attempt, and the number returned
+        # was one this method never wrote. Building item 3a found it (SPEC-v0.7 §12.3a).
+        if _is_our_own_write(found, _reserved(reservation, found, now)):
             _took(A2_LANDED, effect_key)
-            return  # the commit landed
+            return reservation  # the commit landed, and this is the row it wrote
         if found.state is EffectState.FAILED:
             # Re-issue the SAME operation, approval included. Passing `None, None` here was the
             # double-spend `_resolve_lost_insert`'s comment describes, in the branch that
@@ -658,14 +660,22 @@ class PostgresStateStore:
             # different effect key. `v0.1 §4.2 A2` is that an approval is single-use and
             # consumed atomically with the reservation; this failed it open.
             _took(A2_REISSUE, effect_key)
-            self._authorize_and_reserve(
+            _, reissued = self._authorize_and_reserve(
                 approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
-            return
+            return _only(reissued, "reservation")
         _took(A2_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
             raise plan.refusal
+        # `FAILED` is the only record `plan_reservation` grants over, and it re-issued above. A
+        # grant here would be a record nothing in this protocol writes, so refuse rather than
+        # return a reservation nobody wrote.
+        raise DuplicateEffect(
+            f"effect {effect_key!r} could not be resolved after a lost commit",
+            state=IN_PROGRESS_EFFECT,
+            effect_key=effect_key,
+        )
 
     def _resolve_lost_insert(
         self,
@@ -676,8 +686,9 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
-    ) -> None:
-        """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means.
+    ) -> Reservation:
+        """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means. Returns the
+        reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
 
         The first row is an **identity check on the whole row we attempted to write**, not a match
         on `action_id` -- and the difference is a double execution. `Action.action_id` is
@@ -693,15 +704,19 @@ class PostgresStateStore:
             # operation was a double-spend: the effect was reserved, the caller was handed an
             # `Approval`, and the approval row was still `granted`, so the same approval then
             # authorised a second effect key. Found by review.
+            #
+            # And return what the re-issue wrote. It plans afresh, so if another process inserted
+            # and failed between the re-read and the re-issue's own read, it renews, and its
+            # number is not the one first planned (SPEC-v0.7 §5.6).
             _took(A1_REINSERT, effect_key)
-            self._authorize_and_reserve(
+            _, reissued = self._authorize_and_reserve(
                 approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
             )
-            return
+            return _only(reissued, "reservation")
         expected = _reserved(reservation, None, now)
         if _is_our_own_write(found, expected):
             _took(A1_OURS, effect_key)
-            return  # the commit landed; we hold it
+            return reservation  # the commit landed; we hold it
         _took(A1_REFUSE, effect_key)
         plan = plan_reservation(found, effect_key, reservation.action_id, lease, now)
         if plan.refusal is not None:
@@ -777,6 +792,17 @@ class PostgresStateStore:
         if renews:
             # Only a FAILED record is renewable (§5.4); the WHERE clause says so again, so a
             # record that changed under us refuses instead of overwriting an attempt.
+            #
+            # **And only the FAILED record it was planned from** (SPEC-v0.7 §5.6). `_plan` read
+            # with a plain SELECT under READ COMMITTED, so between that read and this write
+            # another process can renew to the same number, run, fail and commit, leaving the
+            # record FAILED again. On `state` alone this matched it and wrote that number a
+            # second time: two dispatches, one attempt. `plan_reservation` renews to
+            # `record.attempt + 1` (effect.py), so the planned-from attempt is one below the
+            # reservation's, and it is taken from the plan, never from `previous`, which is a
+            # second read and may already be the newer record. The attempt number only ever
+            # moves by a renewal, so this closes the race rather than narrowing it.
+            planned_from = reservation.attempt - 1
             with connection.cursor() as cursor:
                 cursor.execute(
                     # `resolved_by` is cleared with them, and its own line says why: a human
@@ -787,7 +813,7 @@ class PostgresStateStore:
                     f"UPDATE {self._q}.effects SET "
                     f"state=%s, action_id=%s, attempt=%s, lease_expires_at=%s, "
                     "result_json=NULL, error=NULL, resolved_by=NULL, updated_at=%s "
-                    "WHERE effect_key=%s AND state=%s",
+                    "WHERE effect_key=%s AND state=%s AND attempt=%s",
                     (
                         str(record.state),
                         record.action_id,
@@ -796,6 +822,7 @@ class PostgresStateStore:
                         _iso(now),
                         record.effect_key,
                         str(EffectState.FAILED),
+                        planned_from,
                     ),
                 )
                 updated = cursor.rowcount
