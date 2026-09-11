@@ -2460,4 +2460,80 @@ decided, not afterwards.
 
 ### 12.5 Item 5: precondition fingerprints
 
+It narrows; the residual window of §6.7 is T261b's, and nothing written for this item says otherwise.
+
+**§6.6's read is where a refusal is raised from, and not only where it is found.** The first build
+read the record, skipped the provider on a refusal verdict, and let `_take` raise the store's own
+refusal. That had a hole: a `pending` approval a human grants between the read and the store call
+was then consumed with no comparison, which is a skip reached by timing. So where the read's verdict
+is a refusal and the precondition question is live (a provider is named, or the record carries a
+fingerprint), `Control` raises that verdict itself, from the same pure `check_consumable` every
+store applies, with the reason and message the store would give. The one exception is an expired
+grant: it goes to the store through `consume_approval`, never through a reservation, so the lapse is
+recorded as 0.6.1 records it. A store whose clock disagreed with `Control`'s would at most spend a
+grant `Control` calls expired, with nothing reserved and nothing run. Where neither side has a
+fingerprint the store call is 0.6.1's exactly, including its refusals. T262's pending-race case
+opens the window with a grant that lands inside the read.
+
+**The read runs on every presenting pass under `APPROVE`**, provider or not: only the record says
+whether an approval carries a fingerprint, and one that does, presented by a call naming no
+provider, is refused (§6.4). The cost is one `get_approval` per approved action.
+
+**`precondition_missing` on a call that names a provider fetches first**, so the event's
+`precondition_at_recheck` is set and §6.4's "one of which is null" holds for both cases. A provider
+that fails there is `precondition_unavailable`: the outage is what an operator fixes first.
+
+**What `error` holds**, in the event, the receipt's `error` and the log line alike: the provider's
+exception by type name; `returned <type>, not a mapping`; or the type name of what `canonical_bytes`
+raised, whose message can quote the value it refused. T260 plants a sentinel in a provider's
+exception message and finds it nowhere.
+
+**`ctrlrun inspect` adds no field.** Its approval entries, the webhook document and the operator
+server's pending listing carry no fingerprint (§6.10); `inspect --json` embeds the receipt and the
+events, and those carry the fields §6.10 and §6.11 place there, as evidence rather than as the
+question put to a human.
+
+**The three reason strings are private constants in `control.py`.** §9.2 adds no public name for
+them and says so; every test asserts the string.
+
+**Observe mode records a failed comparison the way it records any presented approval that does not
+match**: `APPROVAL_INVALIDATED` with the reason and both fields, `would_have.blocked_reason =
+"approval_mismatch"`, and the action runs holding no reservation, which is 0.6.1's observe path for
+an approval mismatch. No grant is spent.
+
+**A resumed leg's receipt carries `precondition_at_request` and a null `precondition_at_recheck`.**
+The first leg of a suspended action writes no receipt, so the resumed leg's is the only one an
+elicited or ACS action gets. It records the fingerprint of the approval the first leg consumed,
+read back from the store, and says with the null that this leg did not compare anything (§6.8).
+
+**Rendering a label this binary does not know.** §6.11 fixes the four known schemas. An unknown
+label renders under `v3`'s keys with its own label; an absent one renders with no `schema` key. The
+two `v4` fields are rendered only for a `v4` label, since they are read only from a `v4` document.
+A `v1` receipt's principal renders as `v1` wrote it, `agent` and `user` only.
+
+**`put_receipt` writes `v4` whatever schema the receipt was read under.** A `v1` or `v2` key set has
+no `seq`, so a read-back receipt written again under its own label would carry no position in its own
+document. A receipt written again is a new row this binary writes.
+
+**The stored document is excluded from equality**, and the store conformance suite's field-by-field
+comparison skips fields excluded from equality, because the receipt read back has a stored document
+and the one written has none by design.
+
+**A stored row that parses but holds a float** still raises when it is hashed, as at 0.6.1, where
+`to_dict()` carried the same float. §6.11's "behaves as it does at 0.6.1" covers it; it is left alone.
+
+**`ApprovalRequest` does not validate the fingerprint's shape.** A malformed stored value compares
+unequal and is refused `precondition_changed`; validating at construction would make a tampered row
+raise out of `get_approval` and blind every reader of that approval.
+
+**Verify prints each distinct note once**, where it printed only the first. G16's note is a
+different sentence from G3's, and the first rule dropped it on every document that also lacked an
+`effect:` template.
+
+**G16 grades a change before the comparison.** A change after it is not refused by a correct kernel,
+so there is nothing there for verify to grade; T261b is where that residual is kept honest.
+
+**CI's `verify` job now expects `verified 12/12` and `verified 7/7`.** Item 1's G13 moves both again,
+and whichever lands second rebases the two lines.
+
 ### 12.6 Item 6: the release

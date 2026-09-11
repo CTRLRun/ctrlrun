@@ -1037,21 +1037,27 @@ checks against the parent's subject but does not authenticate — `--as` is an a
 as one (§5.7, §13). An unqualified MUST above a table containing its own exceptions would teach an
 implementer that delegation is authenticated.
 
-| Entry point | Builds an `Action` | Resolves identity | Evaluates authority |
-|---|---|---|---|
-| `@protect` → `Control.execute` | yes | yes (§3.2) | yes |
-| `Control.execute` called directly | no — the caller built it | no; the in-process trust boundary (§3.1) | yes |
-| `Control.evaluate` | no | no | yes — returns the combined §4.6 decision |
-| `Control.resume` | rehydrated from the store | no — the principal is the held action's | evaluated and recorded, not re-decided (§5.6.1) |
-| `Control.delegate` / `Control.revoke` | no — creates authority | checks `by` is unexpired (§5.3 rule 0) | the six checks of §5.3 |
-| The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) |
-| `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) |
-| `ctrlrun.verify.run` | no - it drives the rows above | no - it synthesizes principals for a scratch store | no - it asserts that the rows above do |
-| An adapter's protected tool -> `@protect` -> `Control.execute` | yes - `@protect` does, from the bound call | yes (§3.2), from the `Control`'s provider | yes, before the approval gate |
-| `ctrlrun.adapter.needs_approval` -> `Control.evaluate` | yes - **core** builds it; the adapter supplies neither a principal nor an `Action` | yes (§3.2), by `Control.resolve_principal` | yes - the combined §4.6 decision, and it writes nothing |
-| `ctrlrun.adapter.InterruptApprovalProvider.wait` -> `grant_approval` / `deny_approval` | no - it records an answer about an action that already exists | no - the principal was resolved when the request was created | **no**, and `SPEC-v0.5.md` §4.1 argues why: a grant authorizes nothing on its own, and `Control.execute` decides the action again in full before consuming it |
-| `ctrlrun mcp-operator`'s read tools | no | **no** - they are consulted for nothing, and `SPEC-mcp-operator.md` §4.1 argues why: a provider that ran on every read would make an expired credential turn `receipts` into a refusal | no - they report what the rows above already decided |
-| `ctrlrun mcp-operator`'s write tools -> `grant_approval` / `deny_approval` / `resolve_effect` | no - each answers about an action or an effect that already exists | yes, from the configured `IdentityProvider` and from nothing else; a decline, a raise, an expiry and a principal with no `user` are four distinguishable refusals (`SPEC-mcp-operator.md` §3.3) | **no**, for `SPEC-v0.5.md` §4.1's reason, restated in `SPEC-mcp-operator.md` §4.3: a grant authorizes nothing on its own |
+| Entry point | Builds an `Action` | Resolves identity | Evaluates authority | Rechecks preconditions (`SPEC-v0.7.md` §7) |
+|---|---|---|---|---|
+| `@protect` → `Control.execute` | yes | yes (§3.2) | yes | yes, under `APPROVE`, where the decorator names `preconditions=`, before each store call that consumes the approval; refuses a fingerprinted approval where it names none |
+| `Control.execute` called directly | no — the caller built it | no; the in-process trust boundary (§3.1) | yes | yes, as above, where the call passes `preconditions=` |
+| `Control.evaluate` | no | no | yes — returns the combined §4.6 decision | **no**: it writes nothing and consumes nothing |
+| `Control.resume` | rehydrated from the store | no — the principal is the held action's | evaluated and recorded, not re-decided (§5.6.1) | **no**: `SPEC-v0.6.md` §7.2.3, refusing would strand a reservation the remote may be acting on |
+| `Control.delegate` / `Control.revoke` | no — creates authority | checks `by` is unexpired (§5.3 rule 0) | the six checks of §5.3 | **no**: they consume no approval |
+| The gateway's `tools/call` | yes | yes (§8.2) | yes, before the approval gate (§8.3) | **no provider**, and it refuses a presented approval that carries a fingerprint (`precondition_missing`) |
+| `ctrlrun.acs`'s request hook | yes | yes (§8.4) | yes, before the approval gate (§8.3) | **no provider**, and refuses a fingerprinted approval, as the gateway |
+| `ctrlrun.verify.run` | no - it drives the rows above | no - it synthesizes principals for a scratch store | no - it asserts that the rows above do | informational: it drives the first two rows with its own provider for G16 |
+| An adapter's protected tool -> `@protect` -> `Control.execute` | yes - `@protect` does, from the bound call | yes (§3.2), from the `Control`'s provider | yes, before the approval gate | yes, as the `@protect` row |
+| `ctrlrun.adapter.needs_approval` -> `Control.evaluate` | yes - **core** builds it; the adapter supplies neither a principal nor an `Action` | yes (§3.2), by `Control.resolve_principal` | yes - the combined §4.6 decision, and it writes nothing | **no**, for `Control.evaluate`'s reason |
+| `ctrlrun.adapter.InterruptApprovalProvider.wait` -> `grant_approval` / `deny_approval` | no - it records an answer about an action that already exists | no - the principal was resolved when the request was created | **no**, and `SPEC-v0.5.md` §4.1 argues why: a grant authorizes nothing on its own, and `Control.execute` decides the action again in full before consuming it | **no**: it records an answer, and `Control.execute` rechecks before consuming |
+| `ctrlrun mcp-operator`'s read tools | no | **no** - they are consulted for nothing, and `SPEC-mcp-operator.md` §4.1 argues why: a provider that ran on every read would make an expired credential turn `receipts` into a refusal | no - they report what the rows above already decided | **no**: they read |
+| `ctrlrun mcp-operator`'s write tools -> `grant_approval` / `deny_approval` / `resolve_effect` | no - each answers about an action or an effect that already exists | yes, from the configured `IdentityProvider` and from nothing else; a decline, a raise, an expiry and a principal with no `user` are four distinguishable refusals (`SPEC-mcp-operator.md` §3.3) | **no**, for `SPEC-v0.5.md` §4.1's reason, restated in `SPEC-mcp-operator.md` §4.3: a grant authorizes nothing on its own | **no**: a grant authorizes nothing on its own; the recheck is at consumption |
+
+The fifth column is added by `SPEC-v0.7.md` §7, which argues every cell, the "no"s as
+deliberately as the "yes"es. v0.7 adds no entry point; it adds a check to one, the precondition
+recheck on `Control.execute`'s presenting pass, which **narrows** the window between a human's
+decision and the effect and does not close it (`SPEC-v0.7.md` §6.7). Recorded here in the same
+commit as the code, as §7 requires.
 
 The `ctrlrun.verify.run` row is **informational**, added by `SPEC-v0.4.md` §3.9 and §9.4. The
 three adapter rows are added by `SPEC-v0.5.md` §4.1, which states each cell with its argument;

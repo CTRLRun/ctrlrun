@@ -24,8 +24,11 @@ from .approval import (
     DEFAULT_APPROVAL_TTL,
     Approval,
     ApprovalProvider,
+    ApprovalRecord,
     ApprovalStatus,
     LocalApprovalProvider,
+    _precondition_at_request,
+    _precondition_fingerprint,
     check_consumable,
     policy_in_force,
 )
@@ -114,6 +117,18 @@ RECONCILE_EAGER: Final = "eager"
 #: Why an answer was forced to `"unknown"`, for `RECONCILIATION_RESOLVED.data.reason` (§2.5).
 RECONCILE_RAISED: Final = "raised"
 RECONCILE_INVALID_RETURN: Final = "invalid_return"
+
+#: SPEC-v0.7 §6.2: the three reasons a precondition refuses, each a value of an existing field
+#: (`ApprovalMismatch.reason`, `APPROVAL_INVALIDATED.data.reason`, and on the request pass
+#: `ActionDenied.reason`). Distinct because a precondition refusal and an ordinary
+#: `ApprovalMismatch` share a type, and a test asserting only the type could not tell which
+#: guard fired. Private: §9.2 adds no public name for them, and every test asserts the string.
+_PRECONDITION_CHANGED: Final = "precondition_changed"
+_PRECONDITION_MISSING: Final = "precondition_missing"
+_PRECONDITION_UNAVAILABLE: Final = "precondition_unavailable"
+_PRECONDITION_REASONS: Final = frozenset(
+    {_PRECONDITION_CHANGED, _PRECONDITION_MISSING, _PRECONDITION_UNAVAILABLE}
+)
 
 #: Where `Control.from_file` keeps its store, and the env var that overrides it (SPEC §8).
 STATE_ENV_VAR: Final = "CTRLRUN_STATE"
@@ -253,6 +268,79 @@ class _Reconciler:
         if answer in RECONCILED_STATES:
             return str(answer), None, None
         return RECONCILED_UNKNOWN, RECONCILE_INVALID_RETURN, repr(answer)
+
+
+class _Compared:
+    """What one presenting pass compared, for the event and the receipt (SPEC-v0.7 §6.2).
+
+    Mutable and short-lived, as `_Observation` is: `execute` makes one per call, each recheck
+    resets it and fills it, and the receipt reads it. Hashes only. `error` is the provider's
+    failure by its type name, never its message: a provider that put the balance it read into
+    its exception would otherwise carry raw state into the evidence through the one field
+    nobody thought to check (§6.5).
+    """
+
+    __slots__ = ("at_recheck", "at_request", "error")
+
+    def __init__(self, at_request: str | None = None) -> None:
+        self.at_request = at_request
+        self.at_recheck: str | None = None
+        self.error: str | None = None
+
+    def reset(self) -> None:
+        self.at_request = None
+        self.at_recheck = None
+        self.error = None
+
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "precondition_at_request": self.at_request,
+            "precondition_at_recheck": self.at_recheck,
+        }
+        if self.error is not None:
+            data["error"] = self.error
+        return data
+
+
+_Preconditions = Callable[[Action], Mapping[str, Any]]
+
+
+def _fetched(provider: _Preconditions, action: Action) -> tuple[str | None, str | None]:
+    """Ask the operator's provider and fingerprint the answer: `(fingerprint, None)` or
+    `(None, what went wrong)`, never raising an `Exception` (SPEC-v0.7 §6.5).
+
+    A provider that raises, returns something that is not a `Mapping`, or returns something
+    `canonical_bytes` refuses has produced no fingerprint, and a comparison that was never made
+    is not a comparison that passed (`v0.4 §3.8`). What went wrong is named by **type only**. The
+    return value exists here for as long as it takes to hash it and goes nowhere else.
+
+    A `BaseException` that is not an `Exception` propagates untouched, as it does from every
+    other hook in this file: nothing has been reserved when this runs, so an interrupt leaves
+    nothing to tidy.
+    """
+    try:
+        # `object`, not the annotation's `Mapping`: the annotation is what the operator
+        # promised, and the check below is what happens when the promise is not kept.
+        state: object = provider(action)
+    except Exception as exc:
+        return None, type(exc).__name__
+    if not isinstance(state, Mapping):
+        return None, f"returned {type(state).__name__}, not a mapping"
+    try:
+        return _precondition_fingerprint(state), None
+    except Exception as exc:
+        return None, type(exc).__name__
+
+
+def _checked_preconditions(preconditions: object, where: str) -> _Preconditions | None:
+    """`None`, or a callable (SPEC-v0.7 §6.2). Anything else is a wiring bug, refused at the
+    door: at decoration time for `@protect`, before any evidence for `execute`."""
+    if preconditions is not None and not callable(preconditions):
+        raise InvalidArgument(
+            f"{where}: preconditions must be a callable taking the Action and returning a "
+            f"mapping, not {type(preconditions).__name__}"
+        )
+    return cast("_Preconditions | None", preconditions)
 
 
 # --- Control ---------------------------------------------------------------------------
@@ -553,6 +641,7 @@ class Control:
         lease: timedelta | None = None,
         reconcile: Callable[[str], ReconcileOutcome] | None = None,
         reconcile_eagerly: bool = False,
+        preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
@@ -568,9 +657,25 @@ class Control:
         `reconcile` asks the remote what happened to an effect whose outcome is unknown, and
         is the only authority besides a human that may move a record out of `AMBIGUOUS`
         (SPEC-v0.2 §2.2). It runs at most once per call.
+
+        `preconditions` reads the state an approval depends on (SPEC-v0.7 §6). It is called
+        with the `Action` and returns a mapping, which is hashed through `canonical_bytes` and
+        kept only as a fingerprint. Under `APPROVE` it is called when the approval is requested,
+        and the fingerprint is stored with the request; and on the presenting pass it is called
+        again **strictly before** the store call that consumes the approval, before each such
+        call, and the action is refused `ApprovalMismatch(reason="precondition_changed")` where
+        the two differ, `"precondition_missing"` where only one side has one, and
+        `"precondition_unavailable"` where the provider raises, returns something that is not a
+        mapping, or returns one `canonical_bytes` refuses. A refusal reserves nothing and leaves
+        the approval granted. **It
+        narrows the window between a human's decision and the effect; it does not close it.**
+        A change landing after the comparison and before the reservation is not refused, and
+        the world can move again before the executor's request lands (§6.7). `ALLOW`, `DENY`
+        and `Control.resume` never call it.
         """
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
+        provider = _checked_preconditions(preconditions, "execute(preconditions=...)")
         self._check_environment(action)
         held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
@@ -596,7 +701,15 @@ class Control:
                 observation.decided(expired)
                 observation.block(PRINCIPAL_EXPIRED)
                 return self._observed(
-                    action, expired, executor, effect_key, started_at, observation, reconciler, held
+                    action,
+                    expired,
+                    executor,
+                    effect_key,
+                    started_at,
+                    observation,
+                    reconciler,
+                    held,
+                    provider,
                 )
             self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
             self._record(
@@ -637,6 +750,7 @@ class Control:
                         observation,
                         reconciler,
                         held,
+                        provider,
                     )
                 self._refuse_authority(action, result, started_at, effect_key)
             self._append(
@@ -672,6 +786,7 @@ class Control:
                     observation,
                     reconciler,
                     held,
+                    provider,
                 )
             # SPEC-v0.6 §7.2.1's third bullet: *"the refusal is recorded against the approval
             # so the history shows a grant that met a denial."* It was not. An independent
@@ -707,10 +822,19 @@ class Control:
             )
         if observation is not None:
             return self._observed(
-                action, evaluation, executor, effect_key, started_at, observation, reconciler, held
+                action,
+                evaluation,
+                executor,
+                effect_key,
+                started_at,
+                observation,
+                reconciler,
+                held,
+                provider,
             )
+        compared = _Compared()
         approval, reservation = self._secure(
-            action, evaluation, started_at, effect_key, held, reconciler
+            action, evaluation, started_at, effect_key, held, reconciler, provider, compared
         )
         attempt = 1 if reservation is None else reservation.attempt
 
@@ -722,7 +846,13 @@ class Control:
                 # its lease expired and another attempt declared the effect AMBIGUOUS. The
                 # refusal is terminal for this proposal, so it gets a receipt like any other.
                 self._refused(
-                    action, evaluation, started_at, effect_key, refused, approval=approval
+                    action,
+                    evaluation,
+                    started_at,
+                    effect_key,
+                    refused,
+                    approval=approval,
+                    compared=compared,
                 )
                 raise
         self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
@@ -736,6 +866,7 @@ class Control:
             started_at,
             reconciler,
             held_key=effect_key,
+            compared=compared,
         )
 
     # --- observe mode (SPEC-v0.3 §6) ----------------------------------------------------
@@ -750,6 +881,7 @@ class Control:
         observation: _Observation,
         reconciler: _Reconciler,
         lease: timedelta,
+        preconditions: _Preconditions | None = None,
     ) -> Receipt:
         """Run an action observe mode has finished deciding about (SPEC-v0.3 §6.2).
 
@@ -759,8 +891,9 @@ class Control:
         attempted from every one of them: observe mode *executes*, and an attempt that runs
         an effect must own its key where it can.
         """
+        compared = _Compared()
         approval, reservation = self._observe_secure(
-            action, evaluation, effect_key, lease, observation
+            action, evaluation, effect_key, lease, observation, preconditions, compared
         )
         held_key = None if reservation is None else effect_key
         attempt = 1 if reservation is None else reservation.attempt
@@ -791,6 +924,7 @@ class Control:
             reconciler,
             held_key=held_key,
             observation=observation,
+            compared=compared,
         )
 
     def _observe_secure(
@@ -800,6 +934,8 @@ class Control:
         effect_key: str | None,
         lease: timedelta,
         observation: _Observation,
+        preconditions: _Preconditions | None,
+        compared: _Compared,
     ) -> tuple[Approval | None, Reservation | None]:
         """Attempt what `_secure` takes, record every refusal, and hold nothing it lost.
 
@@ -826,7 +962,9 @@ class Control:
         if approval_id is None and effect_key is None:
             return None, None
         try:
-            approval, reservation = self._observe_take(action, approval_id, effect_key, lease)
+            approval, reservation = self._observe_take(
+                action, approval_id, effect_key, lease, preconditions, compared
+            )
         except (DuplicateEffect, AmbiguousEffect) as refused:
             observation.block(_blocked_by(refused))
             self._append(
@@ -845,7 +983,7 @@ class Control:
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
-                {"reason": mismatch.reason, "action_hash": action.action_hash},
+                self._invalidated(action, mismatch, compared),
                 effect_key,
                 approval_id=approval_id,
             )
@@ -877,7 +1015,13 @@ class Control:
         return approval, reservation
 
     def _observe_take(
-        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
+        self,
+        action: Action,
+        approval_id: str | None,
+        effect_key: str | None,
+        lease: timedelta,
+        preconditions: _Preconditions | None,
+        compared: _Compared,
     ) -> tuple[Approval | None, Reservation | None]:
         """Observe mode's `_take`: **check the grant, never spend it** (SPEC-v0.6 §7.2.3).
 
@@ -895,6 +1039,11 @@ class Control:
         The verdict is computed with the same pure `check_consumable` every store applies, so
         the four refusals observe mode records are the four `_secure` would have raised, from
         one implementation rather than two.
+
+        SPEC-v0.7 §6.8: **observe mode rechecks and records.** Where the grant is one enforce
+        mode would consume, the precondition is compared exactly as `_recheck` compares it, and
+        a refusal is raised here for `_observe_secure` to record; the action still runs and no
+        grant is spent.
         """
         if approval_id is not None:
             verdict = check_consumable(
@@ -908,6 +1057,8 @@ class Control:
             # `as_approval()` and not a hand-built `Approval`: one construction, so observe
             # mode cannot drift from what a store returns.
             record = verdict.record
+            if record is not None:
+                self._compare(action, record, preconditions, compared)
             approval = None if record is None else record.as_approval()
             # **And no event, which is the change worth naming.** `_observe_secure` used to
             # append `APPROVAL_CONSUMED` here. Nothing is consumed now, and there is no
@@ -940,7 +1091,7 @@ class Control:
         """
         held = self._store.take_continuation(continuation)
         action = held.action
-        started_at, approval = self._resumed_context(action, held.record.created_at)
+        started_at, approval, at_request = self._resumed_context(action, held.record.created_at)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -984,6 +1135,10 @@ class Control:
             observation.decided(evaluation)
             if evaluation.decision is Decision.DENY:
                 observation.block(evaluation.reason)
+        # SPEC-v0.7 §6.8: **no recheck on a resumed leg**, for `v0.6 §7.2.3`'s reason. The
+        # approval was consumed on the first leg, after that leg's recheck, and refusing here
+        # would strand a reservation the remote may already be acting on. The receipt says so:
+        # the fingerprint the approval was requested with, and no recheck.
         return self._outcome(
             action,
             evaluation,
@@ -995,11 +1150,12 @@ class Control:
             _Reconciler(None, False),
             held_key=held.effect_key,
             observation=observation,
+            compared=_Compared(at_request),
         )
 
     def _resumed_context(
         self, action: Action, fallback: datetime
-    ) -> tuple[datetime, Approval | None]:
+    ) -> tuple[datetime, Approval | None, str | None]:
         """Recover the original attempt's evidence, including after a process restart.
 
         EXECUTION_STARTED durably binds the consumed approval to this action ID. Looking
@@ -1020,7 +1176,8 @@ class Control:
                 approval_id = event.approval_id
         record = None if approval_id is None else self._store.get_approval(approval_id)
         approval = None if record is None else record.as_approval()
-        return started, approval
+        at_request = None if record is None else record.request.precondition_fingerprint
+        return started, approval, at_request
 
     def _outcome(
         self,
@@ -1035,6 +1192,7 @@ class Control:
         *,
         held_key: str | None,
         observation: _Observation | None = None,
+        compared: _Compared | None = None,
     ) -> Receipt:
         """Run the executor and record what happened (SPEC-v0.1 §5.5).
 
@@ -1076,7 +1234,14 @@ class Control:
                     # human moves it out of. The store's refusal is what propagates, not the
                     # NotExecuted: an agent that caught that would retry a key it lost.
                     self._unrecorded(
-                        action, evaluation, started_at, held_key, attempt, refused, approval
+                        action,
+                        evaluation,
+                        started_at,
+                        held_key,
+                        attempt,
+                        refused,
+                        approval,
+                        compared,
                     )
                     raise
             self._append(
@@ -1096,6 +1261,7 @@ class Control:
                 effect_key=effect_key,
                 attempt=attempt,
                 observation=observation,
+                compared=compared,
             )
             raise
         except BaseException as exc:
@@ -1147,6 +1313,7 @@ class Control:
                 effect_key=effect_key,
                 attempt=attempt,
                 observation=observation,
+                compared=compared,
             )
             raise
         if held_key is not None:
@@ -1158,7 +1325,14 @@ class Control:
                 # otherwise. What happened at the remote is now as unknown as a timeout, so
                 # the attempt is recorded `ambiguous` rather than committed.
                 self._unrecorded(
-                    action, evaluation, started_at, held_key, attempt, refused, approval
+                    action,
+                    evaluation,
+                    started_at,
+                    held_key,
+                    attempt,
+                    refused,
+                    approval,
+                    compared,
                 )
                 raise
         self._append(EventType.EXECUTION_COMMITTED, action, {}, effect_key, approval=approval)
@@ -1171,6 +1345,7 @@ class Control:
             effect_key=effect_key,
             attempt=attempt,
             observation=observation,
+            compared=compared,
         )
 
     def _suspend(
@@ -1301,6 +1476,8 @@ class Control:
         effect_key: str | None,
         lease: timedelta,
         reconciler: _Reconciler,
+        preconditions: _Preconditions | None,
+        compared: _Compared,
     ) -> tuple[Approval | None, Reservation | None]:
         """Take everything this action needs before it may run: the grant, and the key.
 
@@ -1308,9 +1485,16 @@ class Control:
         first, so a replayed approval is what gets raised when a duplicate effect would also
         apply (T4), and a refused reservation leaves the approval granted for the action the
         human actually saw (T12).
+
+        SPEC-v0.7 §6.2: under `APPROVE`, the precondition is rechecked **strictly before each
+        `_take`**, so the provider can never run after a reservation exists. "Each" because this
+        may take twice, once more after a `reconcile` hook moves an `AMBIGUOUS` record, and the
+        hook is a network call whose duration would otherwise sit inside the window.
         """
         approval_id = (
-            self._presented(action, effect_key) if evaluation.decision is Decision.APPROVE else None
+            self._presented(action, effect_key, evaluation, started_at, preconditions)
+            if evaluation.decision is Decision.APPROVE
+            else None
         )
         if approval_id is None and effect_key is None:
             # SPEC-v0.6 §7.2's `ALLOW` row, which §7.2.2 step 1 quietly assumed a reservation
@@ -1330,6 +1514,8 @@ class Control:
         # and whatever the second attempt meets is final.
         for reconciled in (False, True):
             try:
+                if approval_id is not None:
+                    self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
                 break
             except AmbiguousEffect as refused:
@@ -1347,6 +1533,7 @@ class Control:
                         effect_key,
                         refused,
                         approval_id=approval_id,
+                        compared=compared,
                     )
                     raise
             except ActionDenied as denied:
@@ -1386,7 +1573,7 @@ class Control:
                 self._append(
                     EventType.APPROVAL_INVALIDATED,
                     action,
-                    {"reason": mismatch.reason, "action_hash": action.action_hash},
+                    self._invalidated(action, mismatch, compared),
                     effect_key,
                     approval_id=approval_id,
                 )
@@ -1399,13 +1586,20 @@ class Control:
                     approval_id=approval_id,
                     approver=self._approver_of(approval_id),
                     effect_key=effect_key,
+                    compared=compared,
                 )
                 raise
             except DuplicateEffect as refused:
                 # SPEC §5.4 — this effect already happened or is happening now. The approval,
                 # if one was presented, was not consumed: it is still worth something.
                 self._refused(
-                    action, evaluation, started_at, effect_key, refused, approval_id=approval_id
+                    action,
+                    evaluation,
+                    started_at,
+                    effect_key,
+                    refused,
+                    approval_id=approval_id,
+                    compared=compared,
                 )
                 raise
 
@@ -1565,6 +1759,7 @@ class Control:
         *,
         approval: Approval | None = None,
         approval_id: str | None = None,
+        compared: _Compared | None = None,
     ) -> None:
         """Record a refusal by the effect key: the event, and a `blocked` receipt (§6.1)."""
         presented = approval.approval_id if approval is not None else approval_id
@@ -1584,6 +1779,7 @@ class Control:
             approval_id=presented,
             approver=self._approver_of(presented),
             effect_key=effect_key,
+            compared=compared,
         )
 
     def _unrecorded(
@@ -1595,6 +1791,7 @@ class Control:
         attempt: int,
         refused: DuplicateEffect | AmbiguousEffect,
         approval: Approval | None,
+        compared: _Compared | None = None,
     ) -> None:
         """Record an outcome the store refused to write (SPEC-v0.1 §5.2, §5.5).
 
@@ -1615,9 +1812,17 @@ class Control:
             approval=approval,
             effect_key=effect_key,
             attempt=attempt,
+            compared=compared,
         )
 
-    def _presented(self, action: Action, effect_key: str | None) -> str:
+    def _presented(
+        self,
+        action: Action,
+        effect_key: str | None,
+        evaluation: Evaluation,
+        started_at: datetime,
+        preconditions: _Preconditions | None,
+    ) -> str:
         """The approval this call presents, or record a request and suspend the action.
 
         With nothing presented, `ApprovalRequired` is raised so the caller can come back with
@@ -1628,10 +1833,18 @@ class Control:
         presented = _PRESENTED_APPROVAL.get(None)
         if presented is not None:
             return presented
+        # SPEC-v0.7 §6.2: the fingerprint is captured here, before the request exists, and a
+        # provider that produces none refuses the action before any human is asked (§6.5).
+        fingerprint = None
+        if preconditions is not None:
+            fingerprint, error = _fetched(preconditions, action)
+            if fingerprint is None:
+                self._refuse_unfetched_request(action, evaluation, started_at, effect_key, error)
         # SPEC-v0.6 §7.1 — the request records which policy was in force while it was built.
         # `Control` is the only object holding both a policy and a provider, and the provider
-        # protocol takes neither, so it travels the way a presented approval does.
-        with policy_in_force(self._policy_hash):
+        # protocol takes neither, so it travels the way a presented approval does. The
+        # fingerprint travels beside it, by the same route and for the same reason.
+        with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
             request = self._approvals.request(action, self._approval_ttl)
         self._append(
             EventType.APPROVAL_REQUESTED,
@@ -1646,6 +1859,151 @@ class Control:
             request_id=request.request_id,
             action_id=action.action_id,
         )
+
+    def _refuse_unfetched_request(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        error: str | None,
+    ) -> NoReturn:
+        """SPEC-v0.7 §6.2's request-pass row: no fingerprint, so no request and no human.
+
+        `ActionDenied(reason="precondition_unavailable")`, `ACTION_DENIED` with the reason, and a
+        `denied` receipt keeping `decision: approve`, because the policy did decide `approve` and
+        what refused the action was a provider that could not be read. The error is by type
+        name only (§6.5).
+        """
+        _LOG.warning(
+            "%s: the precondition provider produced no fingerprint (%s), so no approval is "
+            "requested (SPEC-v0.7 §6.5)",
+            action.name,
+            error,
+        )
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {"reason": _PRECONDITION_UNAVAILABLE, "error": error},
+            effect_key,
+        )
+        message = (
+            f"{action.name}: the precondition provider produced no fingerprint ({error}), so no "
+            "approval was requested"
+        )
+        self._record(
+            action,
+            evaluation,
+            ReceiptResult.DENIED,
+            started_at,
+            error=message,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(message, reason=_PRECONDITION_UNAVAILABLE, action_id=action.action_id)
+
+    def _recheck(
+        self,
+        action: Action,
+        approval_id: str,
+        preconditions: _Preconditions | None,
+        compared: _Compared,
+    ) -> None:
+        """SPEC-v0.7 §6.2: the precondition, compared **strictly before** the store call that
+        consumes the approval. Raises the refusal; returns where the store call may proceed.
+
+        `Control` reads the record it is about to present (`get_approval`, an existing read)
+        and decides with `check_consumable`, the pure function every store applies. Where no
+        provider is named and the record carries no fingerprint, the precondition question does
+        not arise and the store call is 0.6.1's exactly.
+
+        **Where the verdict is a refusal, the provider is not called** (§6.6), and the refusal
+        is raised from this read with the reason 0.6.1 gives. Not from the store call: a
+        `pending` record a human grants between this read and that call would then be consumed
+        with no recheck, which is a skip. An expired grant still reaches the store, through
+        `consume_approval` and never through a reservation, so the lapse is recorded as 0.6.1
+        records it; a store whose clock disagreed would at most spend a grant this clock calls
+        expired, with nothing reserved and nothing run.
+
+        This narrows the window between the human's decision and the reservation to the time
+        between this fetch and that store call, and does not close it (§6.7).
+        """
+        compared.reset()
+        record = self._store.get_approval(approval_id)
+        stored = None if record is None else record.request.precondition_fingerprint
+        if preconditions is None and stored is None:
+            return
+        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
+        if verdict.refusal is not None:
+            if verdict.expire:
+                self._store.consume_approval(approval_id, action.action_hash)
+            raise verdict.refusal
+        assert record is not None  # a verdict with no refusal carries its record
+        self._compare(action, record, preconditions, compared)
+
+    def _compare(
+        self,
+        action: Action,
+        record: ApprovalRecord,
+        preconditions: _Preconditions | None,
+        compared: _Compared,
+    ) -> None:
+        """The comparison itself, for `_recheck` and for observe mode (SPEC-v0.7 §6.2, §6.8).
+
+        Three refusals, each its own reason, and `compared` says what was compared: both
+        fingerprints where both exist, the one that exists where only one does, and the
+        provider's failure by type. **Never a skip**: a fingerprint on only one side is
+        `precondition_missing`, because "skip" would mean a store that drops the column, or a
+        path that names no provider, turns the check off (§6.4).
+        """
+        stored = record.request.precondition_fingerprint
+        compared.at_request = stored
+        if preconditions is None and stored is None:
+            return
+        approval_id = record.approval_id
+        if preconditions is not None:
+            fresh, error = _fetched(preconditions, action)
+            if fresh is None:
+                compared.error = error
+                _LOG.warning(
+                    "%s: the precondition provider produced no fingerprint (%s); approval %s is "
+                    "refused and left granted (SPEC-v0.7 §6.5)",
+                    action.name,
+                    error,
+                    approval_id,
+                )
+                raise ApprovalMismatch(
+                    f"approval {approval_id}: the precondition provider produced no "
+                    f"fingerprint ({error}); nothing was reserved",
+                    reason=_PRECONDITION_UNAVAILABLE,
+                    approval_id=approval_id,
+                )
+            compared.at_recheck = fresh
+        if stored is None or compared.at_recheck is None:
+            raise ApprovalMismatch(
+                f"approval {approval_id} has a precondition fingerprint on one side only "
+                f"(requested with {stored}, presented with {compared.at_recheck}); a fingerprint "
+                "on one side is a refusal and never a skip",
+                reason=_PRECONDITION_MISSING,
+                approval_id=approval_id,
+            )
+        if stored != compared.at_recheck:
+            raise ApprovalMismatch(
+                f"approval {approval_id} was granted against precondition {stored} and the "
+                f"provider now reports {compared.at_recheck}; the approval is left granted",
+                reason=_PRECONDITION_CHANGED,
+                approval_id=approval_id,
+            )
+
+    @staticmethod
+    def _invalidated(
+        action: Action, mismatch: ApprovalMismatch, compared: _Compared
+    ) -> dict[str, Any]:
+        """`APPROVAL_INVALIDATED`'s data: the reason, and for a precondition refusal the two
+        fingerprints it compared, hashes only, and the provider's failure by type (§6.2)."""
+        data: dict[str, Any] = {"reason": mismatch.reason, "action_hash": action.action_hash}
+        if mismatch.reason in _PRECONDITION_REASONS:
+            data.update(compared.data())
+        return data
 
     def _take(
         self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
@@ -1813,6 +2171,7 @@ class Control:
         effect_key: str | None = None,
         attempt: int = 1,
         observation: _Observation | None = None,
+        compared: _Compared | None = None,
     ) -> Receipt:
         # SPEC-v0.3 §6.3 — one place turns a terminal outcome into an observed receipt, so
         # `result`, `execution` and `would_have` cannot disagree about the same action. The
@@ -1846,6 +2205,10 @@ class Control:
             policy_hash=self._policy_hash,
             policy_version=self._policy.version,
             controls=evaluation.controls,
+            # SPEC-v0.7 §6.11: what the presenting pass compared, hashes only, `None` where
+            # there was none.
+            precondition_at_request=None if compared is None else compared.at_request,
+            precondition_at_recheck=None if compared is None else compared.at_recheck,
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained
@@ -2013,6 +2376,7 @@ def protect(
     reconcile: Callable[[str], ReconcileOutcome] | None = None,
     reconcile_eagerly: bool = False,
     control: Control | None = None,
+    preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
 
@@ -2029,9 +2393,16 @@ def protect(
     `reconcile` asks the remote what happened to an effect whose outcome is unknown
     (SPEC-v0.2 §2). With `reconcile_eagerly`, it also runs immediately after this call
     produces an `AMBIGUOUS` outcome, rather than only when one blocks a later attempt.
+
+    `preconditions` reads the state an approval depends on, and is `Control.execute`'s keyword
+    (SPEC-v0.7 §6.2): called with the `Action` when the approval is requested and again on the
+    presenting pass, before the store call that consumes it, with a refusal where the two
+    fingerprints differ or only one exists. The recheck narrows the window a human's approval
+    leaves open; it does not close it (§6.7). Not callable is refused here, at decoration time.
     """
     if not name:
         raise InvalidArgument("protect(name=...) must be a non-empty action name")
+    provider = _checked_preconditions(preconditions, f"protect({name!r}, preconditions=...)")
     _check_template(name, "effect", effect)
     _check_template(name, "resource", resource)
     held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
@@ -2112,6 +2483,7 @@ def protect(
                     lease=held,
                     reconcile=reconcile,
                     reconcile_eagerly=reconcile_eagerly,
+                    preconditions=provider,
                 )
             except ApprovalRequired as pending:
                 if not wait:
@@ -2129,6 +2501,7 @@ def protect(
                         lease=held,
                         reconcile=reconcile,
                         reconcile_eagerly=reconcile_eagerly,
+                        preconditions=provider,
                     )
             return returned[0]
 

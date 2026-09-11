@@ -22,7 +22,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -144,6 +144,11 @@ def _differing_field(wrote: Any, read: Any) -> tuple[str, Any, Any] | None:
     read-only mappings `Action` freezes its arguments into (`v0.1 §2.2`).
     """
     for spec in fields(wrote):
+        if not spec.compare:
+            # A field the record excludes from its own equality is not part of what it says:
+            # `Receipt`'s stored document is how a read-back receipt is hashed (SPEC-v0.7
+            # §6.11), present on the one read and absent on the one written, by design.
+            continue
         mine, theirs = getattr(wrote, spec.name), getattr(read, spec.name, None)
         if mine != theirs:
             return spec.name, mine, theirs
@@ -705,6 +710,62 @@ def approval_binding(backend: StoreBackend, processes: int = CONTENDERS) -> Case
             "a refusal must not spend it",
         )
     return passed("binding", title)
+
+
+@case("precondition-fingerprint", "an approval's precondition fingerprint round-trips")
+def approval_precondition_fingerprint(
+    backend: StoreBackend, processes: int = CONTENDERS
+) -> CaseResult:
+    """SPEC-v0.7 §6.4, T266. `ApprovalRecord` is rebuilt from columns, so the fingerprint the
+    recheck reads back must be one, and a store that drops it makes every approval requested
+    with a provider come back without one.
+
+    That is a refusal and never a skip in `Control` (`precondition_missing`), so a dropping store
+    is safe and useless: every such approval is refused at every presentation. This case is what
+    tells an implementer why, by name, before an operator does.
+    """
+    title = approval_precondition_fingerprint.title
+    store = _clocked(backend, lambda: T0)
+    fingerprint = "sha256:" + "ab" * 32
+    carried = replace(
+        build_request(an_action(payment_id="txn_pf"), timedelta(minutes=15), T0),
+        precondition_fingerprint=fingerprint,
+    )
+    bare = build_request(an_action(payment_id="txn_pf0"), timedelta(minutes=15), T0)
+    store.put_approval_request(carried)
+    store.put_approval_request(bare)
+    store.grant_approval(carried.request_id, "cli:conformance")
+
+    readers: list[tuple[str, StateStore]] = [("the store that wrote it", store)]
+    reopened = backend.reopen()
+    if reopened is not None:
+        readers.append(("a second handle on the same backend", reopened))
+    for where, reader in readers:
+        record = reader.get_approval(carried.request_id)
+        listed = [r for r in reader.approvals_for(carried.action_hash)]
+        for how, found in (
+            ("get_approval", record),
+            ("approvals_for", listed[0] if listed else None),
+        ):
+            got = None if found is None else found.request.precondition_fingerprint
+            if got != fingerprint:
+                return failed(
+                    "precondition-fingerprint",
+                    title,
+                    f"{how} through {where}: precondition_fingerprint came back {got!r}, "
+                    f"expected {fingerprint!r}. Every approval requested with a provider would "
+                    "then be refused at every presentation (SPEC-v0.7 §6.4)",
+                )
+        plain = reader.get_approval(bare.request_id)
+        if plain is None or plain.request.precondition_fingerprint is not None:
+            return failed(
+                "precondition-fingerprint",
+                title,
+                f"an approval requested with no provider came back through {where} carrying "
+                f"{None if plain is None else plain.request.precondition_fingerprint!r}; absent "
+                "means absent",
+            )
+    return passed("precondition-fingerprint", title)
 
 
 @case("single-use", "an approval is consumed exactly once")
@@ -1757,6 +1818,7 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         approval_consume_cross_process,
         approval_answered_once,
         approval_binding,
+        approval_precondition_fingerprint,
         approval_single_use,
         approval_expiry,
         approval_atomic,

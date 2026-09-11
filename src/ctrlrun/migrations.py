@@ -294,6 +294,20 @@ _POLICY_PROVENANCE_PG: Final = (
     'ALTER TABLE approvals ADD COLUMN IF NOT EXISTS policy_hash_at_approval TEXT COLLATE "C"',
 )
 
+#: SPEC-v0.7 §6.11: the precondition fingerprint captured when an approval was requested. A
+#: column for `0004`'s reason: `ApprovalRecord` is rebuilt from columns, so a value the recheck
+#: reads back must be one. Nullable, and **not backfilled**: every approval requested before
+#: this migration was requested without a provider, which is exactly what `NULL` means.
+#:
+#: A hash and never the state it was computed from (§6.10), so this column holds nothing a
+#: reader of the approvals table could learn the resource's state from.
+_PRECONDITION_FINGERPRINT: Final = (
+    "ALTER TABLE approvals ADD COLUMN precondition_fingerprint TEXT",
+)
+_PRECONDITION_FINGERPRINT_PG: Final = (
+    'ALTER TABLE approvals ADD COLUMN IF NOT EXISTS precondition_fingerprint TEXT COLLATE "C"',
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -301,6 +315,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0002_receipt_chain", _RECEIPT_CHAIN, postgres=_RECEIPT_CHAIN_PG),
     Migration("0003_resolved_by", _RESOLVED_BY, postgres=_RESOLVED_BY_PG),
     Migration("0004_policy_provenance", _POLICY_PROVENANCE, postgres=_POLICY_PROVENANCE_PG),
+    Migration(
+        "0005_precondition_fingerprint",
+        _PRECONDITION_FINGERPRINT,
+        postgres=_PRECONDITION_FINGERPRINT_PG,
+    ),
 )
 
 HEAD: Final = MIGRATIONS[-1].id

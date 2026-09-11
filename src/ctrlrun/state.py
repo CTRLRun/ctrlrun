@@ -54,7 +54,15 @@ from .effect import (
 )
 from .errors import AmbiguousEffect, DuplicateEffect, InvalidArgument
 from .migrations import migrate
-from .receipt import GENESIS_HASH, Event, EventType, Receipt
+from .receipt import (
+    GENESIS_HASH,
+    RECEIPT_SCHEMA,
+    Event,
+    EventType,
+    Receipt,
+    _document_hash,
+    _stored_receipt,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -671,8 +679,10 @@ class InMemoryStateStore:
             # to one process can offer -- and `reopen()` returning `None` is how this backend
             # declares that (§2.4).
             seq = self._chain_seq + 1
-            chained = replace(receipt, seq=seq, prev_hash=self._chain_hash)
-            digest = chained.chain_hash()
+            # SPEC-v0.7 §6.11: written under the schema this binary writes, and hashed as the
+            # dictionary that says so. The same rule as SQLite's and Postgres's, below.
+            chained = replace(receipt, schema=RECEIPT_SCHEMA, seq=seq, prev_hash=self._chain_hash)
+            digest = _document_hash(chained.to_dict())
             stored = replace(chained, hash=digest)
             self._receipts.append(stored)
             self._chain_seq = seq
@@ -1150,8 +1160,20 @@ class SQLiteStateStore:
                     "the receipt chain has no head row; this database predates "
                     "0002_receipt_chain and was not migrated"
                 )
-            chained = replace(receipt, seq=int(row["seq"]), prev_hash=str(row["hash"]))
-            digest = chained.chain_hash()
+            # SPEC-v0.7 §6.11 rule (b): **hash the exact dictionary that is serialized**, and
+            # never a stored document. The column and the JSON beside it come from one
+            # dictionary, so the read-time hash of that JSON is this write-time hash for every
+            # receipt nobody touched. Written under `RECEIPT_SCHEMA` whatever schema the receipt
+            # was read under: the chain fields exist only from `v3`, and a `v1` document written
+            # into the chain would carry no `seq` of its own.
+            chained = replace(
+                receipt,
+                schema=RECEIPT_SCHEMA,
+                seq=int(row["seq"]),
+                prev_hash=str(row["hash"]),
+            )
+            document = chained.to_dict()
+            digest = _document_hash(document)
             connection.execute(
                 "INSERT INTO receipts(receipt_id, action_id, effect_key, result, json, ts, "
                 "seq, prev_hash, hash) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1160,7 +1182,7 @@ class SQLiteStateStore:
                     chained.action_id,
                     chained.effect_key,
                     str(chained.result),
-                    chained.to_json(),
+                    json.dumps(document, ensure_ascii=False, separators=(",", ":")),
                     _iso(chained.finished_at),
                     chained.seq,
                     chained.prev_hash,
@@ -1208,7 +1230,9 @@ class SQLiteStateStore:
             .fetchall()
         )
         # `hash` comes off the column, because a document cannot contain its own hash (§6.2).
-        return tuple(replace(Receipt.from_json(row["json"]), hash=row["hash"]) for row in rows)
+        # And the parsed document stays with the receipt (SPEC-v0.7 §6.11), so `chain_hash()`
+        # hashes what was stored rather than what this binary would render.
+        return tuple(_stored_receipt(json.loads(row["json"]), row["hash"]) for row in rows)
 
     # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
 
@@ -1290,7 +1314,8 @@ class SQLiteStateStore:
         try:
             self._connection().execute(
                 "INSERT INTO approvals(approval_id, action_hash, status, action_json, "
-                "created_at, expires_at, policy_hash_at_approval) VALUES(?,?,?,?,?,?,?)",
+                "created_at, expires_at, policy_hash_at_approval, precondition_fingerprint) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (
                     request.request_id,
                     request.action_hash,
@@ -1299,6 +1324,7 @@ class SQLiteStateStore:
                     _iso(request.created_at),
                     _iso(request.expires_at),
                     request.policy_hash,
+                    request.precondition_fingerprint,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -1481,6 +1507,7 @@ class SQLiteStateStore:
                 created_at=datetime.fromisoformat(row["created_at"]),
                 expires_at=datetime.fromisoformat(row["expires_at"]),
                 policy_hash=row["policy_hash_at_approval"],
+                precondition_fingerprint=row["precondition_fingerprint"],
             ),
             status=ApprovalStatus(row["status"]),
             approver=row["approver"],

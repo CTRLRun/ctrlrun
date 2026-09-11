@@ -15,6 +15,53 @@ any change to one appears here.
   3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
   `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
   changed; the one test fix is below.
+- **Precondition fingerprints** (`docs/SPEC-v0.7.md` §6, §7). `@protect(..., preconditions=provider)`
+  and `Control.execute(..., preconditions=provider)`, where the provider takes the `Action` and
+  returns a mapping of the state an approval depends on. A precondition fingerprint **narrows**
+  the window between a human's approval and the action's execution; it does not close it.
+  Under `APPROVE` the provider is called when the approval is requested, and the result is kept only
+  as a `sha256:` fingerprint on the request (`ApprovalRequest.precondition_fingerprint`, stored in the
+  new `approvals.precondition_fingerprint` column). On the presenting pass it is called again,
+  strictly before the store call that consumes the approval, and the action is refused with
+  `ApprovalMismatch` and a reason of its own: `precondition_changed` where the two fingerprints
+  differ, `precondition_missing` where only one side has one (a store that lost the column, or the
+  gateway and the ACS hook, which name no provider), and `precondition_unavailable` where the
+  provider raises or returns something that is not a canonicalizable mapping. Every refusal reserves
+  nothing and leaves the approval granted. On the request pass a provider that fails refuses the
+  action with `ActionDenied(reason="precondition_unavailable")` before any human is asked. `ALLOW`,
+  `DENY` and `Control.resume` never call the provider; observe mode compares, records and runs.
+  The comparison is a network call, so it runs outside the atomic reservation write, and a change
+  that lands after the comparison and before the reservation is not refused: T261b opens that
+  window and asserts exactly that. Raw provider output reaches no receipt, event, log line or
+  table, and a provider's exception is recorded by its type name only. No `skip_preconditions`,
+  and no timeout parameter: a provider that hangs holds the call and reserves nothing.
+- **Migration `0005_precondition_fingerprint`** adds `approvals.precondition_fingerprint`, `NULL` on
+  every existing row, on SQLite and Postgres. A database built by 0.6.1's own code migrates keeping
+  every row, and 0.6.1 refuses the migrated database at open naming `0005`. **Stop every 0.6
+  process before the first caller passes `preconditions=`**: a store checks migrations only at
+  open, so a 0.6.1 process already running would consume a fingerprinted approval with no
+  comparison, and nothing in the new process can see it.
+- **G16 in `ctrlrun verify`**, "a moved precondition is refused" before the reservation, under
+  `ctrlrun.guarantees/v3`. Verify supplies its own provider, because a provider is named in code
+  that verify does not read, and the report says so beneath the table; `not applicable` only where
+  no action requires approval. The store conformance suite gains a `precondition-fingerprint` case
+  and a broken-store fixture that fails it by name.
+
+### Changed
+
+- **`ctrlrun.receipt/v4`**, with `precondition_at_request` and `precondition_at_recheck`, and the
+  first receipt-schema bump that does not report older receipts as altered. A receipt read from a
+  store is now hashed as the document it was read from (`docs/SPEC-v0.7.md` §6.11, amending
+  `SPEC-v0.6.md` §6.4's last bullet), so every `v3` receipt a released 0.6 wrote still rehashes to its
+  stored hash and a chain spanning `v3` and `v4` verifies end to end. A key added to a stored
+  receipt, a relabelled `schema`, a removed one or an unknown one is `content_altered` at its `seq`,
+  and no longer something a reader could miss. **Visible**: `to_dict()`, `ctrlrun receipts --json`
+  and `ctrlrun inspect` render each receipt under its own schema, so a pre-v0.6 receipt shows its
+  own `v1` or `v2` label and keys where 0.6.1 showed `v3`. Upgrade every reader before any writer:
+  a `v4` JSONL line handed to 0.6.1 rehashes wrongly.
+- **`ctrlrun verify` prints each distinct note once**, where it printed only the first note in the
+  report, which would have dropped G16's beneath G3's. CI's `verify` job expects `verified 12/12`
+  and `verified 7/7`.
 
 ### Fixed
 

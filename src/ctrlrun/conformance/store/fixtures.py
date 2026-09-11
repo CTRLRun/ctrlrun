@@ -319,6 +319,25 @@ class _CoercesAnArgument(_Wrapped):
         return replace(record, request=replace(record.request, action=action))
 
 
+class _DropsThePreconditionFingerprint(_Wrapped):
+    """Reads every approval back without its precondition fingerprint (SPEC-v0.7 §6.4, T266).
+
+    What a backend that never added `0005`'s column, or a restore from before it, looks like
+    from above: the request went in with a fingerprint and comes out with none.
+    """
+
+    def get_approval(self, approval_id: str) -> Any:
+        record = self._inner.get_approval(approval_id)
+        return None if record is None else _without_fingerprint(record)
+
+    def approvals_for(self, action_hash: str) -> Any:
+        return tuple(_without_fingerprint(r) for r in self._inner.approvals_for(action_hash))
+
+
+def _without_fingerprint(record: Any) -> Any:
+    return replace(record, request=replace(record.request, precondition_fingerprint=None))
+
+
 class _RenumbersEvents(_Wrapped):
     """`append_event` returns an event carrying an id other than the one it stored."""
 
@@ -532,6 +551,12 @@ FIXTURES: Sequence[Fixture] = (
         {"evidence": "action-round-trip"},
         _wrapping("coerces-an-argument", _CoercesAnArgument),
         because="the action hash changed across the store",
+    ),
+    Fixture(
+        "drops-the-precondition-fingerprint",
+        {"approval": "precondition-fingerprint"},
+        _wrapping("drops-the-precondition-fingerprint", _DropsThePreconditionFingerprint),
+        because="precondition_fingerprint came back None",
     ),
     Fixture(
         "renumbers-events",

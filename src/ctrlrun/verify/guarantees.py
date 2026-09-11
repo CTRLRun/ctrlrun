@@ -19,7 +19,8 @@ from typing import Final
 #: SPEC-v0.6 §9.5 — `v2` adds G11 (§6.6). The version moves because the catalogue is a closed
 #: set a report is read against, and a reader that met an id it did not know would have no way
 #: to tell a new guarantee from a corrupted line.
-CATALOGUE: Final = "ctrlrun.guarantees/v2"
+#: SPEC-v0.7 §9.4: `v3` is G1 to G16, and the version moves once for all five of v0.7's.
+CATALOGUE: Final = "ctrlrun.guarantees/v3"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,11 @@ GUARANTEES: Final = (
     Guarantee("G9", "delegation cannot escalate", ("v0.3 §10 T76", "v0.3 §10 T81", "v0.3 §10 T75")),
     Guarantee("G10", "unknown exception is ambiguous", ("v0.1 §5.5", "v0.1 §7 T1", "v0.1 §7 T8")),
     Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
+    Guarantee(
+        "G16",
+        "a moved precondition is refused",
+        ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -105,6 +111,15 @@ GRANT_RESOURCE_NOTE: Final = (
 )
 NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 
+#: SPEC-v0.7 §8.9, G16's note, printed once beneath the table as `EFFECT_TEMPLATE_NOTE` is. G16
+#: is graded against verify's own stand-in for the operator's provider, because a provider is
+#: named in code and not in any document verify reads; this says so where a reader looks.
+PRECONDITION_NOTE: Final = (
+    "verify supplies its own precondition provider; whether your @protect declares one is in "
+    "your code, which verify does not read. The gateway and the ACS hook cannot name a "
+    "provider at all, and refuse an approval that carries a fingerprint"
+)
+
 #: G4's second N/A (§2.2). No backend in v0.4 reaches it — `SQLiteStateStore` refuses
 #: `:memory:` precisely so that it cannot — and the row exists so a v0.6 backend that cannot
 #: make the guarantee reports N/A rather than a green it did not earn.
@@ -146,6 +161,7 @@ __all__ = [
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
     "PER_CONNECTION_BACKEND",
+    "PRECONDITION_NOTE",
     "PROCESSES",
     "SYNTHETIC_PREFIX",
     "Guarantee",
