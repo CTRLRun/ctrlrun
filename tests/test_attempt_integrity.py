@@ -1481,14 +1481,14 @@ def test_the_two_re_issue_bounds_compose(proxy, schema, moves):
         setup.close()
 
     store = LosesCommitsAndKeepsMoving(proxy.url(URL), schema=schema, clock=lambda: T0)
-    raised: BaseException | None = None
+    raised: Exception | None = None
     try:
         proxy.reset_counters()
         proxy.drop_before_commit = 1000  # every COMMIT from here on, as T155f does
         store.breaking = True
         try:
             store.mark_ambiguous(key, REUSED, "nobody knows what the remote did")
-        except BaseException as broke:
+        except Exception as broke:  # RecursionError is an Exception; the unbounded case raised it
             raised = broke
     finally:
         store.breaking = False
