@@ -6,7 +6,7 @@ name: CodeQL
 # the extra queries cost a few minutes that a project this size can afford.
 #
 # Findings land in the repository's code-scanning tab. Nothing here gates a merge -- the
-# required checks stay `check (3.11)`, `check (3.12)` and `package` -- because a static
+# required checks stay `check (3.11)` through `check (3.14)` and `package` -- because a static
 # analyser's first run on an unfamiliar codebase is a reading list, not a verdict.
 
 on:

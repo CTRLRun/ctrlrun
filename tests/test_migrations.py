@@ -68,7 +68,11 @@ def _release_venv(tmp_path_factory, version: str) -> Path | None:
     """
     root = tmp_path_factory.mktemp(f"rel-{version}")
     env = root / "venv"
-    venv.create(env, with_pip=True)
+    # Symlinks, as `python -m venv` uses on POSIX. `venv.create` copies the interpreter by
+    # default, and a copied binary from a shared-libpython build looks for `libpython` beside
+    # itself: on uv's CPython 3.14 for macOS it aborted inside `ensurepip`, and every release
+    # fixture errored before a release was installed.
+    venv.create(env, with_pip=True, symlinks=os.name != "nt")
     python = env / "bin" / "python"
     done = subprocess.run(
         [str(python), "-m", "pip", "install", "-q", f"ctrlrun=={version}"],

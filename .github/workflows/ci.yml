@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     # SPEC-v0.6 §4. The Postgres tests skip when CTRLRUN_TEST_POSTGRES is unset, and a
     # skipping test proves nothing -- so CI supplies a real server rather than letting the
