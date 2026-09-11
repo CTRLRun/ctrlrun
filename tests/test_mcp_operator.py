@@ -14,8 +14,10 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -330,8 +332,27 @@ def test_T182_the_pending_listing_withholds_claim_values(server, control, store)
 
     # The whole rendered document, not just the one key: a claim that leaked through some other
     # field would satisfy the assertion above.
+    #
+    # The employee number is checked by value rather than by substring. `4471` is four decimal
+    # digits, every one of them a hex digit too, so it appears by chance in a request id or a
+    # hash often enough to fail a correct listing: CI caught it on one interpreter of four while
+    # the other three passed the same code. The walk below still catches a leak through any
+    # field, which is what this check is for, and cannot be satisfied by a coincidence.
     rendered = json.dumps(document)
-    assert "4471" not in rendered
+
+    def _values(node: Any) -> Iterator[Any]:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key
+                yield from _values(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from _values(value)
+        else:
+            yield node
+
+    assert 4471 not in list(_values(document)), "the employee number reached the listing"
+    assert "4471" not in list(_values(document)), "the employee number reached it as a string"
     assert "CASE-9" not in rendered
     assert "employee_no" not in rendered
     assert "issuer.example" not in rendered
