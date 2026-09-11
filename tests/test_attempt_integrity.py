@@ -1412,7 +1412,8 @@ def test_the_outcome_re_issue_is_bounded_at_one(schema, caplog):
 
 
 @postgres
-def test_the_two_re_issue_bounds_compose(proxy, schema):
+@pytest.mark.parametrize("moves", [(0, 0, 1, 0), (1, 0, 0, 0)])
+def test_the_two_re_issue_bounds_compose(proxy, schema, moves):
     """Two bounds that reset each other are one unbounded loop, and this drives both at once.
 
     `restaged` bounds the stale re-issue; `retrying` bounds the lost-commit re-issue of `v0.6`
@@ -1427,12 +1428,23 @@ def test_the_two_re_issue_bounds_compose(proxy, schema):
     `drop_before_commit = 1000`, which is T155f's injection; the record that keeps moving is the
     bound test's seam, which is what a same-`action_id` renewal leaves behind. Neither invents a
     store answer: one is a connection dying mid-`COMMIT`, the other is a row a rival advanced.
+
+    **The assertion is the nesting, not the absence of a `RecursionError`, and the reason is what a
+    search of these interleavings shows.** Dropping *both* flags recurses, on some patterns and not
+    others. Dropping *one* does not recurse at all on any pattern of four reads or fewer: it
+    permits exactly one re-issue more than the bound allows, which happens to terminate. So a test
+    that asked only "did this blow the stack" would be green for half the ways this can break, and
+    would have been green for the very mutants that say each flag is load-bearing. Each bound
+    permits one re-issue, so the deepest nesting any interleaving may reach is three; a fourth
+    level means a bound was cleared, whether or not that particular pattern went on forever. The
+    patterns here are the two that separate every case, measured through this proxy rather than
+    guessed: both recurse with both flags gone; `(0, 0, 1, 0)` reaches four with the restage's
+    `retrying` dropped, and `(1, 0, 0, 0)` reaches four with the lost-commit re-issue's `restaged`
+    dropped. Either one alone would leave one of the two flags untested.
     """
     from dataclasses import replace
 
     from ctrlrun.postgres import PostgresStateStore
-
-    moves = (0, 0, 1, 0)
 
     class LosesCommitsAndKeepsMoving(PostgresStateStore):
         breaking = False
@@ -1444,11 +1456,10 @@ def test_the_two_re_issue_bounds_compose(proxy, schema):
             record = super()._read_effect(connection, effect_key)
             if record is None or not self.breaking:
                 return record
-            # The pattern a review's search over read patterns found: the rival moves the row on
-            # the third read of each cycle. Whether two bounds compose is a property of the
-            # interleaving, and this is the interleaving that catches it; the obvious
-            # every-other-read pattern happens to end bounded even when they do not compose,
-            # which is the mutation-pattern-4 trap one layer up from the store.
+            # Where in the cycle the rival moves the row. Whether the bounds compose is a
+            # property of the interleaving: the obvious every-other-read pattern ends bounded
+            # even when they do not compose, which is mutation pattern 4 one layer up from the
+            # store, so the patterns come from a search rather than from intuition.
             moved = moves[self.reads % len(moves)]
             self.reads += 1
             return replace(record, attempt=record.attempt + 1) if moved else record
@@ -1484,11 +1495,11 @@ def test_the_two_re_issue_bounds_compose(proxy, schema):
         proxy.drop_before_commit = 0
         store.close()
 
-    assert proxy.commits_dropped >= 2, (
-        f"only {proxy.commits_dropped} COMMIT was swallowed; the lost-commit half of this "
-        "composition never ran"
-    )
+    assert proxy.commits_dropped >= 1, "no COMMIT was swallowed; the lost-commit half never ran"
     assert store.reads >= 2, "the record never moved; the restage half never ran"
+    assert store.deepest >= 2, (
+        "the transition never nested, so neither re-issue ran and this test is about nothing"
+    )
     assert not isinstance(raised, RecursionError), (
         f"the two bounds reset each other and the re-issues alternated to a RecursionError at "
         f"{store.deepest} deep: outside the closed error set, so no caller can classify it"
@@ -1497,9 +1508,10 @@ def test_the_two_re_issue_bounds_compose(proxy, schema):
         f"the composition ended as {type(raised).__name__ if raised else 'a clean return'}; a "
         "write nobody could land must refuse inside the taxonomy"
     )
-    assert store.deepest <= 4, (
-        f"the transition nested {store.deepest} deep; each bound permits one re-issue, so the "
-        "composition of the two is bounded and small"
+    assert store.deepest <= 3, (
+        f"the transition nested {store.deepest} deep. Each bound permits one re-issue, so three "
+        "is the deepest any interleaving may reach; a fourth level is one of the two bounds "
+        "cleared by the other, whether or not this pattern went on to recurse"
     )
 
     record = stored(schema, key)

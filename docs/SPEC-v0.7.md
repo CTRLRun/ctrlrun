@@ -2563,10 +2563,19 @@ halves at once, every `COMMIT` lost and a record that keeps moving, and measured
 which is T155f's failure mode arriving by another door and outside the closed set of errors, so no caller can
 classify it. Both flags now travel through both re-issues. The composition is the property, not either flag, and
 its test drives both halves the way each is driven alone: the real proxy at `drop_before_commit = 1000` for the
-lost `COMMIT`, and the seam below for the record that moves. **The interleaving matters**: the obvious
-every-other-read pattern ends bounded even when the flags do not compose, and the pattern a search found,
-`(0, 0, 1, 0)`, does not. A test that had picked the obvious one would have been mutation pattern 4 one layer up
-from the store.
+lost `COMMIT`, and the seam below for the record that moves.
+
+**Two things about that test were measured rather than assumed, and both would have made it a false green.**
+The first is the interleaving: the obvious every-other-read pattern ends bounded even when the flags do not
+compose, so the patterns come from a search over this proxy, and there are two, because `(0, 0, 1, 0)` is the
+one that catches the restage failing to pass `retrying` on and `(1, 0, 0, 0)` is the one that catches the
+lost-commit re-issue failing to pass `restaged` on. The second is the assertion. Dropping **both** flags
+recurses; dropping **one** does not recurse at all on any pattern of four reads or fewer, it simply permits one
+re-issue more than the bound allows, and that extra level terminates. So a test asserting only *"this did not
+blow the stack"* would be green for each flag taken alone, which is precisely the pair of mutants that say each
+is load-bearing. Each bound permits one re-issue, so three is the deepest nesting any interleaving may reach,
+and the test asserts that: a fourth level means a bound was cleared, whether or not that pattern went on
+forever.
 
 **The re-issue is asked for at the call site rather than inferred from the state it writes.** It was keyed on
 the target state, `COMMITTED` or `AMBIGUOUS`, which is right for every path there is today and wrong the moment
