@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [0.7.0] — unreleased — Execution boundary
+## [0.7.0] - 2026-09-11 - Execution boundary
 
 Every milestone before this one asked what holds *inside* CTRLRun. v0.7 asks whether it holds at
 the edges the kernel does not control. The kernel does not decide whether the remote acted, an
