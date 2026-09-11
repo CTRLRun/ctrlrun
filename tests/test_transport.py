@@ -26,6 +26,7 @@ import functools
 import http.client
 import inspect
 import io
+import json
 import os
 import socket
 import ssl
@@ -40,12 +41,14 @@ import xmlrpc.client
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import ctrlrun
+import ctrlrun.effect
 import ctrlrun.transport as transport
 from ctrlrun import (
     Action,
@@ -57,6 +60,7 @@ from ctrlrun import (
     Policy,
     Principal,
     SQLiteStateStore,
+    Suspended,
     context,
     protect,
 )
@@ -1640,6 +1644,41 @@ def test_T226_a_proxy_the_environment_bypasses_entirely_still_claims(monkeypatch
     assert isinstance(raised, NotExecuted), raised
 
 
+def test_T226_the_proxy_is_read_when_the_call_starts_not_when_it_fails(monkeypatch, refused):
+    """The client takes its proxies when it is built, so the answer must be read there too.
+
+    A `CONNECT` line is written, the environment loses its proxy while the call is in flight, and
+    the tunnel then fails. Read at the moment of the exception, the answer would be "no proxy" and
+    the written line would be forgotten. Preconditions, asserted: the proxy received the `CONNECT`
+    line, and the environment really was cleared before the call failed.
+    """
+    pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    cleared: dict[str, Any] = {}
+
+    def connect_then_vanish(proxy: Peer, conn: socket.socket) -> None:
+        proxy.received += _read_request(conn)
+        for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ.pop(name, None)
+        cleared["at"] = dict(os.environ)
+        conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        _linger_reset(conn)
+
+    with peer(connect_then_vanish) as proxy:
+        _httpx_through(f"http://{LOOPBACK}:{proxy.port}", monkeypatch)
+        raised = _raised(
+            lambda: gateway_transport.request(
+                "POST", "https://target.ctrlrun.invalid/refunds", content=b"{}", timeout=WAIT
+            )
+        )
+        proxy.join()
+
+    assert proxy.received.startswith(b"CONNECT target.ctrlrun.invalid:443"), "precondition"
+    assert not any(name.lower().endswith("_proxy") for name in cleared["at"]), "precondition"
+    assert not isinstance(raised, NotExecuted), raised
+
+
 def test_T226_the_httpx_variant_marks_the_run_and_consults_it(refused):
     """One register for both variants: a request delivered through httpx, then a refused
     `HTTPConnection` in the same run, is not claimed; and a request delivered through the
@@ -1676,6 +1715,351 @@ def test_T226_the_httpx_variant_marks_the_run_and_consults_it(refused):
         server.join()
     assert server.received.startswith(b"POST /refunds"), "precondition"
     assert isinstance(raised, httpx.ConnectError), raised
+
+
+# === The continuation leg: nothing claims FAILED on a resume (§2.3, §2.5, §12.2.12) ============
+#
+# A continuation exists only because the remote spoke: it comes from the remote's own answer, and
+# the remote is holding the exchange. So a resumed leg can never truthfully say the remote did
+# nothing, whatever happens to the continuation's own request.
+
+MCP_REVISION = "2026-07-28"
+MCP_POLICY = """
+schema: ctrlrun.policy/v2
+actions:
+  mcp.acme.create_refund:
+    effect: "refund:{payment_id}"
+    decision: allow
+"""
+
+
+def test_resume_a_continuation_leg_never_claims(control, store, refused):
+    """Preconditions, asserted: the first leg delivered the request and the remote answered by
+    asking for more, which is the only reason a continuation exists; and the identical refused
+    connect, in a first leg, is claimed (the control)."""
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    with peer(answering(200), one_shot=True) as server:
+
+        @protect("refund.create", control=control)
+        def refund(payment_id: str) -> str:
+            call("http.client", server.port)
+            raise Suspended("continuation-1")
+
+        with context(agent="refund-agent"), pytest.raises(Suspended):
+            refund("txn_1")
+        server.join()
+        port = server.port
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the first leg delivered"
+    assert store.get_effect("refund:txn_1").state is EffectState.EXECUTING
+
+    # The remote is gone, so the continuation's connection is refused before any byte.
+    raised = _caught(lambda: control.resume("continuation-1", lambda: call("http.client", port)))
+
+    assert not isinstance(raised, NotExecuted), raised
+    assert isinstance(raised, ConnectionRefusedError)
+    assert store.receipts()[-1].result is ReceiptResult.AMBIGUOUS
+    assert store.get_effect("refund:txn_1").state is EffectState.AMBIGUOUS
+    with context(agent="refund-agent"), pytest.raises(AmbiguousEffect):
+        refund("txn_1")
+
+
+class _McpUpstream:
+    """A real MCP upstream on a real socket. The first `tools/call` is answered `input_required`
+    with a `requestState`, so the upstream is holding the exchange; the continuation is answered
+    by whatever the case under test installed."""
+
+    def __init__(self, continuation_reply: Callable[[Any], None]) -> None:
+        self.calls: list[Any] = []
+        state = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                document = json.loads(raw)
+                state.calls.append(document)
+                if len(state.calls) == 1:
+                    _mcp_reply(
+                        self,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": document.get("id"),
+                            "result": {
+                                "resultType": "input_required",
+                                "requestState": "server-state-1",
+                                "isError": False,
+                            },
+                        },
+                    )
+                else:
+                    continuation_reply(self)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer((LOOPBACK, 0), Handler)
+        self.port: int = self.server.server_address[1]
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def die(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self._thread.join(WAIT)
+
+    def close(self) -> None:
+        with suppress(Exception):
+            self.die()
+
+
+def _mcp_reply(handler: Any, document: Any, status: int = 200, headers: Any = None) -> None:
+    payload = json.dumps(document).encode()
+    handler.send_response(status)
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
+
+
+def _mcp_call(gateway: Any, *, state: str | None = None) -> Any:
+    params: dict[str, Any] = {
+        "name": "create_refund",
+        "arguments": {"payment_id": "txn_1", "amount": 200},
+    }
+    if state is not None:
+        params["requestState"] = state
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+    headers = {
+        "MCP-Protocol-Version": MCP_REVISION,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "create_refund",
+    }
+    response = gateway.handle(json.dumps(body).encode(), headers)
+    return json.loads(response.body) if response.body else None
+
+
+@contextmanager
+def _mcp_gateway(tmp_path: Path, upstream: _McpUpstream) -> Iterator[tuple[Any, Any]]:
+    from ctrlrun.gateway.server import Gateway, GatewayConfig, httpx_forwarder
+
+    opened = SQLiteStateStore(tmp_path / "gateway.db")
+    config = GatewayConfig(
+        upstream=f"http://{LOOPBACK}:{upstream.port}/mcp",
+        alias="acme",
+        principal="refund-agent",
+        upstream_timeout=WAIT,
+    )
+    forwarder = httpx_forwarder(config)
+    try:
+        yield Gateway(config, Control(Policy.from_yaml(MCP_POLICY), opened), forwarder), opened
+    finally:
+        forwarder.close()
+        opened.close()
+
+
+def _pre_dispatch(handler: Any) -> None:
+    _mcp_reply(
+        handler,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "no such method"}},
+    )
+
+
+def _unauthorized(handler: Any) -> None:
+    _mcp_reply(
+        handler,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "token expired"}},
+        status=401,
+        headers={"WWW-Authenticate": 'Bearer realm="upstream"'},
+    )
+
+
+@pytest.mark.parametrize("case", ["transport", "pre_dispatch", "unauthorized"])
+def test_T231b_a_gateway_continuation_never_records_FAILED(tmp_path, case):
+    """The upstream answered `input_required`, so it has the request and is holding the exchange.
+    Whatever the continuation itself meets, the effect's state is unknown.
+
+    Preconditions, asserted: the upstream received the original `tools/call` and answered
+    `input_required` with a `requestState` (so this is a continuation), and each answer is one
+    that on a **first** leg is `FAILED` (the controls below).
+    """
+    pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    replies = {"pre_dispatch": _pre_dispatch, "unauthorized": _unauthorized}
+    upstream = _McpUpstream(replies.get(case, _pre_dispatch))
+    try:
+        with _mcp_gateway(tmp_path, upstream) as (gateway, opened):
+            first = _mcp_call(gateway)
+            assert first["result"]["resultType"] == "input_required", first
+            assert upstream.calls, "precondition: the upstream received the original call"
+            assert opened.get_effect("refund:txn_1").state is EffectState.EXECUTING
+            if case == "transport":
+                upstream.die()
+            answer = _mcp_call(gateway, state="server-state-1")
+            record = opened.get_effect("refund:txn_1")
+    finally:
+        upstream.close()
+
+    assert record.state is EffectState.AMBIGUOUS, (case, answer)
+    if case == "transport":
+        assert answer["error"]["code"] == -41010, answer
+    else:
+        # The upstream's own answer is relayed unchanged; only what CTRLRun records changes.
+        assert answer["error"]["code"] in (-32601, -32000), answer
+
+
+@pytest.mark.parametrize("case", ["transport", "pre_dispatch", "unauthorized"])
+def test_T231b_the_control_a_first_leg_still_records_FAILED(tmp_path, case, refused):
+    """The other half: on a first leg each of those answers is still `FAILED` and still permits a
+    retry. Without it, a gateway recording everything `AMBIGUOUS` would pass the test above."""
+    pytest.importorskip("httpx", reason="the gateway extra is not installed")
+
+    replies = {"pre_dispatch": _pre_dispatch, "unauthorized": _unauthorized}
+    upstream = _McpUpstream(replies.get(case, _pre_dispatch))
+    # One entry already there, so the upstream's very first real call takes the second branch and
+    # answers what this case is about, on a leg that is nobody's continuation.
+    upstream.calls.append("the count starts at one")
+    try:
+        with _mcp_gateway(tmp_path, upstream) as (gateway, opened):
+            if case == "transport":
+                upstream.die()
+            answer = _mcp_call(gateway)
+            record = opened.get_effect("refund:txn_1")
+    finally:
+        upstream.close()
+
+    assert record.state is EffectState.FAILED, (case, answer)
+    if case == "transport":
+        assert answer["error"]["code"] == -41011, answer
+
+
+# === The forwarder marks the run too (§2.5) =====================================================
+
+
+def test_T226_the_forwarder_marks_the_run_it_writes_in(refused):
+    """`HTTPForwarder` writes request bytes like everything else here, so it marks the register.
+
+    Preconditions, asserted: the peer received the forwarded request, and the same refused
+    connection alone in a run is claimed (the control).
+    """
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    with peer(answering(200)) as server:
+        forwarder = gateway_transport.HTTPForwarder(
+            f"http://{LOOPBACK}:{server.port}/mcp", WAIT, httpx
+        )
+
+        def forward_then_connect() -> int:
+            forwarder(b'{"jsonrpc":"2.0","id":1}', {}, fresh=True)
+            return call("http.client", refused)
+
+        try:
+            raised = _raised(forward_then_connect)
+        finally:
+            forwarder.close()
+        server.join()
+
+    assert server.received.startswith(b"POST /mcp"), "precondition: the forwarder delivered"
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+# === A send with no register marks every open run (§12.2.13) ====================================
+
+
+def test_register_a_plain_thread_that_delivers_stops_its_runs_claim(refused):
+    """`threading.Thread` does not copy the context, and it is what an executor reaches for.
+
+    The thread delivers the effect and the run's own next connection is refused: with the thread's
+    send visible to no register, the run would claim that nothing happened. Preconditions: the
+    peer received the request, and the same refused connect alone in a run is claimed (control).
+    """
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    with peer(answering(200)) as server:
+
+        def deliver_on_a_thread_then_connect() -> int:
+            worker = threading.Thread(target=call, args=("http.client", server.port))
+            worker.start()
+            worker.join(WAIT)
+            return call("http.client", refused)
+
+        raised = _raised(deliver_on_a_thread_then_connect)
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the thread delivered"
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+def test_register_a_send_outside_any_run_marks_every_open_run(refused):
+    """The cost of the rule above, asserted rather than described: a send that belongs to no run
+    suppresses the claims of every run open at that moment, including ones it has nothing to do
+    with. Fail-closed, and the docstring and §12.2.13 say so.
+
+    Precondition (the control): the same run, with no stray send, claims.
+    """
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+
+    open_run, stray_sent = threading.Event(), threading.Event()
+    outcome: dict[str, BaseException] = {}
+
+    def hold_a_run_open() -> None:
+        def body() -> None:
+            open_run.set()
+            assert stray_sent.wait(WAIT), "the stray send never happened"
+            outcome["raised"] = _caught(lambda: call("http.client", refused))
+
+        in_run(body)
+
+    holder = threading.Thread(target=hold_a_run_open)
+    holder.start()
+    try:
+        assert open_run.wait(WAIT), "the run never opened"
+        with peer(answering(200)) as server:
+            call("http.client", server.port)  # outside any run of its own
+            server.join()
+    finally:
+        stray_sent.set()
+        holder.join(WAIT * 2)
+
+    assert not isinstance(outcome["raised"], NotExecuted), outcome["raised"]
+    assert isinstance(outcome["raised"], ConnectionRefusedError)
+
+
+def test_register_the_sibling_thread_race_is_what_the_docstring_says_it_is(refused):
+    """§2.3's disclosed race, pinned so the disclosure cannot drift: a thread that **did** copy the
+    context and sends *after* the claim was decided does not retract it. The claim is about the
+    run up to the moment of the failure.
+
+    Precondition: the sibling really did deliver its request, after the claim.
+    """
+    claimed = threading.Event()
+
+    with peer(answering(200)) as server:
+
+        def claim_then_let_the_sibling_send() -> int:
+            def sibling() -> None:
+                assert claimed.wait(WAIT)
+                call("http.client", server.port)
+
+            worker = threading.Thread(target=contextvars.copy_context().run, args=(sibling,))
+            worker.start()
+            try:
+                return call("http.client", refused)
+            finally:
+                claimed.set()
+                worker.join(WAIT)
+
+        raised = _raised(claim_then_let_the_sibling_send)
+        server.join()
+
+    assert server.received.startswith(b"POST /refunds"), "precondition: the sibling delivered"
+    assert isinstance(raised, NotExecuted), raised
 
 
 # === T227: one implementation of the rule ========================================================
@@ -2274,6 +2658,34 @@ def test_T230_a_classifier_blind_to_its_own_evidence_fails_the_reused_row(tmp_pa
             raise NotExecuted("claimed without evidence") from exc
 
     monkeypatch.setattr(transport.HTTPConnection, "connect", blind)
+    result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
+
+    assert result.status is Status.FAIL
+    assert result.reason.startswith(
+        "the classifier raised NotExecuted on a connection that had already delivered"
+    ), result.reason
+
+
+def test_T230_a_classifier_with_no_byte_mark_fails_the_reused_row(tmp_path, monkeypatch):
+    """The register alone is not enough. A classifier that keeps the run's register and the
+    foreign-socket record, and drops the connection's own byte mark, is wrong exactly where a
+    connection carries a delivered request into a run that has offered nothing itself, which is
+    what the reused row drives."""
+    from ctrlrun.verify import Status
+
+    def no_byte_mark(self):  # type: ignore[no-untyped-def]
+        self._ctrlrun_connecting = True
+        try:
+            http.client.HTTPConnection.connect(self)
+        except Exception as exc:
+            run = ctrlrun.effect._EXECUTOR_RUN.get()
+            if run is not None and not run.offered and not self._ctrlrun_foreign:
+                raise NotExecuted("the run offered nothing, so this connection claims") from exc
+            raise
+        finally:
+            self._ctrlrun_connecting = False
+
+    monkeypatch.setattr(transport.HTTPConnection, "connect", no_byte_mark)
     result = _g12(tmp_path, ALLOWED_WITH_EFFECT)
 
     assert result.status is Status.FAIL
