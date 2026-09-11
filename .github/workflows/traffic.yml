@@ -1,0 +1,129 @@
+name: Traffic
+
+# The clone count behind the README's `clones` badge.
+#
+# GitHub publishes no clone badge, and for a reason worth respecting: `GET /repos/{owner}/{repo}
+# /traffic/clones` needs *push* access and keeps only the last fourteen days. So a badge that
+# read the API at render time would be impossible (no anonymous read) and a badge that read it
+# once would be a fortnight's number wearing a lifetime's label.
+#
+# This job answers both: it runs daily, merges the fourteen days the API returns into
+# `clones-history.json` on the orphan `badges` branch keyed by date, and writes
+# `clones-badge.json` from the sum. The API is authoritative for the days it covers, so a day
+# it reports overwrites the stored one rather than adding to it; a re-run therefore cannot
+# double-count, and a missed day is recovered by any run in the next fortnight. The badge links
+# to the history file, so the number is a sum of days a reader can re-add.
+#
+# `GITHUB_TOKEN` cannot do this: the `permissions:` block has no key that grants traffic access.
+# It needs a token with `administration: read` (fine-grained) or `repo` (classic), stored as
+# `TRAFFIC_TOKEN`. Absent that secret the job warns and exits 0, the same trade `notify-docs`
+# in `ci.yml` makes: a missing optional secret leaves a badge stale, and a red run every night
+# would teach us to ignore a red run.
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  clones:
+    # A fork has its own traffic and no business publishing to this repository's badges branch.
+    if: github.repository == 'CTRLRun/ctrlrun'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the traffic API
+        id: traffic
+        env:
+          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          if [ -z "${TRAFFIC_TOKEN:-}" ]; then
+            echo "::warning::TRAFFIC_TOKEN is not set; the clones badge keeps its last value"
+            echo "read=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -sS -f \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TRAFFIC_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$REPOSITORY/traffic/clones" > clones-api.json
+          echo "read=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge into the history and publish
+        if: steps.traffic.outputs.read == 'true'
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # `actions/checkout` configures a single-branch refspec, so the destination ref is
+          # named explicitly; see the `badge` job in `ci.yml` for what the short form breaks.
+          if git fetch origin badges:refs/remotes/origin/badges 2>/dev/null; then
+            git switch -c badges refs/remotes/origin/badges
+          else
+            git switch --orphan badges
+          fi
+          # `clones-api.json` is untracked, so it survives either path, which is the only file
+          # that must.
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          fresh = json.loads(Path("clones-api.json").read_text(encoding="utf-8"))
+          history_path = Path("clones-history.json")
+          history = (
+              json.loads(history_path.read_text(encoding="utf-8"))
+              if history_path.exists()
+              else {"days": {}}
+          )
+          days = history.get("days", {})
+          # The API's fourteen days are authoritative for those fourteen days: assignment, not
+          # addition, is what makes a second run of the same day idempotent.
+          for day in fresh.get("clones", []):
+              days[day["timestamp"][:10]] = {
+                  "count": day["count"],
+                  "uniques": day["uniques"],
+              }
+          days = dict(sorted(days.items()))
+          total = sum(day["count"] for day in days.values())
+          uniques = sum(day["uniques"] for day in days.values())
+          history_path.write_text(
+              json.dumps(
+                  {
+                      "since": next(iter(days), None),
+                      "total": total,
+                      "uniques": uniques,
+                      "days": days,
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          # A count, never an outcome, and labelled with what it counts: `clones` is git
+          # clones including CI and mirrors, not people.
+          Path("clones-badge.json").write_text(
+              json.dumps(
+                  {
+                      "schemaVersion": 1,
+                      "label": "clones",
+                      "message": f"{total:,}",
+                      "color": "B8730A",
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(f"clones badge: {total:,} over {len(days)} days")
+          PY
+          test -s clones-badge.json
+          total=$(python -c 'import json;print(json.load(open("clones-badge.json"))["message"])')
+          git add -f clones-badge.json clones-history.json
+          git commit -m "clones: $total" || { echo "clones unchanged"; exit 0; }
+          git push origin badges
