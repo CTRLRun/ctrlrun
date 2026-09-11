@@ -203,8 +203,8 @@ named, and none of them is left to be discovered by the item that meets it.
    controls. And `--store-url postgresql://remote-host/…` already connects off the host, through
    libpq's own sockets, which the guard never sees (`verify/scenarios.py:546-553`). The rule becomes
    *verify opens no connection except to the store `--store-url` names and to loopback listeners
-   it bound itself*, and T107's guard admits a connect or a lookup for the loopback literals
-   `127.0.0.1` and `::1` only, refusing `localhost` and everything else (§8.9, G12). Item 6
+   it bound itself*, and T107's guard admits a connect only to a `127.0.0.1` port the run itself
+   bound, refuses any other bind, and refuses `localhost` and `::1` (§8.9, G12). Item 6
    reconciles the README's *"with no network"* (`README.md:258`), which is already inaccurate
    under `--store-url`.
 6. **Verify and the test suite inject clocks into Postgres stores.** `verify/scenarios.py:553`
@@ -596,8 +596,11 @@ With `StateStore` frozen, the measurement has to reach `Control` some other way.
   `"lease_expired"`), and the derived `exceeded`.
 - `Control` reads `getattr(store, "clock_skew", None)` at the start of every `execute` and `resume`,
   and again immediately after a reservation is refused with `AmbiguousEffect`. **It uses the value
-  only if `isinstance(value, ClockSkew)`**; anything else is ignored with one log line per store, and
-  an exception raised by the read is logged and never raised, because an observation must not be able
+  only if `isinstance(value, ClockSkew)`**, where `ClockSkew` is `ctrlrun.state.ClockSkew` itself: **a
+  third-party store must construct that class**, and a look-alike type with the same fields is ignored.
+  Anything that is neither `None` nor a `ClockSkew`, and an exception raised by the read, is logged at
+  `WARNING` **once per store per kind of error** (not once per action, which would flood a log exactly
+  as the event's rate limit exists to avoid), and never raised, because an observation must not be able
   to fail an action (§3.5). Where the value is exceeded and is not the measurement it last reported, `Control` appends **`CLOCK_SKEW_DETECTED`**
   through `_append`, so the store writes it and every sink receives it with the store-assigned
   `event_id` (`v0.2 §4.1`). The at-open report carries no `action_id`, like the three `DELEGATION_*`
@@ -824,30 +827,38 @@ one.
 
 Nothing here joins item 5's receipt bump: the fields are already there.
 
-### 4.6 Two deployments, one provider account
+### 4.6 Two stores, one provider account
 
-The token is a function of `(effect_key, attempt)` and nothing else, so **two deployments that share
-one provider account and one effect-key namespace derive identical tokens for different effects.** A
-staging store and a production store both reserving `refund:txn_1`, or two tenants' stores both
-reserving `order:1001`, against one Stripe account: the second to send gets the first's cached
-response back, the provider having deduplicated it, and its executor sees a success it did not cause.
-That is a false `COMMITTED`, and it is the worst outcome in this document.
+The token is a function of `(effect_key, attempt)` and nothing else, so **two stores that share one
+provider account derive identical tokens wherever their effect-key strings coincide.** Whether that hurts
+depends on whether the two keys name the same effect.
 
-**Decided: namespace the effect key per deployment, and add no discriminator to the derivation.** `v0.1
-§5.1` already says effect keys are globally unique within a store and should be namespaced; this
-section adds that where two stores share a provider account the namespace must include the deployment,
-as in `effect="acme-prod:refund:{payment_id}"`, and the docstring, the README and `THREAT_MODEL.md` say
-so (item 6). The argument against a discriminator in the derivation:
+- **Different effects, one key string: a false `COMMITTED`.** Two tenants' stores both declare
+  `effect="order:{order_id}"`, and both have an order 1001 that is a different order. Both reserve
+  `order:1001` at attempt 1 against one Stripe account. The second to send carries the first's token, the
+  provider deduplicates it and returns the first tenant's cached success, and the second tenant's executor
+  sees a success for a charge that never happened. It records `COMMITTED`, and that is the worst outcome in
+  this document.
+- **The same effect, one key string: harmless.** A staging and a production store both reserving
+  `refund:txn_1` for the same real transaction are duplicates of one refund, and the provider's
+  deduplication stops the second, which is what it is for; the `COMMITTED` is true.
 
-- **Nothing available is both stable and sufficient.** The environment is stable at execution time, but
-  the case that bites is two stores in the *same* environment sharing an account, which it does not
-  separate. A store identity would separate them, and no store has one: `v0.6 §5.1` refuses process and
-  host identity on records, and inventing a store id would be a new column and a new thing to keep
-  stable across a migration or a restore.
-- **The derivation is pinned to two inputs** so that anyone holding a receipt can re-derive it (§4.5), and
-  a third input that is usually the same would make "usually" the operative word in a safety argument.
-- **The operator already owns the namespace.** The effect key is the operator's template, and it is the
-  one identifier that is supposed to be unique across whatever shares the effect.
+**Decided: an effect key must name its effect uniquely across every store that shares a provider account,
+and no discriminator is added to the derivation.** `v0.1 §5.1` already asks for namespaced effect keys; this
+section adds that the namespace must include the deployment wherever a placeholder is not unique at the
+provider, as in `effect="tenant-{tenant_id}:order:{order_id}"` or `effect="acme-prod:order:{order_id}"`. The
+docstring, the README and `THREAT_MODEL.md` say so (item 6). The argument against a discriminator:
+
+- **Nothing available is both stable and sufficient.** The environment is stable at execution time, but the
+  case that bites is two stores in the *same* environment sharing an account, which it does not separate, and
+  no store carries an identity to add.
+- **The derivation is pinned to two inputs so that anyone holding a receipt can re-derive it** (§4.5); a third
+  input would have to be carried to every place that re-derives, and one that is usually the same would make
+  "usually" the operative word in a safety argument.
+- **The operator already owns the namespace.** The effect key is the operator's template, and it is the one
+  identifier that is supposed to be unique across whatever shares the effect.
+
+**The kernel cannot check this**, since it sees one store. Verify prints a note beneath G14 saying so (§8.9).
 
 ### 4.7 What it is for
 
@@ -1015,8 +1026,12 @@ and the action runs (§5.7).
 
 **The fast path.** Before the approval gate, between policy evaluation and `_secure`
 (`control.py:708-712`), `Control` reads the record once: where it is `FAILED` and its `attempt` is
-already at or above the ceiling, the call is refused the same way, with nothing reserved, nothing
-released and nothing consumed, and **no approval request is created**. It saves a write, it saves a
+already at or above the ceiling, the call is refused the same way. **The fast path refuses only a
+`FAILED` record**, normatively: a record in any other state, `AMBIGUOUS` above all, passes it untouched
+to the reservation, which refuses or reconciles it exactly as at 0.6.1, and T245's route and G15 both
+depend on that. It refuses with `EFFECT_RESERVATION_REFUSED` (`data.reason = "attempt_ceiling"`), a
+`blocked` receipt and `ActionDenied(reason="attempt_ceiling")`, with nothing reserved, nothing released and
+nothing consumed, and **no approval request is created**. It saves a write, it saves a
 presented approval from being spent, and it saves a human from being asked about an attempt that could
 never run, which `v0.3 §4.3`'s first reason says a denial must never do.
 
@@ -1081,11 +1096,16 @@ renewal then matches no row and is refused exactly as a lost renewal race is ref
 **The lost `COMMIT`.** Where the reservation's `COMMIT` is lost, `_authorize_and_reserve` re-reads and,
 where the write did not land, re-issues the operation through `_authorize_and_reserve(..., retrying=True)`
 from `_resolve_lost_renewal` and `_resolve_lost_insert` (`postgres.py:602-622`, `660-663`, `696-699`).
-**The re-issue's result is discarded** and the original plan's reservation is returned. If another
-process renewed and failed between the lost commit and the re-read, the re-issue writes *k+2* and
-`Control` is handed *k+1*: two dispatches share a token, the ceiling undercounts, and `Control.resume`,
-which reads the stored number (`control.py:992`), later derives a different token inside the same
-attempt, which breaks T233. Item 3a returns the re-issue's reservation on both paths, so the number
+**The re-issue's result is discarded** and the original plan's reservation is returned. The two paths
+open at different moments. On a lost **renewal**, another process renews and fails between the lost
+commit and the re-read; the re-read finds `FAILED` and re-issues (`A2_REISSUE`), the re-issue writes *k+2*,
+and `Control` is handed *k+1*. On a lost **insert**, the re-issue runs only when the re-read finds no
+record at all (`A1_REINSERT`, `postgres.py:690-699`); a record already there takes `A1_REFUSE` and raises
+`DuplicateEffect` (`705-713`) before any re-issue. So the insert's window is later, between that re-read
+and the re-issue's own planning read: another process inserts attempt 1 and fails there, the re-issue
+renews to 2, and `Control` is handed 1. Either way two dispatches share a token, the ceiling
+undercounts, and `Control.resume`, which reads the stored number (`control.py:992`), later derives a
+different token inside the same attempt, which breaks T233. Item 3a returns the re-issue's reservation on both paths, so the number
 `Control` holds is the one on the record.
 
 **On SQLite and the in-memory store** the renewal reads and writes inside one `BEGIN IMMEDIATE`
@@ -1100,8 +1120,9 @@ same type. Neither adds a method, changes a signature or changes a decision `pla
 **The tests open the windows on purpose.** Two processes renewing concurrently, which an earlier draft of
 T232 leaned on, do not: the window needs one renewal stalled between its `SELECT` and its `UPDATE` long enough for another process to
 renew, run and fail. T246 holds the stale `UPDATE` with the proxy the tests own until that has
-happened; T246b swallows a reservation's `COMMIT` with the same proxy, interleaves another process's
-renew-and-fail before the re-read, and asserts the attempt returned equals the attempt stored. The store
+happened; T246b swallows a reservation's `COMMIT` with the same proxy and opens each path's own window,
+the renewal's before the re-read and the insert's between the re-read and the re-issue's planning read, and
+asserts the attempt returned equals the attempt stored. The store
 conformance suite states both properties and gains a case for them if its barrier can reach between a
 store's read and its write; `v0.6 §2.4` says the in-process case cannot open windows inside a store,
 and if that holds here §12 says so and T246 and T246b are the only tests of the defence.
@@ -1409,32 +1430,57 @@ own code** (`v0.6 §3.5`), in both directions: 0.7 opens and migrates it keeping
 migrated database at open with `SchemaMismatch` naming `0005` and both versions (T264). The runner is why a
 column is possible at all, and that makes the change safe, not cheap.
 
-**The rehash rule, which amends `v0.6 §6.4`'s last bullet.** `chain_hash()` recomputes over `to_dict()`,
-and `to_dict()` stamps the current schema and the current key set (`receipt.py:314`, `318-345`). A `v4`
-binary rendering a `v3` receipt as `v4` would recompute a different document and report every receipt a
-released 0.6 wrote as `content_altered`. So, from item 5:
+**The rehash rule, which amends `v0.6 §6.4`'s last bullet: hash what was stored.** `chain_hash()`
+recomputes over `to_dict()`, and `to_dict()` stamps the current schema and the current key set
+(`receipt.py:314`, `318-345`). A `v4` binary rendering a `v3` receipt as `v4` would recompute a different
+document and report every receipt a released 0.6 wrote as `content_altered`. So, from item 5:
 
-- `Receipt` carries **`schema`**, the schema string of the document it was read from, and a receipt this
-  binary writes is `ctrlrun.receipt/v4`.
-- **Every schema renders under its own label and its own key set.** A `v4` receipt renders `v3`'s keys
-  plus the two precondition fields under `"schema": "ctrlrun.receipt/v4"`; a `v3` receipt renders the
-  document it was written as, byte for byte; a `v2` or `v1` receipt renders under `v2` or `v1` with that
-  version's keys. 0.6.1 rendered `v1` and `v2` receipts under the `v3` label, which made three labels
-  hash identically; that ends, and `ctrlrun receipts --json` shows a pre-v0.6 receipt's own label, which
-  item 6 lists as a visible change.
-- **`from_dict` parses only the declared schema's keys.** A document carrying any key outside its
-  declared schema's set has been altered by definition, since no writer of that schema wrote it: the
-  chain reader reports it **`content_altered`** at its `seq`, and no reader surfaces the extra key's
-  value. Without this, a row-writer could add `precondition_at_recheck` to a receipt 0.6.1 wrote; the
-  `v3` rendering would leave it out of the hash, the chain would verify, and every reader would show a
-  fabricated field.
+- **A receipt read from a store keeps the document it was read from**, in a private field filled on read
+  exactly as `hash` already is (`state.py:1211`, and Postgres the same), and **`chain_hash()` hashes that
+  document when it is present**, through `canonical_bytes` as always. A receipt this binary is writing has
+  no stored document, and `chain_hash()` hashes `to_dict()`, as today. The stored JSON is `to_json()` of
+  the dictionary that was hashed at write time, so the recomputation over the stored document equals the
+  stored hash for every receipt nobody touched, whatever schema wrote it. (The in-memory store keeps the
+  objects it was handed rather than documents, so it has nothing to re-read and nothing a row-writer
+  could reach.)
+- **Every tamper the schema bump could hide is then a hash mismatch by construction.** A key added to a
+  stored document, a relabelled `schema`, a removed `schema`, a `schema` this binary has never heard of: each
+  changes the stored document, so each is `content_altered` at its `seq`, with no rule about key sets for
+  the reader to get wrong. Without this, a row-writer could add `precondition_at_recheck` to a receipt
+  0.6.1 wrote; a reader rendering it under `v3`'s keys would leave the key out of the hash, the chain would
+  verify, and a reader that parsed it would show a fabricated field.
+- **`from_dict` never raises inside a store read, over the schema or over a key.** `receipts()` builds
+  every row with `Receipt.from_json` (`state.py:1211`), so a `from_dict` that raised on one tampered row
+  would raise out of `receipts()` and blind every reader at once: the chain walk, `ctrlrun receipts`,
+  `inspect`, `stats` and G11. An absent or unknown `schema`, or an extra key, is left to the hash to
+  report. `from_dict` reads only the fields the document's declared schema has (the precondition fields
+  only from a `v4` document), so no reader ever surfaces an undeclared key's value. A row that cannot be
+  parsed at all, not a JSON object or missing a field every schema has, behaves as it does at 0.6.1; if
+  item 5 changes that, §12 says how.
+- **Each schema's key set is exactly its released writers'**, counted at the top level of the document:
+  `v1`, **19** keys, written by 0.1.0 and 0.2.0; `v2`, **21**, by 0.3.0rc1, 0.4.0 and 0.5.0 (`v1`'s plus
+  `execution` and `would_have`); `v3`, **26**, by 0.6.0 and 0.6.1 (`v2`'s plus `seq`, `prev_hash`,
+  `policy_hash`, `policy_version`, `controls`); `v4`, **28**, `v3`'s plus the two precondition fields.
+  "Extra" means a top-level key outside that set, never an omitted one. A document that *lacks* a key its
+  schema has is the unreleased item-6-era `v3` database `v0.6 §6.4` already describes, and it already
+  breaks as that section records.
+- **For display, every schema renders under its own label and key set.** `to_dict()` of a `v4` receipt
+  renders `v4`; of a `v3` receipt, the `v3` document; of a `v2` or `v1` receipt, that version's label and
+  keys. 0.6.1 rendered `v1` and `v2` receipts under the `v3` label; that ends, and `ctrlrun receipts
+  --json` shows a pre-v0.6 receipt's own label, which item 6 lists as a visible change. The hash no longer
+  depends on this rendering at all.
 - **`unchained` is decided by `seq` alone**, as the chain reader decides it today (`receipt.py:570-571`),
-  never by the label. `seq` did not exist before `v3`, so a document carrying a `seq` and labelled `v1`
-  or `v2` is **`content_altered`**: somebody relabelled a chained receipt.
-- `Receipt.from_dict` refuses a document whose `schema` is absent or is not one of the four, with
-  `InvalidArgument` naming it, and the chain reader reports such a row `content_altered` at its `seq`
-  rather than stopping. A document that does not say which rule hashes it cannot be rehashed by any rule,
-  and rendering it under this binary's would be a guess.
+  never by the label. That misclassifies nothing 0.6.1 wrote: every store assigns `seq` before it
+  serializes the receipt (`state.py:1153-1163`, Postgres's `put_receipt`, the in-memory store at
+  `state.py:673-674`), and migration `0002` added the chain columns without rewriting any stored JSON
+  (`migrations.py:181-183`), so a pre-chain document has no `seq` and a chained one has its own. A chained
+  receipt relabelled `v1` or `v2` is caught by the first bullet, as a changed document.
+
+**Rejected: refusing, or parsing only the declared keys and comparing key sets.** An earlier draft did
+both. Refusing blinds every reader, as above. Parsing only the declared keys and rendering under them
+means an added key is neither parsed nor rendered, so the recomputed hash matches and nothing reports
+anything, unless `Receipt` carried a marker saying "this document had extra keys", which would be a public
+name added to a frozen record for a check the stored document makes for free.
 
 **No 0.6 process may be running when any caller uses `preconditions=`.** A store checks migrations
 only at open (`postgres.py:259`), so a 0.6.1 process already running when `0005` is applied keeps
@@ -1525,8 +1571,11 @@ exactly as at 0.6.1: the same grants, the same `DuplicateEffect(state="in_progre
 `plan_reservation` with the application clock, not by the store under test.
 
 #### T214: The store conformance suite's skew case
-Graded against Postgres: an injected skew is reported and an aligned clock is not. On SQLite and the
-in-memory store it is `not_applicable` with the reason *this backend exposes no clock measurement; SQLite
+Graded against Postgres: an injected skew is reported and an aligned clock is not. **A backend whose
+`clock_skew` is present but is neither `None` nor a `ctrlrun.state.ClockSkew`, or whose read raises, fails the
+case** by name: `Control` would ignore it silently in production, so the suite is where its author finds out.
+`not_applicable` is reserved for a backend on which the attribute is **absent**. On SQLite and the in-memory
+store it is `not_applicable` with the reason *this backend exposes no clock measurement; SQLite
 and the in-memory store read only the application's clock and have none to expose*, a sentence true of
 every backend that reaches it, a third-party store with a clock it does not expose included. `v0.6 §8`
 T141's "no other N/A is accepted" is amended to accept this one, in the same commit, and §9.6 records the
@@ -1543,8 +1592,9 @@ of the first re-measures nothing.
 The measurement query is made to raise, at open and on the `E3` path. The store opens; the reservation's
 refusal is the same `AmbiguousEffect` with the same record written; nothing is raised that 0.6.1 did not
 raise; a log record names the failure. And from `Control`'s side: a store whose `clock_skew` is not a
-`ClockSkew` (a string, a `timedelta`), and one whose `clock_skew` property raises, each leave the action's
-outcome, receipt and events exactly as without it, with one log line.
+`ClockSkew` (a string, a `timedelta`, a look-alike dataclass with the same fields), and one whose `clock_skew`
+property raises, each leave the action's outcome, receipt and events exactly as without it, with one `WARNING`
+per store per kind of error across ten actions, not ten.
 
 #### T217: The event reaches every sink, through `Control`, with the store's id
 A recording sink receives `CLOCK_SKEW_DETECTED` with the `event_id` the store assigned, and the store's
@@ -1623,11 +1673,18 @@ headers and a proxy tunnel; the bytes handed to `HTTPConnection.send` over the s
 subclass; the two are equal. §2.3's mark lives in `send` on the strength of this, and a Python that wrote a
 byte by another route would fail here before it failed anywhere that mattered.
 
+**And over TLS**, because the claim that the count is taken above TLS rests on `HTTPSConnection` inheriting
+`send` rather than overriding it: against a loopback TLS server the test owns, the **decrypted** application
+bytes the server received equal the bytes handed to `HTTPSConnection.send`, and the test asserts
+`HTTPSConnection.send is HTTPConnection.send` on each Python, so an override arriving in a later release is a
+red test rather than a count taken below the record layer.
+
 #### T230: G12 in verify, under the amended network guard
-§8.9's G12 entry. T107's guard is amended to let `connect`, `connect_ex`, `create_connection` and
-`getaddrinfo` through for the loopback literals `127.0.0.1` and `::1` and nothing else, `localhost` included.
-The same subprocess asserts the guard is live (a connect to `192.0.2.1`, TEST-NET-1, and a lookup of
-`localhost` are both refused by it) and that G12 was graded, not `N/A` and not skipped.
+§8.9's G12 entry, under the guard G12's "What it amends" describes. The same subprocess asserts the guard is live
+and exactly as wide as the rule: a connect to `192.0.2.1` (TEST-NET-1) is refused; a connect to `127.0.0.1` on a
+port the run did not bind (a listener the test opened before installing the guard) is refused; a `bind` to
+`0.0.0.0` is refused; a lookup of `localhost`, and a `connect(("localhost", port))` to a bound port, are refused;
+`::1` is refused. And G12 was graded, not `N/A` and not skipped.
 
 #### T231: The gateway's `NotExecuted` carries its cause
 An intercepted `tools/call` against an upstream port that refuses: the effect is `FAILED`, the client gets
@@ -1647,10 +1704,15 @@ test fail with two reservations carrying *k+1*. On SQLite the same condition is 
 the table says so rather than claiming a row.
 
 #### T246b: A lost `COMMIT` returns the attempt it wrote
-The proxy swallows a reservation's `COMMIT` (a renewal, and separately an insert); before the store re-reads,
-another process renews the key and fails. The re-issue writes the next number, and the attempt the reservation
-method returns equals the attempt on the stored record. Mutating either resolve path back to returning the
-original plan's reservation makes this test fail with the two numbers differing.
+Two variants, each opening its own path's window, because the two paths re-issue at different moments.
+**Renewal:** the proxy swallows a renewal's `COMMIT`; before the store re-reads, another process renews the key
+and fails; the re-read finds `FAILED` and re-issues. **Insert:** the proxy swallows an insert's `COMMIT`; the
+re-read finds no record and takes `A1_REINSERT`; the proxy then holds the re-issue's own planning `SELECT` while
+another process inserts attempt 1 and fails, and releases it, so the re-issue renews to 2. (Interleaving before
+the re-read instead would send the insert down `A1_REFUSE` and never reach the re-issue, which would be a test
+of a window nobody opened.) In both, the attempt the reservation method returns equals the attempt on the stored
+record, and mutating that path's resolve function back to returning the original plan's reservation makes its
+variant fail with the two numbers differing.
 
 ### 8.3 Item 3: The idempotency token (§4)
 
@@ -1719,20 +1781,29 @@ only in a ceiling have different `policy_hash` values.
 record is `AMBIGUOUS` at N; attempt N+1 carries a `reconcile` hook answering `not_executed`. The fast path
 lets it through (the record it reads is `AMBIGUOUS`), the hook moves the record to `FAILED` at N, the second
 take renews it to N+1, and the check refuses: `ActionDenied(reason="attempt_ceiling")`, `EFFECT_RESERVED`
-before `EFFECT_RESERVATION_REFUSED`, the record `FAILED` at N+1, the executor called N times. Deleting the
-check makes this test fail with N+1 executions.
+before an `EFFECT_RESERVATION_REFUSED` whose `data.reason == "attempt_ceiling"` (the reason, not only the event's
+position, since a duplicate or ambiguous refusal shares the type), the record `FAILED` at N+1, the executor called
+N times. Deleting the check makes this test fail with N+1 executions.
 
 #### T245b: The fast path, alone, by the evidence it leaves
-A record already `FAILED` at the ceiling: the next call is refused with the record's attempt unchanged, no
-`EFFECT_RESERVED` for the call, no approval request created, and a presented approval still `granted`. Those
-four facts can only come from the fast path, since the check after the reservation always leaves a reservation
-behind; deleting the fast path turns each of them over while the refusal itself survives.
+A record already `FAILED` at the ceiling, and three calls, because the four facts need three:
+1. **an `APPROVE` action with nothing presented**: refused `attempt_ceiling`, **no approval request created**;
+2. **the same action with a granted approval presented**: refused, the approval **still `granted`**;
+3. **an `ALLOW` action on a key at its ceiling**: refused, **no `EFFECT_RESERVED`** and the record's attempt
+   **unchanged**.
+
+Each refusal's `EFFECT_RESERVATION_REFUSED` has `data.reason == "attempt_ceiling"`. Those facts can only come from
+the fast path, since the check after the reservation always leaves a reservation behind. Deleting the fast path
+turns each of them over, and the three do not fail alike, which the test asserts rather than hides: calls 2 and 3
+are then refused by the check, leaving a consumed approval and a reservation; call 1 is not refused at all, and
+raises `ApprovalRequired` with a request created, since the check runs only after an approval is presented.
 
 #### T247: Both backends, and the v0.6 multi-process standard
 T240 to T245b on SQLite and on Postgres. On Postgres, under `v0.6`'s multi-process standard: more processes
 than the ceiling allows race renewals of one key across the boundary, each executor counting its calls in a file
-the parent reads, and the total never exceeds N. That depends on item 3a, and it is the test that would see item
-3a missing from item 4's side.
+the parent reads, and the total never exceeds N. It depends on item 3a but cannot see item 3a missing: racing
+processes do not reliably stall between a `SELECT` and an `UPDATE`, which is why item 3a's T246 opens that window
+deterministically and this test does not claim to.
 
 #### T248: What happens to an approval on a refused attempt
 Through the fast path, the presented approval is `granted` afterwards. Through the check after the
@@ -1821,10 +1892,12 @@ before any other table is read. SQLite and Postgres.
 #### T265: `v3` and `v4` in one chain
 A chain written by 0.6.1's code and continued by 0.7 verifies end to end with `verify_chain`, `ctrlrun
 receipts --verify-chain` and G11's reader; each `v3` receipt rehashes to its stored hash; each new receipt is
-`v4`. A document with no `schema`, and one saying `ctrlrun.receipt/v9`, is refused by `from_dict` naming it.
-Mutating `to_dict` to render every receipt as `v4` makes this test fail with `content_altered` at the first
-`v3` receipt. Three tampers, each `content_altered` at its `seq` and none surfacing a value: a `v3` row given a
-`precondition_at_recheck` key; a chained `v3` row relabelled `v1`; a chained `v3` row relabelled `v2`.
+`v4`. Mutating `chain_hash()` to hash `to_dict()` for a stored receipt makes this test fail with
+`content_altered` at the first `v3` receipt. Five tampers on stored rows, each `content_altered` at its `seq`,
+none surfacing a value, and **none raising out of `receipts()`**: a `v3` row given a `precondition_at_recheck`
+key; a chained `v3` row relabelled `v1`; one relabelled `v2`; one with its `schema` key removed; one saying
+`ctrlrun.receipt/v9`. With any of them present, `ctrlrun receipts` still lists every other row and
+`ctrlrun stats` still counts them.
 
 #### T266: The store conformance suite covers the column
 A case asserting a store persists and returns `precondition_fingerprint`; a broken-store fixture that drops it
@@ -1852,7 +1925,10 @@ fails, and whoever adds it says in the test which kind it is. A positive control
 0.6.1 reported for G1 to G11, plus G12 to G16 each graded or `N/A` with its sentence, under
 `ctrlrun.guarantees/v3`. All sixteen ids are present in the registry before the release PR opens. And against
 a document whose only effect-bearing action declares `max_attempts: 1`: G5 and G14 are `N/A` with §8.9's
-ceiling sentence, never `fail`; G12 passes on its two separate keys; G15 is graded.
+ceiling sentence, never `fail`; G12 passes on its two separate keys; G15 is graded. And against a document with
+action A (an `effect:`, `max_attempts: 1`, allowed) and action B (an `effect:`, no ceiling, deny-only): G5 and
+G14 are `N/A` with the ceiling sentence, because the ceiling is the only reason nothing is selectable; with B
+allowed instead, G5 and G14 select B and are graded.
 
 #### T271: Core still installs nothing new, and the demo still runs offline
 `pip install ctrlrun` installs `pyyaml` and `click` and nothing else; `ctrlrun demo` runs every scenario in under
@@ -1894,7 +1970,8 @@ whose actions are allowed and merely ungranted, which is a false `N/A`. **Never 
 environment.** A sandbox that will not let verify bind a loopback socket is an internal error, exit 3
 (`v0.4 §3.8`), because it is a fact about the machine and not about the document.
 
-**Observable.** Verify binds a listener on the literal `127.0.0.1`, at an ephemeral port. The executor drives
+**Observable.** Verify binds a listener on the literal `127.0.0.1`, at an ephemeral port, through the socket
+class the guard patches, so the guard records it. The executor drives
 `ctrlrun.transport.HTTPConnection("127.0.0.1", port)` directly, **not** `urlopen`: `urlopen` honours
 `HTTP_PROXY`, and on a host that sets one the loopback request would go to the proxy, and G12 would fail for a
 reason that has nothing to do with the kernel. The listener reads at least one byte, **records that it did**
@@ -1911,10 +1988,22 @@ first attempt and an operator's `max_attempts: 1` cannot turn the control into a
 **What it amends.** `v0.4 §3.7`'s "no scenario opens a socket" becomes **verify opens no connection except to
 the store `--store-url` names and to loopback listeners it bound itself.** The old sentence was already untrue
 under `--store-url postgresql://remote-host/…`, whose libpq sockets T107's guard never sees
-(`verify/scenarios.py:546-553`). T107's guard (`tests/test_verify.py:535-557`) is amended to let `connect`,
-`connect_ex`, `create_connection` and `getaddrinfo` through for the loopback literals `127.0.0.1` and `::1`
-only, and to go on refusing `localhost` and everything else (T230). Item 6 reconciles `README.md:258`'s *"with
-no network"*.
+(`verify/scenarios.py:546-553`). T107's guard (`tests/test_verify.py:535-557`) is amended so that it admits
+exactly what the rule says and no more:
+
+- **It records every `(host, port)` bound through its patched socket class**, and admits `connect` and
+  `connect_ex` only to a recorded pair. Admitting any port on loopback would admit a local forwarding proxy, an
+  SSH tunnel or a container's published port, each of which leaves the host.
+- **It refuses any `bind` to an address other than `127.0.0.1`**, so a listener on `0.0.0.0` fails the run
+  instead of passing it.
+- **It matches the literal string `"127.0.0.1"`**, not `ipaddress.ip_address(...).is_loopback`, whose handling
+  of IPv4-mapped addresses varies across the supported Pythons, and it checks the host string inside the patched
+  `connect` itself, because a C-level `connect(("localhost", port))` resolves without calling the patched
+  `getaddrinfo`. `create_connection` and `getaddrinfo` are admitted for that literal only; `localhost` is
+  refused everywhere.
+- **`::1` is not admitted.** Verify never uses it, and admitting what nothing uses is how a guard grows holes.
+
+T230 asserts each of those. Item 6 reconciles `README.md:258`'s *"with no network"*.
 
 ---
 
@@ -1958,8 +2047,12 @@ synthesized arguments resolve, **and whose ceiling allows a renewal** (no `max_a
 template`, and *in a `ctrlrun.policy/v1` document the template lives in the `@protect` decorator, which verify
 does not read*. True, because the token is defined only for an attempt that holds a reservation, and without a
 key there is no reservation and no attempt to name. And the new case: `every action with an effect: template
-declares max_attempts: 1, so no renewal can happen`, true because a ceiling of one forbids the renewal G14 and
-G5 exist to observe.
+that verify can drive to allow or approve declares max_attempts: 1, so no renewal can happen`. **Precedence:**
+this sentence is printed only where the ceiling is the *only* reason nothing is selectable, which verify
+establishes by selecting again with the ceiling filter removed; where that selection also finds nothing, the
+reason is `unselected()`'s, as before. An earlier draft's wording, without "that verify can drive to allow or
+approve", was false about a document with one allowed action at `max_attempts: 1` and a second, uncapped
+action that is deny-only or ungranted.
 
 **Observable.** Attempt 1's executor reads the token and raises `NotExecuted`; attempt 2's reads it and commits.
 The two differ, and each equals the derivation from its own receipt's `effect_key` and `attempt`. That last
@@ -1970,6 +2063,10 @@ executor raises `InvalidArgument`**. What the control catches is a context varia
 set the token and never reset it would pass the observable, because each executor would still read its own
 attempt's value, and would fail here, where a caller outside any attempt was handed the last attempt's token.
 The two-reads half catches a token recomputed from something that moves within one attempt.
+
+**Note, printed once beneath the table:** *a token is unique only as far as your effect keys are: two stores
+sharing a provider account must not produce the same effect-key string for different effects, and nothing here
+can check that (§4.6).*
 
 **Why G14 depends on the document at all.** It does not depend on what the operator wrote the way G15 and G16
 do; it depends on there being an effect key a renewal can reach, which is the same thing G5 depends on, and a
@@ -1999,13 +2096,15 @@ every loop verify runs is bounded (`v0.4 §3.6`).
 cannot: attempts 1 to N−1 raise `NotExecuted`; attempt N raises `TimeoutError`, leaving the record `AMBIGUOUS`
 at N; attempt N+1 carries a `reconcile` hook answering `not_executed`, passes the fast path, is reconciled and
 renewed to N+1, and raises `ActionDenied` with `reason == "attempt_ceiling"`. The executor was called exactly N
-times; `EFFECT_RESERVED` precedes `EFFECT_RESERVATION_REFUSED` for attempt N+1; the record is `FAILED` at N+1; the
-refused attempt's receipt is `blocked`. A kernel with the check deleted executes attempt N+1 and fails here. An
+times; `EFFECT_RESERVED` precedes an `EFFECT_RESERVATION_REFUSED` whose `data.reason == "attempt_ceiling"` for
+attempt N+1; the record is `FAILED` at N+1; the refused attempt's receipt is `blocked`. A kernel with the check deleted executes attempt N+1 and fails here. An
 earlier draft drove N+1 sequential `NotExecuted` attempts, which the fast path alone refuses, so that G15 passed
 with the guarantee's own mechanism deleted.
 
 **Control.** Every attempt up to N executed: the call count reached N, so for N of 2 or more the renewals were
-admitted. A kernel that refused every renewal would fail this.
+admitted. A kernel that refused every renewal would fail this, **except at N = 1**, where there is no renewal to
+admit and this control cannot tell such a kernel from a correct one; the G5 amendment below says what that
+leaves ungraded.
 
 ---
 
@@ -2049,8 +2148,15 @@ reconciles the roadmap sentence.
 control renews the selected action's key, `NotExecuted` then a retry that must commit
 (`verify/scenarios.py:1344-1377`), and under `max_attempts: 1` that retry is refused, which would report a
 correct kernel as `fail`. **Item 4 makes the change for both G5 and G14**, since item 3 lands G14 before
-`max_attempts` exists: each selects only an action whose ceiling allows a renewal, and where every candidate
-declares `max_attempts: 1` each is `N/A` with the sentence above. T270 runs a document shaped that way.
+`max_attempts` exists: each selects only an action whose ceiling allows a renewal, and where the ceiling is the
+only reason nothing is selectable each is `N/A` with the sentence and the precedence above. T270 runs two
+documents shaped that way.
+
+**What that leaves ungraded, stated.** For a document whose only drivable effect-bearing action declares
+`max_attempts: 1`, nothing in verify grades "`FAILED` permits a retry" (`v0.1 §5.4`): G5 is `N/A`, and G15's
+control at N = 1 cannot tell a kernel that refuses every renewal from a correct one, because the correct one
+refuses it too. That is true of the document rather than a gap in verify: the operator has forbidden the retry
+the guarantee is about.
 
 **The catalogue moves once.** Item 1 bumps `ctrlrun.guarantees/v2` to `v3` and lands G13; items 2 to 5 land G12,
 G14, G15 and G16. Between items, unreleased `main` carries a partial `v3`, and item 6 asserts all five are present
@@ -2189,7 +2295,7 @@ Each in the item that makes it true, and each recorded here so it can be found.
    gateway's `NotExecuted` is chained (item 2).
 4. **`v0.3 §4.3.1`** gains §7's column and §5.5's order (items 4 and 5).
 5. **`v0.4 §3.7`** becomes *verify opens no connection except to the store `--store-url` names and to loopback
-   listeners it bound itself*, and T107's guard admits the loopback literals only (item 2). **G5's selection**
+   listeners it bound itself*, and T107's guard admits only the `127.0.0.1` ports the run bound (item 2). **G5's selection**
    (`v0.4 §2.2`) skips an action whose ceiling forbids a renewal (item 4, §8.9).
 6. **`v0.6 §6.4`'s last bullet**: an additive receipt field no longer breaks the rehash of an older receipt,
    because a receipt renders under its own schema; the unreleased builds that bullet describes are unchanged
@@ -2227,11 +2333,10 @@ own, and none of them is configurable.
 | A Postgres renewal planned against a stale attempt number | Matches no row; refused (§5.6, item 3a) |
 | A lost `COMMIT` on a reservation, resolved by re-issuing it | The attempt the re-issue wrote is the one returned, never the one first planned (§5.6, item 3a) |
 | A store whose `clock_skew` is not a `ClockSkew`, or whose read raises | Ignored with a log line; the action is unaffected (§3.6) |
-| A receipt document with a key outside its declared schema, or a `seq` under a `v1` or `v2` label | `content_altered` at its `seq`; no reader surfaces the extra key (§6.11) |
+| A stored receipt document with an added key, a changed or removed `schema`, or an unknown one | A hash mismatch: `content_altered` at its `seq`. `receipts()` does not raise, and no reader surfaces an undeclared key (§6.11) |
 | A presented approval whose fingerprint differs from the recheck | `ApprovalMismatch(reason="precondition_changed")`; nothing reserved; approval `granted` (§6.3) |
 | A fingerprint on one side only | `ApprovalMismatch(reason="precondition_missing")`; never a skip (§6.4) |
 | The provider raises, returns a non-mapping, or returns what `canonical_bytes` refuses | Presenting pass: `ApprovalMismatch(reason="precondition_unavailable")`, nothing reserved. Request pass: `ActionDenied(reason="precondition_unavailable")`, no request created (§6.5) |
-| A receipt document with no `schema`, or one this binary does not know | `InvalidArgument` from `Receipt.from_dict`, naming it (§6.11) |
 | An 0.6 binary opening a database migrated by 0.7 | `SchemaMismatch` at open, naming `0005` and both versions (§6.11) |
 
 ---
