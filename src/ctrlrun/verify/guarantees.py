@@ -64,7 +64,9 @@ GUARANTEES: Final = (
     ),
     Guarantee(
         "G15",
-        "a renewal past the operator's ceiling is refused",
+        # Exactly `report._TITLE_WIDTH`. A longer title is the one thing that breaks the CLI
+        # table's alignment, and "a renewal past the operator's ceiling is refused" was 48.
+        "renewal past the ceiling refused",
         (
             "v0.1 §5.4",
             "v0.7 §8 T240",
@@ -160,8 +162,16 @@ NO_CEILING_DECLARED: Final = (
     "no action verify can drive to allow or approve declares both `effect:` and `max_attempts`"
 )
 CEILING_BOUND: Final = 100
+
+#: **Scoped to what verify can select**, on `NO_CEILING_DECLARED`'s shape and for its reason. An
+#: earlier wording, "every declared max_attempts is above verify's bound", was false of a document
+#: whose deny-only action declares `max_attempts: 3`: the fallback selection re-applies the effect
+#: and ceiling filters and drops only the bound, so the sentence can only ever describe the actions
+#: verify can drive. That is the identical defect §8.9 caught in the sibling sentence, and an N/A
+#: reason that is not true of the operator's document is a false green (§8.9's opening MUST).
 CEILING_ABOVE_BOUND: Final = (
-    f"every declared max_attempts is above verify's bound of {CEILING_BOUND} attempts"
+    "every action verify can drive to allow or approve that declares both `effect:` and "
+    f"`max_attempts` declares one above verify's bound of {CEILING_BOUND} attempts"
 )
 
 #: SPEC-v0.7 §8.9 — the reason G5 (and G14, when item 3 lands it) reports where the operator's

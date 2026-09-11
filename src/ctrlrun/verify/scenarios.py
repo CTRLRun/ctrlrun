@@ -2357,6 +2357,11 @@ class Engine:
             needs_effect=True, needs_ceiling=True, ceiling_bound=reg.CEILING_BOUND
         )
         if selection is None:
+            # The fallback drops the bound and **keeps** every other filter, so what it finds is
+            # an action verify could otherwise drive. `CEILING_ABOVE_BOUND` is worded to say
+            # exactly that and no more: a deny-only action's low ceiling is not something this
+            # selection ever looked at, and a sentence claiming "every declared" would be false
+            # of the operator's document (§8.9's opening MUST).
             if self.select(needs_effect=True, needs_ceiling=True) is not None:
                 return self.na("G15", reg.CEILING_ABOVE_BOUND)
             return self.na("G15", self.unselected(reg.NO_CEILING_DECLARED))

@@ -31,8 +31,11 @@ any change to one appears here.
   on SQLite and the in-memory store because neither has a clock of its own.
 - **The attempt ceiling, `max_attempts`** (SPEC-v0.7 §5, item 4, and the amendment to
   `docs/SPEC-v0.1.md` §5.4). A new action-entry policy key, an integer of at least 1, bounding the
-  attempts that may **execute** on one effect key, the first included: `max_attempts: 3` is the
-  first attempt and two renewals. It needs `schema: ctrlrun.policy/v5`, a new schema version that
+  **attempts** that may execute on one effect key, the first included: `max_attempts: 3` is the
+  first attempt and two renewals. **An attempt, not an executor invocation**: a `Suspended`
+  executor holds its reservation and every `Control.resume` runs on that same attempt, so an
+  elicitation loop is one dispatch however many rounds it takes. The gateway bounds those with
+  `max_elicitation_rounds`; a direct `Control.resume` caller has no bound, and this adds none. It needs `schema: ctrlrun.policy/v5`, a new schema version that
   is a superset of `v4` as `v4` is of `v3`; `0`, a negative, a `bool`, a float, a string and a
   mapping are each a `PolicyError` at load, naming the key, the action and the line. The ceiling
   is inside the policy hash, so a receipt records which one refused an attempt.
@@ -41,10 +44,14 @@ any change to one appears here.
   taken before reserving. Above the ceiling the executor is not called, the record is released as
   `FAILED` with an error naming the ceiling, `EFFECT_RESERVATION_REFUSED` carries
   `reason: "attempt_ceiling"` with the attempt and the ceiling, a `blocked` receipt is written,
-  and `ActionDenied(reason="attempt_ceiling")` is raised. A read of the record before the approval
-  gate refuses the ordinary sequential case earlier, writing nothing, spending no presented
-  approval and creating no approval request; it refuses only a `FAILED` record and is never the
-  guarantee. In observe mode the refusal is recorded as `would_have.blocked_reason:
+  and `ActionDenied(reason="attempt_ceiling")` is raised. The refused attempt number is **spent**:
+  raising `max_attempts` from 2 to 4 after a refusal buys one further dispatch, not two. A read of
+  the record before the approval gate refuses the ordinary sequential case earlier, writing
+  nothing, spending no presented approval and creating no approval request; it refuses only a
+  `FAILED` record and is never the guarantee. **On any other route the approval gate comes
+  first**, so on an `APPROVE` action a human can be asked, and answer, for an attempt that is then
+  refused: a wasted answer, never an execution, and `docs/SPEC-v0.7.md` §5.2 and §5.5 say so
+  rather than closing it. In observe mode the refusal is recorded as `would_have.blocked_reason:
   "attempt_ceiling"` and the action runs. Verify gains **G15**, and G5 now selects only an action
   whose ceiling permits a renewal, reporting `N/A` where the ceiling is the only reason it cannot,
   because G5's control *is* a renewal and `max_attempts: 1` would otherwise report a correct

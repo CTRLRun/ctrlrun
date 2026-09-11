@@ -416,6 +416,13 @@ class Control:
         would otherwise have no meaning on the one path that may not have them. The gateway's
         approval pre-check reads this, so leaving it undefined would give three different
         gateway behaviours.
+
+        **It does not see the attempt ceiling** (SPEC-v0.7 §5.5, §7). `max_attempts` is decided
+        against an effect record, and this method takes an `Action` rather than an effect key and
+        may not read the store to resolve one. So an adapter asking `ctrlrun.adapter.needs_approval`
+        can put an approval in front of a human for an attempt `execute` will then refuse, and a
+        gateway pre-check can report `approve` for the same attempt. The cost is a wasted answer,
+        never an execution: nothing here writes, and every ceiling refusal happens in `execute`.
         """
         # SPEC-v0.3 §4.3.1 — the environment obeys §2.5 on *every* row of that table, and
         # `evaluate` is one. Read-only, so this refuses rather than denies: an Action from
@@ -743,6 +750,11 @@ class Control:
                 # race that enforce mode does not have.
                 observation.block(BLOCKED_ATTEMPT_CEILING)
             else:
+                # SPEC-v0.6 §7.2.1, applied here as the `DENY` branch above applies it: a
+                # presented approval is recorded against the refusal it met, so the history
+                # connects a live granted approval to what stopped it. It is **not** consumed,
+                # which is the fast path's point, and a review found this same omission on the
+                # `DENY` path before it was fixed there.
                 self._refuse_ceiling(
                     action,
                     evaluation,
@@ -751,6 +763,7 @@ class Control:
                     attempt=refused_early,
                     ceiling=ceiling,
                     reserved=False,
+                    approval_id=_PRESENTED_APPROVAL.get(None),
                 )
         if observation is not None:
             return self._observed(
@@ -1759,13 +1772,16 @@ class Control:
         ceiling: int | None,
         reserved: bool,
         approval: Approval | None = None,
+        approval_id: str | None = None,
     ) -> NoReturn:
         """Refuse one attempt for the operator's ceiling, and say so in the history (§5.5).
 
         Above the ceiling the executor is not called. Where a reservation was taken, the record
         is released as `FAILED` through `begin_execution` and `fail_effect`, with an error naming
         the ceiling: `FAILED` is true here, because nothing ran. `EXECUTION_STARTED` is **not**
-        appended, because that event is the claim that something started.
+        appended, because that event is the claim that something started. The refused number is
+        **spent** either way (§5.5): the reservation assigned it, so an operator who later raises
+        the ceiling buys the difference minus the numbers refusals already consumed.
 
         `ActionDenied` and not `DuplicateEffect`, `AmbiguousEffect` or `NotExecuted`: it is the
         only type in the closed set whose meaning is true, "the action may not run, and `reason`
@@ -1773,19 +1789,21 @@ class Control:
         is written for exactly that. The receipt is `blocked` rather than `denied` because it
         describes what stopped the attempt, which is the effect's own history, and it keeps the
         decision the policy actually reached (`v0.1 §6.1`, `§4.2 A1`).
+
+        **The evidence is written before the release is attempted**, and a refusal of any type is
+        caught. A review found `InvalidArgument` escaping here: `_checked` raises it where the
+        record moved under a different `action_id` with a dead lease (`state.py`), and on the old
+        ordering that left the record `RESERVED` *and* the refusal with no event and no receipt.
+        The store's own exception still propagates, as `v0.1 §5.5` has it; what changed is that it
+        can no longer take the evidence with it.
+
+        **On the fast path nothing was reserved**, so `attempt` is the number this call *would*
+        have been given. Two calls refused in a row therefore carry the same number, which is not
+        a defect: no number was assigned to either, and the alternative is a receipt that names an
+        attempt the store never wrote.
         """
         error = f"attempt {attempt} refused: max_attempts is {ceiling} (SPEC-v0.7 §5)"
-        released: CTRLRunError | None = None
-        if reserved and effect_key is not None:
-            try:
-                self._store.begin_execution(effect_key, action.action_id)
-                self._store.fail_effect(effect_key, action.action_id, error)
-            except (DuplicateEffect, AmbiguousEffect) as refused:
-                # §5.7 — the record moved on while the ceiling was deciding. The refusal
-                # propagates after the `blocked` receipt, as `v0.1 §5.5` has a store's refusal
-                # propagate: `AMBIGUOUS` is not something this path may collapse to `FAILED`.
-                released = refused
-        presented = approval.approval_id if approval is not None else None
+        presented = approval.approval_id if approval is not None else approval_id
         self._append(
             EventType.EFFECT_RESERVATION_REFUSED,
             action,
@@ -1796,6 +1814,7 @@ class Control:
             },
             effect_key,
             approval=approval,
+            approval_id=approval_id,
         )
         self._record(
             action,
@@ -1804,12 +1823,20 @@ class Control:
             started_at,
             error=error,
             approval=approval,
-            approver=self._approver_of(presented),
+            approval_id=approval_id,
+            approver=None if approval is not None else self._approver_of(presented),
             effect_key=effect_key,
             attempt=attempt,
         )
-        if released is not None:
-            raise released
+        if reserved and effect_key is not None:
+            try:
+                self._store.begin_execution(effect_key, action.action_id)
+                self._store.fail_effect(effect_key, action.action_id, error)
+            except CTRLRunError as refused:
+                # §5.7 — the record moved on while the ceiling was deciding. The refusal
+                # propagates, as `v0.1 §5.5` has a store's refusal propagate: `AMBIGUOUS` is not
+                # something this path may collapse to `FAILED`.
+                raise refused from None
         raise ActionDenied(
             f"{action.name} denied: {error}",
             reason=BLOCKED_ATTEMPT_CEILING,

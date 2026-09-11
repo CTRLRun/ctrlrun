@@ -38,6 +38,7 @@ from ctrlrun import (
     ApprovalRequired,
     Control,
     InMemoryStateStore,
+    InvalidArgument,
     NotExecuted,
     Policy,
     PolicyError,
@@ -149,27 +150,57 @@ def _not_executed() -> NotExecuted:
     return NotExecuted("the remote rejected it before doing anything")
 
 
-@pytest.fixture(params=["in-memory", "sqlite"])
+@pytest.fixture(
+    params=[
+        "in-memory",
+        "sqlite",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not os.environ.get("CTRLRUN_TEST_POSTGRES"),
+                reason="CTRLRUN_TEST_POSTGRES is not set; no server to run against",
+            ),
+        ),
+    ]
+)
 def stores(request, tmp_path, fake_clock):
     """A factory for stores on whichever backend, so one test can build two (T247).
 
     `conftest.state_store` hands out one store, and the positive control needs a second: the
     same sequence under a document with no ceiling, compared record for record.
+
+    **Postgres is one of the three**, which §8.4's T247 asks for in its first sentence: without
+    it the ceiling's only Postgres coverage is T247's property assertion, which catches a deleted
+    check about a quarter of the time and a deleted fast path never. Each store gets a scratch
+    schema of its own, dropped afterwards (`v0.6 §4.1`), so nothing is left in `public`.
     """
     made: list[object] = []
+    schemas: list[str] = []
 
     def make():
-        store = (
-            InMemoryStateStore(clock=fake_clock)
-            if request.param == "in-memory"
-            else SQLiteStateStore(tmp_path / f"state-{len(made)}.db", clock=fake_clock)
-        )
+        if request.param == "in-memory":
+            store = InMemoryStateStore(clock=fake_clock)
+        elif request.param == "sqlite":
+            store = SQLiteStateStore(tmp_path / f"state-{len(made)}.db", clock=fake_clock)
+        else:
+            from ctrlrun.postgres import PostgresStateStore
+
+            url = os.environ["CTRLRUN_TEST_POSTGRES"]
+            name = f"cap_{uuid.uuid4().hex[:12]}"
+            PostgresStateStore.create_schema(url, name)
+            schemas.append(name)
+            store = PostgresStateStore(url, schema=name, clock=fake_clock)
         made.append(store)
         return store
 
     yield make
     for store in made:
         store.close()
+    if schemas:
+        from ctrlrun.postgres import PostgresStateStore
+
+        for name in schemas:
+            PostgresStateStore.drop_schema(os.environ["CTRLRUN_TEST_POSTGRES"], name)
 
 
 def _control(document, store, fake_clock):
@@ -274,6 +305,17 @@ def _stale_read(store, interleave):
     return _window(store, "get_effect", interleave)
 
 
+@contextmanager
+def monkeypatched(owner, name, replacement):
+    """One attribute swapped for the length of a `with`, restored on the way out."""
+    original = getattr(owner, name)
+    setattr(owner, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(owner, name, original)
+
+
 def _renew_and_fail(control, remote, payment_id="txn_1"):
     """One whole attempt by somebody else: renew the key, dispatch, and fail."""
     with pytest.raises(NotExecuted):
@@ -343,8 +385,19 @@ def test_T241_the_check_after_the_reservation_never_calls_the_executor(stores, f
 
 
 def _projection(store):
-    """What a run left behind, in the terms 0.6.1 and 0.7 must agree on."""
-    events = [(str(event.type), dict(event.data), event.effect_key) for event in store.events()]
+    """What a run left behind, in the terms 0.6.1 and 0.7 must agree on.
+
+    `CLOCK_SKEW_DETECTED` is dropped, and only that: on Postgres every scratch store is opened
+    with this suite's frozen clock, so each one measures a real skew of several days and reports
+    it with its own microseconds (SPEC-v0.7 §1.4 item 6, §3.8). That is item 1's event and item
+    1's tests grade it; what this comparison is about is whether a ceiling under which nothing
+    is refused changes anything the ceiling owns.
+    """
+    events = [
+        (str(event.type), dict(event.data), event.effect_key)
+        for event in store.events()
+        if str(event.type) != "CLOCK_SKEW_DETECTED"
+    ]
     receipts = [
         (receipt.result, receipt.attempt, receipt.effect_key) for receipt in _receipts(store)
     ]
@@ -656,6 +709,15 @@ def test_T245b_the_fast_path_leaves_a_presented_approval_granted(stores, fake_cl
     assert store.get_approval(second).status == "granted"
     assert _refusals(store)[-1].data["reason"] == CEILING
 
+    # SPEC-v0.6 §7.2.1, as the `DENY` path applies it: the refusal is **recorded against** the
+    # approval it met, so the history connects a live granted approval to what stopped it. A
+    # review found `approval_id=None` here while an unspent approval sat in the store, which is
+    # the same omission that review found on the `DENY` path.
+    assert _refusals(store)[-1].approval_id == second
+    blocked = _receipts(store)[-1]
+    assert blocked.approval_id == second
+    assert blocked.approver == "ops@example.com"
+
 
 def test_T245b_the_fast_path_reserves_nothing(stores, fake_clock):
     store = stores()
@@ -709,7 +771,7 @@ REPO_SRC = str(Path(__file__).resolve().parents[1] / "src")
 BOUND = 180.0
 
 CHILD = textwrap.dedent("""
-    import json, os, sys
+    import json, os, sys, time
     job = json.loads(sys.stdin.read())
     sys.path.insert(0, job["src"])
     import ctrlrun
@@ -730,6 +792,7 @@ CHILD = textwrap.dedent("""
         raise NotExecuted("the remote rejected it before doing anything")
 
     refused = None
+    started = time.time()
     for _ in range(job["rounds"]):
         try:
             with context(agent="refund-agent"):
@@ -741,6 +804,7 @@ CHILD = textwrap.dedent("""
             break
         except CTRLRunError:
             continue
+    finished = time.time()
     record = store.get_effect("refund:" + job["payment_id"])
     store.close()
     print(json.dumps({
@@ -748,8 +812,27 @@ CHILD = textwrap.dedent("""
         "refused": refused,
         "attempt": None if record is None else record.attempt,
         "state": None if record is None else str(record.state),
+        "started": started,
+        "finished": finished,
     }))
 """)
+
+
+def _overlapping(results):
+    """The largest number of children whose `[started, finished]` windows all overlap.
+
+    The signal a serialised run cannot produce. Each child reports the wall clock it took either
+    side of its own loop, so two children overlap when neither finished before the other began.
+    """
+    most = 0
+    for probe in results:
+        together = [
+            other
+            for other in results
+            if other["started"] <= probe["finished"] and probe["started"] <= other["finished"]
+        ]
+        most = max(most, len(together))
+    return most
 
 
 @postgres
@@ -822,9 +905,63 @@ def test_T247_no_more_than_N_dispatches_across_separate_processes():
     assert all(result["refused"] in (None, CEILING) for result in results), (
         f"a process was refused for a reason this run cannot explain: {results}"
     )
+    # **And the run has to have contended**, asserted on something only contention produces.
+    # Every assertion above is satisfied by six processes running one after another, which is
+    # what this test looked like before a review replaced the feed-all-then-wait loop with a
+    # `wait()` per child and watched it pass 3 out of 3. A serialised run has no two windows
+    # that overlap; a contended one has several.
+    assert _overlapping(results) >= 2, (
+        f"no two children ran at the same time, so nothing was contended: {results}"
+    )
 
 
 # --- T248: what happens to an approval on a refused attempt -----------------------------
+
+
+def test_T248_the_reconcile_route_asks_a_human_for_an_attempt_that_can_never_run(
+    stores, fake_clock
+):
+    """The cost §5.5 states rather than closes, pinned so the claim cannot drift back.
+
+    The fast path refuses only a `FAILED` record, normatively, so an `AMBIGUOUS` one goes
+    through to `_secure` -- and `_secure` reaches the approval gate **before** any reconcile.
+    So on §5.5's own public route, which is the one T245 and G15 are built on, a human is asked
+    for an attempt that the check will then refuse, and the yes they give is consumed by the
+    reservation that gets refused.
+
+    This is not the adapter's `Control.evaluate` exception: it is the kernel's primary route.
+    §5.5 states the cost and does not close it, because re-reading the record between the
+    reconcile and the second take would destroy the seamless route the check's own test needs.
+    """
+    store = stores()
+    control = _control(APPROVE_CEILING_1, store, fake_clock)
+    remote = Remote(TimeoutError("the response was lost"), "never reached")
+    with pytest.raises(TimeoutError):
+        _call(control, remote, approval=_grant(control, store))
+    assert store.get_effect(KEY).state is EffectState.AMBIGUOUS
+
+    requested_before = len(_events(store, EventType.APPROVAL_REQUESTED))
+
+    # Attempt 2 presents nothing and carries the hook. A NEW request is created and the caller
+    # is told to go and find a human, although attempt 2 can never run under a ceiling of 1.
+    with pytest.raises(ApprovalRequired) as asked:
+        _call(control, remote, reconcile=lambda key: "not_executed")
+    assert len(_events(store, EventType.APPROVAL_REQUESTED)) == requested_before + 1, (
+        "the approval gate ran before the reconcile, so a human was asked"
+    )
+    request_id = asked.value.request_id
+    assert store.get_approval(request_id).status == "pending"
+
+    # The human says yes, the agent retries, and the yes is spent on the refusal.
+    store.grant_approval(request_id, "ops@example.com")
+    with pytest.raises(ActionDenied) as refused:
+        _call(control, remote, approval=request_id, reconcile=lambda key: "not_executed")
+    assert refused.value.reason == CEILING
+    assert store.get_approval(request_id).status == "consumed", (
+        "the reservation consumed it in the transaction the check then refused"
+    )
+    assert remote.calls == 1, "one dispatch under a ceiling of 1, and one wasted answer"
+    assert _receipts(store)[-1].approval_id == request_id
 
 
 def test_T248_the_check_leaves_the_approval_consumed_and_the_receipt_names_it(stores, fake_clock):
@@ -934,6 +1071,100 @@ def test_T249_a_record_that_moved_while_the_ceiling_decided_propagates_the_store
     assert "max_attempts is 3" in (blocked.error or "")
     assert _refusals(store)[-1].data["reason"] == CEILING
     assert store.get_effect(KEY).state is EffectState.AMBIGUOUS
+
+
+def test_T249_a_store_refusal_of_any_type_still_leaves_the_evidence(stores, fake_clock):
+    """The refusal takes nothing with it (§5.5, `v0.1 §5.5`).
+
+    `_checked` raises `InvalidArgument`, not `DuplicateEffect` or `AmbiguousEffect`, where the
+    record moved under a different `action_id` with a dead lease. A review found that escaping
+    before the event and the receipt were written, leaving the record `RESERVED` and the refusal
+    with no evidence at all. The evidence is written first now, and every `CTRLRunError` the
+    release raises still propagates.
+    """
+    store = stores()
+    control = _control(ALLOW_CEILING_3, store, fake_clock)
+    remote = Remote(_not_executed(), _not_executed(), TimeoutError("the response was lost"))
+    for _ in range(2):
+        with pytest.raises(NotExecuted):
+            _call(control, remote)
+    with pytest.raises(TimeoutError):
+        _call(control, remote)
+
+    def refusing(self, *args, **kwargs):
+        raise InvalidArgument("the record moved under another action with a dead lease")
+
+    with monkeypatched(type(store), "begin_execution", refusing), pytest.raises(InvalidArgument):
+        _call(control, remote, reconcile=lambda key: "not_executed")
+
+    assert _refusals(store)[-1].data["reason"] == CEILING
+    blocked = _receipts(store)[-1]
+    assert blocked.result is ReceiptResult.BLOCKED
+    assert "max_attempts is 3" in (blocked.error or "")
+    assert remote.calls == 3
+
+
+# --- what the refused attempt number costs, and what the ceiling does not bound ----------
+
+
+def test_a_refused_attempt_number_is_spent(stores, fake_clock):
+    """§5.5: the reservation assigned it, so raising the ceiling buys less than the difference.
+
+    §5.7 justifies counting an attempt a human resolved because *"it was dispatched"*. The number
+    a check-path refusal burns was not dispatched, and it is spent all the same, because the
+    store assigned it before the check could look. An operator raising `max_attempts` from 2 to 4
+    buys one more dispatch, not two, and the spec says so rather than leaving it to be found.
+    """
+    store = stores()
+    control = _control(ALLOW_CEILING_2, store, fake_clock)
+    remote = Remote(_not_executed(), TimeoutError("the response was lost"), "ok", "ok")
+    with pytest.raises(NotExecuted):
+        _call(control, remote)
+    with pytest.raises(TimeoutError):
+        _call(control, remote)
+    with pytest.raises(ActionDenied) as refused:
+        _call(control, remote, reconcile=lambda key: "not_executed")
+    assert refused.value.reason == CEILING
+    assert remote.calls == 2
+
+    record = store.get_effect(KEY)
+    assert record.state is EffectState.FAILED
+    assert record.attempt == 3, "the refused number was assigned, and it is gone"
+
+    raised = _control(
+        ALLOW_CEILING_3.replace("max_attempts: 3", "max_attempts: 4"), store, fake_clock
+    )
+    assert _call(raised, remote) == "re_txn_1-3"
+    assert remote.calls == 3, "raising 2 to 4 bought one more dispatch, not two"
+
+
+def test_the_ceiling_bounds_attempts_and_not_executor_invocations(stores, fake_clock):
+    """§5.7: `Control.resume` reserves nothing, and the consequence is stated.
+
+    One attempt can invoke the executor many times: a `Suspended` executor holds attempt 1 and
+    each `resume` runs it again on that same attempt. The gateway bounds this with
+    `max_elicitation_rounds` (`v0.2 §6.9.2`); a direct `Control.resume` caller has no bound, and
+    `max_attempts` is not one. It bounds attempts, which is what a provider dispatch costs.
+    """
+    store = stores()
+    control = _control(ALLOW_CEILING_1, store, fake_clock)
+    rounds = {"n": 0}
+
+    @protect("stripe.refund", effect="refund:{payment_id}", control=control)
+    def refund(payment_id: str, amount: int) -> str:
+        rounds["n"] += 1
+        raise Suspended(f"round-{rounds['n']}")
+
+    with context(agent="refund-agent"), pytest.raises(Suspended):
+        refund(payment_id="txn_1", amount=200)
+    for expected in range(2, 6):
+        with pytest.raises(Suspended):
+            control.resume(f"round-{expected - 1}", lambda: refund.__wrapped__("txn_1", 200))
+        assert rounds["n"] == expected
+
+    record = store.get_effect(KEY)
+    assert record.attempt == 1, "every round was the same attempt"
+    assert rounds["n"] == 5, "five executor invocations under max_attempts: 1"
 
 
 # --- T250: observe mode, resume, and resolved attempts ----------------------------------
@@ -1137,7 +1368,10 @@ def test_a_committed_effect_is_still_a_duplicate_and_not_a_ceiling_refusal(store
 G15_NOT_DECLARED = (
     "no action verify can drive to allow or approve declares both `effect:` and `max_attempts`"
 )
-G15_ABOVE_BOUND = "every declared max_attempts is above verify's bound of 100 attempts"
+G15_ABOVE_BOUND = (
+    "every action verify can drive to allow or approve that declares both `effect:` and "
+    "`max_attempts` declares one above verify's bound of 100 attempts"
+)
 CEILING_FORBIDS_RENEWAL = (
     "every action with an `effect:` template that verify can select (a decision of allow or "
     "approve under a grant that covers it) declares max_attempts: 1, so no renewal can happen"
@@ -1253,6 +1487,48 @@ def test_T252_G15_is_not_applicable_above_verifys_bound(tmp_path):
     result = _verify(tmp_path, V5_CEILING_ABOVE_BOUND, only=("G15",))["G15"]
     assert result.status is Status.NOT_APPLICABLE
     assert result.reason == G15_ABOVE_BOUND
+
+
+def test_T252_the_above_bound_reason_is_true_of_a_document_with_a_low_deny_only_ceiling(tmp_path):
+    """§8.9's opening MUST: every N/A reason is a sentence true of the operator's document.
+
+    The fallback selection re-applies the effect and ceiling filters and drops only the bound, so
+    it can only ever describe the actions verify can **drive**. An earlier wording said "every
+    declared max_attempts is above verify's bound" and was false here: `acme.beta` declares 3.
+    That is the identical defect §8.9 already caught and fixed in the sibling sentence.
+    """
+    from ctrlrun.verify import Status
+
+    document = """
+schema: ctrlrun.policy/v5
+actions:
+  acme.alpha:
+    effect: "alpha:{ticket}"
+    max_attempts: 1000
+    rules:
+      - when: { amount_gte: 0, amount_lte: 1000 }
+        decision: allow
+      - decision: deny
+  acme.beta:
+    effect: "beta:{ticket}"
+    max_attempts: 3
+    decision: deny
+"""
+    result = _verify(tmp_path, document, only=("G15",))["G15"]
+    assert result.status is Status.NOT_APPLICABLE
+    assert result.reason == G15_ABOVE_BOUND
+    assert "every declared max_attempts" not in result.reason, (
+        "the sentence must not claim anything about a ceiling verify never looked at"
+    )
+
+
+def test_T252_the_catalogue_titles_fit_the_report_table(tmp_path):
+    """A title wider than `report._TITLE_WIDTH` breaks the CLI table's alignment."""
+    from ctrlrun.verify import guarantees as reg
+    from ctrlrun.verify.report import _TITLE_WIDTH
+
+    too_wide = {g.id: len(g.title) for g in reg.GUARANTEES if len(g.title) > _TITLE_WIDTH}
+    assert not too_wide, too_wide
 
 
 def test_T252_a_kernel_with_the_check_deleted_fails_G15(tmp_path, monkeypatch):
