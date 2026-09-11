@@ -2559,6 +2559,73 @@ action that can store it and a sink is handed only an event that was stored.
 
 ### 12.3 Item 3: the idempotency token
 
+**The derivation is §4.2's, byte for byte, and the three worked values are the code's.**
+`idempotency_token_for("refund:txn_1", 1)` is `382ee448-97da-8107-b674-8c253650d93f`, attempt 2 is
+`28bb40af-814c-8fb6-ba63-e8663b1c036d` and `refund:txn_2` at attempt 1 is
+`89977bc9-d128-8ae8-871f-f5265155e60f`. T235 pins the first as a literal and the other two beside
+it, so a change to the domain tag, the truncation, the version nibble or the canonical form is a
+red test rather than a silent change of every token a deployment has ever sent.
+
+**The domain tag is a module constant, `effect.IDEMPOTENCY_SCHEMA`, not a literal and not a private
+name.** Every schema string in this codebase is a public `Final` beside the code that stamps it, as
+`ACTION_SCHEMA`, `RECEIPT_SCHEMA` and `INSPECTION_SCHEMA` are, and none of them is in §9's frozen
+list either; item 1's `_CLOCK_SKEW_TRIGGERS` is private because it is a closed vocabulary a caller
+would otherwise be tempted to extend, which a schema tag is not.
+
+**The binding is a context manager around `executor()` and nothing else.** `_attempt_token` sets the
+variable where `held_key is not None` and resets it in a `finally`, so the value is gone whether the
+executor returned, raised, or suspended. `_outcome` is the single place `execute`, `_observed` and
+`resume` all reach, which is why a resumed leg reads the token of the attempt it resumes without a
+second binding site: `resume` passes `held.record.attempt`, unchanged (`control.py:992`), and T233
+asserts the number and the token together, so a change to either is visible.
+
+**`held_key`, not `effect_key`.** The two differ for an observe-mode attempt whose reservation was
+refused, where `effect_key` names the key and `held_key` is `None` because another attempt owns the
+record. Binding on `effect_key` would hand that executor attempt 1's token, which names the real
+holder's attempt, and it would do so on the one path where nothing can be written to say so. T236
+drives it, and the test beside it, an observe-mode attempt that *does* hold its key and is answered,
+is the control that keeps it from passing against a kernel that simply never answers in observe mode.
+
+**The context variable takes a default of `None` rather than being left unset.** `_CONTEXT` and
+`_PRESENTED_APPROVAL` are read with `.get(None)`; this one is read with `.get()` against a declared
+default, which is the same refusal and lets a test undo a deliberately leaking mutant without a
+reset token. The accessor refuses `None` and never guesses.
+
+**G14 runs its control first.** The two reads and the refusal outside any executor are asserted
+before the renewal, so a kernel whose answer moves within an attempt, and a kernel that sets the
+variable and never resets it, both report `control failed` rather than a violation of the
+observable, which is the distinction §1.3 draws. The leaking kernel is the sharper of the two: it
+passes the observable, because each executor still reads its own attempt's value.
+
+**The note beneath the table is not an N/A reason and not a finding.** §4.6's sentence is printed
+under the table whenever G14 is graded, once, from `EFFECT_KEY_SCOPE_NOTE`, rather than in G14's
+`detail.note`: `detail.note` is rendered under the guarantee's own row and only for the first
+result carrying one, so a run where an earlier N/A already printed a note would have swallowed it.
+A guarantee silent about the one thing a single-store run cannot check would read as having checked
+it.
+
+**No `reconcile` hook signature changed, and none needed to.** The hook is handed the effect key
+(`v0.2 §11`), and the attempt is on the record, so `idempotency_token_for(key,
+store.get_effect(key).attempt)` is the whole of what §4.5 asks for. Making the accessor answer inside
+a hook was rejected in §4.3 and nothing in the code argued for it: the blocking call really does run
+under a different attempt from the eager one.
+
+**Its catalogue title is *token changes across a renewal*,** thirty characters, because the report's
+title column is thirty-two and a longer one pushes every status on that row out of line. G13's entry
+made the same choice for the same reason.
+
+**The counts verify pins moved by one, as item 1's did.** G14 joins G3, G4 and G5 wherever the
+effect template lives in a `@protect` decorator verify does not read, so `V1_PAYMENTS` reports six
+over six with seven not applicable; the authority example reports twelve over twelve. The
+catalogue-size guard in T101 was the literal `"8/8"`, which is the real summary now that eight
+guarantees are applicable there, and it is computed from `len(GUARANTEES)` instead.
+
+**Item 3a is what makes this sound on Postgres, and it is not merged.** The token is unique per
+dispatch only where the attempt number is unique per key and the number `Control` is handed is the
+number the store wrote, and on Postgres neither holds until item 3a lands (§1.4 item 3, §4.4, §5.6).
+This item is built on `main` and cherry-picks nothing; T232 cannot see that defect and does not
+claim to.
+
 ### 12.4 Item 4: the attempt ceiling
 
 ### 12.5 Item 5: precondition fingerprints

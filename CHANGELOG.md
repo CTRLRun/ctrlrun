@@ -29,6 +29,27 @@ any change to one appears here.
   Postgres `--store-url` and `N/A` on SQLite, and the catalogue moves to
   `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
   on SQLite and the in-memory store because neither has a clock of its own.
+- **The provider idempotency token** (SPEC-v0.7 §4, item 3). `ctrlrun.idempotency_token()`, a new
+  zero-argument accessor re-exported at package import, answers inside an executor with the token
+  of the attempt it is running: `ctrlrun.effect.idempotency_token_for(effect_key, attempt)`, a
+  SHA-256 over the canonical form of `(effect_key, attempt)` under the domain tag
+  `ctrlrun.idempotency/v1`, rendered as a 36-character UUID of version 8. Send it to a provider as
+  its idempotency key. **Derived from the attempt and not from the effect key alone**: the effect
+  key is stable across `SPEC-v0.1.md` §5.4's renewal, so a provider given it would answer the one
+  retry the kernel permits, permitted *because the executor proved nothing happened*, with the
+  cached failure of the attempt that failed. It is stable within one attempt, including across a
+  `Control.resume` of a suspended one, and different after a renewal. **What it is for is
+  reconciliation**: a deterministic handle to ask a provider what became of an attempt whose
+  outcome is unknown, by a key the provider already indexes. It does not make a retry safe, and
+  after an `AMBIGUOUS` outcome the kernel still refuses one. Nothing is stored: the token is a pure
+  function of two fields every receipt of an attempt that ran already carries, so a receipt
+  re-derives it and a `reconcile` hook reads the attempt off the record. The executor signature is
+  unchanged, and an executor that never calls the accessor runs exactly as it did at 0.6.1. Outside
+  an executor, for an action with no effect key, for an observe-mode attempt whose reservation was
+  refused, and on a thread started without a copy of the executor's context, it raises
+  `InvalidArgument`. Verify gains G14, with a note beneath the table: a token is unique only as far
+  as the operator's effect keys are, and a kernel that sees one store cannot check that two stores
+  sharing a provider account never produce one effect-key string for two different effects.
 
 ### Fixed
 
