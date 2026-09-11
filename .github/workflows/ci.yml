@@ -122,10 +122,11 @@ jobs:
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
           test "$AUTHORITY" = "verified 14/14"
           # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
-          # to diverge from (SPEC-v0.7 §8.9). G16 is graded on both documents (§8.9).
-          test "$AUTHORITY_NA" = "1"
+          # to diverge from; G15 is N/A because neither document declares `max_attempts`.
+          # G16 is graded on both: verify brings its own precondition provider (SPEC-v0.7 §8.9).
+          test "$AUTHORITY_NA" = "2"
           test "$TEMPLATES" = "verified 8/8"
-          test "$TEMPLATES_NA" = "7"
+          test "$TEMPLATES_NA" = "8"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml

@@ -336,6 +336,15 @@ When a new action arrives for an `effect_key` that already has a record:
 
 `FAILED` means the executor *proved* nothing happened (§5.5). That is the only state that permits automatic retry.
 
+**Amendment (v0.7, `SPEC-v0.7.md` §5).** The `FAILED` row is bounded where the action's policy entry declares `max_attempts` (`schema: ctrlrun.policy/v5`): at most `max_attempts` attempts execute on one effect key, the first included.
+
+| Existing state | New reservation | Raised |
+|---|---|---|
+| `FAILED` at attempt *n*, and no `max_attempts`, or *n* + 1 ≤ `max_attempts` | allowed: attempt *n* + 1, same key | none |
+| `FAILED` at attempt *n*, and *n* + 1 > `max_attempts` | refused. Where the record is read before the approval gate, nothing is written. Otherwise the store assigns attempt *n* + 1, and the record is released as `FAILED` without the executor being called | `ActionDenied(reason="attempt_ceiling")` |
+
+The decision is taken on the attempt number the store assigned to the reservation, after the reservation and before the executor; a read of the record before the approval gate may refuse the same renewal earlier and is never the only check. The refusal appends `EFFECT_RESERVATION_REFUSED` with `data.reason = "attempt_ceiling"` and writes a `blocked` receipt. `FAILED` is still the only state that permits an automatic retry: the ceiling removes permission from that row and grants none to any other.
+
 ### 5.5 Executor outcome mapping
 
 The wrapped function is the executor. Its result is mapped:

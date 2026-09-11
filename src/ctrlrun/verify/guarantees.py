@@ -77,6 +77,24 @@ GUARANTEES: Final = (
             "v0.7 §8 T238",
         ),
     ),
+    # SPEC-v0.7 §9.4 — **in id order**, because `BY_ID`'s insertion order is the report's order.
+    # Items 3, 4 and 5 each appended after G13 on their own branch, so a textual merge would have
+    # produced G13/G15/G14/G16 or a conflict; this is the conflict, resolved the way the
+    # catalogue reads.
+    Guarantee(
+        "G15",
+        # Exactly `report._TITLE_WIDTH`. A longer title is the one thing that breaks the CLI
+        # table's alignment, and "a renewal past the operator's ceiling is refused" was 48.
+        "renewal past the ceiling refused",
+        (
+            "v0.1 §5.4",
+            "v0.7 §8 T240",
+            "v0.7 §8 T241",
+            "v0.7 §8 T242",
+            "v0.7 §8 T245",
+            "v0.7 §8 T245b",
+        ),
+    ),
     Guarantee(
         "G16",
         # Not "a moved precondition is refused": a precondition that moves after the comparison
@@ -174,6 +192,35 @@ STORE_READS_APPLICATION_CLOCK: Final = (
     "to diverge from; pass --store-url postgresql://… to grade this"
 )
 
+#: SPEC-v0.7 §8.9 — G15's two N/A reasons, and the bound behind the second. Every loop verify
+#: runs is bounded (`v0.4 §3.6`), so a ceiling above what verify will drive is a statement about
+#: the document *and* about verify's stated bound, on the precedent of `GRANT_ALREADY_EXPIRED`.
+NO_CEILING_DECLARED: Final = (
+    "no action verify can drive to allow or approve declares both `effect:` and `max_attempts`"
+)
+CEILING_BOUND: Final = 100
+
+#: **Scoped to what verify can select**, on `NO_CEILING_DECLARED`'s shape and for its reason. An
+#: earlier wording, "every declared max_attempts is above verify's bound", was false of a document
+#: whose deny-only action declares `max_attempts: 3`: the fallback selection re-applies the effect
+#: and ceiling filters and drops only the bound, so the sentence can only ever describe the actions
+#: verify can drive. That is the identical defect §8.9 caught in the sibling sentence, and an N/A
+#: reason that is not true of the operator's document is a false green (§8.9's opening MUST).
+CEILING_ABOVE_BOUND: Final = (
+    "every action verify can drive to allow or approve that declares both `effect:` and "
+    f"`max_attempts` declares one above verify's bound of {CEILING_BOUND} attempts"
+)
+
+#: SPEC-v0.7 §8.9 — the reason G5 (and G14, when item 3 lands it) reports where the operator's
+#: ceiling is the *only* thing that makes a renewal unselectable. Printed only where selecting
+#: again without the ceiling filter does find something; otherwise `unselected()`'s reason wins,
+#: because a document whose uncapped action is deny-only or ungranted is not a document whose
+#: ceilings took the guarantee away.
+CEILING_FORBIDS_RENEWAL: Final = (
+    "every action with an `effect:` template that verify can select (a decision of allow or "
+    "approve under a grant that covers it) declares max_attempts: 1, so no renewal can happen"
+)
+
 #: G14's note, printed once beneath the table (SPEC-v0.7 §8.9, §4.6). Not an N/A reason and not
 #: a finding: the token is a function of `(effect_key, attempt)` and nothing else, so two stores
 #: that share a provider account derive one token wherever their effect-key strings coincide.
@@ -195,6 +242,9 @@ __all__ = [
     "BY_ID",
     "CANDIDATE_BOUND",
     "CATALOGUE",
+    "CEILING_ABOVE_BOUND",
+    "CEILING_BOUND",
+    "CEILING_FORBIDS_RENEWAL",
     "CONTROL_FAILED",
     "EFFECT_KEY_SCOPE_NOTE",
     "EFFECT_TEMPLATE_NOTE",
@@ -206,6 +256,7 @@ __all__ = [
     "NO_ACTIONS",
     "NO_APPROVE_RULE",
     "NO_AUTHORITY_SECTION",
+    "NO_CEILING_DECLARED",
     "NO_DELEGABLE_GRANT",
     "NO_EFFECT_TEMPLATE",
     "NO_EXPIRES_AT",

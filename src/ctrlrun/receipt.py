@@ -93,7 +93,13 @@ BLOCKED_DUPLICATE: Final = "duplicate"
 BLOCKED_IN_PROGRESS: Final = "in_progress"
 BLOCKED_AMBIGUOUS: Final = "ambiguous"
 
-#: The four that mean "the effect state or a presented approval would have stopped it", as
+#: SPEC-v0.7 §5.5 — the attempt ceiling's refusal, in the same three places: `ActionDenied.reason`,
+#: `EFFECT_RESERVATION_REFUSED.data.reason`, and `would_have.blocked_reason` in observe mode. It is
+#: a value of existing fields and not a new type: an operator's `max_attempts` is a policy saying
+#: no, and an agent loop's `except ActionDenied` is written for exactly that.
+BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"
+
+#: The five that mean "the effect state or a presented approval would have stopped it", as
 #: opposed to a decision that would have. `ctrlrun stats` counts them as one line (§6.4).
 BLOCKED_BY_STATE: Final = frozenset(
     {
@@ -101,6 +107,7 @@ BLOCKED_BY_STATE: Final = frozenset(
         BLOCKED_DUPLICATE,
         BLOCKED_IN_PROGRESS,
         BLOCKED_AMBIGUOUS,
+        BLOCKED_ATTEMPT_CEILING,
     }
 )
 

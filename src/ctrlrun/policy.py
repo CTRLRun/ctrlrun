@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import StrEnum
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -49,13 +49,36 @@ POLICY_SCHEMA_V3: Final = "ctrlrun.policy/v3"
 #: those three keys need `v4`.
 POLICY_SCHEMA_V4: Final = "ctrlrun.policy/v4"
 
-#: All of them, newest last, for the message an unknown schema produces.
+#: SPEC-v0.7 §5.3 — required by any document using `max_attempts:`. An 0.6.1 reader refuses a
+#: `v5` document outright, which is the fail-closed direction: a reader that ignored the key
+#: would renew without a ceiling, which is the behaviour the key exists to bound.
+POLICY_SCHEMA_V5: Final = "ctrlrun.policy/v5"
+
+#: All of them, newest last, for the message an unknown schema produces. **In version order**,
+#: which `_at_least` reads: a version added out of order would make every gate below lie.
 SUPPORTED_SCHEMAS: Final = (
     POLICY_SCHEMA,
     POLICY_SCHEMA_V2,
     POLICY_SCHEMA_V3,
     POLICY_SCHEMA_V4,
+    POLICY_SCHEMA_V5,
 )
+
+
+def _at_least(schema: str, minimum: str) -> bool:
+    """Whether `schema` is `minimum` or a later version (SPEC-v0.7 §5.3).
+
+    Each version is a **superset** of the one before: a `v5` document may use every key any
+    earlier version allows. Three gates in this module compared for equality instead, which was
+    right while `v4` was the newest and became wrong the moment it was not; `require_v3`'s own
+    comment predicted it. An unknown schema is refused before any of them runs, so a name that
+    is not in `SUPPORTED_SCHEMAS` cannot reach here from `Policy._from_document`; where one does,
+    from `authority.py`'s standalone path, it is treated as too old, which is fail-closed.
+    """
+    if schema not in SUPPORTED_SCHEMAS or minimum not in SUPPORTED_SCHEMAS:
+        return False
+    return SUPPORTED_SCHEMAS.index(schema) >= SUPPORTED_SCHEMAS.index(minimum)
+
 
 #: SPEC-v0.3 §6.1 — the two values of the top-level `mode:` key, and nothing else. Absent
 #: means `enforce`: the fail-closed default, so a document that predates the key enforces.
@@ -123,12 +146,25 @@ _V4_ENTRY_KEYS: Final[Mapping[str, str]] = {
     ),
 }
 
+#: SPEC-v0.7 §5.3 — the action-entry key that needs `ctrlrun.policy/v5`, and the same sentence:
+#: what an older reader would do with the document if it ignored the key.
+_V5_ENTRY_KEYS: Final[Mapping[str, str]] = {
+    "max_attempts": (
+        "an older reader would ignore the ceiling and renew over `FAILED` without bound, which "
+        "is the behaviour this key exists to stop"
+    ),
+}
+
 _RULE_KEYS: Final = frozenset({"when", "decision", "controls"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
 #: decorator to carry an effect template, so the policy file has to.
 _V2_ENTRY_KEYS: Final = frozenset({"effect", "resource", "mcp"})
-_ENTRY_KEYS: Final = frozenset({"decision", "rules", "controls", "data"}) | _V2_ENTRY_KEYS
+_ENTRY_KEYS: Final = (
+    frozenset({"decision", "rules", "controls", "data"})
+    | _V2_ENTRY_KEYS
+    | frozenset(_V5_ENTRY_KEYS)
+)
 
 #: And the closed key set of the `mcp` mapping, which is one key wide.
 _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
@@ -483,6 +519,9 @@ class _ActionPolicy:
     controls: tuple[str, ...] = ()
     #: §7.4 — which of this action's arguments carry which class of data.
     data: Mapping[str, DataLabel] = field(default_factory=dict)
+    #: SPEC-v0.7 §5.3 — how many attempts may execute on one effect key, the first included, or
+    #: `None` where the entry names no ceiling. `None` is today's behaviour and is not a number.
+    max_attempts: int | None = None
 
     def data_scope(self, arguments: Mapping[str, Any]) -> frozenset[str]:
         """The labels present in **the arguments actually supplied** (SPEC-v0.6 §7.4).
@@ -661,10 +700,10 @@ class Policy:
     @classmethod
     def from_yaml(cls, text: str, *, source: str = "<string>") -> Policy:
         """Parse and validate a policy document. Anything malformed raises `PolicyError`."""
-        return cls._from_document(strict_load(text, source), source)
+        return cls._from_document(strict_load(text, source), source, text)
 
     @classmethod
-    def _from_document(cls, document: object, source: str) -> Policy:
+    def _from_document(cls, document: object, source: str, text: str | None = None) -> Policy:
         if not isinstance(document, Mapping):
             raise PolicyError(
                 f"{source}: policy must be a mapping with 'schema' and 'actions' keys, "
@@ -708,7 +747,13 @@ class Policy:
             if not isinstance(name, str) or not name:
                 raise PolicyError(f"{source}: action names must be non-empty strings, got {name!r}")
             actions[name] = _parse_entry(
-                entry, f"{source}: action {name!r}", str(schema), frozenset(controls)
+                entry,
+                f"{source}: action {name!r}",
+                str(schema),
+                frozenset(controls),
+                # SPEC-v0.7 §5.3 — the line a refused key sits on, recovered from the document's
+                # own marks and only where a refusal is about to name one.
+                line_of=partial(_entry_key_line, text, name),
             )
         return cls(
             actions=MappingProxyType(actions),
@@ -744,6 +789,17 @@ class Policy:
         """This action's `mcp:` options, defaulting to the fail-closed ones (§3.1, §11)."""
         entry = self.actions.get(action_name)
         return _DEFAULT_MCP_OPTIONS if entry is None else entry.mcp
+
+    def max_attempts(self, action_name: str) -> int | None:
+        """This action's attempt ceiling, or `None` (SPEC-v0.7 §5.3).
+
+        `None` means the operator named no ceiling, which is 0.6.1's behaviour exactly: a renewal
+        over `FAILED` is admitted without bound (`v0.1 §5.4`). It is not a number and never
+        defaults to one, because any default would refuse at 0.7.0 a renewal that succeeded at
+        0.6.1, and would be a bound nobody chose (§5.4).
+        """
+        entry = self.actions.get(action_name)
+        return None if entry is None else entry.max_attempts
 
     def evaluate(self, action: Action) -> Evaluation:
         """Decide an action. No side effects; an unlisted action is denied (SPEC-v0.1 §3.4)."""
@@ -932,8 +988,9 @@ def require_v3(document: Mapping[Any, Any], schema: str, source: str) -> None:
     nothing else, so the check has to exist on both paths rather than on whichever runs first.
     """
     # v4 is a superset: a `v4` document may use every `v3` key. Comparing for equality here was
-    # right while v3 was the newest and becomes a bug the moment it is not.
-    if schema in (POLICY_SCHEMA_V3, POLICY_SCHEMA_V4):
+    # right while v3 was the newest and becomes a bug the moment it is not. SPEC-v0.7 §5.3: the
+    # membership test that replaced it had the same shape, so `v5` reads it through `_at_least`.
+    if _at_least(schema, POLICY_SCHEMA_V3):
         return
     for key, consequence in _V3_TOP_LEVEL_KEYS.items():
         if key in document:
@@ -952,7 +1009,7 @@ def require_v4(document: Mapping[Any, Any], schema: str, source: str) -> None:
     check at all" and "an older reader would refuse the document outright" call for different
     reactions.
     """
-    if schema == POLICY_SCHEMA_V4:
+    if _at_least(schema, POLICY_SCHEMA_V4):
         return
     for key, consequence in _V4_TOP_LEVEL_KEYS.items():
         if key in document:
@@ -1172,7 +1229,12 @@ def _parse_cited(value: object, where: str, known: frozenset[str]) -> tuple[str,
 
 
 def _parse_entry(
-    entry: object, where: str, schema: str, known: frozenset[str] = frozenset()
+    entry: object,
+    where: str,
+    schema: str,
+    known: frozenset[str] = frozenset(),
+    *,
+    line_of: Callable[[str], int | None] = lambda key: None,
 ) -> _ActionPolicy:
     if not isinstance(entry, Mapping):
         raise PolicyError(
@@ -1192,12 +1254,19 @@ def _parse_entry(
 
     cited = _parse_cited(entry.get("controls"), where, known)
     for key, consequence in _V4_ENTRY_KEYS.items():
-        if key in entry and schema != POLICY_SCHEMA_V4:
+        if key in entry and not _at_least(schema, POLICY_SCHEMA_V4):
             raise PolicyError(
                 f"{where}: {key!r} needs 'schema: {POLICY_SCHEMA_V4}'; this document declares "
                 f"{schema!r}, and {consequence}"
             )
+    for key, consequence in _V5_ENTRY_KEYS.items():
+        if key in entry and not _at_least(schema, POLICY_SCHEMA_V5):
+            raise PolicyError(
+                f"{where}: {key!r}{_at_line(line_of(key))} needs 'schema: {POLICY_SCHEMA_V5}'; "
+                f"this document declares {schema!r}, and {consequence}"
+            )
     labels = _parse_data(entry.get("data"), where)
+    ceiling = _parse_max_attempts(entry, where, line_of)
 
     if has_decision:
         return _ActionPolicy(
@@ -1208,6 +1277,7 @@ def _parse_entry(
             mcp=mcp,
             controls=cited,
             data=MappingProxyType(labels),
+            max_attempts=ceiling,
         )
 
     rules = entry["rules"]
@@ -1223,7 +1293,84 @@ def _parse_entry(
         mcp=mcp,
         controls=cited,
         data=MappingProxyType(labels),
+        max_attempts=ceiling,
     )
+
+
+def _at_line(line: int | None) -> str:
+    """` on line N`, or nothing where the document's marks could not be recovered."""
+    return "" if line is None else f" on line {line}"
+
+
+def _parse_max_attempts(
+    entry: Mapping[Any, Any], where: str, line_of: Callable[[str], int | None]
+) -> int | None:
+    """The attempt ceiling, validated at load (SPEC-v0.7 §5.3).
+
+    **At load, and naming the key, the action and the line**, so a malformed ceiling fails the
+    policy rather than the execution: a document that cannot say how many attempts it permits is
+    a document nobody should deploy, and finding out at the fourth dispatch is finding out late.
+
+    `bool` is refused although Python makes it an `int` (`v0.1 §3.2`): `max_attempts: true` is a
+    typo for a number and not a ceiling of one. `0` is refused rather than read as "unlimited"
+    (`v0.7 §1.1`: no value of this key relaxes it) or as "never run" (`max_attempts` counts what
+    executes, and an action that may never execute is a `decision: deny`). There is no upper
+    bound: a very large ceiling is the operator's statement that they meant it.
+    """
+    if "max_attempts" not in entry:
+        return None
+    value = entry["max_attempts"]
+    at = _at_line(line_of("max_attempts"))
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PolicyError(
+            f"{where}: 'max_attempts'{at} must be an integer of at least 1, got "
+            f"{_type_name(value)} {value!r}. It counts the attempts that may execute on one "
+            "effect key, the first included; remove the key for no ceiling"
+        )
+    if value < 1:
+        raise PolicyError(
+            f"{where}: 'max_attempts'{at} must be an integer of at least 1, got {value!r}. "
+            "It counts the attempts that may execute on one effect key, the first included, so "
+            "there is no ceiling below 1; remove the key for no ceiling"
+        )
+    return value
+
+
+def _entry_key_line(text: str | None, action: str, key: str) -> int | None:
+    """The 1-based line `actions: <action>: <key>:` sits on, or `None`.
+
+    Composed on demand, on the refusal path only, rather than carried through the parse: the
+    loader hands `_parse_entry` a plain document, and PyYAML drops a node's marks the moment it
+    constructs one. Composing again reads the same text with the same loader and asks it for the
+    one mark the message needs, at the cost of a second parse of a document that is about to be
+    refused. `_StrictLoader.construct_mapping` never runs here, so the duplicate-key refusal is
+    unaffected either way: that one already fired, in `strict_load`, before this could.
+    """
+    if text is None:
+        return None
+    try:
+        root = yaml.compose(text, Loader=_StrictLoader)
+    except (yaml.YAMLError, ValueError, OverflowError):  # pragma: no cover - strict_load ran first
+        return None
+    node = _child(_child(root, "actions"), action)
+    found = None if node is None else _key_node(node, key)
+    return None if found is None else int(found.start_mark.line) + 1
+
+
+def _child(node: Any, key: str) -> Any:  # noqa: ANN401 - PyYAML ships no stubs
+    found = _key_node(node, key)
+    if found is None:
+        return None
+    return next(value for name, value in node.value if name is found)
+
+
+def _key_node(node: Any, key: str) -> Any:  # noqa: ANN401 - PyYAML ships no stubs
+    if not isinstance(node, yaml.MappingNode):
+        return None
+    for name, _ in node.value:
+        if isinstance(name, yaml.ScalarNode) and name.value == key:
+            return name
+    return None
 
 
 def _reject_v2_keys_under_v1(entry: Mapping[Any, Any], where: str, schema: str) -> None:
