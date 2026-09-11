@@ -2326,17 +2326,23 @@ class Engine:
             # refuse the claim. Delivering it inside the run, or on a thread the run can see,
             # would leave this row saying what `second_connection` already says (§12.2.11).
             listener = _Listener("answer")
+            held = _loopback_socket()  # bound, and never listening
             try:
                 connection = transport.HTTPConnection(_LOOPBACK, listener.port, timeout=_G12_WAIT)
-                _post(connection, close=False)
-                listener.stop_and_hold()
-                # The reconnect alone is the short wait: a held, unlistening port refuses at
-                # once on Linux and drops the SYN on macOS.
+                _post(connection)  # delivered, and the socket closed; the byte mark stays
+                listener.close()
+                # The reconnect goes to a port verify holds bound and never listens on, which is
+                # §12.2.1's mechanism: refused at once on Linux, the SYN dropped on macOS, and no
+                # other process can take it. The connection's target is nothing to do with what
+                # this row asserts, which is that an object that has already offered a byte does
+                # not claim when its **next** connect fails (§12.2.11).
+                connection.host, connection.port = _LOOPBACK, held.getsockname()[1]
                 connection.timeout = _G12_CONTROL_WAIT
                 result = attempt("reused", lambda: _post(connection))
             finally:
                 with suppress(OSError):
                     connection.close()
+                held.close()
                 listener.close()
             rows["reused"] = delivered_then(
                 "reused",
@@ -2397,7 +2403,6 @@ class Engine:
         finally:
             store.close()
 
-    #: G12's loopback address: the literal, never `localhost` and never `::1` (SPEC-v0.7 §8.9).
     # --- G13: divergence between the store's clock and this host's is named ----------------
 
     def g13(self) -> GuaranteeResult:
@@ -2669,6 +2674,7 @@ class Engine:
             store.close()
 
 
+#: G12's loopback address: the literal, never `localhost` and never `::1` (SPEC-v0.7 §8.9).
 _LOOPBACK: Final = "127.0.0.1"
 
 #: How long G12 waits on any socket, so a broken classifier fails red rather than hanging (§3.6).
@@ -2764,15 +2770,15 @@ class _Listener:
     - `hang`: reads the request and never answers, until the client goes away.
     - `answer`: reads the request and answers `200` with `Connection: close`.
 
-    `stop_and_hold()` ends the listener and keeps its port bound by a socket that does not listen,
-    so a reconnect is refused or dropped and the port cannot pass to another process in between.
+    Nothing here re-binds a port after serving it. A listener's port cannot be re-bound portably
+    while the connection it served is still closing: Linux answers `EADDRINUSE` even with
+    `SO_REUSEADDR`, which is what CI found after a clean macOS run (§12.2.11).
     """
 
     def __init__(self, mode: str) -> None:
         self.received = 0
         self.arrived = threading.Event()
         self._mode = mode
-        self._held: socket.socket | None = None
         self._socket = _loopback_socket()
         self._socket.listen(1)
         self._socket.settimeout(_G12_WAIT)
@@ -2812,34 +2818,11 @@ class _Listener:
         """
         self.arrived.wait(_G12_WAIT)
 
-    def stop_and_hold(self) -> None:
-        """Close the listener and bind its port again, not listening, before anything else can.
-
-        The re-bind uses `SO_REUSEADDR`, since the served connection's server side is in
-        `TIME_WAIT`. If it fails, somebody else took the port in between, and the row would send a
-        request to a service verify did not start: an internal error, never a result.
-        """
-        self._thread.join(_G12_WAIT * 2)
-        self._socket.close()
-        held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            held.bind((_LOOPBACK, self.port))
-        except Exception as taken:
-            held.close()
-            raise VerifyInternalError(
-                f"G12: verify could not hold port {self.port} after its listener closed: {taken}. "
-                "Another process took it; run verify again (SPEC-v0.7 §12.2.11)"
-            ) from taken
-        self._held = held
-
     def close(self) -> None:
         """Wait for the peer to finish, bounded, so `received` is final when it is read."""
         self._thread.join(_G12_WAIT * 2)
-        for opened in (self._socket, self._held):
-            if opened is not None:
-                with suppress(OSError):
-                    opened.close()
+        with suppress(OSError):
+            self._socket.close()
 
 
 def _shorten_the_read(listener: _Listener, connection: Any) -> Callable[[], None]:
@@ -2852,7 +2835,7 @@ def _shorten_the_read(listener: _Listener, connection: Any) -> Callable[[], None
     return pause
 
 
-def _post(connection: Any, *, close: bool = True, pause: Callable[[], None] | None = None) -> str:
+def _post(connection: Any, *, pause: Callable[[], None] | None = None) -> str:
     """The request every G12 row sends: a body, so there is a request byte to write."""
     try:
         connection.request(
@@ -2865,8 +2848,7 @@ def _post(connection: Any, *, close: bool = True, pause: Callable[[], None] | No
             pause()
         connection.getresponse().read()
     finally:
-        if close:
-            connection.close()
+        connection.close()
     return f"{APPROVER}-result"
 
 

@@ -2154,8 +2154,9 @@ effect key the record is `AMBIGUOUS`.
 
 1. **`byte_written`**: the listener reads at least one byte and resets.
 2. **`read_timeout`**: the listener reads the request and never answers, and the connection's read times out.
-3. **`reused`**: one connection delivers a request and is answered; the listener then closes and its port is
-   held by a socket that does not listen; the same connection's next request reconnects and fails.
+3. **`reused`**: one connection delivers a request and is answered, before the attempt and outside any run,
+   and is closed; its next request, inside the attempt, reconnects to a socket verify bound and never
+   listened on, and fails. No port is re-bound after being served: that is not portable (§12.2.11).
 4. **`second_connection`**: one connection delivers a request and is answered; a second connection, in the same
    executor run, fails to connect to a held, unlistening port.
 
@@ -2747,6 +2748,10 @@ timeout of one second, and it asserts `NotExecuted` chained from the connect's o
 says which mechanism the host used, and two runs on one host are identical. The cost is one
 second per verify run on macOS.
 
+**This is the mechanism G12 uses wherever it needs a connect to fail**: the control, the
+second-connection row and the reused row alike (§12.2.11). It is the only one that behaves the
+same on Linux and macOS and cannot race another process for the port.
+
 #### 12.2.2 "An opener the classifier did not build" was the wrong question
 
 **Closed: the stack heuristic is gone, and the register of §12.2.9 replaced it.** §2.3's first
@@ -2894,11 +2899,26 @@ foreign-socket record or the register. The review demonstrated it with a classif
 wherever they arise, which passed G12 and turned a read timeout after 97 delivered bytes into a
 `FAILED` record.
 
-The rows are in §8.9: a read timeout, a reused connection, and a second connection in one run. The
-reused row needs a port that refuses *and* cannot pass to another process, so the listener closes
-and verify immediately re-binds the port with `SO_REUSEADDR`, not listening; if that bind fails
-somebody else took the port, and the row is an internal error rather than a request sent to a
-service verify did not start. T230 carries one mutant per row.
+The rows are in §8.9: a read timeout, a reused connection, and a second connection in one run. T230
+carries one mutant per row.
+
+**The reused row needed a second mechanism, and the first one was not portable.** It needs a
+connection that has already delivered a request and whose *next* connect fails, on a port no other
+process can take. The first attempt closed the listener and re-bound its port with `SO_REUSEADDR`,
+not listening. On macOS that works. **On Linux it does not**: while the connection it served is
+still closing, the port is held by that connection and `bind` answers `EADDRINUSE` whatever
+`SO_REUSEADDR` says, so `ctrlrun verify` exited 3 on every Linux run, for every document, on a
+correct kernel. Nobody saw it because the reasoning and the measurement were both done on macOS;
+**CI found it on Linux after a clean macOS run and a clean review round**, which is the argument
+for the matrix and against a mechanism measured on one platform.
+
+There is no second mechanism now. The reused row reconnects to **the socket §12.2.1 already
+describes**: bound by verify, never listened on, refused at once on Linux and dropped on macOS, and
+held for the row's duration so no other process can take it. The connection's target has nothing to
+do with what the row asserts, which is that an object that has already offered a byte does not
+claim when its next connect fails, so pointing the reconnect at that socket costs the row nothing
+and removes both the race and the platform dependency. No port is ever re-bound after being
+served.
 
 **And the network guard was wider than its sentence** (the review's finding 7). It recorded any
 bind, so a UDP bind to `127.0.0.1:P` admitted a TCP connect to another process's listener on `P`,
