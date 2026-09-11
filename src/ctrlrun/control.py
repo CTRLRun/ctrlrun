@@ -150,6 +150,10 @@ _PRECONDITION_REASONS: Final = frozenset(
 #: unanswerable through `deny_approval`, and the approver says which of the two it was.
 _WITHDRAWN_BY: Final = "ctrlrun:precondition-not-recorded"
 
+#: The two outcomes of `_withdraw` that are this call's own writes. Anything else happened to
+#: the request rather than to it, and the refusal says so rather than claiming a withdrawal.
+_WITHDRAWALS: Final = frozenset({"denied", "spent"})
+
 #: Where `Control.from_file` keeps its store, and the env var that overrides it (SPEC §8).
 STATE_ENV_VAR: Final = "CTRLRUN_STATE"
 DEFAULT_STATE_DIR: Final = ".ctrlrun"
@@ -1919,8 +1923,23 @@ class Control:
         # `Control` is the only object holding both a policy and a provider, and the provider
         # protocol takes neither, so it travels the way a presented approval does. The
         # fingerprint travels beside it, by the same route and for the same reason.
-        with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
-            request = self._approvals.request(action, self._approval_ttl)
+        try:
+            with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
+                request = self._approvals.request(action, self._approval_ttl)
+        except Exception:
+            if fingerprint is not None:
+                # SPEC-v0.7 §6.4's residual, the half with no race in it: a provider that
+                # recorded a request and *then* raised leaves a row `Control` never learns the
+                # id of, so there is nothing to withdraw. The exception is the provider's and
+                # propagates; what the kernel owes is a line saying a fingerprint was computed,
+                # so an operator knows an unfingerprinted request may be sitting in the store.
+                _LOG.warning(
+                    "%s: the approval provider raised after a precondition fingerprint was "
+                    "computed; if it recorded a request before raising, that request carries no "
+                    "fingerprint and no presentation of it can compare anything (SPEC-v0.7 §6.4)",
+                    action.name,
+                )
+            raise
         # The request exists in the store from here, whatever happens next, so it is recorded
         # before anything is decided about it: a row with no `APPROVAL_REQUESTED` behind it is
         # evidence nobody can read.
@@ -1992,12 +2011,16 @@ class Control:
     def _recorded(self, request: ApprovalRequest, fingerprint: str) -> bool:
         """Did the fingerprint reach the record a later presentation will read? (§6.4)
 
-        Both halves, because either can lose it: the provider builds the `ApprovalRequest`, and
-        the store persists it. The read-back is the one that matters -- a presentation reads the
-        store and not this object -- and it is one `get_approval`, on the request pass only.
+        **The read-back, and only the read-back.** An earlier build also compared the returned
+        `ApprovalRequest`, and the review found that guard subsumed: a presentation reads the
+        store, so a returned object that differs from the row changes nothing a later pass sees,
+        and every way of losing the fingerprint that a presentation could meet -- a store
+        without the column, a provider that builds its own request -- is visible here. A guard
+        that can only fire where a later one would, with the same result, is documentation
+        rather than defence (`CONTRIBUTING.md`, the first of the four shapes of a false green).
+
+        One `get_approval`, on the request pass only.
         """
-        if request.precondition_fingerprint != fingerprint:
-            return False
         record = self._store.get_approval(request.request_id)
         return record is not None and record.request.precondition_fingerprint == fingerprint
 
@@ -2026,12 +2049,17 @@ class Control:
         withdrawn = self._withdraw(request)
         compared = _Compared()
         compared.at_recheck = fingerprint
+        outcome = (
+            f"the request is withdrawn ({withdrawn})"
+            if withdrawn in _WITHDRAWALS
+            else f"the request could not be withdrawn ({withdrawn})"
+        )
         _LOG.warning(
-            "%s: the precondition fingerprint was not recorded with approval request %s, so the "
-            "request is withdrawn (%s) and the action is refused (SPEC-v0.7 §6.4)",
+            "%s: the precondition fingerprint was not recorded with approval request %s, so %s "
+            "and the action is refused (SPEC-v0.7 §6.4)",
             action.name,
             request.request_id,
-            withdrawn,
+            outcome,
         )
         self._append(
             EventType.APPROVAL_INVALIDATED,
@@ -2055,7 +2083,7 @@ class Control:
         message = (
             f"{action.name}: the precondition fingerprint was not recorded with approval "
             f"request {request.request_id}, so no presentation of it could compare anything; "
-            f"the request is withdrawn ({withdrawn})"
+            f"{outcome}"
         )
         self._record(
             action,
@@ -2076,25 +2104,63 @@ class Control:
         record `check_consumable` refuses by `approval_denied`. A record that is no longer
         pending refuses that, so a grant that landed inside the window is spent instead: a
         consumed approval authorizes nothing either, and nothing was reserved or run for it.
-        Returns what was done, for the event.
+
+        **What it returns is what happened, and it reads the row back to find out.** An earlier
+        build reported the status it had read *before* its own failed `consume_approval`, and
+        said `consumed` whether this call had spent the grant or another caller had: a
+        presentation that won the race ran the action while the evidence said the request had
+        been withdrawn `granted`. The answers are distinct now -- `denied` and `spent` for this
+        call's own writes, `already_consumed` where somebody else got there first, and
+        `not_withdrawn:<what the row says>` where nothing was withdrawn -- and only the first
+        two let the refusal call itself a withdrawal.
+
+        **Every exception is caught, and the width is the point**, as in
+        `_spend_unneeded_approval` for the opposite reason. There the action proceeds because
+        there is nothing to protect; here it is refused whatever the store does, so catching a
+        driver error can only add a refusal and its evidence. Letting one out left no
+        `ACTION_DENIED`, no receipt, and an answerable request carrying no fingerprint, which is
+        the hole this method exists to close.
         """
         try:
             self._store.deny_approval(request.request_id, _WITHDRAWN_BY)
             return "denied"
-        except CTRLRunError as refused:
+        except Exception as refused:
             _LOG.info("%s could not be denied (%s); it is not pending", request.request_id, refused)
-        record = self._store.get_approval(request.request_id)
+        record = self._read_back(request)
         if record is not None and record.status is ApprovalStatus.GRANTED:
             try:
                 self._store.consume_approval(request.request_id, record.action_hash)
-                return "consumed"
-            except CTRLRunError as refused:
+                return "spent"
+            except Exception as refused:
                 _LOG.warning(
                     "%s was granted inside the window and could not be spent (%s)",
                     request.request_id,
                     refused,
                 )
-        return "unknown" if record is None else str(record.status)
+        found = self._read_back(request)
+        if found is None:
+            return "not_withdrawn:absent"
+        if found.status is ApprovalStatus.DENIED:
+            # Denied while this call was looking, by a human or by another withdrawal: the
+            # request is unanswerable, which is what this method is for.
+            return "denied"
+        if found.status is ApprovalStatus.CONSUMED:
+            return "already_consumed"
+        return f"not_withdrawn:{found.status}"
+
+    def _read_back(self, request: ApprovalRequest) -> ApprovalRecord | None:
+        """The record as it stands now, or `None` where there is none or it cannot be read.
+
+        A store that raises here leaves the caller saying `not_withdrawn:absent`, which is the
+        honest answer when nothing can be read: it claims no write.
+        """
+        try:
+            return self._store.get_approval(request.request_id)
+        except Exception as refused:
+            _LOG.warning(
+                "%s: the approval record could not be read back (%s)", request.request_id, refused
+            )
+            return None
 
     def _recheck(
         self,

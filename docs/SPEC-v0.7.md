@@ -1252,7 +1252,7 @@ effect: the reservation is held, the provider hangs, and nobody knows whether to
 |---|---|
 | The call names a provider, and it returns a canonicalizable mapping | the request is created carrying the fingerprint; `ApprovalRequired` as today |
 | The provider raises, returns a non-mapping, or returns something the canonicalizer refuses | **refused before any request exists**: `ActionDenied(reason="precondition_unavailable")`, a `denied` receipt keeping `decision: approve`, `ACTION_DENIED` with the reason; no human is asked |
-| The fingerprint is computed and the request comes back without it, or the store hands it back without it | **refused**: `ActionDenied(reason="precondition_missing")`, and the request is **withdrawn** so nothing can spend it later (§6.4); a `denied` receipt keeping `decision: approve` |
+| The fingerprint is computed and the store hands the request back without it | **refused**: `ActionDenied(reason="precondition_missing")`, and the request is **withdrawn** where this call can reach it, so no later presentation of it compares nothing (§6.4, and its residual); a `denied` receipt keeping `decision: approve` |
 
 Every refusal on the presenting pass appends `APPROVAL_INVALIDATED` with `data.reason` naming which, and
 the two fingerprints it compared, hashes only. The three reasons are distinct because a mismatch and an
@@ -1316,12 +1316,30 @@ request pass reads its own request back, through the object the provider returne
 - `APPROVAL_INVALIDATED` records the reason, which of the two withdrawals was used, and the
   fingerprint that was computed and not recorded.
 
-**The residual, stated.** `Control` learns that a request exists only when the provider returns, so an
-approval granted **and presented** inside `request()` is spent before there is anything to withdraw.
-Closing that needs a store call that records the request and its fingerprint together, and `StateStore`
-is frozen (`v0.6 §9.2`); it is a finding for the maintainer rather than a method this item adds. What
-holds either way: the request is unusable afterwards, and the evidence says a fingerprint was computed
-and never recorded.
+**The residual, stated, and it is wider than one race.** `Control` learns that a request exists only
+when the provider returns, so anything that happens to the row before that is beyond this refusal:
+
+- an approval granted **and presented** inside `request()` is spent before there is anything to
+  withdraw;
+- **a provider that records a request and then raises** leaves the same orphan with no race at all,
+  and `Control` never learns its id. The exception is the provider's and propagates; the kernel logs
+  a warning naming the action and saying a fingerprint was computed, which is all it can do;
+- a store that refuses the withdrawal itself leaves the request answerable. The action is still
+  refused, with its receipt and its `ACTION_DENIED`, and `APPROVAL_INVALIDATED` says
+  `not_withdrawn:<status>` rather than claiming a write (§6.2's table, and the reason strings of §9.2).
+
+So the claim this section makes is bounded: **a request this call can reach is withdrawn, and the
+evidence names what was done to it.** Closing the rest needs a store call that records the request and
+its fingerprint together, and `StateStore` is frozen (`v0.6 §9.2`); §12.5 records the alternative that
+would remove the *cause* rather than close the window, and why v0.7 does not take it.
+
+**What a withdrawal looks like to everything that reads denials.** It is a `deny_approval`, so
+`find_denied_request` returns it and the gateway's *"no is an answer"* pre-check (`v0.2 §6.10`) refuses
+every call for that action hash until the request expires, as though a human had said no. That is
+fail-closed, bounded by the TTL and traceable through the approver
+(`ctrlrun:precondition-not-recorded`), and it exports an in-process misconfiguration to a path that
+never asked for a fingerprint, which is the cost of using an existing store method rather than adding
+one.
 
 **What that costs at the gateway and the ACS hook, stated with its bound.** Both present the newest
 granted approval for the action's hash and create a new request only when they find none
@@ -1445,8 +1463,10 @@ account states and PHI stay out of the evidence; only the fingerprint does. The 
 exists in memory for as long as it takes to canonicalize and hash it, and T260 searches every written row,
 every JSONL line and every captured log record for a sentinel value the provider returned.
 
-The fingerprint goes to three places, all of them hashes: `approvals.precondition_fingerprint`,
-`APPROVAL_INVALIDATED`'s data on a refusal, and the receipt's two fields (§6.11). It is not added to the
+The fingerprint goes to four places, all of them hashes: `approvals.precondition_fingerprint`,
+`APPROVAL_INVALIDATED`'s data on a refusal, `APPROVAL_CONSUMED`'s data where a comparison was made
+(§6.11, which is how a resumed leg records the comparison its first leg made), and the receipt's two
+fields. This enumeration exists to be complete, so a fifth place is a change to this paragraph. It is not added to the
 webhook document (`ctrlrun.approval_request/v1` is unchanged), to `ctrlrun inspect`, or to anything a
 human is shown to decide with: a hash tells a human nothing about the world they are approving, and the
 human reads the world in their own systems.
@@ -1534,7 +1554,14 @@ document and report every receipt a released 0.6 wrote as `content_altered`. So,
   **type** and never its message, which quotes what it refused. The rows that link to it are told that it
   has no computable hash. A malformed value of a key a schema *declares*, a float among `controls` say, is
   a document that cannot be parsed at all and behaves as it does at 0.6.1, which the next bullet covers.
-- **`from_dict` never raises inside a store read, over the schema or over a key.** `receipts()` builds
+- **`from_dict` never raises inside a store read over the *schema* or over an added *key*. Over a
+malformed **value** of a key a schema declares, it still does, exactly as at 0.6.1**, and that is
+stated rather than smoothed over: a float among `controls` makes `_controls_of` raise out of
+`receipts()`, so one `UPDATE` blinds `ctrlrun receipts`, `--verify-chain`, `inspect`, `stats` and G11
+at once. v0.7 neither introduces nor widens it, and fixing it needs either a new name in
+`CHAIN_BREAKS` -- a closed set and a `v0.6 §6.5` surface -- or a reader that can walk raw rows, which
+is a shape this milestone does not have. It is deferred with that blast radius written down, and §12.5
+records it for the roadmap. `receipts()` builds
   every row with `Receipt.from_json` (`state.py:1211`), so a `from_dict` that raised on one tampered row
   would raise out of `receipts()` and blind every reader at once: the chain walk, `ctrlrun receipts`,
   `inspect`, `stats` and G11. An absent or unknown `schema`, or an extra key, is left to the hash to
@@ -2676,6 +2703,47 @@ grant that landed inside the window. **The residual is in §6.4**: an approval g
 inside `request()` is spent before `Control` knows the request exists, and closing that needs a store
 call that records the request and its fingerprint together. `StateStore` is frozen (`v0.6 §9.2`), so
 that is a finding for the maintainer and not a method this item adds. The honest test names it.
+
+**A withdrawal reports what happened to the request, not what was read before trying.** The first
+build of it returned the status from the read *before* its own failed `consume_approval`, and said
+`consumed` whether it had spent the grant or another caller had. The review drove a presentation that
+won that race: it **ran the action**, and the evidence said the request had been withdrawn `granted`
+while the row said `consumed`. So the row is read back after a failed write and the answers are
+distinct -- `denied`, `spent`, `already_consumed`, `not_withdrawn:<status>` -- and the refusal calls
+itself a withdrawal only for the first two, which are this call's own writes.
+
+**Every exception in the withdrawal is caught, on `_spend_unneeded_approval`'s argument pointed the
+other way.** A `sqlite3.OperationalError` out of `deny_approval` used to leave `_presented` with no
+`ACTION_DENIED`, no receipt and an answerable unfingerprinted request. There, catching everything is
+safe because the action proceeds and there is nothing to protect; here it is safe because the action is
+refused whatever the store does, so a wider catch can only add a refusal and its evidence. No other
+handler in this file may widen on either argument without making it again.
+
+**The object-side half of the recorded check was subsumed, and is gone.** It compared the
+`ApprovalRequest` the provider returned as well as the record read back. A presentation reads the
+store, so a returned object that differs from the row changes nothing a later pass sees, and both
+reachable causes (a store without the column, a provider that builds its own request) are visible in
+the read-back. Collapsed rather than kept as documentation, which is what `CONTRIBUTING.md`'s first
+shape asks for.
+
+**Rejected for v0.7: making the fingerprint recordable by a third-party provider.** The reachable cause
+of §6.4's residual is as much the frozen `ApprovalProvider` protocol as `StateStore`'s method set:
+`build_request` is package-internal and the context variable it reads is private, so a provider outside
+this package cannot record a fingerprint however careful it is, and the kernel can only detect that
+afterwards. Publishing either would remove the cause rather than close the window, which is the better
+shape of fix. It is not taken here because it is a public name on a frozen surface (`v0.1 §8`,
+`v0.5 §9`) and because the case is **unreachable with all three shipped providers**, which build their
+requests through `build_request`; v0.7 refuses the reachable symptom instead, and the decision is
+recorded so a later milestone can weigh the name rather than rediscover the argument.
+
+**Deferred, with its blast radius: a malformed value of a key a schema declares.** `_controls_of`
+raises out of `from_dict`, so one `UPDATE` putting a float among a receipt's `controls` blinds
+`ctrlrun receipts`, `receipts --verify-chain`, `inspect`, `stats` and G11 together, where the
+schema-level and added-key cases are each reported at their `seq` and leave every other row readable.
+v0.7 neither introduces nor widens it: 0.6.1 behaves the same. Fixing it needs a new name in
+`CHAIN_BREAKS`, which is a closed set on a `v0.6 §6.5` surface, or a reader that walks raw rows, and
+neither belongs in an item about preconditions. Item 6 carries it to the roadmap as a named item before
+v1.0, with this paragraph as its statement.
 
 **A provider outage in observe mode costs the duplicate refusal too.** Observe mode records a failed
 comparison and runs holding nothing, which is 0.6.1's observe path for any approval mismatch, so

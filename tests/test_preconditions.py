@@ -1875,7 +1875,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: (prevents, prevention; guarantees, guaranteed; ensures, ensured), exact forms for the rest.
 CLAIM = re.compile(
     r"\b(prevent\w*|close|closes|closed|closing|guarantee\w*|ensur\w*|opens nothing|cannot|"
-    r"blocks)\b",
+    # `nothing can …` and `no <thing> can …`: three of these arrived in one round, each true of
+    # the ordinary path and false of a residual the same document declares, and none of them
+    # used a word the pattern had. An absolute is a claim whether or not it is phrased as one.
+    r"blocks|nothing can|no \w+ can)\b",
     re.IGNORECASE,
 )
 #: "Mentions a precondition or a fingerprint", and the recheck that compares them: §8's own
@@ -1981,6 +1984,8 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
 ANOTHER_SUBJECT: dict[str, tuple[str, ...]] = {
     "CHANGELOG.md": (
         '"a moved fingerprint is refused" before the reservation, under `ctrlrun.guarantees/v3`.',
+        # "fail-closed" beside the approver string `ctrlrun:precondition-not-recorded`.
+        "as though a human had said no: fail-closed, bounded by the TTL",
     ),
     "SPEC-v0.7 §6": (
         "the alternative is a path that cannot recheck spending an approval that was granted "
@@ -1989,12 +1994,19 @@ ANOTHER_SUBJECT: dict[str, tuple[str, ...]] = {
         "passed**",
         # What closing §6.4's residual would take, which is a store method rather than a claim
         # about the recheck (review finding 1).
-        "Closing that needs a store call that records the request and its fingerprint together",
+        "Closing the rest needs a store call that records the request and its fingerprint",
+        # The bound the withdrawal claims, which is the opposite of an absolute.
+        "So the claim this section makes is bounded",
+        "That is fail-closed, bounded by the TTL and traceable through the approver",
     ),
     "SPEC-v0.7 §12.5": (
         # The same residual, and a module path that happens to contain the word "guarantees".
         "closing that needs a store call that records the request and its fingerprint together",
         "It went into `verify.guarantees.__all__` and not into §9.2",
+        # A third-party provider's capability, and a closed set of chain-break names: neither is
+        # a claim about what the recheck does.
+        "cannot record a fingerprint however careful it is",
+        "Fixing it needs a new name in `CHAIN_BREAKS`",
     ),
 }
 
@@ -2005,6 +2017,8 @@ def test_T268_the_pattern_fires_on_a_prevention_claim():
         "The recheck prevents a stale approval."
     ]
     assert _flagged("The precondition check blocks a stale world.")
+    assert _flagged("The request is withdrawn, so nothing can spend that fingerprint later.")
+    assert _flagged("No presentation can reach a precondition that moved.")
     assert not _flagged("The fingerprint narrows a window.")
 
 
@@ -2430,6 +2444,9 @@ class ThirdPartyProvider:
         self._store = store
         self._clock = clock
         self._on_request = on_request
+        #: The request it last built, which is the only handle a test has on a row `Control`
+        #: may never learn the id of.
+        self.last: Any = None
 
     def request(self, action: Action, ttl: timedelta = timedelta(minutes=15)):
         from ctrlrun.approval import ApprovalRequest, new_request_id
@@ -2443,6 +2460,7 @@ class ThirdPartyProvider:
             expires_at=now + ttl,
         )
         self._store.put_approval_request(request)
+        self.last = request
         if self._on_request is not None:
             self._on_request(request)
         return request
@@ -3097,4 +3115,288 @@ def test_R6_a_resumed_leg_takes_no_fingerprint_from_a_tampered_event(tmp_path, f
 
     assert receipt.precondition_at_recheck is None
     assert receipt.precondition_at_request == fingerprint(AT_REQUEST)
+    store.close()
+
+
+# =================================================================================================
+# Round two of the review: seven follow-ups, each a test before it was a fix.
+# =================================================================================================
+
+
+def _withdrawn_of(store, request_id: str) -> str | None:
+    events = invalidated(store, request_id)
+    assert events, f"no APPROVAL_INVALIDATED for {request_id}"
+    return events[0].data.get("withdrawn")
+
+
+def test_R2_1_a_presentation_that_wins_the_race_is_reported_as_what_happened(tmp_path, fake_clock):
+    """**Round-2 finding 1.** The withdrawal reported the status it read *before* its own
+    failed `consume_approval`, and said `consumed` whether it had spent the grant or somebody
+    else had. A presentation that won the race therefore ran the action while the evidence said
+    the request had been withdrawn `granted`, with the row saying `consumed`.
+
+    What is recorded is what happened: `already_consumed` where another caller spent it, and
+    `withdrawn` in the message only where one of the two writes was this one's."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    ran: list[str] = []
+    holder: list[Control] = []
+    provider = ThirdPartyProvider(
+        store,
+        fake_clock,
+        on_request=lambda request: store.grant_approval(request.request_id, "human:alice"),
+    )
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+    holder.append(control)
+    real_consume = store.consume_approval
+    raced: list[str] = []
+
+    def a_presentation_wins_the_race(approval_id: str, action_hash: str):
+        if not raced:
+            raced.append(approval_id)
+            with with_approval(approval_id):
+                holder[0].execute(
+                    an_action(holder[0]), Executor(lambda: ran.append("raced") or "done"), KEY
+                )
+        return real_consume(approval_id, action_hash)
+
+    store.consume_approval = a_presentation_wins_the_race  # type: ignore[method-assign]
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    assert ran == ["raced"], "the race did not happen, so this test proves nothing"
+    request_id = raced[0]
+    assert store.get_approval(request_id).status is ApprovalStatus.CONSUMED
+    assert _withdrawn_of(store, request_id) == "already_consumed", (
+        "the evidence claims a withdrawal this call did not make"
+    )
+    assert "is withdrawn" not in str(denied.value), str(denied.value)
+    assert "could not be withdrawn (already_consumed)" in str(denied.value)
+    store.close()
+
+
+def test_R2_1_a_request_that_was_never_persisted_is_not_reported_as_withdrawn(tmp_path, fake_clock):
+    """The same rule for the provider that records nothing: there is no row, so there is
+    nothing that was withdrawn, and the message says so rather than asserting a write."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+
+    class RecordsNothing(ThirdPartyProvider):
+        def request(self, action: Action, ttl: timedelta = timedelta(minutes=15)):
+            from ctrlrun.approval import ApprovalRequest, new_request_id
+
+            now = fake_clock()
+            self.last = ApprovalRequest(
+                request_id=new_request_id(),
+                action_hash=action.action_hash,
+                action=action,
+                created_at=now,
+                expires_at=now + ttl,
+            )
+            return self.last
+
+    provider = RecordsNothing(store, fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(an_action(control), Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    assert _withdrawn_of(store, provider.last.request_id) == "not_withdrawn:absent"
+    assert "is withdrawn" not in str(denied.value), str(denied.value)
+    assert "could not be withdrawn (not_withdrawn:absent)" in str(denied.value)
+    store.close()
+
+
+def test_R2_1_the_two_withdrawals_this_call_makes_are_named_apart(tmp_path, fake_clock):
+    """`denied` for a request still pending, `spent` for a grant that landed inside the window:
+    two different writes, and an operator reading the evidence can tell which happened."""
+    outcomes = {}
+
+    def granting(target):
+        return lambda request: target.grant_approval(request.request_id, "human:alice")
+
+    for label, grant in (("denied", False), ("spent", True)):
+        store = SQLiteStateStore(tmp_path / f"{label}.db", clock=fake_clock)
+        provider = ThirdPartyProvider(
+            store, fake_clock, on_request=granting(store) if grant else None
+        )
+        control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+        with pytest.raises(ActionDenied) as denied:
+            control.execute(an_action(control), Executor(), KEY, preconditions=World())
+        outcomes[label] = _withdrawn_of(store, provider.last.request_id)
+        assert f"withdrawn ({label})" in str(denied.value), str(denied.value)
+        store.close()
+
+    assert outcomes == {"denied": "denied", "spent": "spent"}
+
+
+def test_R2_2_a_store_error_during_the_withdrawal_still_refuses_and_records(
+    tmp_path, fake_clock, caplog
+):
+    """**Round-2 finding 2.** `deny_approval` raising a driver error carried it out of
+    `Control`: no `ACTION_DENIED`, no receipt, and the unfingerprinted request left answerable,
+    which a human could then grant and any no-provider call could spend.
+
+    The width is `_spend_unneeded_approval`'s argument in the other direction: there the action
+    proceeds because there is nothing to protect, here it is refused whatever the store did, so
+    catching everything can only add refusals and evidence."""
+    caplog.set_level(logging.DEBUG, logger="ctrlrun")
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    provider = ThirdPartyProvider(store, fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+
+    def the_store_is_locked(*args: Any, **kwargs: Any):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.deny_approval = the_store_is_locked  # type: ignore[method-assign]
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    assert _withdrawn_of(store, provider.last.request_id) == "not_withdrawn:pending"
+    assert "is withdrawn" not in str(denied.value), str(denied.value)
+    receipt = last_receipt(store, action)
+    assert receipt.result is ReceiptResult.DENIED
+    assert any(event.type is EventType.ACTION_DENIED for event in store.events())
+    store.close()
+
+
+def test_R2_3_a_provider_that_raises_after_recording_is_named_in_the_log(
+    tmp_path, fake_clock, caplog
+):
+    """**Round-2 finding 3.** A provider that records a request and *then* raises leaves the
+    same orphan with no race at all, and `Control` never learns the id, so there is nothing to
+    withdraw. The exception is the provider's and propagates; what the kernel owes is a line
+    naming the action and saying a fingerprint was computed, so an operator reading the log
+    knows an unfingerprinted request may be sitting in the store."""
+    caplog.set_level(logging.DEBUG, logger="ctrlrun")
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+
+    def records_then_raises(request):
+        raise RuntimeError("the webhook POST failed after the row was written")
+
+    provider = ThirdPartyProvider(store, fake_clock, on_request=records_then_raises)
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+
+    with pytest.raises(RuntimeError):
+        control.execute(an_action(control), Executor(), KEY, preconditions=World())
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "customer.delete" in record.getMessage()
+    ]
+    assert any("fingerprint" in message for message in warnings), warnings
+    assert store.get_approval(provider.last.request_id).status is ApprovalStatus.PENDING
+    store.close()
+
+
+def test_R2_4_the_gateway_reads_a_withdrawal_as_an_answer_until_it_expires(tmp_path, fake_clock):
+    """**Round-2 finding 4.** A withdrawal is a `deny_approval`, so `find_denied_request`
+    returns it and the gateway's *"no is an answer"* pre-check refuses every call for that
+    action hash until the request expires, as though a human had said no. Fail-closed, bounded
+    by the TTL, and traceable through the approver, and it is documented rather than left for
+    an operator to discover."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    gateway, _unused, forwarded = _gateway(store, fake_clock)
+    body, headers = _tools_call()
+    first = json.loads(gateway.handle(body, headers).body)
+    action = store.get_approval(first["error"]["data"]["request_id"]).request.action
+
+    class Bare(ThirdPartyProvider):
+        pass
+
+    withdrawing = Control(
+        Policy.from_yaml(GATEWAY_POLICY),
+        store,
+        Bare(store, fake_clock),
+        clock=fake_clock,
+    )
+    with pytest.raises(ActionDenied):
+        withdrawing.execute(action, Executor(), "delete:C123", preconditions=World())
+
+    denied_request = store.find_denied_request(action.action_hash)
+    assert denied_request is not None
+    assert store.get_approval(denied_request.request_id).approver.startswith("ctrlrun:")
+
+    response = json.loads(gateway.handle(body, headers).body)
+
+    assert response["error"]["code"] == -41003, response
+    assert forwarded == []
+    fake_clock.advance(timedelta(minutes=16))
+    after = json.loads(gateway.handle(body, headers).body)
+    assert after["error"]["code"] == -41002, "the bound did not lapse with the request"
+    store.close()
+
+
+def test_R2_deferred_a_malformed_value_of_a_declared_key_still_blinds_every_reader(
+    tmp_path, fake_clock
+):
+    """**Deferred, and pinned so it cannot drift quietly** (SPEC-v0.7 §6.11, §12.5).
+
+    A float among a receipt's `controls` is a malformed *value* of a key the schema declares, so
+    `_controls_of` raises out of `from_dict` and every reader of that store stops: `receipts`,
+    `--verify-chain`, `stats` and G11 together, from one `UPDATE`. The schema-level and
+    added-key cases are each named at their `seq` and leave every other row readable; this one
+    is not, and 0.6.1 behaves the same way. v0.7 neither introduces nor widens it, and a fix
+    needs a name in `CHAIN_BREAKS` (a closed set on a `v0.6 §6.5` surface) or a raw-row reader.
+
+    This test asserts today's behaviour, so whoever fixes it has to come here and say so.
+    """
+    from click.testing import CliRunner
+
+    from ctrlrun.cli import main as cli
+
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database, clock=fake_clock)
+    control = Control(Policy.from_yaml(POLICY), store, clock=fake_clock)
+    for customer in ("C1", "C2", "C3"):
+        control.execute(an_action(control, customer, "customer.read"), Executor(), None)
+    store.close()
+    _tamper_one(database, 2, lambda document: {**document, "controls": [1.5]})
+
+    reopened = SQLiteStateStore(database, clock=fake_clock)
+    with pytest.raises(InvalidArgument):
+        reopened.receipts()
+    reopened.close()
+
+    url = f"sqlite://{database}"
+    for arguments in (["receipts"], ["receipts", "--verify-chain"]):
+        result = CliRunner().invoke(cli.main, [*arguments, "--store-url", url])
+        assert result.exit_code != 0, (arguments, result.output)
+        assert "ctr_" not in result.output, "a row of the two that are intact was listed"
+
+
+def test_R2_2_a_store_error_during_the_withdrawal_still_refuses_and_records_when_the_grant_cannot_be_spent(  # noqa: E501
+    tmp_path, fake_clock
+):
+    """The other half of finding 2: the grant landed inside the window, so the withdrawal is a
+    `consume_approval`, and that is the call the store refuses with a driver error. The action
+    is still refused and recorded, and the evidence says the grant is still standing."""
+    store = SQLiteStateStore(tmp_path / "state.db", clock=fake_clock)
+    provider = ThirdPartyProvider(
+        store,
+        fake_clock,
+        on_request=lambda request: store.grant_approval(request.request_id, "human:alice"),
+    )
+    control = Control(Policy.from_yaml(POLICY), store, provider, clock=fake_clock)
+
+    def the_store_is_locked(*args: Any, **kwargs: Any):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.consume_approval = the_store_is_locked  # type: ignore[method-assign]
+    action = an_action(control)
+
+    with pytest.raises(ActionDenied) as denied:
+        control.execute(action, Executor(), KEY, preconditions=World())
+
+    assert denied.value.reason == MISSING
+    assert _withdrawn_of(store, provider.last.request_id) == "not_withdrawn:granted"
+    assert "is withdrawn" not in str(denied.value), str(denied.value)
+    assert last_receipt(store, action).result is ReceiptResult.DENIED
+    assert store.get_approval(provider.last.request_id).status is ApprovalStatus.GRANTED
     store.close()

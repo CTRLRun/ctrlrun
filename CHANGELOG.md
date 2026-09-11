@@ -45,9 +45,15 @@ any change to one appears here.
   action with `ActionDenied(reason="precondition_unavailable")` before any human is asked, and a
   fingerprint that is computed and then **not recorded** (a store without the column, a third-party
   `ApprovalProvider` building its own request) refuses with
-  `ActionDenied(reason="precondition_missing")` and **withdraws the request it left behind**, so
-  nothing can grant it and spend it unchecked later. `ALLOW`, `DENY` and `Control.resume` never call
-  the provider; observe mode compares, records and runs.
+  `ActionDenied(reason="precondition_missing")` and **withdraws the request it left behind** where
+  this call can reach it: denied while it is pending, spent where a grant landed inside the window,
+  and `not_withdrawn:<status>` in the evidence where neither write was possible (the provider raised
+  after recording, or the store refused). §6.4 states that bound and its residual. **A withdrawal is
+  a `deny_approval`**, so `find_denied_request` returns it and the gateway's "no is an answer"
+  pre-check refuses every call for that action hash until the request expires, as though a human had
+  said no: fail-closed, bounded by the TTL, and traceable through the approver
+  `ctrlrun:precondition-not-recorded`. `ALLOW`, `DENY` and `Control.resume` never call the provider;
+  observe mode compares, records and runs.
   The comparison is a network call, so it runs outside the atomic reservation write, and a change
   that lands after the comparison and before the reservation is not refused: T261b opens that
   window and asserts exactly that. Raw provider output reaches no receipt, event, log line or
