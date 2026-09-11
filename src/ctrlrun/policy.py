@@ -564,12 +564,36 @@ class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # PyYAML ships no s
 
 
 def strict_load(text: str, source: str) -> Any:  # noqa: ANN401 - any YAML scalar or node
-    """`yaml.safe_load`, refusing a repeated key. The one loader for every CTRLRun document."""
+    """`yaml.safe_load`, refusing a repeated key. The one loader for every CTRLRun document.
+
+    **`yaml.YAMLError` is not the whole contract.** PyYAML converts a scalar before it has
+    decided the document is well formed, and three conversions raise the interpreter's own
+    exception rather than a `YAMLError`:
+
+    - `"\\U0001f600"` with too many digits overflows converting the codepoint to a C int,
+      which is `OverflowError`. The fuzzer found this one after 174,380 executions;
+    - `"\\U00110000"` is a legal-looking escape above the Unicode maximum, and `chr()` says
+      `ValueError`;
+    - `2026-99-99` is a `ValueError` from `datetime`, and is the one that matters: a mistyped
+      date is a thing a person writes in a real policy, not a thing a fuzzer invents.
+
+    Each was a crash where the caller was promised a refusal, and `Policy.from_yaml` says
+    "anything malformed raises `PolicyError`" without qualification. The document is refused
+    either way, so nothing unsafe was ever admitted; what leaked was the exception type, and a
+    caller that catches `PolicyError` around a policy load would not have caught these.
+
+    `ValueError` and `OverflowError` are therefore refusals too. The catch is deliberately not
+    `Exception`: this function calls one thing, so a `MemoryError` or a `KeyboardInterrupt`
+    here is not the document's fault and must not be reported as one. `RecursionError` is left
+    uncaught for the same reason, and `fuzz/properties.py` says so where it excludes it.
+    """
     try:
         # `_StrictLoader` derives from `SafeLoader`, so this constructs no arbitrary object.
         return yaml.load(text, Loader=_StrictLoader)
     except yaml.YAMLError as exc:
         raise PolicyError(f"{source}: not valid YAML: {exc}") from exc
+    except (ValueError, OverflowError) as exc:
+        raise PolicyError(f"{source}: not valid YAML: {type(exc).__name__}: {exc}") from exc
 
 
 @dataclass(frozen=True)
