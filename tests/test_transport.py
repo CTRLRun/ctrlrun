@@ -1679,6 +1679,76 @@ def test_T226_the_proxy_is_read_when_the_call_starts_not_when_it_fails(monkeypat
     assert not isinstance(raised, NotExecuted), raised
 
 
+def test_T226_the_forwarder_marks_the_run_when_its_write_fails_part_way(refused):
+    """The other half of the forwarder's mark: the request was going out when it failed.
+
+    A peer that reads nothing and resets, and a body larger than the buffers, so httpx raises
+    while writing. Preconditions, asserted: the peer's socket received a byte, the forwarder
+    reports `AFTER_REQUEST_SENT`, and the same refused connection alone in a run is claimed.
+    """
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    assert isinstance(_raised(lambda: call("http.client", refused)), NotExecuted), "control"
+    observations: list[Any] = []
+
+    with peer(peek_then_reset, rcvbuf=4096) as server:
+        forwarder = gateway_transport.HTTPForwarder(
+            f"http://{LOOPBACK}:{server.port}/mcp", WAIT, httpx
+        )
+
+        def write_then_connect() -> int:
+            observed, _, _, _ = forwarder(b"x" * (32 * 1024 * 1024), {}, fresh=True)
+            observations.append(observed)
+            return call("http.client", refused)
+
+        try:
+            raised = _raised(write_then_connect)
+        finally:
+            forwarder.close()
+        server.join()
+
+    assert len(server.received) >= 1, "precondition: the peer's socket received a byte"
+    assert observations == [transport.Transport.AFTER_REQUEST_SENT], observations
+    assert isinstance(raised, ConnectionRefusedError), raised
+
+
+def test_T226_the_forwarder_reads_the_proxy_when_the_call_starts(monkeypatch):
+    """The forwarder's half of the same rule: its client takes its proxies when it is built.
+
+    Preconditions, asserted: the proxy received the `CONNECT` line, and the environment lost its
+    proxy while the call was in flight, which read at the moment of the exception would make the
+    written line invisible.
+    """
+    httpx = pytest.importorskip("httpx", reason="the gateway extra is not installed")
+    from ctrlrun.gateway import transport as gateway_transport
+
+    cleared: dict[str, Any] = {}
+
+    def connect_then_vanish(proxy: Peer, conn: socket.socket) -> None:
+        proxy.received += _read_request(conn)
+        for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ.pop(name, None)
+        cleared["at"] = dict(os.environ)
+        conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        _linger_reset(conn)
+
+    with peer(connect_then_vanish) as proxy:
+        _httpx_through(f"http://{LOOPBACK}:{proxy.port}", monkeypatch)
+        forwarder = gateway_transport.HTTPForwarder(
+            "https://target.ctrlrun.invalid/mcp", WAIT, httpx
+        )
+        try:
+            observed, _, _, _ = forwarder(b'{"jsonrpc":"2.0","id":1}', {}, fresh=True)
+        finally:
+            forwarder.close()
+        proxy.join()
+
+    assert proxy.received.startswith(b"CONNECT target.ctrlrun.invalid:443"), "precondition"
+    assert not any(name.lower().endswith("_proxy") for name in cleared["at"]), "precondition"
+    assert observed is transport.Transport.AFTER_REQUEST_SENT
+
+
 def test_T226_the_httpx_variant_marks_the_run_and_consults_it(refused):
     """One register for both variants: a request delivered through httpx, then a refused
     `HTTPConnection` in the same run, is not claimed; and a request delivered through the
@@ -2029,6 +2099,23 @@ def test_register_a_send_outside_any_run_marks_every_open_run(refused):
 
     assert not isinstance(outcome["raised"], NotExecuted), outcome["raised"]
     assert isinstance(outcome["raised"], ConnectionRefusedError)
+
+
+def test_register_no_run_outlives_its_executor(refused):
+    """The set of open runs is what a stray send marks, so a run left in it would go on being
+    marked, and the set would grow for the life of the process. Precondition: it is empty before,
+    holds exactly this run during, and is empty after, including when the executor raises."""
+    from ctrlrun.effect import _OPEN_RUNS
+
+    assert not _OPEN_RUNS, "precondition: no run is open before this test"
+    seen: list[int] = []
+    in_run(lambda: seen.append(len(_OPEN_RUNS)))
+    assert seen == [1], seen
+    assert not _OPEN_RUNS
+
+    _raised(lambda: call("http.client", refused))
+
+    assert not _OPEN_RUNS
 
 
 def test_register_the_sibling_thread_race_is_what_the_docstring_says_it_is(refused):
