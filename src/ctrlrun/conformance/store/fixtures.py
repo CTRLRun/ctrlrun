@@ -22,7 +22,7 @@ import shutil
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +30,7 @@ from ...action import Action
 from ...effect import DEFAULT_LEASE, EffectRecord, EffectState, Reservation
 from ...errors import NotExecuted
 from ...receipt import Event
-from ...state import DelegationRecord, StateStore
+from ...state import ClockSkew, DelegationRecord, StateStore
 from .backends import SQLiteBackend, StoreBackend
 
 
@@ -383,6 +383,68 @@ class _UpsertsADelegation(_Wrapped):
         self._inner.put_delegation(record)
 
 
+# --- clock (SPEC-v0.7 §8 T214) ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ClockSkewLookAlike:
+    """Every field `ClockSkew` has, and not `ClockSkew`. `Control` ignores it by design."""
+
+    skew: timedelta
+    bound: timedelta
+    threshold: timedelta
+    measured_at: datetime
+    trigger: str
+
+    @property
+    def exceeded(self) -> bool:
+        return abs(self.skew) > self.threshold + self.bound
+
+
+class _SkewLookAlike(_Wrapped):
+    """Exposes its measurement as a look-alike type rather than `ctrlrun.state.ClockSkew`."""
+
+    @property
+    def clock_skew(self) -> Any:
+        return _ClockSkewLookAlike(
+            timedelta(seconds=30), timedelta(0), timedelta(seconds=1), datetime.now(UTC), "open"
+        )
+
+
+class _SkewReadRaises(_Wrapped):
+    """Exposes the attribute, and reading it raises."""
+
+    @property
+    def clock_skew(self) -> ClockSkew | None:
+        raise RuntimeError("the measurement could not be read")
+
+
+def _pinned(skew: timedelta) -> ClockSkew:
+    return ClockSkew(
+        skew=skew,
+        bound=timedelta(0),
+        threshold=timedelta(seconds=1),
+        measured_at=datetime.now(UTC),
+        trigger="open",
+    )
+
+
+class _SkewNeverReported(_Wrapped):
+    """A detector that never fires: every measurement says the clocks agree."""
+
+    @property
+    def clock_skew(self) -> ClockSkew | None:
+        return _pinned(timedelta(0))
+
+
+class _SkewAlwaysReported(_Wrapped):
+    """A detector that always fires: every measurement says the clocks are an hour apart."""
+
+    @property
+    def clock_skew(self) -> ClockSkew | None:
+        return _pinned(timedelta(hours=1))
+
+
 # --- the declarations ------------------------------------------------------------------------
 
 
@@ -575,6 +637,30 @@ FIXTURES: Sequence[Fixture] = (
         {"delegation": "insert-not-upsert"},
         _wrapping("upserts-a-delegation", _UpsertsADelegation),
         because="upserted on a duplicate id",
+    ),
+    Fixture(
+        "skew-look-alike",
+        {"clock": "skew-measured"},
+        _wrapping("skew-look-alike", _SkewLookAlike),
+        because="not a ctrlrun.state.ClockSkew",
+    ),
+    Fixture(
+        "skew-read-raises",
+        {"clock": "skew-measured"},
+        _wrapping("skew-read-raises", _SkewReadRaises),
+        because="reading clock_skew raised",
+    ),
+    Fixture(
+        "skew-never-reported",
+        {"clock": "skew-measured"},
+        _wrapping("skew-never-reported", _SkewNeverReported),
+        because="was not reported",
+    ),
+    Fixture(
+        "skew-always-reported",
+        {"clock": "skew-measured"},
+        _wrapping("skew-always-reported", _SkewAlwaysReported),
+        because="aligned with the store's was reported",
     ),
     Fixture(
         "falsely-declares-no-url",

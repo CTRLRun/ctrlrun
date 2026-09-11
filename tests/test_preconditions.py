@@ -2120,9 +2120,7 @@ def test_T269_G16_fails_where_the_fingerprint_is_lost_after_the_request(monkeypa
         reads.append(approval_id)
         if record is None or len(reads) <= 1:
             return record
-        return replace(
-            record, request=replace(record.request, precondition_fingerprint=None)
-        )
+        return replace(record, request=replace(record.request, precondition_fingerprint=None))
 
     monkeypatch.setattr(SQLiteStateStore, "get_approval", losing)
 

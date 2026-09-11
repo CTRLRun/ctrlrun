@@ -19,7 +19,8 @@ from typing import Final
 #: SPEC-v0.6 §9.5 — `v2` adds G11 (§6.6). The version moves because the catalogue is a closed
 #: set a report is read against, and a reader that met an id it did not know would have no way
 #: to tell a new guarantee from a corrupted line.
-#: SPEC-v0.7 §9.4: `v3` is G1 to G16, and the version moves once for all five of v0.7's.
+#: SPEC-v0.7 §9.4: `v3` is G1 to G16. It moves once, with G13, and the other four join it as
+#: their items land; nothing is released in between.
 CATALOGUE: Final = "ctrlrun.guarantees/v3"
 
 
@@ -49,6 +50,18 @@ GUARANTEES: Final = (
     Guarantee("G9", "delegation cannot escalate", ("v0.3 §10 T76", "v0.3 §10 T81", "v0.3 §10 T75")),
     Guarantee("G10", "unknown exception is ambiguous", ("v0.1 §5.5", "v0.1 §7 T1", "v0.1 §7 T8")),
     Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
+    Guarantee(
+        "G13",
+        "clock divergence is named",
+        (
+            "v0.1 §5.3 E3",
+            "v0.7 §8 T209",
+            "v0.7 §8 T210",
+            "v0.7 §8 T211",
+            "v0.7 §8 T212",
+            "v0.7 §8 T213",
+        ),
+    ),
     Guarantee(
         "G16",
         # Not "a moved precondition is refused": a precondition that moves after the comparison
@@ -139,6 +152,13 @@ GRANT_ALREADY_EXPIRED: Final = (
     "an injected clock"
 )
 
+#: G13's one N/A (SPEC-v0.7 §8.9). True of every run it appears on: SQLite has no clock of its
+#: own, so there is nothing for the application's to diverge from.
+STORE_READS_APPLICATION_CLOCK: Final = (
+    "the store verify was given reads only the application's clock, so there is no second clock "
+    "to diverge from; pass --store-url postgresql://… to grade this"
+)
+
 #: `--only` (§4.6).
 NOT_SELECTED: Final = "not selected"
 
@@ -166,6 +186,7 @@ __all__ = [
     "NO_GRANT_MATCHES",
     "PER_CONNECTION_BACKEND",
     "PROCESSES",
+    "STORE_READS_APPLICATION_CLOCK",
     "SYNTHETIC_PREFIX",
     "Guarantee",
 ]

@@ -15,6 +15,7 @@ Two rules every case obeys, both `v0.4 §1.3`'s positive-control rule one layer 
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 import subprocess
@@ -39,7 +40,14 @@ from ...errors import (
 )
 from ...policy import Decision
 from ...receipt import Event, EventType, Receipt, ReceiptResult
-from ...state import DelegationRecord, StateStore
+from ...state import (
+    ClockSkew,
+    DelegationRecord,
+    StateStore,
+    _decisive,
+    _explained_by_alignment,
+    _wider_margin,
+)
 from ..report import CaseResult, SuiteStatus
 from .backends import StoreBackend, store_from_url
 
@@ -1802,6 +1810,177 @@ def delegation_grant_json(backend: StoreBackend, processes: int = CONTENDERS) ->
     return passed("grant-json-round-trip", title)
 
 
+# --- clock (SPEC-v0.7 §3, §8 T214) -----------------------------------------------------------
+
+#: The one reason this case is `not_applicable`, and only where the attribute is **absent**. A
+#: sentence true of every backend that reaches it, a third-party store with a clock it does not
+#: expose included.
+NO_CLOCK_MEASUREMENT = (
+    "this backend exposes no clock measurement; SQLite and the in-memory store read only the "
+    "application's clock and have none to expose"
+)
+
+#: How far past the threshold the case injects skew: §8 T209's five seconds.
+SKEW_MARGIN = timedelta(seconds=5)
+
+_ABSENT = object()
+
+
+def _exposes_clock_skew(store: StateStore) -> bool:
+    """Is the optional attribute there at all? Asked without calling it, so a property that
+    raises `AttributeError` is a read that raised and not an absent attribute; and asked through
+    `getattr` too, so a forwarding wrapper that does reach a real one counts as exposing it."""
+    if inspect.getattr_static(store, "clock_skew", _ABSENT) is not _ABSENT:
+        return True
+    try:
+        getattr(store, "clock_skew")  # noqa: B009 - not on the StateStore protocol
+    except AttributeError:
+        return False
+    except Exception:
+        return True
+    return True
+
+
+def _clock_skew_of(store: StateStore) -> tuple[ClockSkew | None, str | None]:
+    """The store's measurement, or the reason it is unusable. `Control` would ignore anything
+    but a `ClockSkew` or `None` silently in production, so the suite is where its author finds
+    out."""
+    try:
+        value = getattr(store, "clock_skew")  # noqa: B009 - not on the StateStore protocol
+    except Exception as broke:
+        return None, (
+            f"reading clock_skew raised {type(broke).__name__}: {broke}; Control ignores such a "
+            "store, so its skew would never be reported"
+        )
+    if value is None or isinstance(value, ClockSkew):
+        return value, None
+    return None, (
+        f"clock_skew is a {type(value).__name__}, not a ctrlrun.state.ClockSkew; Control ignores "
+        "it, so this store's skew would never be reported"
+    )
+
+
+#: How many times the case may align again, or widen an injection, before it says it could not
+#: establish divergence on this link. Every loop in this suite is bounded.
+SKEW_ATTEMPTS = 3
+
+
+def _host_clock_shifted(by: timedelta) -> Callable[[], datetime]:
+    """The host's clock, shifted. A function and not a lambda closing over a loop variable: the
+    stores here are opened inside loops, and a closure would hand the last shift to all of them.
+    """
+    return lambda: datetime.now(UTC) + by
+
+
+def _unestablished(what: str, measured: ClockSkew | None) -> str:
+    """The reason for a link the case could not outrun. It names the link, not the store: a
+    silence inside a conforming store's own bound is not a finding about it."""
+    bound = "unknown" if measured is None else str(measured.bound)
+    return (
+        f"could not establish {what} in {SKEW_ATTEMPTS} attempts: the store's measurements "
+        f"carry a bound of {bound}, half their round trip, and the case could not make its "
+        "injection decisive against it. This is a property of the link to the store, not a "
+        "report the store failed to make; grade it over a faster one"
+    )
+
+
+@case("skew-measured", "a store with its own clock names divergence from the application's")
+def clock_skew_measured(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """SPEC-v0.7 §3, §8 T214. An injected skew is reported and an aligned clock is not.
+
+    **Aligned, not raw.** The case first measures the store against the host's real clock and
+    then aligns by the offset it found, so a CI runner whose clock has drifted grades the store
+    and not the runner. Both halves are asserted, because a detector that always fires passes
+    the first and one that never fires passes the second.
+
+    **Sized against the bound, never fixed.** A conforming store reports only past
+    `threshold + bound`, so an injection is graded only once it is decisive against the bound
+    the shifted store measured and the aligning measurement's own doubt; until then the case
+    widens it and opens again. A report on the aligned clock that the aligning measurement's
+    doubt could explain is met by aligning again. A link it cannot outrun in `SKEW_ATTEMPTS` is
+    reported as that, by name, and never as a store that stayed silent.
+
+    The suite's only seam is `open_with_clock`, and that is enough: the skew is injected on the
+    application's side, which is the direction an operator's hosts get wrong.
+    """
+    case_id, title = "skew-measured", clock_skew_measured.title
+    probe = backend.open()
+    if not _exposes_clock_skew(probe):
+        return na(case_id, title, NO_CLOCK_MEASUREMENT)
+
+    first: ClockSkew | None = None
+    aligned: ClockSkew | None = None
+    for _ in range(SKEW_ATTEMPTS):
+        first, problem = _clock_skew_of(probe)
+        if problem is not None:
+            return failed(case_id, title, problem)
+        if first is None:
+            return failed(
+                case_id,
+                title,
+                "clock_skew is None after open: the store retained no measurement, and a "
+                "detector that never ran cannot be graded",
+            )
+        at = first.skew
+        aligned, problem = _clock_skew_of(backend.open_with_clock(_host_clock_shifted(-at)))
+        if problem is not None:
+            return failed(case_id, title, problem)
+        if aligned is None:
+            return failed(case_id, title, "an aligned store retained no measurement at open")
+        if not aligned.exceeded:
+            break
+        if not _explained_by_alignment(aligned, first.bound):
+            return failed(
+                case_id,
+                title,
+                f"an application clock aligned with the store's was reported as {aligned.skew} "
+                f"off (bound {aligned.bound}, threshold {aligned.threshold}, alignment within "
+                f"{first.bound}): a detector that fires on an aligned clock is one nobody keeps",
+            )
+        probe = backend.open()
+    else:
+        return failed(case_id, title, _unestablished("an aligned clock", aligned))
+    assert first is not None
+    offset, alignment, threshold = first.skew, first.bound, first.threshold
+
+    for direction, sign in (("ahead of", 1), ("behind", -1)):
+        margin = SKEW_MARGIN
+        measured: ClockSkew | None = None
+        for _ in range(SKEW_ATTEMPTS):
+            injected = sign * (threshold + margin)
+            opened = backend.open_with_clock(_host_clock_shifted(injected - offset))
+            measured, problem = _clock_skew_of(opened)
+            if problem is not None:
+                return failed(case_id, title, problem)
+            if measured is None:
+                return failed(
+                    case_id,
+                    title,
+                    f"an application clock {direction} the store's by {abs(injected)} was not "
+                    "reported (measured None: the store retained no measurement at open)",
+                )
+            if _decisive(injected, measured, alignment):
+                break
+            margin = max(margin, _wider_margin(measured, alignment, SKEW_MARGIN))
+        else:
+            return failed(case_id, title, _unestablished(f"a clock {direction} it", measured))
+        if not measured.exceeded:
+            return failed(
+                case_id,
+                title,
+                f"an application clock {direction} the store's by {abs(injected)} was not "
+                f"reported (measured {measured.skew} within {measured.bound})",
+            )
+        if (measured.skew > timedelta(0)) is not (sign > 0):
+            return failed(
+                case_id,
+                title,
+                f"an application clock {direction} the store's was measured as {measured.skew}; "
+                "a positive skew means the application is ahead",
+            )
+    return passed(case_id, title)
+
+
 # --- clock plumbing -------------------------------------------------------------------------
 
 
@@ -1838,6 +2017,7 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         continuation_extend_lease,
     ),
     "delegation": (delegation_insert, delegation_revoke, delegation_grant_json),
+    "clock": (clock_skew_measured,),
 }
 
 

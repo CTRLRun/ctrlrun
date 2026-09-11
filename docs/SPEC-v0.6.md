@@ -1818,6 +1818,10 @@ A fixture that fails nothing is a failure; a fixture whose named suite passed is
 exception of `reservation`'s cross-process case for `InMemoryStateStore`, which is
 `not_applicable` with §2.4's reason. No other N/A is accepted, from either backend.
 
+*Amended by `SPEC-v0.7.md` §8 T214 (its §9.6, item 7):* the `clock` suite's `skew-measured` case
+is also `not_applicable` on both, with T214's reason, because neither has a clock of its own to
+measure. That is the one further N/A accepted.
+
 #### T142 — The report refuses a degenerate run
 Every case `not_applicable` → `report.ok` is `False`. `run(backend, only=…)` naming a case that is
 not in the registry **raises**, rather than silently running everything or nothing.

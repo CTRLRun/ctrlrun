@@ -15,6 +15,20 @@ any change to one appears here.
   3.11, 3.12, 3.13 and 3.14, and the package classifiers name all four. The floor is unchanged:
   `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
   changed; the one test fix is below.
+- **Clock-skew detection** (SPEC-v0.7 §3, item 1). `PostgresStateStore` measures its server's
+  clock against the application's at open, and again when an expired lease is declared
+  `AMBIGUOUS` (at most once per `DEFAULT_LEASE`), in one round trip whose half is the
+  measurement's bound, so latency alone is never reported as skew. It keeps its latest
+  measurement as the optional, read-only `clock_skew` attribute, a `ctrlrun.state.ClockSkew`;
+  `Control` reads it at the start of every `execute` and `resume` and after an `AmbiguousEffect`,
+  and appends one new event type, `CLOCK_SKEW_DETECTED`, for a measurement past
+  `clock_skew_threshold` (default one second, at most `DEFAULT_LEASE`, and no value switches it
+  off). **It observes and reports, and changes no decision**: every lease is still evaluated
+  against the application clock exactly as at 0.6.1, no reservation outcome changes, and a
+  measurement that fails is logged and changes nothing. Verify gains G13, graded against a
+  Postgres `--store-url` and `N/A` on SQLite, and the catalogue moves to
+  `ctrlrun.guarantees/v3`; the store conformance suite gains a `clock` case, `not_applicable`
+  on SQLite and the in-memory store because neither has a clock of its own.
 - **Precondition fingerprints** (`docs/SPEC-v0.7.md` §6, §7). `@protect(..., preconditions=provider)`
   and `Control.execute(..., preconditions=provider)`, where the provider takes the `Action` and
   returns a mapping of the state an approval depends on. A precondition fingerprint **narrows**
@@ -78,6 +92,11 @@ any change to one appears here.
   comparison its first leg made.
 
 ### Fixed
+
+- **`PostgresStateStore.events()` read a missing `action_id` back as the string `"None"`.** An
+  event about no action (the three `DELEGATION_*` types, and now `CLOCK_SKEW_DETECTED` reported at
+  open) named a proposal called "None" on Postgres alone; SQLite and the in-memory store returned
+  `None`. It now returns `None` on all three.
 
 - **The migration tests' release fixtures could not build a venv on some interpreters.**
   `venv.create` copies the interpreter by default, and a copied binary from a shared-libpython

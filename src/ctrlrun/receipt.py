@@ -150,7 +150,8 @@ class ReceiptResult(StrEnum):
 
 
 class EventType(StrEnum):
-    """The closed set of event types in SPEC-v0.1 §6.2, extended by SPEC-v0.2 §2.5."""
+    """The closed set of event types in SPEC-v0.1 §6.2, extended by SPEC-v0.2 §2.5, SPEC-v0.3
+    §7 and SPEC-v0.7 §3.6."""
 
     ACTION_PROPOSED = "ACTION_PROPOSED"
     POLICY_EVALUATED = "POLICY_EVALUATED"
@@ -186,6 +187,12 @@ class EventType(StrEnum):
     DELEGATION_CREATED = "DELEGATION_CREATED"
     DELEGATION_REVOKED = "DELEGATION_REVOKED"
     DELEGATION_REJECTED = "DELEGATION_REJECTED"
+    #: SPEC-v0.7 §3.6: this host's clock and the store's disagree past the threshold, beyond
+    #: the measurement's own bound. Named for what happened, not for the store that noticed.
+    #: `action_id` is `None` on the report of a measurement taken at open, like the three
+    #: `DELEGATION_*` types; the report beside an expired lease names that attempt. It records
+    #: a fact beside a refusal and decides nothing: no lease is evaluated against it.
+    CLOCK_SKEW_DETECTED = "CLOCK_SKEW_DETECTED"
 
 
 @dataclass(frozen=True)
@@ -197,7 +204,9 @@ class Event:
     `action_id` is `None` for the three `DELEGATION_*` types (SPEC-v0.3 §7): they are about an
     authority record, created and revoked outside any action's life, and they name the
     delegation in `data.delegation_id`. Inventing a synthetic `action_id` would put a value in
-    a field every reader takes to name a real proposal.
+    a field every reader takes to name a real proposal. The same holds for a
+    `CLOCK_SKEW_DETECTED` reporting a measurement taken when the store opened (SPEC-v0.7 §3.6),
+    which is about the deployment and not about an action.
     """
 
     type: EventType
