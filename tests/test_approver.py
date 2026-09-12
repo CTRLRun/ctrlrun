@@ -438,8 +438,14 @@ def test_T291b_a_moved_action_hash_still_reports_mismatch(store, clock):
     assert mismatched.value.reason == "mismatch"
 
 
-def test_T291b_a_lapsed_grant_still_expires_with_its_event_and_its_write(store, clock):
-    """§2.4.1 row 4: the one a status-only gate fails: the lapse keeps its event and its write."""
+def test_T291b_a_lapsed_grant_whose_approver_is_fine_still_expires(store, clock):
+    """§2.4.1 row 4: the lapse keeps its reason, its event and the store's own write.
+
+    This is the row that makes the gate more than a status test, and it holds because the
+    approver check **passes** here: a lapsed grant with a good approver falls through to
+    `_take`, which is where `v0.1 §4.2 A3` says the expiry decision and its write belong. The
+    row where the approver check would refuse is the test below.
+    """
     control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
     action = _action(control)
     request_id = _requested(control, action)
@@ -453,6 +459,29 @@ def test_T291b_a_lapsed_grant_still_expires_with_its_event_and_its_write(store, 
     expired = [event for event in store.events() if event.type is EventType.APPROVAL_EXPIRED]
     assert len(expired) == 1
     assert str(store.get_approval(request_id).status) == "expired"
+
+
+def test_T291b_a_lapsed_grant_with_a_bad_approver_reports_the_approver(store, clock):
+    """§2.4.1's fifth row, which is what checking the lapsed row costs.
+
+    A grant that is **both** lapsed and refused on approver grounds reports the approver reason,
+    so that row keeps no `APPROVAL_EXPIRED` event and no lapse write. The grant is unusable
+    either way and `check_consumable` refuses it at every later presentation; what is bought is
+    that the lapsed row cannot be a way past §2.7 on a host whose clock runs ahead of the
+    store's, which is T291c.
+    """
+    control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
+    action = _action(control)
+    request_id = _requested(control, action)
+    store.grant_approval(request_id, "cli:local")
+    clock.advance(timedelta(hours=48))
+
+    with pytest.raises(ApprovalMismatch) as refused:
+        _present(control, action, request_id)
+
+    assert refused.value.reason == UNVERIFIED
+    assert [event.type for event in store.events()].count(EventType.APPROVAL_EXPIRED) == 0
+    assert str(store.get_approval(request_id).status) == "granted"
 
 
 # --- T291c: the skew that turned the gate into a skip ------------------------------------------
@@ -495,6 +524,13 @@ def test_T291c_a_clock_ahead_of_the_stores_does_not_skip_the_approver_check(stor
         "the store then consumed it: a self-approval ran"
     )
     assert executor.calls == 0
+    # **And the refusal costs nothing**, which the first fix for this could not say: it deferred
+    # the check past `_take`, so the grant was consumed and the effect key left RESERVED with a
+    # live lease and nothing to release it, which lapses into an `AMBIGUOUS` record a human must
+    # resolve for an action the kernel itself refused. The review found that too.
+    record = store.get_approval(request_id)
+    assert str(record.status) == "granted", "the human's yes was spent on a refusal"
+    assert store.get_effect(KEY) is None, "a refused action left a reservation behind"
 
 
 # --- T295: the upgrade case --------------------------------------------------------------------
@@ -581,6 +617,38 @@ def test_T296_every_other_mismatch_now_records_its_own_reason(store, clock):
     assert receipt.would_have.blocked_reason == "mismatch", (
         "the constant `approval_mismatch` is what this recorded before, for every mismatch"
     )
+
+
+# --- T296b: the report still adds up -----------------------------------------------------------
+
+
+def test_T296b_an_observed_approval_refusal_is_still_counted_by_stats(store, clock):
+    """§4.1's vocabulary change, against the bucket `ctrlrun stats` counts on (`v0.3 §6.4`).
+
+    An independent review measured what this change did before the bucket was widened: an
+    observe-mode approval refusal landed in no bucket at all, so `would_have_been_blocked` went
+    from 1 to 0 and the command whose whole job is "what changes if you turn enforcement on"
+    silently under-reported it. `receipt.py` already said why that must not happen: a bucketed
+    count over a string nobody constrained is a report that quietly stops adding up.
+
+    Driven with **no `ApproverIdentity` anywhere**, because the receipt that stopped counting was
+    a plain hash mismatch with nothing to do with v0.8.
+    """
+    from ctrlrun.reporting import stats_document
+
+    enforcing = _control(store, clock)
+    action = _action(enforcing)
+    request_id = _requested(enforcing, action)
+    store.grant_approval(request_id, "cli:local")
+    moved = _action(enforcing, amount=999, payment_id="EU-42")
+
+    with with_approval(request_id):
+        _observing(store, clock, None).execute(moved, _Executor(), "refund:EU-99")
+
+    document = stats_document(list(store.receipts()), mode="observe", boundary=None)
+
+    assert document["would_have_been_blocked"] == 1
+    assert document["blocked_by_reason"] == {"mismatch": 1}
 
 
 # --- T297: the resumed leg is the only receipt some actions get ------------------------------

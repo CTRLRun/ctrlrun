@@ -88,7 +88,6 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
-    BLOCKED_APPROVAL_MISMATCH,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
@@ -374,23 +373,19 @@ class _Compared:
     per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("approvers", "at_recheck", "at_request", "deferred_approver_check", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
         self.approvers: tuple[VerifiedApprover, ...] = ()
-        #: SPEC-v0.8 §2.4.1: this clock called the grant lapsed, so the approver checks stood
-        #: aside; if the store disagrees and consumes it, they run after the store call.
-        self.deferred_approver_check = False
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
         self.approvers = ()
-        self.deferred_approver_check = False
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -1189,7 +1184,7 @@ class Control:
             # Recording the specific reason for the approver refusals alone would leave a
             # vocabulary nobody can explain, so every mismatch now records its own reason. The
             # values are the ones `_secure` raises, and §11.1's table lists them.
-            observation.block(mismatch.reason or BLOCKED_APPROVAL_MISMATCH)
+            observation.block(mismatch.reason)
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
@@ -1814,9 +1809,6 @@ class Control:
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
-                # SPEC-v0.8 §2.4.1: the store disagreed with this clock about expiry and
-                # consumed the grant, so the checks that stood aside for the lapse run now.
-                self._check_approver_after_take(action, approval_id, compared)
                 break
             except AmbiguousEffect as refused:
                 # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
@@ -2593,30 +2585,6 @@ class Control:
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)
 
-    def _check_approver_after_take(
-        self, action: Action, approval_id: str | None, compared: _Compared
-    ) -> None:
-        """The deferred approver check, run after the store disagreed about expiry (§2.4.1).
-
-        **This is the fail-open hole an independent review found, closed.** The gate below skips
-        the approver checks where *this* clock considers the grant lapsed, because refusing here
-        would cost the lapse its `APPROVAL_EXPIRED` event and the store's own lapse write. But a
-        skip is permanent, and the store has its own clock: where this host runs ahead, the gate
-        skipped and `consume_approval_and_reserve` then consumed the grant happily, so the action
-        ran **with no approver check at all**. A self-approval committed under a twenty-minute
-        skew, which is `v0.7 §12.5`'s divergence inverted into fail-open.
-
-        So the skip is a deferral and nothing more: where the store consumed a grant this clock
-        called lapsed, the checks run now, on the record read on the presenting pass, and refuse.
-        The grant is spent in that branch. That is the fail-closed direction and it costs a human
-        a second answer only on a deployment whose clocks already disagree, which `v0.7 §3` gives
-        an operator an event to find.
-        """
-        if approval_id is None or not compared.deferred_approver_check:
-            return
-        record = self._store.get_approval(approval_id)
-        self._refuse_approver(action, approval_id, () if record is None else record.approvers)
-
     def _check_approver(
         self,
         action: Action,
@@ -2640,8 +2608,10 @@ class Control:
         `v0.1 §4.2` froze: no second implementation of a frozen rule, no second clock read, and
         the store still decides expiry and may disagree.
 
-        **The lapsed row is a deferral and not a skip**, which is the difference between this and
-        the version an independent review broke: `_check_approver_after_take` says why.
+        **The lapsed row is checked and not skipped**, which is the difference between this and
+        the version an independent review broke twice: first by skipping it, which was fail-open
+        under clock skew, and then by deferring it past `_take`, which closed that and left a
+        consumed grant and a reservation nothing releases. The comment below carries the cost.
         """
         if record is not None:
             # Recorded whatever this deployment checks, so a receipt says who answered even
@@ -2649,14 +2619,25 @@ class Control:
             compared.approvers = record.approvers
         if self._approver_identity is None:
             return
-        if verdict.record is None:
-            # Denied, consumed or hash-moved: the store's reason wins and this check stands
-            # aside for good. Lapsed by this clock: stand aside *for now*, because the store may
-            # disagree, and a disagreement it resolves in favour of the grant must not be a way
-            # past §2.7.
-            compared.deferred_approver_check = verdict.expire
+        if verdict.record is None and not verdict.expire:
+            # Denied, consumed, hash-moved, pending, unknown: the store's reason wins and this
+            # check stands aside, because an ungated refusal would report an approver problem
+            # for a human's no, for `G1`'s moved hash and for `G2`'s replayed approval.
             return
-        self._refuse_approver(action, approval_id, verdict.record.approvers)
+        # **`verdict.expire` is the lapsed row, and it is checked rather than skipped.** It means
+        # granted, hash matching, and past its expiry by *this* clock, which is the one case where
+        # `check_consumable` refuses a record the approver checks can still read. Skipping it was
+        # fail-open: the store keeps its own clock, so where this host ran ahead the checks stood
+        # aside and `consume_approval_and_reserve` then consumed the grant happily, and a
+        # self-approval committed under a twenty-minute skew.
+        #
+        # What it costs to check it here instead: a grant that is **both** lapsed and refused on
+        # approver grounds reports the approver reason rather than `expired`, so that row keeps no
+        # `APPROVAL_EXPIRED` event and no lapse write. The grant is unusable either way,
+        # `check_consumable` refuses it at every later presentation, and a lapsed grant whose
+        # approver is fine still reports `expired` with its event and the store's own write,
+        # because the check passes and `_take` decides. §2.4.1 carries the table.
+        self._refuse_approver(action, approval_id, record.approvers if record is not None else ())
 
     def _refuse_approver(
         self, action: Action, approval_id: str, approvers: tuple[VerifiedApprover, ...]

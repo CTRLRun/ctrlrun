@@ -109,7 +109,34 @@ BLOCKED_AMBIGUOUS: Final = "ambiguous"
 #: no, and an agent loop's `except ActionDenied` is written for exactly that.
 BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"
 
-#: The five that mean "the effect state or a presented approval would have stopped it", as
+#: SPEC-v0.8 §4.1 — observe mode records a mismatch's **own** reason now, where it recorded
+#: `BLOCKED_APPROVAL_MISMATCH` for every one of them, so the closed vocabulary above grows by the
+#: reasons an `ApprovalMismatch` actually carries. They are the values `check_consumable` and
+#: `Control` already raise, listed here because §6.4 buckets counts on this set.
+#:
+#: **Widening the set is not decoration: without it the change would have been a silent
+#: under-count.** An independent review measured it. An observe-mode approval refusal, including a
+#: plain hash mismatch that has nothing to do with v0.8, landed in no bucket at all, so
+#: `would_have_been_blocked` went from 1 to 0 and `ctrlrun stats` under-reported exactly what it
+#: exists to report. The comment above says a bucketed count over a string nobody constrained is a
+#: report that quietly stops adding up; this is that, and the fix is to constrain the string.
+BLOCKED_APPROVAL_REASONS: Final = frozenset(
+    {
+        "mismatch",
+        "consumed",
+        "expired",
+        "pending",
+        "denied",
+        "unknown",
+        "precondition_changed",
+        "precondition_missing",
+        "precondition_unavailable",
+        "approver_unverified",
+        "approver_is_requester",
+    }
+)
+
+#: The ones that mean "the effect state or a presented approval would have stopped it", as
 #: opposed to a decision that would have. `ctrlrun stats` counts them as one line (§6.4).
 BLOCKED_BY_STATE: Final = frozenset(
     {
@@ -118,6 +145,7 @@ BLOCKED_BY_STATE: Final = frozenset(
         BLOCKED_IN_PROGRESS,
         BLOCKED_AMBIGUOUS,
         BLOCKED_ATTEMPT_CEILING,
+        *BLOCKED_APPROVAL_REASONS,
     }
 )
 
