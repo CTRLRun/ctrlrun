@@ -288,7 +288,7 @@ table and `BLOCKED_BY_STATE` both had to grow for.
 
 ### 2.4.1 Why the gate exists, and what it costs to omit it
 
-Without it, this milestone would report the wrong reason for four refusals that have nothing to do
+Without it, this milestone would report the wrong reason for five refusals that have nothing to do
 with approvers, because `Control` no longer applies `check_consumable` and the store applies it
 only inside `_take`:
 
@@ -300,7 +300,7 @@ only inside `_take`:
 | **Pending** | `pending` | `approver_unverified` |
 | **No such approval** | `unknown` | `approver_unverified` |
 
-So the gate stands aside for all four, the store's reason wins, and two shipped guarantees keep
+So the gate stands aside for all five, the store's reason wins, and two shipped guarantees keep
 theirs.
 
 ### 2.4.2 The lapsed row, which took three attempts
@@ -330,7 +330,7 @@ there is no clean cleanup: `fail_effect` requires `EXECUTING`, so `RESERVED → 
 exist, and `mark_ambiguous` would assert "unknown" about an action known not to have run.
 
 **The answer is to check it, before `_take`, like the others.** The gate stands aside only for the
-four rows above; the lapsed row is checked.
+five rows above; the lapsed row is checked.
 
 | The row | What it reports | What it costs |
 |---|---|---|
@@ -343,7 +343,7 @@ What is bought is that the lapsed row cannot be a way past §2.7 on a host whose
 and that **nothing is written by a refusal** stays literally true, which neither of the other two
 answers could say.
 
-T291b covers the four rows and the lapsed-with-a-good-approver row; T291c is the skew reproduction
+T291b covers the five store-owned rows and the lapsed-with-a-good-approver row; T291c is the skew reproduction
 and asserts the grant is still granted and nothing reserved; the lapsed-with-a-bad-approver row has
 its own test saying what it gives up.
 
@@ -1508,18 +1508,25 @@ forbids (the third).
   provider anywhere** still reaches the approver checks: the test drives the 0.6-shaped path and
   asserts the refusal. Without this, every check in §2 to §4 is dead on the default path and every
   other test still passes (§2.4).
-- **T291b:** the gate of §2.4.1, all four rows. With an `ApproverIdentity` configured and no
+- **T291b:** the gate of §2.4.1, every row. With an `ApproverIdentity` configured and no
   `VerifiedApprover` on the row: a **denied** approval still raises `ActionDenied(approval_denied)`
   with `APPROVAL_DENIED` and a `DENIED` receipt; a **consumed** one still reports `consumed` (G2);
-  a **mutated action** still reports `mismatch` (G1); and a **granted but lapsed** one still
-  reports `expired`, appends exactly one `APPROVAL_EXPIRED`, and leaves the row moved to `expired`
-  by the store's own write. The fourth is the one a status-only gate fails: without it the lapse
-  has no event and no write, and the row stays `granted` for ever.
-- **T292:** the migration, both directions, on SQLite and Postgres, from a database built by
-  0.7.0's own code and not a hand-written fixture: rows with no approver columns open, migrate and
-  keep every value; an 0.7.0 binary against the migrated database refuses and names both versions.
-- **T293:** a v3, v4 and v5 receipt chain verifies end to end, each receipt hashed by the rule its
-  own version wrote (`v0.7 §6.11`).
+  a **mutated action** still reports `mismatch` (G1); a **pending** one reports `pending` and an
+  **unknown** one `unknown`, which is the reason §2.7's fifth row and all of item 4's M-of-N
+  depend on; and a **granted but lapsed** one whose approver is fine still reports `expired`,
+  appends exactly one `APPROVAL_EXPIRED`, and leaves the row moved to `expired` by the store's own
+  write. The lapsed row is the one a status-only gate gets wrong in both directions, and §2.4.2
+  is its argument: its own test asserts what checking it costs, which is that a grant both lapsed
+  **and** approver-refused keeps no `APPROVAL_EXPIRED` and no lapse write.
+- **T291c:** the skew §2.4.2 exists for. A `Control` whose clock runs ahead of the store's presents
+  a self-approved grant: refused `approver_is_requester`, the executor not called, **the approval
+  still granted and nothing reserved**. Without the last two assertions the test cannot tell a
+  refusal before the store call from one after, which is what let the deferral look correct.
+- **T292:** the migration ledger reaches `HEAD` and the column round-trips through a file-backed
+  store. The 0.6.1-built upgrade in both directions is `test_preconditions.py`'s T264, and §14.2
+  says why this one does not duplicate it.
+- **T293:** a chain carrying a `v5` receipt verifies end to end, and a `v4` document still parses
+  with neither `v5` key. The stored-v3-continued-by-this-binary chain is T265's.
 - **T294:** `ctrlrun.guarantees/v3` becomes `v4` here, and `verify` reports the catalogue version
   and G18, graded, never `N/A` (§11.7).
 - **T295:** the upgrade case of §2.9: an approval granted at 0.7.0, still pending, presented after
