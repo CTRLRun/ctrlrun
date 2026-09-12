@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import uuid
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -57,6 +59,82 @@ ReconcileOutcome = Literal["committed", "not_executed", "unknown"]
 `AMBIGUOUS`. A hook moves a record only in the direction its answer points, and is the only
 thing besides a human permitted to move one out of `AMBIGUOUS`.
 """
+
+
+class _ExecutorRun:
+    """The register of one executor run: whether any request byte has been offered in it.
+
+    SPEC-v0.7 §2.3, §12.2.9. `Control` opens one around each `executor()` call, and
+    `ctrlrun.transport` and `ctrlrun.gateway.transport.request` mark it before they hand a byte
+    over and read it before they claim `NotExecuted`. A connection failing to connect proves
+    nothing about the effect if an earlier connection in the same run already delivered the
+    request, so the claim needs this, not only the connection's own record.
+
+    A run opened inside another run (an executor calling a protected function) marks the run that
+    contains it too: the outer effect has then offered bytes, through the inner one. Private, and
+    not part of the API: the classifiers are its only readers.
+
+    **A resumed leg starts marked.** A continuation exists only because the remote spoke: it comes
+    from the remote's own answer and the remote is holding the exchange, so nothing on that leg can
+    truthfully say the remote did nothing, whatever happens to the continuation's own request
+    (SPEC-v0.7 §12.2.12).
+    """
+
+    __slots__ = ("_outer", "offered")
+
+    def __init__(self, outer: _ExecutorRun | None, offered: bool = False) -> None:
+        self.offered = offered
+        self._outer = outer
+
+    def mark(self) -> None:
+        run: _ExecutorRun | None = self
+        while run is not None:
+            run.offered = True
+            run = run._outer
+
+
+#: The current run's register, or `None` outside any executor run: on a thread that did not copy
+#: the executor's context, and in code `Control` is not running. `None` means nothing is claimed.
+_EXECUTOR_RUN: ContextVar[_ExecutorRun | None] = ContextVar("ctrlrun_executor_run", default=None)
+
+#: Every register open anywhere in this process, with the lock that guards it.
+#:
+#: A thread started without copying the executor's context has no register, and not copying is
+#: Python's default: `threading.Thread` and `ThreadPoolExecutor.submit` both leave it behind. A
+#: request such a thread delivers would otherwise be invisible, and the run it belongs to would go
+#: on to claim that nothing happened. So a send that finds no register marks **every** open run
+#: (SPEC-v0.7 §12.2.13). The cost is real and is the fail-closed direction: a stray send suppresses
+#: the claims of runs it has nothing to do with, which turns a provable `FAILED` into `AMBIGUOUS`
+#: and never the other way round.
+_OPEN_RUNS: set[_ExecutorRun] = set()
+_OPEN_RUNS_LOCK: Final = threading.Lock()
+
+
+def _opened(run: _ExecutorRun) -> None:
+    with _OPEN_RUNS_LOCK:
+        _OPEN_RUNS.add(run)
+
+
+def _closed(run: _ExecutorRun) -> None:
+    with _OPEN_RUNS_LOCK:
+        _OPEN_RUNS.discard(run)
+
+
+def _offered_somewhere() -> None:
+    """A request byte was handed over by code that belongs to no run: mark every open one."""
+    with _OPEN_RUNS_LOCK:
+        open_runs = list(_OPEN_RUNS)
+    for run in open_runs:
+        run.mark()
+
+
+def _offered(run: _ExecutorRun | None) -> None:
+    """Record that a request byte is about to be handed over, wherever it can be recorded."""
+    if run is None:
+        _offered_somewhere()
+    else:
+        run.mark()
+
 
 RECONCILED_COMMITTED: Final = "committed"
 RECONCILED_NOT_EXECUTED: Final = "not_executed"

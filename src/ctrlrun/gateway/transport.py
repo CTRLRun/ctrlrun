@@ -3,6 +3,11 @@
 The listener supplies a request-local sink. Progress is sent immediately; an intercepted
 final response is returned to Control first so its receipt exists before the client sees it.
 The HTTP client is supplied lazily by server.py, keeping the gateway extra optional.
+
+SPEC-v0.7 §2.5: the httpx variant of `ctrlrun.transport`'s classifier lives here, because httpx
+does: `request()` is the gateway's rule offered to an executor that calls an HTTP API with httpx,
+and `_observed` is the one mapping from an httpx exception to what was observed, called by
+`request()` and by `HTTPForwarder`'s fresh path alike.
 """
 
 from __future__ import annotations
@@ -13,15 +18,22 @@ import queue
 import re
 import socket
 import threading
+import urllib.request
 from collections.abc import Generator, Iterator, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
+from .. import transport as _core
+from ..effect import _EXECUTOR_RUN, EffectState, _offered
+from ..errors import NotExecuted
 from .legacy import is_event_stream, strip_event_ids
 from .mcp import LEGACY_DEFAULT_REVISION, LEGACY_REVISIONS
 from .outcome import Observed, Transport, UpstreamError, UpstreamResult, UpstreamStatus
 from .wire import _header
+
+if TYPE_CHECKING:
+    import httpx as _httpx
 
 HOP_BY_HOP = frozenset(
     {
@@ -58,6 +70,107 @@ STREAM: ContextVar[StreamSink | None] = ContextVar("ctrlrun_gateway_stream", def
 
 class _Disconnected(Exception):
     pass
+
+
+#: The exception behind the last `Transport` this context's forwarder observed, so the gateway's
+#: executor can chain its `NotExecuted` from it (SPEC-v0.7 §2.5). A context variable because the
+#: listener serves each request on its own thread and one forwarder is shared by all of them;
+#: `Forwarder`'s return shape is unchanged, so a custom forwarder simply never sets it.
+_CAUSE: ContextVar[BaseException | None] = ContextVar("ctrlrun_gateway_cause", default=None)
+
+
+def _through_a_proxy() -> bool:
+    """Whether httpx, trusting the environment as it does by default, may send through a proxy.
+
+    httpx takes its proxies from `urllib.request.getproxies()`: the environment, and the system
+    configuration on macOS and Windows. It drops them all when `NO_PROXY` contains `*`. This reads
+    the same source and answers True for any `http`, `https` or `all` proxy unless `NO_PROXY` is
+    `*`. A narrower `NO_PROXY` is not consulted, so a host it bypasses is judged as if proxied:
+    the fail-closed direction, which costs a claim and never makes a false one.
+    """
+    proxies = urllib.request.getproxies()
+    if "*" in [host.strip() for host in proxies.get("no", "").split(",")]:
+        return False
+    return any(proxies.get(scheme) for scheme in ("http", "https", "all"))
+
+
+def _observed(exc: BaseException, httpx: Any, *, proxied: bool | None = None) -> Transport:
+    """What an exception from a fresh, single-use httpx client shows (SPEC-v0.7 §2.5).
+
+    httpx exposes no count of request bytes written after the connection is established, so this
+    claims exactly one thing: `httpx.ConnectError` and `httpx.ConnectTimeout` are raised while the
+    connection is being established (TCP, and TLS where there is TLS), before a request byte is
+    written, and are `NEVER_CONNECTED`. **Behind a proxy they are not**: httpx reports an
+    unreachable proxy, and a TLS failure with the target after the proxy answered the `CONNECT`
+    line, with the same types, and `ctrlrun.transport` counts that line as written (§2.3's tunnel
+    row). One rule, so behind a proxy both are `AFTER_REQUEST_SENT` (§12.2.10). The listener's own
+    cancellation is `CLIENT_DISCONNECTED`. Everything else, a proxy's refusal included, may have
+    followed dispatch and is `AFTER_REQUEST_SENT`. Only a client built for the one call, with no
+    connection reuse, may be judged by this; the pooled client's observations are never recorded
+    as an effect.
+
+    `proxied` is the answer as it was when the call began, because that is when the client took
+    its proxies; read at the moment of the exception it could have changed under another thread
+    (§12.2.14). Omitted, it is read here, which is what a caller with no call to speak of wants.
+    """
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        if _through_a_proxy() if proxied is None else proxied:
+            return Transport.AFTER_REQUEST_SENT
+        return Transport.NEVER_CONNECTED
+    if isinstance(exc, _Disconnected):
+        return Transport.CLIENT_DISCONNECTED
+    return Transport.AFTER_REQUEST_SENT
+
+
+def request(
+    method: str,
+    url: str,
+    *,
+    content: bytes | None = None,
+    headers: Mapping[str, str] | None = None,
+    timeout: float,
+) -> _httpx.Response:
+    """One HTTP request through httpx, classified (SPEC-v0.7 §2.5). Needs `ctrlrun[gateway]`.
+
+    A new `httpx.Client` is built for this one call and closed after it, so no connection is
+    reused and none is pooled; no client can be passed in. Redirects are not followed (httpx's
+    default, stated here rather than inherited). The response is read before it is returned.
+
+    Raises `NotExecuted`, chained from the httpx exception, only where the connection was never
+    established, no proxy was in the way, and no request byte had been offered earlier in the
+    same executor run, by this function or by `ctrlrun.transport` (the register `Control` opens
+    around each executor call; outside one, nothing is claimed). Every other failure is the httpx
+    exception, untouched, which the kernel records `AMBIGUOUS`, and every call that may have
+    written a byte marks the register for what follows it in the run. No HTTP status is ever
+    `NotExecuted` here: an HTTP API is not an MCP peer, and a `401` from a provider is a status
+    like any other (§2.4). An executor may still raise
+    `NotExecuted` on its own provider-specific evidence, which is then its claim, not this one's.
+    """
+    from . import http_client
+
+    httpx = http_client()
+    run = _EXECUTOR_RUN.get()
+    proxied = _through_a_proxy()
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            response = client.request(method, url, content=content, headers=headers)
+            response.read()
+    except Exception as exc:
+        observed = _observed(exc, httpx, proxied=proxied)
+        if (
+            run is not None
+            and not run.offered
+            and _core.effect_state(observed) is EffectState.FAILED
+        ):
+            raise NotExecuted(
+                f"ctrlrun.gateway.transport: the connection was never established: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if observed is not Transport.NEVER_CONNECTED:
+            _offered(run)
+        raise
+    _offered(run)
+    return response  # type: ignore[no-any-return]
 
 
 def _chunks(response: Any, sink: StreamSink | None) -> Generator[bytes, None, None]:
@@ -205,9 +318,15 @@ class HTTPForwarder:
         if method == "POST":
             relayed["Content-Type"] = "application/json"
         owned = fresh or STREAM.get() is not None
+        # Read where the client takes its own proxies, not where the call fails: another thread
+        # may clear the environment while this one is in flight (§12.2.14).
+        proxied = _through_a_proxy()
+        run = _EXECUTOR_RUN.get()
         client = self.httpx.Client(timeout=self.timeout) if owned else self.pooled
         try:
             with client.stream(method, self.upstream, content=body, headers=relayed) as response:
+                if run is not None:
+                    run.mark()  # the request reached the wire: whatever follows, it was written
                 status = response.status_code
                 response_headers = dict(response.headers)
                 challenge = "www-authenticate" in response.headers
@@ -237,13 +356,20 @@ class HTTPForwarder:
                     status,
                     response_headers,
                 )
-        except (self.httpx.ConnectError, self.httpx.ConnectTimeout):
-            return Transport.NEVER_CONNECTED, None, 502, {}
-        except _Disconnected:
-            return Transport.CLIENT_DISCONNECTED, None, 502, {}
-        except Exception:
-            # Every other failure may have happened after dispatch, including bad encoding.
-            return Transport.AFTER_REQUEST_SENT, None, 502, {}
+        except Exception as exc:
+            # SPEC-v0.7 §2.5: one mapping, shared with `request()`. Every failure other than a
+            # connection never established may have happened after dispatch, bad encoding
+            # included. The exception is kept beside the observation for the executor to chain.
+            _CAUSE.set(exc)
+            observed = _observed(exc, self.httpx, proxied=proxied)
+            if observed is not Transport.NEVER_CONNECTED and run is not None:
+                # SPEC-v0.7 §2.5: the forwarder writes request bytes like everything else here,
+                # so it marks the run it writes in. Only its own: the relayed traffic it also
+                # carries (`tools/list`, GET, DELETE) is never an effect (§6.3), and marking
+                # every open run from a listener thread would let it suppress the claims of
+                # intercepted calls it has nothing to do with (§12.2.13).
+                run.mark()
+            return observed, None, 502, {}
         finally:
             if owned:
                 client.close()

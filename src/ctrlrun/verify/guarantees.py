@@ -51,6 +51,11 @@ GUARANTEES: Final = (
     Guarantee("G10", "unknown exception is ambiguous", ("v0.1 §5.5", "v0.1 §7 T1", "v0.1 §7 T8")),
     Guarantee("G11", "an altered receipt is detected", ("v0.6 §6.5", "v0.6 §8 T164")),
     Guarantee(
+        "G12",
+        "a byte written is ambiguous",
+        ("v0.1 §5.5", "v0.2 §6.8", "v0.7 §8 T220", "v0.7 §8 T221", "v0.7 §8 T223b"),
+    ),
+    Guarantee(
         "G13",
         "clock divergence is named",
         (

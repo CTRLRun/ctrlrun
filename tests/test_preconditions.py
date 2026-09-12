@@ -1963,9 +1963,17 @@ SCANNED = {
 #:
 #: Sentences that **disclaim**: they say the recheck narrows, and name what it does not do.
 DISCLAIMS: dict[str, tuple[str, ...]] = {
+    "README.md": (
+        "It does not close it, because the recheck is a network call and cannot run inside the "
+        "atomic write.",
+    ),
     "CHANGELOG.md": (
         "A precondition fingerprint **narrows** the window between a human's approval and the "
         "action's execution; it does not close it.",
+        # The release's own "What this release does not close" list, which states the residual
+        # where an operator reads it rather than only in the specification.
+        "narrows the window between a human's approval and the action's execution, and does not "
+        "close it.",
         "and precondition fingerprints, which **narrow** the window between a human's approval "
         "and the action's execution and do not close it",
     ),

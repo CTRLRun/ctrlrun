@@ -113,9 +113,9 @@ def test_T100_the_authority_example_passes_every_non_authority_guarantee():
     report = run(AUTHORITY_PAYMENTS)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G10", "G11", "G12"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G10"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G10", "G12"):
         assert results[gid].action == "stripe.refund", gid
     assert results["G3"].effect_key == "refund:ctrlrun-verify-payment_id"
     assert report.exit_code == 0
@@ -129,7 +129,7 @@ def test_T100_the_starter_policy_exercises_every_non_authority_guarantee():
     report = run(EXAMPLE_POLICY)
     results = _by_id(report)
 
-    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G10", "G11"):
+    for gid in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G10", "G11", "G12"):
         assert results[gid].status is Status.PASS, (gid, results[gid].reason)
     assert results["G1"].action == "k8s.delete_namespace"
     assert results["G10"].action == "customer.read"
@@ -173,7 +173,7 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
-    assert report.applicable == 8
+    assert report.applicable == 9
     assert report.not_applicable == 7
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with five N/As a
@@ -537,31 +537,6 @@ def test_T106_G4_contends_in_real_processes(tmp_path):
 
 # --- T107: verify reaches no network ---------------------------------------------------------
 
-_REFUSE_EVERY_SOCKET = '''\
-"""Imported by `site` at startup: nothing under verify may open a socket."""
-
-import socket
-
-_real = socket.socket
-
-
-class _Refusing(_real):
-    def connect(self, *args, **kwargs):
-        raise RuntimeError("verify tried to connect; verify runs with no network")
-
-    def connect_ex(self, *args, **kwargs):
-        raise RuntimeError("verify tried to connect; verify runs with no network")
-
-
-def _refuse(*args, **kwargs):
-    raise RuntimeError("verify tried to resolve a name; verify runs with no network")
-
-
-socket.socket = _Refusing
-socket.create_connection = _refuse
-socket.getaddrinfo = _refuse
-'''
-
 _ASSERT_THE_GUARD_IS_LIVE = """
 import socket, sys
 
@@ -580,11 +555,12 @@ sys.exit(report.exit_code)
 """
 
 
-def test_T107_a_full_run_completes_with_no_network(tmp_path):
+def test_T107_a_full_run_completes_with_no_network(tmp_path, no_network):
+    """SPEC-v0.7 §8.9 amends the rule to "no connection except to the store `--store-url` names
+    and to loopback listeners verify bound itself", and the guard, `conftest.py`'s one definition,
+    admits exactly that: G12's listener and nothing else. T230 asserts how wide it is."""
     path = _write(tmp_path, WITH_EFFECTS)
-    guard = tmp_path / "guard"
-    guard.mkdir()
-    (guard / "sitecustomize.py").write_text(_REFUSE_EVERY_SOCKET, encoding="utf-8")
+    guard = no_network
     script = tmp_path / "check.py"
     script.write_text(_ASSERT_THE_GUARD_IS_LIVE, encoding="utf-8")
 
@@ -868,14 +844,14 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_seven_over_seven():
+def test_the_v1_payments_template_reports_eight_over_eight():
     """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1)."""
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (7, 7, 8)
+    assert (report.passed, report.applicable, report.not_applicable) == (8, 8, 8)
     text = report.to_text()
-    assert "7/7 declared guarantees pass." in text
+    assert "8/8 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 is graded: verify brings its own provider (§8.9).
