@@ -91,6 +91,14 @@ APPROVER_UNENTITLED: Final = "approver_unentitled"
 #: A value of `ActionDenied.reason` and of `ACTION_DENIED.data.reason`, not a new error type.
 APPROVALS_UNVERIFIABLE: Final = "approvals_unverifiable"
 
+#: SPEC-v0.8 §3.3, §4.5, extending `v0.7 §6.4`'s read-back to the two fields items 3 and 4 pin.
+#: The request carries what was in force when it was built: the roles the cited controls demand
+#: and how many distinct principals must answer. Both travel to the provider through a context
+#: variable, so **a provider that builds its own `ApprovalRequest` and a store that drops the
+#: columns each produce a row pinning neither** -- and a row pinning neither is a row that gates
+#: nobody and grants on one yes, which is the silent downgrade §4.5 says does not exist.
+APPROVAL_UNRECORDED: Final = "approval_unrecorded"
+
 
 @dataclass(frozen=True)
 class RequiredRole:
@@ -436,6 +444,19 @@ class ApprovalRequest:
             raise InvalidArgument(
                 f"approval {self.request_id} expires at or before it was created; "
                 "a request nobody can answer is not a request"
+            )
+        # SPEC-v0.8 §4.2, §12. Refused here rather than coerced: `count_grant` clamped a
+        # corrupt value with `max(1, ...)` and the SQLite read turned a `0` into `1` with
+        # `or 1`, so a row whose threshold had been tampered to nothing read back as an
+        # ordinary single-approval request and nobody could tell. `approvers` and
+        # `required_roles` both raise out of the store read on a corrupted column; this is
+        # the third field and it was the one that did not. Policy load refuses these values
+        # too, so the only way here is a row a store did not write.
+        threshold: object = self.approvals_required
+        if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+            raise InvalidArgument(
+                f"approval {self.request_id} requires {threshold!r} approvals; the threshold "
+                "is an integer of at least 1 (SPEC-v0.8 §4.2)"
             )
 
 

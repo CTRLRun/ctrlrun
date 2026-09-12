@@ -565,8 +565,21 @@ expectation they failed.
 ### 3.4 A missing claim is not a role
 
 The approver's roles are read from the claim `ApproverIdentity.roles_claim` names, on the resolved
-principal's claims. Three facts about the code shape every rule below, and each was found by
-reading it rather than assumed:
+principal's claims.
+
+**One surface may name it twice, and the flag wins.** The operator MCP server has its own
+`--approver-roles-claim`, because it resolves the approver with its own provider and a deployment
+may run it against an issuer the embedding application does not use. Where both are set the flag
+wins; where only the `Control`'s is set the server reads that. This is stated rather than left to
+be discovered because **it is a flag that changes the outcome of an entitlement decision**, and the
+rule that no flag relaxes a check is only true if every flag that touches one is written down. It
+cannot relax the check: naming a claim that carries no role refuses *more*, never less, and the
+kernel's refusal at consumption reads what was recorded either way. The server warns at startup
+where a cited control names a role and neither source names a claim, because that configuration
+refuses every approval it gates.
+
+Three facts about the code shape every rule below, and each was found by reading it rather than
+assumed:
 
 - `ClaimValue` is `str | int | bool` and `Principal.claims` **refuses containers**
   (`action.py`), whose stated reason is that "a provider flattens or drops a structured claim
@@ -763,12 +776,31 @@ once" is the requirement, and rejecting the second answer would make a human thi
 lost. Once the record has reached `granted`, a further grant is refused exactly as it is today, by
 `check_answerable`, which refuses any record that is not `PENDING` and which `v0.1 §4.2` freezes.
 
-**What does not count**, each refused before the count moves, and each with its own test asserting
-the count did not move:
+**What does not count, and where it stops counting.** Three answers must not authorize an action,
+and building item 4 established that only one of them can be excluded from the count itself. The
+draft of this paragraph said all three were "refused before the count moves"; §14.4 records why
+that was wrong and what replaced it.
 
-- the requester's own yes (§4.1);
-- an approver who satisfies none of the required roles (§3.8);
-- an approver the provider could not verify (§2.7).
+| Answer | Where it is refused | Does the count move? |
+|---|---|---|
+| An approver the provider could not verify (§2.7) | In the count. `count_grant` records no approver for a grant carrying none | No. The row is unchanged |
+| The requester's own yes (§4.1) | At consumption, `approver_is_requester` | **Yes**, and the row shows who gave it |
+| An approver satisfying a required role they do not hold (§3.8) | At the granting surface, and again at consumption, `approver_unentitled` | **Yes**, at consumption; the grant surface refuses before the row is written at all |
+
+The two that count are still refused, every time, on every path, and the receipt names which
+refusal fired. What they do not do is make the record unreachable: a yes that never lands leaves
+the request `pending` for ever, and at N=1 that turns a refusal a reader can act on into a silence
+they cannot.
+
+**A partial grant is visible in one place only, and that is deliberate.** `ctrlrun.inspection/v2`
+is unchanged (§11.3) and §11.2 adds no event type, so a request that one of two humans has answered
+reads identically to one nobody has answered in `ctrlrun inspect --json` and in the event log. What
+reports it is the answer each grant surface returns, to the person who just answered. The reason is
+that the alternative is an event type meaning "somebody answered and it changed nothing", which is
+a row every reader of the chain has to learn to ignore, for a fact with a half-life of minutes. The
+cost is stated here rather than left to be discovered: **an operator cannot currently see how many
+of N a pending request holds without asking the store for the row.** If that turns out to matter it
+is an inspection schema bump, on its own version line, not an event.
 
 **A denial denies the request, whole.** One `deny_approval` moves the record to `denied` however
 many grants it holds. A request that absorbs a no while it waits for enough yeses is a request that
@@ -1609,9 +1641,11 @@ forbids (the third).
   update**; N grants never become N+1 and one principal never fills two slots. The test is written
   so that it **fails against a compare-and-set on `status`**, because that is the shape the store
   has today and the one a reviewer found: a test that passes against it has not opened the window.
-- **T314:** the requester's own yes does not count, and the count is asserted unmoved (§4.2).
-- **T315:** an unentitled yes does not count, and the count is asserted unmoved.
-- **T316:** an unverifiable yes does not count, and the count is asserted unmoved.
+- **T314:** the requester's own yes is refused at consumption with `approver_is_requester`, and
+  the row shows the count *did* move, which §4.2's table and §14.4 explain.
+- **T315:** an unentitled yes is refused with `approver_unentitled`, and the same about the count.
+- **T316:** an unverifiable yes does not count, and the count is asserted unmoved: this is the one
+  of the three that the count itself excludes.
 - **T317:** one denial denies a request holding N-1 grants.
 - **T318:** expiry: a request with N-1 grants expires as a whole, and the grants do not extend it.
 - **T319:** `approvals_required: 1` is 0.7.0 exactly, driven through the whole path and compared.
@@ -1800,6 +1834,7 @@ the section it cites, and only then is there code.
 |---|---|---|---|
 | Two CLI options | 1 | `ctrlrun revoke --created-by`, `--under` | The incident operation is a query over rows that already exist, and writing it under pressure is how a script revokes the wrong subtree. `--created-by` and not `--by`, because `--by` already means who performed the revocation (§7.2). |
 | One configuration object | 2 | `ctrlrun.approval.ApproverIdentity(provider, roles_claim=None)`, and `Control(approver_identity=...)` with a read-only `Control.approver_identity` | Opt in, then fail closed, needs one switch. A provider without a roles claim cannot answer §3, so the two travel together or a deployment has a silent half-check (§2.3). |
+| One server flag | 3 | `ctrlrun mcp-operator --approver-roles-claim`, and `OperatorConfig.approver_roles_claim` | The server resolves the approver with its own provider, against an issuer the application need not share. It takes precedence over `ApproverIdentity.roles_claim` and falls back to it; §3.4 says why a flag touching an entitlement decision is named here. |
 | One record type | 2 | `ctrlrun.approval.VerifiedApprover(agent, user, issuer, entitled, granted_at)`, read back on `ApprovalRecord.approvers` | `ApprovalRecord` is rebuilt from columns, so a value the consume-side check reads must be one (`v0.6 §3.7`). |
 | One amendment to `v0.3 §2.1` | 3 | `ClaimValue` gains `tuple[str, ...]`; `_frozen_claims` accepts a sequence of strings and normalises it to a tuple; `JWTIdentityProvider` carries an array-of-strings claim instead of dropping it | A roles claim is a JSON array at every issuer anybody deploys, and `Principal.claims` refuses containers today, so §3 is unbuildable without this. The normalisation is the half that keeps it readable: JSON has no tuple, so a stored claim returns as a list, and without it every receipt carrying one would raise on read, against `Receipt.from_dict`'s never-raises contract. Safe for hashes: `v0.3 §2.2` keeps claims out of an action's canonical form (§3.4). |
 | One record type | 3 | `ctrlrun.approval.RequiredRole(control, role)` | The refusal must name the control (§3.7), so the pair survives to the refusal; a role alone leaves an operator grepping a registry. |
@@ -2181,6 +2216,40 @@ which is a true statement about those documents (§3.5). Nine tests and two pins
 in item 2 and the second time that CI file has been the thing no local gate would catch.
 
 ### 14.4 Item 4: M-of-N
+
+**"Does not count" cannot mean "is not counted", for two of the three.** §4.2's first draft said
+the requester's own yes, an unentitled yes and an unverifiable yes were each *refused before the
+count moved*. Building it showed that reading destroys G18. At `approvals_required: 1`, excluding
+the requester's yes from the count leaves the record `pending` for ever: the consumption check
+never reaches `approver_is_requester`, because there is nothing granted to check, and the refusal a
+reader gets is `pending` — "nobody has answered yet" — about a request the requester answered. G18
+is shipped, `verify` grades it, and it says a self-approval is *refused as one*.
+
+So the store counts every verified approver, and all three refusals live at consumption where the
+kernel can name which one fired. One rule, in one place, and the store stays a store rather than
+acquiring a second opinion about who may answer. §4.2 now carries the table.
+
+**The same argument, run the other way, is why an unverifiable yes *is* excluded from the count.**
+There is nothing to refuse it by: a row with no verified approver records nothing that could be
+compared against a requester or a role, and at N=1 it must still grant, because that is 0.7.0
+unchanged and R1 promises a deployment naming no approver identity is untouched.
+
+**The read-back had to grow, and an independent review found that it had not.** `v0.7 §6.4` reads
+the stored request back after the provider returns, because a provider that builds its own
+`ApprovalRequest` and a store that drops a column both produce a row missing what the kernel
+pinned. Items 3 and 4 pin two more fields by exactly the same route and added no check, so both
+were lost in both ways with nothing refused: a row pinning `required_roles=()` satisfies every
+control trivially, and one pinning `approvals_required=1` grants on a single yes. An action ran
+under a policy demanding two approvals from a named role, approved once, by somebody holding no
+role. `§4.5`'s sentence that no such path exists was false when it was written; the read-back now
+covers all three fields and `approval_unrecorded` is its refusal.
+
+**The count's window is not the same thing as two processes answering at once.** Item 4's serial
+tests all pass against a store with no compare-and-set whatever, which the mutation table caught by
+being caught for the wrong reason: removing Postgres's condition turned a *sequential* test red.
+T313 opens the real window, between the read of `approvers` and the update of it, and fails against
+the compare-and-set on `status` that the store had. The store conformance case learned the same
+lesson one layer down: it accepted a `processes` argument and never used it.
 
 ### 14.5 Item 5: break-glass as a grant
 

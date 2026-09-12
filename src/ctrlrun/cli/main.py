@@ -373,7 +373,6 @@ def approve(request_id: str, store_url: str | None) -> None:
         # SPEC-v0.8 §4.4: recorded, and still short of the threshold the request pinned. No
         # `APPROVAL_GRANTED` event, because nothing was granted yet: an event naming a grant that
         # did not happen is the false-green shape in the evidence log (`v0.6 §7.2.3`'s argument).
-        held = 0 if record is None else len(record.request.required_roles)
         after = store.get_approval(request_id)
         recorded = 0 if after is None else len(after.approvers)
         needed = 1 if after is None else after.request.approvals_required
@@ -385,7 +384,6 @@ def approve(request_id: str, store_url: str | None) -> None:
                 "this answer carries no verified approver, so it will not count where the "
                 "deployment names an approver identity (SPEC-v0.8 §2.6)"
             )
-        del held
         return
     if record is not None:
         store.append_event(

@@ -1708,7 +1708,12 @@ class SQLiteStateStore:
                 policy_hash=row["policy_hash_at_approval"],
                 precondition_fingerprint=row["precondition_fingerprint"],
                 required_roles=_roles_from_json(row["required_roles"]),
-                approvals_required=row["approvals_required"] or 1,
+                # `if ... is None else` and never `or 1`: `or` swallows a tampered `0`,
+                # which `ApprovalRequest.__post_init__` exists to refuse (§4.2, §12). `None`
+                # is the honest absent value, written by every row predating the column.
+                approvals_required=(
+                    1 if row["approvals_required"] is None else row["approvals_required"]
+                ),
             ),
             status=ApprovalStatus(row["status"]),
             approver=row["approver"],

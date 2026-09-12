@@ -23,6 +23,7 @@ from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
+    APPROVAL_UNRECORDED,
     APPROVALS_UNVERIFIABLE,
     APPROVER_IS_REQUESTER,
     APPROVER_UNENTITLED,
@@ -1161,7 +1162,18 @@ class Control:
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
             if approval_id is None:
-                observation.block(BLOCKED_APPROVAL_REQUIRED)
+                # SPEC-v0.8 §4.2, §11.1. **The threshold refusal reaches observe mode too**,
+                # and it reached it nowhere: `_refuse_unverifiable` lives in `_presented`,
+                # which observe mode never calls, so a deployment piloting a two-approver
+                # policy with no approver identity was told `approval_required` -- that a human
+                # would have been asked. Enforce mode denies every one of those actions before
+                # anybody is asked, and reporting which is the one thing observe mode is for.
+                required = self._policy.approvals_required(action.name)
+                observation.block(
+                    APPROVALS_UNVERIFIABLE
+                    if required > 1 and self._approver_identity is None
+                    else BLOCKED_APPROVAL_REQUIRED
+                )
         if approval_id is None and effect_key is None:
             return None, None
         try:
@@ -2351,7 +2363,16 @@ class Control:
             effect_key,
             approval_id=request.request_id,
         )
-        if fingerprint is not None and not self._recorded(request, fingerprint):
+        # **Asked whenever anything was pinned**, not only for a fingerprint. The earlier
+        # spelling was `if fingerprint is not None`, which meant a deployment with no
+        # preconditions at all -- the common one -- never read the row back, and so never saw a
+        # threshold or a role list that failed to reach it.
+        missing = (
+            self._unpinned(request, fingerprint, roles, required)
+            if fingerprint is not None or roles or required > 1
+            else None
+        )
+        if missing is not None:
             # SPEC-v0.7 §6.4: **never a skip**, and without this it was one. A provider that
             # builds its own `ApprovalRequest` (`build_request` is package-internal) and a store
             # that does not persist the column both leave an approval that was requested with a
@@ -2359,7 +2380,7 @@ class Control:
             # names no provider, is 0.6.1's path: consumed with nothing compared. The request
             # pass is where that is visible, so it is where it is refused.
             self._refuse_unrecorded_request(
-                action, evaluation, started_at, effect_key, request, fingerprint
+                action, evaluation, started_at, effect_key, request, fingerprint, missing
             )
         raise ApprovalRequired(
             f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
@@ -2440,8 +2461,14 @@ class Control:
         )
         raise ActionDenied(message, reason=_PRECONDITION_UNAVAILABLE, action_id=action.action_id)
 
-    def _recorded(self, request: ApprovalRequest, fingerprint: str) -> bool:
-        """Did the fingerprint reach the record a later presentation will read? (§6.4)
+    def _unpinned(
+        self,
+        request: ApprovalRequest,
+        fingerprint: str | None,
+        roles: tuple[RequiredRole, ...],
+        required: int,
+    ) -> str | None:
+        """What the kernel pinned and the stored row does not carry, or `None` (§6.4, §4.5).
 
         **The read-back, and only the read-back.** An earlier build also compared the returned
         `ApprovalRequest`, and the review found that guard subsumed: a presentation reads the
@@ -2452,9 +2479,37 @@ class Control:
         rather than defence (`CONTRIBUTING.md`, the first of the four shapes of a false green).
 
         One `get_approval`, on the request pass only.
+
+        **Three fields, not one, and the two new ones are v0.8's.** `v0.7 §6.4` wrote this for
+        the precondition fingerprint and named both ways of losing it: a provider that builds
+        its own `ApprovalRequest`, and a store that does not persist the column. Items 3 and 4
+        pin the required roles and the threshold by exactly the same route, and an independent
+        review found that both were lost in exactly the same two ways, with no refusal anywhere:
+        a row pinning `required_roles=()` satisfies `unsatisfied` trivially, and a row pinning
+        `approvals_required=1` grants on one yes. An action then executed under a policy
+        demanding two approvals from a named role, approved once by somebody holding no role.
+
+        So the read-back covers every field this method pins. A row missing any of them cannot
+        be compared against what was in force, and `v0.7 §6.4`'s rule is that such a request is
+        refused where it is visible rather than skipped.
         """
         record = self._store.get_approval(request.request_id)
-        return record is not None and record.request.precondition_fingerprint == fingerprint
+        if record is None:
+            return "the request was not recorded at all"
+        stored = record.request
+        if fingerprint is not None and stored.precondition_fingerprint != fingerprint:
+            return "the precondition fingerprint"
+        if stored.required_roles != roles:
+            return (
+                f"the roles the cited controls require ({[role.control for role in roles]}); "
+                f"the row carries {[role.control for role in stored.required_roles]}"
+            )
+        if stored.approvals_required != required:
+            return (
+                f"the threshold of {required} approvals; the row carries "
+                f"{stored.approvals_required}"
+            )
+        return None
 
     def _refuse_unrecorded_request(
         self,
@@ -2463,7 +2518,8 @@ class Control:
         started_at: datetime,
         effect_key: str | None,
         request: ApprovalRequest,
-        fingerprint: str,
+        fingerprint: str | None,
+        missing: str,
     ) -> NoReturn:
         """Refuse, and leave nothing behind that another path could spend (SPEC-v0.7 §6.4).
 
@@ -2480,16 +2536,23 @@ class Control:
         """
         withdrawn = self._withdraw(request)
         compared = _Compared()
-        compared.at_recheck = fingerprint
+        if fingerprint is not None:
+            compared.at_recheck = fingerprint
+        # The fingerprint keeps its own reason, because `precondition_missing` is in the
+        # vocabulary `v0.7` froze and every reader of an older receipt reads it that way. What
+        # items 3 and 4 pin gets its own, for the reason every refusal here does: a test that
+        # asserts a status cannot tell which guard ran.
+        reason = _PRECONDITION_MISSING if fingerprint is not None else APPROVAL_UNRECORDED
         outcome = (
             f"the request is withdrawn ({withdrawn})"
             if withdrawn in _WITHDRAWALS
             else f"the request could not be withdrawn ({withdrawn})"
         )
         _LOG.warning(
-            "%s: the precondition fingerprint was not recorded with approval request %s, so %s "
-            "and the action is refused (SPEC-v0.7 §6.4)",
+            "%s: %s was not recorded with approval request %s, so %s and the action is refused "
+            "(SPEC-v0.7 §6.4, SPEC-v0.8 §4.5)",
             action.name,
+            missing,
             request.request_id,
             outcome,
         )
@@ -2497,7 +2560,8 @@ class Control:
             EventType.APPROVAL_INVALIDATED,
             action,
             {
-                "reason": _PRECONDITION_MISSING,
+                "reason": reason,
+                "missing": missing,
                 "action_hash": action.action_hash,
                 "withdrawn": withdrawn,
                 **compared.data(),
@@ -2508,14 +2572,13 @@ class Control:
         self._append(
             EventType.ACTION_DENIED,
             action,
-            {"reason": _PRECONDITION_MISSING},
+            {"reason": reason},
             effect_key,
             approval_id=request.request_id,
         )
         message = (
-            f"{action.name}: the precondition fingerprint was not recorded with approval "
-            f"request {request.request_id}, so no presentation of it could compare anything; "
-            f"{outcome}"
+            f"{action.name}: {missing} was not recorded with approval request "
+            f"{request.request_id}, so no presentation of it could compare anything; {outcome}"
         )
         self._record(
             action,
@@ -2527,7 +2590,7 @@ class Control:
             effect_key=effect_key,
             compared=compared,
         )
-        raise ActionDenied(message, reason=_PRECONDITION_MISSING, action_id=action.action_id)
+        raise ActionDenied(message, reason=reason, action_id=action.action_id)
 
     def _withdraw(self, request: ApprovalRequest) -> str:
         """Make a request nobody may answer, with the methods a store already has (§6.4).

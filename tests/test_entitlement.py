@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -534,6 +535,40 @@ def test_T307_a_receipt_carrying_a_tampered_claim_still_parses():
 
     assert kept == {"team": ("payments",), "level": 3, "on": True}
     assert Principal(agent="a", user=None, claims=kept).claims["team"] == ("payments",)
+
+
+# --- the vocabulary check that stops this being found a third time ----------------------------
+
+
+def test_every_approval_refusal_reason_is_counted_by_stats():
+    """`ctrlrun stats` must have a bucket for every reason an approval can be refused with.
+
+    Enumerated from `approval.py` rather than restated here, which is the whole point: a set
+    written out by hand is a set somebody adds a reason without. It has been missed twice. Item
+    2 shipped `approval_denied` in no bucket, so an observe-mode run in which a **human said
+    no** was counted nowhere; items 3 and 4 then coined `approver_unentitled` and
+    `approvals_unverifiable` and did the same thing again. This test fails on the next one.
+    """
+    import re
+
+    from ctrlrun import approval
+    from ctrlrun.receipt import BLOCKED_BY_STATE
+
+    source = pathlib.Path(approval.__file__).read_text(encoding="utf-8")
+    names = re.findall(r"^([A-Z][A-Z_]*): Final = \"([a-z_]+)\"", source, re.MULTILINE)
+    reasons = {
+        value
+        for name, value in names
+        if name.startswith(("APPROVAL_", "APPROVER_", "APPROVALS_", "HASH_", "UNKNOWN_"))
+    }
+    assert reasons, "the enumeration found nothing, so this test is asserting nothing"
+
+    missing = sorted(reason for reason in reasons if reason not in BLOCKED_BY_STATE)
+    assert not missing, (
+        f"these refusal reasons are in no `ctrlrun stats` bucket: {missing}. An observe-mode "
+        "run that would have refused for one of them reports would_have_been_blocked = 0, "
+        "which is a report saying nothing happened about the thing that did"
+    )
 
 
 # --- T308: the registry loads, and refuses what it must ---------------------------------------

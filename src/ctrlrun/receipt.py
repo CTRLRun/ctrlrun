@@ -27,7 +27,12 @@ from .action import Principal, canonical_bytes
 # downward (ARCHITECTURE §6): a receipt records what an approval verified, and the record
 # type it records is that module's.
 from .approval import APPROVAL_DENIED as APPROVAL_DENIED_REASON
-from .approval import VerifiedApprover
+from .approval import (
+    APPROVAL_UNRECORDED,
+    APPROVALS_UNVERIFIABLE,
+    APPROVER_UNENTITLED,
+    VerifiedApprover,
+)
 from .errors import CTRLRunError, InvalidArgument
 from .policy import Decision
 
@@ -143,6 +148,17 @@ BLOCKED_APPROVAL_REASONS: Final = frozenset(
         "precondition_unavailable",
         "approver_unverified",
         "approver_is_requester",
+        # **Items 3 and 4's reasons, and their absence was the same defect one item later.**
+        # The paragraph above records `approval_denied` landing in no bucket and being fixed
+        # here; `approver_unentitled` and `approvals_unverifiable` were then coined without
+        # being added here, so an observe-mode run that would have refused an unentitled
+        # approver reported `would_have_been_blocked = 0`. A set maintained by hand is a set
+        # the next reason is missed from, which is why
+        # `test_every_approval_refusal_reason_is_counted_by_stats` enumerates them from
+        # `approval.py` instead of restating them.
+        APPROVER_UNENTITLED,
+        APPROVALS_UNVERIFIABLE,
+        APPROVAL_UNRECORDED,
     }
 )
 

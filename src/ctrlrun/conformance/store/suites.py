@@ -1113,6 +1113,79 @@ def approval_verified_approver(backend: StoreBackend, processes: int = CONTENDER
             title,
             f"the request is {None if final is None else final.status} at 2 of 2, not granted",
         )
+    store.close()
+    return _contended_count(backend, processes, title)
+
+
+#: SPEC-v0.8 §4.5 — the one reason this case is `not_applicable`, and it rests on the store's
+#: own declaration that its storage cannot be opened from another process, which §2.4 already
+#: allows for `url()`. A sequential pass is not evidence about a count: every assertion above
+#: holds on a store that reads and then writes with nothing in between.
+NO_CONTENTION = (
+    "this backend's storage cannot be opened from another process, so the count cannot be "
+    "contended; what passed above is the sequential half only"
+)
+
+
+def _contended_count(backend: StoreBackend, processes: int, title: str) -> CaseResult:
+    """The half that is about a **count**: N processes, and one principal in two of them.
+
+    SPEC-v0.8 §4.3. A store deciding the threshold by a read and then a write passes every
+    sequential assertion in this case and fails here, which is the whole reason `processes` is
+    a parameter: an earlier draft accepted it and never used it, so the case asserted nothing
+    about concurrency while sitting in a suite named for it.
+
+    `alice` answers from **two** of the contenders and `bob` from the rest. Whatever the
+    interleaving, the row must end with exactly two approvers, because there are exactly two
+    principals; a store that appends reaches three or more, and one that loses an update
+    reaches one.
+    """
+    store = backend.open()
+    action = an_action(payment_id="txn_contended")
+    with _required_roles((), 2):
+        request = build_request(action, timedelta(minutes=15), store_now(store))
+    store.put_approval_request(request)
+    store.close()
+
+    people = [("human:alice", "alice@example.com")] * 2 + [("human:bob", "bob@example.com")] * max(
+        1, processes - 2
+    )
+    outcome = race(
+        backend,
+        len(people),
+        [
+            {
+                "kind": "answer",
+                "answer": "grant",
+                "approval_id": request.request_id,
+                "who": f"conformance-{index}",
+                "agent": agent,
+                "user": user,
+            }
+            for index, (agent, user) in enumerate(people)
+        ],
+    )
+    if isinstance(outcome, str):
+        if not storage_is_confined(backend):
+            return dishonest("verified-approver", title, "url()")
+        return na("verified-approver", title, NO_CONTENTION)
+
+    after = backend.open()
+    try:
+        record = after.get_approval(request.request_id)
+    finally:
+        after.close()
+    if record is None:
+        return failed("verified-approver", title, "the contended request did not come back")
+    agents = sorted({approver.agent for approver in record.approvers})
+    if len(record.approvers) != 2 or agents != ["human:alice", "human:bob"]:
+        return failed(
+            "verified-approver",
+            title,
+            f"{len(people)} contenders and two principals left "
+            f"{[approver.agent for approver in record.approvers]}: a count decided by a read "
+            "and then a write either loses one of them or counts one of them twice",
+        )
     return passed("verified-approver", title)
 
 
