@@ -296,10 +296,13 @@ jobs:
       - name: Install
         # Every extra: a runnable guide block that exports to OpenTelemetry or opens the
         # gateway's client needs the extra installed, and a block that skipped would be a
-        # sample nobody ran.
+        # sample nobody ran. `postgres` too, and for a different reason: the readiness block
+        # records what `pytest --collect-only` finds, and 76 of the tests exist only when
+        # psycopg is importable. The same extras as `check`, so this job counts the suite
+        # that job runs; `test_the_docs_job_installs_the_extras_the_check_job_runs` holds it.
         run: |
           python -m pip install --upgrade pip
-          pip install -e "./ctrlrun[dev,gateway,otel,identity]"
+          pip install -e "./ctrlrun[dev,gateway,otel,identity,postgres]"
           pip install griffe pyyaml
 
       # `_core.py` raises when it cannot find the library, so this prints a path or the job

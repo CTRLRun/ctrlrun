@@ -165,6 +165,23 @@ def test_codeql_does_not_gate_a_merge():
     assert "Nothing here gates a merge" in workflow
 
 
+def test_the_docs_job_installs_the_extras_the_check_job_runs():
+    """The readiness block records what `pytest --collect-only` finds, and the Postgres tests
+    are collected only when psycopg is importable. A `docs` job installed with fewer extras
+    than `check` counts a smaller suite than the one that ran, and fails the audit against a
+    number that was right."""
+    workflow = _workflow("ci.yml")
+
+    def extras(job: str) -> set[str]:
+        for step in workflow["jobs"][job]["steps"]:
+            match = re.search(r'pip install -e "\.?/?(?:ctrlrun)?\[([^]]+)\]"', step.get("run", ""))
+            if match:
+                return set(match.group(1).split(","))
+        raise AssertionError(f"no editable install in the {job} job")
+
+    assert extras("docs") == extras("check")
+
+
 # --- community files -----------------------------------------------------------------------
 
 
