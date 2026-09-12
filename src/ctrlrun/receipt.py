@@ -27,7 +27,12 @@ from .action import Principal, canonical_bytes
 # downward (ARCHITECTURE §6): a receipt records what an approval verified, and the record
 # type it records is that module's.
 from .approval import APPROVAL_DENIED as APPROVAL_DENIED_REASON
-from .approval import VerifiedApprover
+from .approval import (
+    APPROVAL_UNRECORDED,
+    APPROVALS_UNVERIFIABLE,
+    APPROVER_UNENTITLED,
+    VerifiedApprover,
+)
 from .errors import CTRLRunError, InvalidArgument
 from .policy import Decision
 
@@ -143,6 +148,17 @@ BLOCKED_APPROVAL_REASONS: Final = frozenset(
         "precondition_unavailable",
         "approver_unverified",
         "approver_is_requester",
+        # **Items 3 and 4's reasons, and their absence was the same defect one item later.**
+        # The paragraph above records `approval_denied` landing in no bucket and being fixed
+        # here; `approver_unentitled` and `approvals_unverifiable` were then coined without
+        # being added here, so an observe-mode run that would have refused an unentitled
+        # approver reported `would_have_been_blocked = 0`. A set maintained by hand is a set
+        # the next reason is missed from, which is why
+        # `test_every_approval_refusal_reason_is_counted_by_stats` enumerates them from
+        # `approval.py` instead of restating them.
+        APPROVER_UNENTITLED,
+        APPROVALS_UNVERIFIABLE,
+        APPROVAL_UNRECORDED,
     }
 )
 
@@ -546,7 +562,7 @@ class Receipt:
             principal=Principal(
                 agent=principal["agent"],
                 user=principal["user"],
-                claims=principal.get("claims") or {},
+                claims=_claims_of(principal.get("claims")),
                 issuer=principal.get("issuer"),
                 expires_at=None if expires_at is None else datetime.fromisoformat(expires_at),
             ),
@@ -602,6 +618,33 @@ class Receipt:
         """Parse one JSONL line written by `to_json`."""
         document: dict[str, Any] = json.loads(line)
         return cls.from_dict(document)
+
+
+def _claims_of(value: object) -> dict[str, Any]:
+    """`Principal.claims` out of a document, never raising (`v0.7 §6.11`, SPEC-v0.8 §3.4).
+
+    `_frozen_claims` refuses a claim JSON can hold — an array of numbers, a float, a nested
+    object — and `Principal` runs it on construction, so a receipt carrying one raised out of
+    `from_dict` and blinded every reader of the chain rather than the one field. Dropped here
+    for `_approvers_of`'s reason, and the drop is visible: the receipt reads back with fewer
+    claims than the principal that produced it, and its stored hash no longer matches.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    # `bool | int | str` and no float branch: a float is not an `int` in Python, so it falls
+    # through to the drop below with every other shape. A branch that cannot fire is
+    # documentation, not defence.
+    kept: dict[str, Any] = {}
+    for name, claim in value.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(claim, bool | int | str):
+            kept[name] = claim
+        elif isinstance(claim, list | tuple) and all(
+            isinstance(item, str) and item for item in claim
+        ):
+            kept[name] = tuple(claim)
+    return kept
 
 
 def _approvers_of(value: object) -> tuple[VerifiedApprover, ...]:

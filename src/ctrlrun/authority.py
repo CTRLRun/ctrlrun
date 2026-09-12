@@ -30,7 +30,7 @@ import re
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
@@ -97,7 +97,19 @@ _ID_HEX_BYTES: Final = 16  # "dlg_" + 32 hex chars
 #: §5.2, §5.7 — `api` for `Control.delegate`, where `by` came from wherever the application's
 #: identity came from, and `cli` for `ctrlrun delegate`, where it came from a shell. A reader of
 #: the evidence can tell an act from an assertion, which is the whole reason the field exists.
-_CREATED_VIA: Final[Mapping[str, Literal["api", "cli"]]] = {"api": "api", "cli": "cli"}
+#: SPEC-v0.3 §5.3, SPEC-v0.8 §5.3, §11.1. The vocabulary is **closed** and a record carrying a
+#: value outside it is unreadable, which makes `_candidates` raise and answers
+#: `authority_unreadable` for **every action in the deployment**. So the third value is a public
+#: change that moves the `Literal`, this mapping and every reader together, in one commit; a
+#: deployment that wrote `break-glass` rows under a reader that knew two values would deny
+#: everything, which is fail-closed and useless.
+CreatedVia = Literal["api", "cli", "break-glass"]
+
+_CREATED_VIA: Final[Mapping[str, CreatedVia]] = {
+    "api": "api",
+    "cli": "cli",
+    "break-glass": "break-glass",
+}
 
 #: SPEC-v0.3 §5.3 — the creation-time vocabulary. Disjoint from the evaluation reasons above,
 #: and never used interchangeably with them: a test asserting `authority_escalation` on a
@@ -125,7 +137,14 @@ _STRICTER: Final = {
 }
 
 _AUTHORITY_KEY: Final = "authority"
-_AUTHORITY_KEYS: Final = frozenset({"max_delegation_depth", "grants"})
+_AUTHORITY_KEYS: Final = frozenset({"max_delegation_depth", "grants", "break_glass"})
+
+#: SPEC-v0.8 §5.2 — an envelope's keys: a grant's, minus the two it may not carry, plus the two
+#: that make it an envelope. `delegable:` and `expires_at:` are **named refusals** rather than
+#: silent omissions, because the grant parser accepts both and an operator writing
+#: `delegable: true` would then owe an `expires_at` an envelope does not have.
+_ENVELOPE_ONLY_KEYS: Final = frozenset({"max_ttl", "controls"})
+_ENVELOPE_REFUSED_KEYS: Final = frozenset({"delegable", "expires_at"})
 _GRANT_KEYS: Final = frozenset(
     {
         "id",
@@ -428,7 +447,7 @@ class Delegation:
     depth: int
     grant: Grant
     created_by: Principal
-    created_via: Literal["api", "cli"]
+    created_via: CreatedVia
     created_at: datetime
     revoked_at: datetime | None = None
     revoked_by: str | None = None
@@ -708,6 +727,12 @@ class _Walk:
     missing_parent_id: str | None = None
     cycle_at: str | None = None
     depth_exceeded: int | None = None
+    #: SPEC-v0.8 §5.2 point 4 — did the root come from `Authority.envelopes`? `delegable` is
+    #: read at three sites that each decide something, and an envelope carries no such key,
+    #: so an envelope ancestor **counts as** delegable at all three. "Counts as", and never a
+    #: `delegable=True` written onto the parsed grant: the rendered value must come from the
+    #: document, or the policy hash would move because of a runtime rule (T332).
+    root_is_envelope: bool = False
 
     @property
     def complete(self) -> bool:
@@ -719,6 +744,19 @@ class _Walk:
         above: list[Grant] = [] if self.root is None else [self.root]
         above.extend(node.grant for node in reversed(self.nodes[1:]))
         return tuple(above)
+
+    @property
+    def undelegable_ancestor(self) -> bool:
+        """Is any ancestor one that may not be delegated beneath? (SPEC-v0.8 §5.2 point 4.)
+
+        The root is exempt where it is an envelope, which is the whole of the rule: an envelope
+        exists only to be a parent, and what bounds the population it can reach is `max_ttl`
+        rather than `delegable`. Every other ancestor is read exactly as before.
+        """
+        above = self.ancestors
+        if self.root_is_envelope and above:
+            above = above[1:]
+        return any(not ancestor.delegable for ancestor in above)
 
     @property
     def ancestor_ids(self) -> tuple[str, ...]:
@@ -748,6 +786,36 @@ def _by_grant_id(result: AuthorityResult) -> str:
     return result.grant_id or ""
 
 
+@dataclass(frozen=True)
+class BreakGlassEnvelope:
+    """The widest authority an incident may reach, declared in advance (SPEC-v0.8 §5.2).
+
+    An envelope is a `Grant` in every respect the parser knows, plus the longest expiry a grant
+    beneath it may carry and the controls whose `approver_role` gates who may open one. It is
+    **not** in `Authority.grants`, so `_candidates` cannot return it and it decides no action:
+    that is T330 true by construction rather than by a filter somebody can delete.
+
+    It carries no `delegable` and no `expires_at`. `delegable` is what ordinarily says a grant
+    may be delegated beneath, and the reason behind that rule -- that nothing else bounds the
+    population a delegable grant can reach -- is met here by `max_ttl`, which bounds every child
+    in time and is required. An envelope exists only to be a parent.
+    """
+
+    grant: Grant
+    max_ttl: timedelta
+    controls: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.max_ttl <= timedelta(0):
+            raise InvalidArgument(
+                f"break-glass envelope {self.grant.id!r}: 'max_ttl' must be a positive duration"
+            )
+
+    @property
+    def id(self) -> str:
+        return self.grant.id
+
+
 class Authority:
     """The `authority:` section, loaded and evaluable (SPEC-v0.3 §4).
 
@@ -761,16 +829,26 @@ class Authority:
         *,
         max_delegation_depth: int = DEFAULT_MAX_DELEGATION_DEPTH,
         source: str = "<string>",
+        envelopes: Mapping[str, BreakGlassEnvelope] | None = None,
     ) -> None:
         if max_delegation_depth < 0:
             raise InvalidArgument("max_delegation_depth must be a non-negative int")
         self._grants = MappingProxyType(dict(grants))
         self._max_delegation_depth = max_delegation_depth
         self._source = source
+        # SPEC-v0.8 §5.2: a **separate mapping**, and that is the whole design. `_candidates`
+        # returns every entry of `_grants` unconditionally, so an envelope living there would
+        # decide actions, which is the opposite of what it is for.
+        self._envelopes = MappingProxyType(dict(envelopes or {}))
 
     @property
     def grants(self) -> Mapping[str, Grant]:
         return self._grants
+
+    @property
+    def envelopes(self) -> Mapping[str, BreakGlassEnvelope]:
+        """The break-glass envelopes (SPEC-v0.8 §5.2). Never consulted by `evaluate`."""
+        return self._envelopes
 
     @property
     def max_delegation_depth(self) -> int:
@@ -874,6 +952,105 @@ class Authority:
 
     # --- delegation (SPEC-v0.3 §5) -----------------------------------------------------
 
+    def plan_break_glass(
+        self,
+        envelope_id: str,
+        grant: Grant,
+        *,
+        by: Principal,
+        store: StateStore,
+        now: datetime,
+    ) -> Delegation:
+        """The delegation `Control.break_glass` would write, or a refusal (SPEC-v0.8 §5.3).
+
+        `plan_delegation` with two differences, and both are §5.3.1's:
+
+        - **`envelope_id` resolves only in `envelopes`.** An id naming an ordinary grant is
+          refused by name, whether or not it also names nothing here. Without that,
+          `--envelope <a delegable grant id>` would reach a path where rule 4 is skipped for a
+          grant that has no `controls:` to gate it instead, which is strictly weaker than what
+          `ctrlrun delegate` requires beneath the same grant (T334b).
+        - **Rule 4 does not apply.** An envelope's subject names the agents a break-glass grant
+          may be *for*; the principal opening one is a human. What gates the opener is the
+          envelope's `controls:`, checked by `Control` where the approver identity is.
+
+        Every other rule of `v0.3 §5.3` applies unchanged: unknown parent, expiry, containment,
+        depth. And one this adds: a grant beneath an envelope **must** carry an expiry, and one
+        beyond `max_ttl` is refused.
+        """
+        envelope = self._envelopes.get(envelope_id)
+        if envelope is None:
+            named = (
+                " it names a grant, and a grant is not an envelope: opening one beneath it "
+                "would skip the subject check that 'ctrlrun delegate' applies there, and a "
+                "grant has no 'controls:' to gate the opener instead"
+                if envelope_id in self._grants
+                else " no envelope of that name is declared"
+            )
+            raise AuthorityEscalation(
+                f"no break-glass envelope {envelope_id!r};{named}. An envelope is declared "
+                "under 'authority: break_glass:' and names the controls that gate who may open "
+                "it (SPEC-v0.8 §5.2, §5.3.1)",
+                reason=UNKNOWN_PARENT,
+                parent_id=envelope_id,
+            )
+        if by.expires_at is not None and now > by.expires_at:
+            raise IdentityError(
+                f"the opening principal's credential expired at {by.expires_at}; an expired "
+                "credential may not create authority (SPEC-v0.3 §5.3 rule 0)"
+            )
+        if grant.id:
+            raise InvalidArgument(
+                f"the grant passed to break_glass() carries id {grant.id!r}; a delegation's id "
+                "is assigned, not chosen (SPEC-v0.3 §5.2)"
+            )
+        if grant.expires_at is None:
+            # §5.3's one added rule. An ordinary delegation may carry no expiry; a break-glass
+            # grant that outlives the incident is the thing this section exists to prevent.
+            raise AuthorityEscalation(
+                f"a grant opened beneath {envelope_id!r} must carry 'expires_at'; break-glass "
+                "authority that outlives the incident is what an envelope exists to prevent "
+                "(SPEC-v0.8 §5.3)",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension="expires_at",
+            )
+        if grant.expires_at > now + envelope.max_ttl:
+            raise AuthorityEscalation(
+                f"a grant opened beneath {envelope_id!r} expires at {grant.expires_at}, beyond "
+                f"its max_ttl of {envelope.max_ttl} from now ({now + envelope.max_ttl})",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension="expires_at",
+            )
+        depth = 1
+        if depth > self._max_delegation_depth:
+            raise AuthorityEscalation(
+                f"a delegation of {envelope_id!r} would be at depth {depth}, beyond "
+                f"max_delegation_depth {self._max_delegation_depth}",
+                reason=MAX_DEPTH,
+                parent_id=envelope_id,
+            )
+        dimension = contained_dimension(envelope.grant, grant)
+        if dimension is not None:
+            raise AuthorityEscalation(
+                f"the break-glass grant is not contained in {envelope_id!r} on {dimension!r}; "
+                "omission never means unlimited (SPEC-v0.3 §5.4)",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension=dimension,
+            )
+        delegation_id = new_delegation_id()
+        return Delegation(
+            delegation_id=delegation_id,
+            parent_id=envelope_id,
+            depth=depth,
+            grant=replace(grant, id=delegation_id),
+            created_by=by,
+            created_via="break-glass",
+            created_at=now,
+        )
+
     def plan_delegation(
         self, parent_id: str, grant: Grant, *, by: Principal, store: StateStore, now: datetime
     ) -> Delegation:
@@ -960,6 +1137,27 @@ class Authority:
         """§5.3 rules 1 to 3, and the walked depth rule 5 needs."""
         # §5.2 — a root grant wins any collision: an id is resolved against the document first
         # and the store second.
+        if parent_id in self._envelopes:
+            # **SPEC-v0.8 §5.3.1, the direction an independent review found open.** §5.3.1
+            # guards `break-glass --envelope <a grant id>`; nothing guarded `delegate --parent
+            # <an envelope id>`, which is strictly worse. An earlier build of this method
+            # returned the envelope's grant here, and `plan_delegation` then created authority
+            # beneath it with **no expiry requirement, no `max_ttl`, no entitlement check and
+            # no `created_via` saying what it was** -- a permanent break-glass grant, opened
+            # from a shell by anyone whose `--as` matched the envelope's subject, which is a
+            # pattern over the agents the grant may be *for*.
+            #
+            # `plan_break_glass` resolves envelopes itself and applies §5.3's rules. This path
+            # refuses them by name. The delegable-exemption of §5.2 point 4 lives at the two
+            # read sites that walk an existing chain, where it cannot create anything.
+            raise AuthorityEscalation(
+                f"{parent_id!r} is a break-glass envelope, not a grant. Authority beneath an "
+                "envelope is opened with 'ctrlrun break-glass --envelope', which requires an "
+                "expiry inside its max_ttl and checks the opener against the controls that "
+                "gate it; delegating beneath one directly would skip both (SPEC-v0.8 §5.3.1)",
+                reason=UNKNOWN_PARENT,
+                parent_id=parent_id,
+            )
         root = self._grants.get(parent_id)
         if root is not None:
             if not root.delegable:
@@ -1013,8 +1211,13 @@ class Authority:
         # new delegations appearing anywhere beneath it rather than only one level down.
         invalid = walk.missing_parent_id is not None or walk.cycle_at is not None
         if not invalid:
-            invalid = any(node.is_revoked for node in walk.nodes[1:]) or any(
-                ancestor.is_expired(now) or not ancestor.delegable for ancestor in walk.ancestors
+            # SPEC-v0.8 §5.2 point 4, second site: the same exemption, or a delegation
+            # **beneath** a break-glass grant is refused `parent_not_valid` and §5.4's
+            # attenuation bullet cannot hold (T337).
+            invalid = (
+                any(node.is_revoked for node in walk.nodes[1:])
+                or any(ancestor.is_expired(now) for ancestor in walk.ancestors)
+                or walk.undelegable_ancestor
             )
         if invalid:
             raise AuthorityEscalation(
@@ -1050,6 +1253,18 @@ class Authority:
             root = self._grants.get(parent_id)
             if root is not None:
                 return _Walk(tuple(nodes), root=root, root_id=parent_id)
+            # SPEC-v0.8 §5.2 point 2: a break-glass delegation names an **envelope** as its
+            # parent, and the walk resolved roots out of `_grants` alone. Without this its
+            # chain has no root at all and every action under it is refused
+            # `authority_escalation` with a missing parent.
+            envelope = self._envelopes.get(parent_id)
+            if envelope is not None:
+                return _Walk(
+                    tuple(nodes),
+                    root=envelope.grant,
+                    root_id=parent_id,
+                    root_is_envelope=True,
+                )
             if parent_id in seen:
                 return _Walk(tuple(nodes), cycle_at=parent_id)
             record = store.get_delegation(parent_id)
@@ -1099,6 +1314,24 @@ class Authority:
                 return _ChainCheck(
                     depth, AuthorityResult(False, AUTHORITY_ESCALATION, dimension=dimension)
                 )
+        # SPEC-v0.8 §5.2, and `v0.3 §5.6`'s stated purpose: **a narrowed root narrows
+        # everything beneath it.** `max_ttl` was checked once, at creation, and is not a §5.4
+        # containment row, so an operator who narrowed an envelope while an incident was still
+        # running narrowed nothing: a four-hour grant opened under `PT4H` kept running under
+        # `PT15M`. Every other envelope dimension already narrows live grants here, because the
+        # envelope is the chain's root parent; this is the one that did not, and it is the one
+        # bound an operator reaches for first.
+        envelope = None if walk.root_id is None else self._envelopes.get(walk.root_id)
+        if envelope is not None and walk.nodes:
+            opened = walk.nodes[-1]
+            if (
+                opened.grant.expires_at is None
+                or opened.grant.expires_at > opened.created_at + envelope.max_ttl
+            ):
+                return _ChainCheck(
+                    depth,
+                    AuthorityResult(False, AUTHORITY_ESCALATION, dimension="max_ttl"),
+                )
         if walk.cycle_at is not None:
             # A chain that loops is a store somebody has edited by hand, and it belongs with
             # the other unreadable-record cases rather than with the ordinary escalations.
@@ -1116,15 +1349,29 @@ class Authority:
             return _ChainCheck(
                 depth, AuthorityResult(False, AUTHORITY_ESCALATION, depth_exceeded=depth)
             )
-        if any(not ancestor.delegable for ancestor in walk.ancestors):
+        if walk.undelegable_ancestor:
             # Rule 6 exists because `delegable` is not a §5.4 row and rule 4 would therefore
             # never see it. An operator setting `delegable: false` on a root grant is shutting
             # down a chain they believe is compromised.
+            #
+            # SPEC-v0.8 §5.2 point 4, third site: this runs on **every evaluation**, so without
+            # the envelope exemption a break-glass grant is created successfully and then
+            # authorises nothing, refused `authority_escalation` with no dimension named, which
+            # is the least diagnosable refusal in this file (T326b).
             return _ChainCheck(depth, AuthorityResult(False, AUTHORITY_ESCALATION))
         return _ChainCheck(depth, None)
 
 
 # --- loading (SPEC-v0.3 §4.1, §4.2) ----------------------------------------------------
+
+
+def _canonical_envelope(envelope: BreakGlassEnvelope) -> dict[str, PlainValue]:
+    """One envelope in the shape `policy_hash` is taken over (SPEC-v0.8 §5.2)."""
+    rendered = _canonical_grant(envelope.grant)
+    fields: dict[str, PlainValue] = dict(rendered) if isinstance(rendered, dict) else {}
+    fields["max_ttl"] = int(envelope.max_ttl.total_seconds())
+    fields["controls"] = list(envelope.controls)
+    return fields
 
 
 def canonical_grants(authority: Authority | None) -> PlainValue:
@@ -1155,6 +1402,20 @@ def canonical_grants(authority: Authority | None) -> PlainValue:
         # locally rather than relying on the layer below.
         "grants": {
             grant_id: _canonical_grant(grant) for grant_id, grant in authority.grants.items()
+        },
+        # SPEC-v0.8 §5.2, §11.1. **The envelope is the widest authority an incident can reach**,
+        # and the argument for declaring it in the policy is that it was evidenced before the
+        # incident by a document somebody reviewed. That argument is only true if widening it
+        # moves the hash, so `max_ttl` is rendered here with the rest.
+        #
+        # Rendered through `_canonical_grant` like any grant, whose closed field list always
+        # emits `delegable`. An envelope carries no such key, so it hashes `delegable: false` --
+        # the parser default every grant omitting the key already hashes as -- and the read-site
+        # rule of §5.2 point 4 does not touch the rendered value. That is deliberate: the hash
+        # is a statement about the document, never about a runtime decision (T332).
+        "break_glass": {
+            envelope_id: _canonical_envelope(envelope)
+            for envelope_id, envelope in authority.envelopes.items()
         },
     }
 
@@ -1212,10 +1473,10 @@ def _optional_from_yaml(
     # as well as in `Policy`, because §8.3's `--authority` document is never read by the
     # policy loader at all.
     require_v3(document, str(schema), source)
-    return _from_section(document[_AUTHORITY_KEY], source)
+    return _from_section(document[_AUTHORITY_KEY], source, standalone=standalone)
 
 
-def _from_section(section: object, source: str) -> Authority:
+def _from_section(section: object, source: str, *, standalone: bool = False) -> Authority:
     where = f"{source}: authority"
     if not isinstance(section, Mapping):
         raise PolicyError(
@@ -1250,7 +1511,110 @@ def _from_section(section: object, source: str) -> Authority:
                 "can resolve later"
             )
         grants[grant.id] = grant
-    return Authority(grants, max_delegation_depth=depth, source=source)
+    if standalone and "break_glass" in section:
+        # SPEC-v0.8 §5.2. Not "allowed but its citations must resolve": this document shape has
+        # no control registry to resolve them against, so the only envelope it could express is
+        # an **ungated** one, and the single deployment unable to state the gate would be the
+        # one whose break-glass anybody verified could open.
+        raise PolicyError(
+            f"{where}: a standalone authority document may not declare 'break_glass'. An "
+            "envelope names the controls whose approver_role gates who may open it, and this "
+            "document shape carries no control registry to resolve them against; move the "
+            "authority section into the policy document, where the registry is (SPEC-v0.8 §5.2)"
+        )
+    envelopes = _parse_envelopes(section.get("break_glass"), grants, where)
+    return Authority(grants, max_delegation_depth=depth, source=source, envelopes=envelopes)
+
+
+def _parse_envelopes(
+    block: object, grants: Mapping[str, Grant], where: str
+) -> dict[str, BreakGlassEnvelope]:
+    """SPEC-v0.8 §5.2's `break_glass:` mapping, by id."""
+    if block is None:
+        return {}
+    if not isinstance(block, Mapping):
+        raise PolicyError(
+            f"{where}: 'break_glass' must be a mapping of envelope id to envelope, got "
+            f"{_type_name(block)}"
+        )
+    envelopes: dict[str, BreakGlassEnvelope] = {}
+    for identifier, entry in block.items():
+        spot = f"{where} break_glass[{identifier!r}]"
+        if not isinstance(identifier, str) or not identifier:
+            raise PolicyError(f"{spot}: an envelope id must be a non-empty string")
+        if identifier in grants:
+            # §5.2 and §5.3.1: rule 4 is substituted only for a parent that came from
+            # `break_glass:`, so "which mapping did this id come from" must always have an
+            # answer. An id in both makes it undecidable, and the resolution that favoured
+            # `grants:` would silently skip the gate.
+            raise PolicyError(
+                f"{spot}: {identifier!r} is declared in both 'grants' and 'break_glass'. "
+                "Which mapping a parent came from decides whether the envelope's controls "
+                "gate who may open it (SPEC-v0.8 §5.3.1), so one id cannot be in both"
+            )
+        if not isinstance(entry, Mapping):
+            raise PolicyError(f"{spot}: an envelope must be a mapping, got {_type_name(entry)}")
+        for refused in sorted(_ENVELOPE_REFUSED_KEYS):
+            if refused in entry:
+                raise PolicyError(
+                    f"{spot}: an envelope may not carry {refused!r}. An envelope exists only "
+                    "to be a parent, so 'delegable' is what it means rather than a key, and "
+                    "what bounds it in time is 'max_ttl', which every grant beneath it obeys "
+                    "(SPEC-v0.8 §5.2)"
+                )
+        _reject_unknown_keys(
+            entry, (_GRANT_KEYS - _ENVELOPE_REFUSED_KEYS - {"id"}) | _ENVELOPE_ONLY_KEYS, spot
+        )
+        if "max_ttl" not in entry:
+            raise PolicyError(
+                f"{spot}: 'max_ttl' is required. It is what bounds every grant opened beneath "
+                "this envelope in time, and a break-glass grant that outlives the incident is "
+                "what SPEC-v0.8 §5 exists to prevent"
+            )
+        max_ttl = _parse_duration(entry["max_ttl"], f"{spot}: max_ttl")
+        controls = entry.get("controls", [])
+        if not isinstance(controls, list) or not all(
+            isinstance(item, str) and item for item in controls
+        ):
+            raise PolicyError(f"{spot}: 'controls' must be a list of control ids, got {controls!r}")
+        grant = _parse_grant(
+            {key: value for key, value in entry.items() if key not in _ENVELOPE_ONLY_KEYS}
+            | {"id": identifier},
+            spot,
+        )
+        try:
+            envelopes[identifier] = BreakGlassEnvelope(
+                grant=grant, max_ttl=max_ttl, controls=tuple(controls)
+            )
+        except InvalidArgument as exc:
+            raise PolicyError(f"{spot}: {exc}") from exc
+    return envelopes
+
+
+def _parse_duration(value: object, where: str) -> timedelta:
+    """An ISO-8601 duration, the subset `max_ttl` needs: `PT<n>H`, `PT<n>M`, `PT<n>S`, `P<n>D`.
+
+    Written here rather than taken from a dependency, because the core is stdlib plus `pyyaml`
+    and `click`, and because a permissive parser would accept a month or a year, which are not
+    durations a clock can add without a calendar.
+    """
+    if not isinstance(value, str) or not value:
+        raise PolicyError(f"{where}: must be an ISO-8601 duration string, got {value!r}")
+    match = _DURATION.fullmatch(value)
+    if match is None:
+        raise PolicyError(
+            f"{where}: {value!r} is not a duration this reader accepts. Write it as 'PT4H', "
+            "'PT30M', 'PT90S' or 'P2D'; months and years are not durations a clock can add"
+        )
+    days, hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    found = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    if found <= timedelta(0):
+        raise PolicyError(f"{where}: {value!r} is not a positive duration")
+    return found
+
+
+#: The subset of ISO-8601 above. Anchored, so `P1MT1H` is refused rather than read as an hour.
+_DURATION: Final = re.compile(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?")
 
 
 def grant_from_yaml(text: str, *, source: str = "<string>") -> Grant:

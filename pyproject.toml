@@ -68,6 +68,11 @@ ctrlrun = "ctrlrun.cli.main:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    # The suite is 3700 tests of temp databases, scratch schemas and loopback sockets, each
+    # owning its own, and running them one at a time cost eleven minutes of wall clock for no
+    # isolation the tests did not already have. `scripts/check.sh` passes `-n auto`; `-p
+    # no:randomly -n0` is how an ordering bug is reproduced.
+    "pytest-xdist>=3",
     "mypy>=2.3",
     "ruff>=0.16",
     # SPEC-v0.4 §4.3 - T115 validates `ctrlrun verify --junit` against the checked-in
@@ -133,6 +138,12 @@ markers = [
     # unmarked test that appends one, which is what "no `authority:` section behaves
     # exactly as v0.2" means mechanically inside one pytest process.
     "authority: builds an `authority:` section (SPEC-v0.3 §4.1)",
+    # A test that reproduces a timing window through the TCP proxy in
+    # `tests/failure_injection.py`: a held statement, a killed COMMIT, a partition. These do
+    # not share a box. Run under `-n auto` on a loaded CI runner, T155b's COMMIT was never
+    # killed and the test reported "the window never opened" -- correctly, because it had not.
+    # `scripts/check.sh` runs everything else in parallel and these on their own.
+    "serial: reproduces a timing window and must not share a machine with other workers",
 ]
 
 [tool.mypy]

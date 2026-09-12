@@ -727,10 +727,10 @@ def test_T283b_a_corrupted_entitled_column_is_refused_and_not_exploded(store, cl
     assert fine.entitled == ("card-data-handling",)
 
 
-# --- T297: the resumed leg is the only receipt some actions get ------------------------------
+# --- T296c: the resumed leg is the only receipt some actions get ------------------------------
 
 
-def test_T297_a_resumed_leg_carries_the_approvers_onto_its_receipt(store, clock):
+def test_T296c_a_resumed_leg_carries_the_approvers_onto_its_receipt(store, clock):
     """§2.5 and `SPEC-mcp-operator.md` §8.3, which is why this is not a nicety.
 
     A suspended action writes no receipt on the leg that suspended, so the resumed leg's is the

@@ -369,6 +369,22 @@ def approve(request_id: str, store_url: str | None) -> None:
         approval = store.grant_approval(request_id, CLI_APPROVER)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
+    if approval is None:
+        # SPEC-v0.8 §4.4: recorded, and still short of the threshold the request pinned. No
+        # `APPROVAL_GRANTED` event, because nothing was granted yet: an event naming a grant that
+        # did not happen is the false-green shape in the evidence log (`v0.6 §7.2.3`'s argument).
+        after = store.get_approval(request_id)
+        recorded = 0 if after is None else len(after.approvers)
+        needed = 1 if after is None else after.request.approvals_required
+        click.echo(f"recorded {request_id}: {recorded} of {needed} approvals")
+        # §2.6: a CLI grant records no verified approver, so under M-of-N it never counts. Said
+        # here rather than left for an operator to infer from a number that does not move.
+        if recorded < needed:
+            click.echo(
+                "this answer carries no verified approver, so it will not count where the "
+                "deployment names an approver identity (SPEC-v0.8 §2.6)"
+            )
+        return
     if record is not None:
         store.append_event(
             _event(
@@ -930,6 +946,52 @@ def delegate(
     click.echo(f"revoke it with: ctrlrun revoke {created.delegation_id}")
 
 
+@main.command("break-glass")
+@click.option(
+    "--envelope",
+    required=True,
+    help="The break-glass envelope declared under 'authority: break_glass:'.",
+)
+@click.option(
+    "--file",
+    "grant_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="A one-grant YAML document, as --file takes for delegate. 'expires_at' is required.",
+)
+@click.option("--reason", default="", help="Free text recorded on the DELEGATION_CREATED event.")
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+@STORE_URL_OPTION
+def break_glass(
+    envelope: str, grant_file: Path, reason: str, as_json: bool, store_url: str | None
+) -> None:
+    """Open a break-glass grant beneath a declared envelope.
+
+    An incident needs authority nobody was granted in advance, and the wrong answer is a flag:
+    a flag leaves no record, expires never and cannot be revoked. What this creates is an
+    ordinary delegation, bounded by the envelope on every dimension, expiring within its
+    'max_ttl', revocable, attenuable, and named on the receipt of every action taken under it.
+
+    **There is no --as.** Whoever opens one is the principal the deployment's approver identity
+    resolves, and a deployment that names none cannot open one at all: an assertion typed at a
+    shell is exactly what break-glass must not accept (SPEC-v0.8 §5.3.1).
+    """
+    try:
+        control = _control_on(store_url)
+        grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
+        created = control._break_glass(envelope, grant, reason=reason)
+    except AuthorityEscalation as exc:
+        raise click.ClickException(f"{exc.reason}: {exc}") from exc
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(_delegation_dict(created), ensure_ascii=False))
+        return
+    click.echo(f"opened {created.delegation_id} beneath {created.parent_id}")
+    click.echo(f"expires {created.grant.expires_at}")
+    click.echo(f"revoke it with: ctrlrun revoke {created.delegation_id}")
+
+
 @main.command()
 @click.argument("delegation_id", required=False)
 @click.option("--by", "by", default=CLI_APPROVER, show_default=True, help="Who revoked it.")
@@ -1179,6 +1241,14 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
 @click.option("--identity-jwt-leeway", type=float, default=60.0, show_default=True)
 @click.option("--identity-jwt-jwks-min-refresh", type=float, default=30.0, show_default=True)
 @click.option("--identity-jwt-http-timeout", type=float, default=5.0, show_default=True)
+@click.option(
+    "--approver-roles-claim",
+    default=None,
+    help=(
+        "Which verified claim carries this issuer's roles, for the approver entitlement of "
+        "SPEC-v0.8 §3. Without it no role can be read, so any cited control naming one refuses."
+    ),
+)
 @STORE_URL_OPTION
 def mcp_operator(
     listen: str,
@@ -1198,6 +1268,7 @@ def mcp_operator(
     identity_jwt_audience: str | None,
     identity_jwt_token_type: str | None,
     identity_jwt_header: str,
+    approver_roles_claim: str | None,
     identity_jwt_agent_claim: str,
     identity_jwt_user_claim: str | None,
     identity_jwt_claims: tuple[str, ...],
@@ -1246,6 +1317,7 @@ def mcp_operator(
             identity_jwt_leeway=identity_jwt_leeway,
             identity_jwt_jwks_min_refresh=identity_jwt_jwks_min_refresh,
             identity_jwt_http_timeout=identity_jwt_http_timeout,
+            approver_roles_claim=approver_roles_claim,
         )
     except (ValueError, CTRLRunError) as exc:
         raise click.ClickException(str(exc)) from exc

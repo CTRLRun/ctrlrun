@@ -49,6 +49,7 @@ from .approval import (
     _verified_approver_now,
     check_answerable,
     check_consumable,
+    count_grant,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -92,6 +93,8 @@ from .state import (
     _resolved,
     _result_json,
     _result_value,
+    _roles_from_json,
+    _roles_json,
     _transitioned,
     _utc_now,
 )
@@ -315,6 +318,13 @@ def _moved(found: EffectRecord, was: EffectRecord, effect_key: str) -> CTRLRunEr
     if found.state is EffectState.COMMITTED:
         return DuplicateEffect(moved, state=COMMITTED_EFFECT, effect_key=effect_key)
     return DuplicateEffect(moved, state=IN_PROGRESS_EFFECT, effect_key=effect_key)
+
+
+#: SPEC-v0.8 §4.3 — how many times a grant re-reads after losing its compare-and-set. Bounded,
+#: because an unbounded retry against a hot approval is a spin nobody can see; N humans answering
+#: one request cannot exceed N collisions, and this is comfortably above any N a human workflow
+#: has.
+_GRANT_ATTEMPTS: Final = 8
 
 
 class PostgresStateStore:
@@ -696,7 +706,7 @@ class PostgresStateStore:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
                 "granted_at, expires_at, consumed_at, policy_hash_at_approval, "
-                "precondition_fingerprint, approvers "
+                "precondition_fingerprint, approvers, required_roles, approvals_required "
                 f"FROM {self._q}.approvals WHERE approval_id = %s",
                 (approval_id,),
             )
@@ -712,6 +722,8 @@ class PostgresStateStore:
                 expires_at=datetime.fromisoformat(str(row[7])),
                 policy_hash=None if row[9] is None else str(row[9]),
                 precondition_fingerprint=None if row[10] is None else str(row[10]),
+                required_roles=_roles_from_json(None if row[12] is None else str(row[12])),
+                approvals_required=int(row[13]) if row[13] is not None else 1,
             ),
             status=ApprovalStatus(row[2]),
             approver=row[4],
@@ -1467,8 +1479,8 @@ class PostgresStateStore:
                     f"INSERT INTO {self._q}.approvals("
                     "approval_id, action_hash, status, action_json, "
                     "approver, created_at, granted_at, expires_at, consumed_at, "
-                    "policy_hash_at_approval, precondition_fingerprint) "
-                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s,%s)",
+                    "policy_hash_at_approval, precondition_fingerprint, required_roles, "
+                    "approvals_required) VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s,%s,%s,%s)",
                     (
                         request.request_id,
                         request.action_hash,
@@ -1478,6 +1490,8 @@ class PostgresStateStore:
                         _iso(request.expires_at),
                         request.policy_hash,
                         request.precondition_fingerprint,
+                        _roles_json(request.required_roles),
+                        request.approvals_required,
                     ),
                 )
         except Exception as duplicate:
@@ -1513,51 +1527,76 @@ class PostgresStateStore:
 
         return _newest_denied(self.approvals_for(action_hash), action_hash, self._clock())
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
+        """Record one answer, counting toward the threshold the request pinned (SPEC-v0.8 §4.2).
+
+        **The compare-and-set is on `approvers` and not on `status`, and that is the whole of
+        §4.3.** This store runs READ COMMITTED with an explicit `BEGIN` and reads with a plain
+        `SELECT`, so at N-1 the status does not change: two concurrent grants both read
+        `pending`, both update `WHERE status = 'pending'`, both see `rowcount == 1`, and each
+        writes an `approvers` value computed from the row it read before the other wrote. That is
+        a lost update, and one principal fills two slots. `_consume_locked` documents the
+        identical defect, measured at 8 of 8, and says the condition has to be in the statement.
+
+        So the condition is the value being changed. `IS NOT DISTINCT FROM` and not `=`, because
+        the first grant compares against `NULL`. A miss means somebody else answered first, which
+        is information rather than an error to swallow: the retry re-reads, and it converges
+        because a fresh statement in READ COMMITTED sees the winner's commit.
+        """
         approver = _approver(approver)
         connection = self._connection()
-        now = self._clock()
-        connection.execute("BEGIN")
-        self._use_schema(connection)
-        try:
-            record = self._answerable(connection, approval_id, now)
-            # SPEC-v0.8 §2.5: the verified approver the granting surface resolved, appended to
-            # whatever the row already holds.
-            verified = _verified_approver_now(now)
-            approvers = (*record.approvers, verified) if verified else record.approvers
-            granted = replace(
-                record,
-                status=ApprovalStatus.GRANTED,
-                approver=approver,
-                granted_at=now,
-                approvers=approvers,
-            )
-            with connection.cursor() as cursor:
-                # Conditional on what `check_answerable` saw. Unconditional, a concurrent
-                # `deny_approval` was silently overwritten and `find_granted_approval` then
-                # returned an approval a human had refused.
-                cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s, "
-                    "approvers=%s WHERE approval_id=%s AND status=%s",
-                    (
-                        str(ApprovalStatus.GRANTED),
-                        approver,
-                        _iso(now),
-                        _approvers_json(approvers),
-                        approval_id,
-                        str(record.status),
-                    ),
+        for _ in range(_GRANT_ATTEMPTS):
+            now = self._clock()
+            connection.execute("BEGIN")
+            self._use_schema(connection)
+            try:
+                record = self._answerable(connection, approval_id, now)
+                verified = _verified_approver_now(now)
+                approvers, reached = count_grant(record, verified, now)
+                status = ApprovalStatus.GRANTED if reached else record.status
+                granted = replace(
+                    record,
+                    status=status,
+                    approver=approver if reached else record.approver,
+                    granted_at=now if reached else record.granted_at,
+                    approvers=approvers,
                 )
-                if cursor.rowcount != 1:
-                    raise ApprovalMismatch(
-                        f"approval {approval_id} was answered by somebody else first",
-                        reason="answered",
+                with connection.cursor() as cursor:
+                    # Conditional on what this transaction read, which is both halves: the
+                    # status `check_answerable` saw, so a concurrent `deny_approval` is not
+                    # silently overwritten, and the `approvers` value the count was computed
+                    # from, so a concurrent grant is not lost.
+                    cursor.execute(
+                        f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s, "
+                        "approvers=%s WHERE approval_id=%s AND status=%s "
+                        "AND approvers IS NOT DISTINCT FROM %s",
+                        (
+                            str(status),
+                            granted.approver,
+                            _iso(granted.granted_at) if granted.granted_at else None,
+                            _approvers_json(approvers),
+                            approval_id,
+                            str(record.status),
+                            _approvers_json(record.approvers),
+                        ),
                     )
-        except BaseException:
-            self._rollback(connection)
-            raise
-        self._commit(connection)
-        return granted.as_approval()
+                    missed = cursor.rowcount != 1
+            except BaseException:
+                self._rollback(connection)
+                raise
+            if missed:
+                # Somebody else answered between this transaction's read and its write. Roll
+                # back and read again rather than raise: their answer is as valid as this one,
+                # and the next pass counts both.
+                self._rollback(connection)
+                continue
+            self._commit(connection)
+            return granted.as_approval() if reached else None
+        raise ApprovalMismatch(
+            f"approval {approval_id} was answered by somebody else first, {_GRANT_ATTEMPTS} "
+            "times running; nothing was recorded for this answer",
+            reason="answered",
+        )
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)

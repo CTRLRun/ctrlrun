@@ -19,11 +19,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
+from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
+    APPROVAL_UNRECORDED,
+    APPROVALS_UNVERIFIABLE,
     APPROVER_IS_REQUESTER,
+    APPROVER_UNENTITLED,
     APPROVER_UNVERIFIED,
     DEFAULT_APPROVAL_TTL,
     Approval,
@@ -34,13 +37,26 @@ from .approval import (
     ApprovalVerdict,
     ApproverIdentity,
     LocalApprovalProvider,
+    RequiredRole,
     VerifiedApprover,
     _precondition_at_request,
     _precondition_fingerprint,
+    _required_roles,
     check_consumable,
+    entitled_controls,
     policy_in_force,
+    roles_held,
+    unsatisfied,
 )
-from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
+from .authority import (
+    Authority,
+    AuthorityResult,
+    BreakGlassEnvelope,
+    CreatedVia,
+    Delegation,
+    Grant,
+    _optional_from_yaml,
+)
 from .effect import (
     _EXECUTOR_RUN,
     COMMITTED_EFFECT,
@@ -184,6 +200,12 @@ class _Invocation:
 
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
+#: SPEC-v0.8 §5.4 — the grant that decided the action being recorded, for the receipt. A
+#: context variable rather than an argument threaded through `_record`'s dozen call sites,
+#: on the precedent of `_PRESENTED_APPROVAL` beneath it: `Control` is shared across calls and
+#: holds no per-call state, and a context variable is per-call by construction.
+_AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_grant_id")
+
 _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
 #: SPEC-v0.7 §4.3. The token of the attempt whose executor is running, and nothing else. Set
@@ -373,19 +395,23 @@ class _Compared:
     per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("approvers", "at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error", "unentitled")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
         self.approvers: tuple[VerifiedApprover, ...] = ()
+        #: SPEC-v0.8 §3.7 — the required role an approver did not hold, so the event can name the
+        #: control as well as the reason.
+        self.unentitled: RequiredRole | None = None
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
         self.approvers = ()
+        self.unentitled = None
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -641,10 +667,22 @@ class Control:
         return self._policy.evaluate(action)
 
     def _authority_result(self, action: Action) -> AuthorityResult | None:
-        """The authority axis for this action, or `None` where there is no section (§4.1)."""
+        """The authority axis for this action, or `None` where there is no section (§4.1).
+
+        SPEC-v0.8 §5.4: it also remembers which grant decided, for the receipt. Here rather
+        than at the four call sites, because a site that forgot would produce a receipt whose
+        `authority_grant_id` was the **previous** action's, and a stale id on the evidence is
+        worse than none. Set on every call, including to `None`, for the same reason.
+        """
         if self._authority is None:
+            _AUTHORITY_GRANT_ID.set(None)
             return None
-        return self._authority.evaluate(action, now=self._clock(), store=self._store)
+        result = self._authority.evaluate(action, now=self._clock(), store=self._store)
+        # Only where one passed: `grant_id` is also set on a refusal, and a committed receipt
+        # is the only thing this field is read on. §4.6's `min` already picked which grant of
+        # several decided, so this is that decision and not a guess about it.
+        _AUTHORITY_GRANT_ID.set(result.grant_id if result.passed else None)
+        return result
 
     def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
         """SPEC-v0.3 §7 — the ids travel here, and never in `decision_reason`.
@@ -824,6 +862,15 @@ class Control:
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
+        # SPEC-v0.8 §5.4. **Cleared at the top of the call, not only set at the authority
+        # gate.** §4.3.1 puts `principal_expired` first, so `execute` records a denied receipt
+        # *before* `_authority_result` runs; with only the gate setting this, that receipt
+        # carried the **previous** action's grant id. An independent review demonstrated it: a
+        # committed action under a break-glass grant, then a refusal for a lapsed credential,
+        # and the refusal's receipt named the grant that never decided it. Async tasks inherit
+        # a copy of the context at creation, so a task started after a break-glass action
+        # carried that id into an unrelated refusal too.
+        _AUTHORITY_GRANT_ID.set(None)
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -1152,7 +1199,18 @@ class Control:
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
             if approval_id is None:
-                observation.block(BLOCKED_APPROVAL_REQUIRED)
+                # SPEC-v0.8 §4.2, §11.1. **The threshold refusal reaches observe mode too**,
+                # and it reached it nowhere: `_refuse_unverifiable` lives in `_presented`,
+                # which observe mode never calls, so a deployment piloting a two-approver
+                # policy with no approver identity was told `approval_required` -- that a human
+                # would have been asked. Enforce mode denies every one of those actions before
+                # anybody is asked, and reporting which is the one thing observe mode is for.
+                required = self._policy.approvals_required(action.name)
+                observation.block(
+                    APPROVALS_UNVERIFIABLE
+                    if required > 1 and self._approver_identity is None
+                    else BLOCKED_APPROVAL_REQUIRED
+                )
         if approval_id is None and effect_key is None:
             return None, None
         try:
@@ -2277,6 +2335,14 @@ class Control:
         action is suspended awaiting a human, which is not a terminal state (§6.1). The
         `APPROVAL_REQUESTED` event is the evidence.
         """
+        # SPEC-v0.8 §4.2: a threshold above one in a deployment that verifies nobody has no
+        # referent for "distinct principals": the count could never move, or distinctness would
+        # fall back to the string §4.1 forbids. Denied here, before a human is asked, because
+        # asking somebody to answer a request that can never be completed spends their attention
+        # on nothing (`v0.3 §4.3`'s argument for refusing before the approval gate).
+        required = self._policy.approvals_required(action.name)
+        if required > 1 and self._approver_identity is None:
+            self._refuse_unverifiable(action, evaluation, started_at, effect_key, required)
         presented = _PRESENTED_APPROVAL.get(None)
         if presented is not None:
             return presented
@@ -2291,8 +2357,24 @@ class Control:
         # `Control` is the only object holding both a policy and a provider, and the provider
         # protocol takes neither, so it travels the way a presented approval does. The
         # fingerprint travels beside it, by the same route and for the same reason.
+        # SPEC-v0.8 §3.3: which controls the evaluation that sent this action to approval cited,
+        # and what role each demands. Built here rather than on `Policy`, because `Control` is
+        # the only object that holds both the evaluation and the registry, and §11.1 freezes no
+        # accessor for it.
+        roles = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in evaluation.controls
+            )
+            if control is not None and control.approver_role
+        )
         try:
-            with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
+            with (
+                policy_in_force(self._policy_hash),
+                _precondition_at_request(fingerprint),
+                _required_roles(roles, self._policy.approvals_required(action.name)),
+            ):
                 request = self._approvals.request(action, self._approval_ttl)
         except Exception:
             if fingerprint is not None:
@@ -2318,7 +2400,16 @@ class Control:
             effect_key,
             approval_id=request.request_id,
         )
-        if fingerprint is not None and not self._recorded(request, fingerprint):
+        # **Asked whenever anything was pinned**, not only for a fingerprint. The earlier
+        # spelling was `if fingerprint is not None`, which meant a deployment with no
+        # preconditions at all -- the common one -- never read the row back, and so never saw a
+        # threshold or a role list that failed to reach it.
+        missing = (
+            self._unpinned(request, fingerprint, roles, required)
+            if fingerprint is not None or roles or required > 1
+            else None
+        )
+        if missing is not None:
             # SPEC-v0.7 §6.4: **never a skip**, and without this it was one. A provider that
             # builds its own `ApprovalRequest` (`build_request` is package-internal) and a store
             # that does not persist the column both leave an approval that was requested with a
@@ -2326,7 +2417,7 @@ class Control:
             # names no provider, is 0.6.1's path: consumed with nothing compared. The request
             # pass is where that is visible, so it is where it is refused.
             self._refuse_unrecorded_request(
-                action, evaluation, started_at, effect_key, request, fingerprint
+                action, evaluation, started_at, effect_key, request, fingerprint, missing
             )
         raise ApprovalRequired(
             f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
@@ -2334,6 +2425,37 @@ class Control:
             request_id=request.request_id,
             action_id=action.action_id,
         )
+
+    def _refuse_unverifiable(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        required: int,
+    ) -> None:
+        """§4.2's refusal: `approvals_required` above one, and nobody to count (§12).
+
+        Not a load error: the policy is loadable and correct, and what is missing is the
+        `Control` it was deployed in, which the loader cannot see.
+        """
+        message = (
+            f"{action.name}: 'approvals_required: {required}' needs an approver identity, and "
+            "this deployment names none; distinct principals cannot be counted where nobody is "
+            "verified (SPEC-v0.8 §4.2)"
+        )
+        self._append(
+            EventType.ACTION_DENIED, action, {"reason": APPROVALS_UNVERIFIABLE}, effect_key
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, APPROVALS_UNVERIFIABLE, evaluation.controls),
+            ReceiptResult.DENIED,
+            started_at,
+            error=message,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(message, reason=APPROVALS_UNVERIFIABLE, action_id=action.action_id)
 
     def _refuse_unfetched_request(
         self,
@@ -2376,8 +2498,14 @@ class Control:
         )
         raise ActionDenied(message, reason=_PRECONDITION_UNAVAILABLE, action_id=action.action_id)
 
-    def _recorded(self, request: ApprovalRequest, fingerprint: str) -> bool:
-        """Did the fingerprint reach the record a later presentation will read? (§6.4)
+    def _unpinned(
+        self,
+        request: ApprovalRequest,
+        fingerprint: str | None,
+        roles: tuple[RequiredRole, ...],
+        required: int,
+    ) -> str | None:
+        """What the kernel pinned and the stored row does not carry, or `None` (§6.4, §4.5).
 
         **The read-back, and only the read-back.** An earlier build also compared the returned
         `ApprovalRequest`, and the review found that guard subsumed: a presentation reads the
@@ -2388,9 +2516,37 @@ class Control:
         rather than defence (`CONTRIBUTING.md`, the first of the four shapes of a false green).
 
         One `get_approval`, on the request pass only.
+
+        **Three fields, not one, and the two new ones are v0.8's.** `v0.7 §6.4` wrote this for
+        the precondition fingerprint and named both ways of losing it: a provider that builds
+        its own `ApprovalRequest`, and a store that does not persist the column. Items 3 and 4
+        pin the required roles and the threshold by exactly the same route, and an independent
+        review found that both were lost in exactly the same two ways, with no refusal anywhere:
+        a row pinning `required_roles=()` satisfies `unsatisfied` trivially, and a row pinning
+        `approvals_required=1` grants on one yes. An action then executed under a policy
+        demanding two approvals from a named role, approved once by somebody holding no role.
+
+        So the read-back covers every field this method pins. A row missing any of them cannot
+        be compared against what was in force, and `v0.7 §6.4`'s rule is that such a request is
+        refused where it is visible rather than skipped.
         """
         record = self._store.get_approval(request.request_id)
-        return record is not None and record.request.precondition_fingerprint == fingerprint
+        if record is None:
+            return "the request was not recorded at all"
+        stored = record.request
+        if fingerprint is not None and stored.precondition_fingerprint != fingerprint:
+            return "the precondition fingerprint"
+        if stored.required_roles != roles:
+            return (
+                f"the roles the cited controls require ({[role.control for role in roles]}); "
+                f"the row carries {[role.control for role in stored.required_roles]}"
+            )
+        if stored.approvals_required != required:
+            return (
+                f"the threshold of {required} approvals; the row carries "
+                f"{stored.approvals_required}"
+            )
+        return None
 
     def _refuse_unrecorded_request(
         self,
@@ -2399,7 +2555,8 @@ class Control:
         started_at: datetime,
         effect_key: str | None,
         request: ApprovalRequest,
-        fingerprint: str,
+        fingerprint: str | None,
+        missing: str,
     ) -> NoReturn:
         """Refuse, and leave nothing behind that another path could spend (SPEC-v0.7 §6.4).
 
@@ -2416,16 +2573,23 @@ class Control:
         """
         withdrawn = self._withdraw(request)
         compared = _Compared()
-        compared.at_recheck = fingerprint
+        if fingerprint is not None:
+            compared.at_recheck = fingerprint
+        # The fingerprint keeps its own reason, because `precondition_missing` is in the
+        # vocabulary `v0.7` froze and every reader of an older receipt reads it that way. What
+        # items 3 and 4 pin gets its own, for the reason every refusal here does: a test that
+        # asserts a status cannot tell which guard ran.
+        reason = _PRECONDITION_MISSING if fingerprint is not None else APPROVAL_UNRECORDED
         outcome = (
             f"the request is withdrawn ({withdrawn})"
             if withdrawn in _WITHDRAWALS
             else f"the request could not be withdrawn ({withdrawn})"
         )
         _LOG.warning(
-            "%s: the precondition fingerprint was not recorded with approval request %s, so %s "
-            "and the action is refused (SPEC-v0.7 §6.4)",
+            "%s: %s was not recorded with approval request %s, so %s and the action is refused "
+            "(SPEC-v0.7 §6.4, SPEC-v0.8 §4.5)",
             action.name,
+            missing,
             request.request_id,
             outcome,
         )
@@ -2433,7 +2597,8 @@ class Control:
             EventType.APPROVAL_INVALIDATED,
             action,
             {
-                "reason": _PRECONDITION_MISSING,
+                "reason": reason,
+                "missing": missing,
                 "action_hash": action.action_hash,
                 "withdrawn": withdrawn,
                 **compared.data(),
@@ -2444,14 +2609,13 @@ class Control:
         self._append(
             EventType.ACTION_DENIED,
             action,
-            {"reason": _PRECONDITION_MISSING},
+            {"reason": reason},
             effect_key,
             approval_id=request.request_id,
         )
         message = (
-            f"{action.name}: the precondition fingerprint was not recorded with approval "
-            f"request {request.request_id}, so no presentation of it could compare anything; "
-            f"{outcome}"
+            f"{action.name}: {missing} was not recorded with approval request "
+            f"{request.request_id}, so no presentation of it could compare anything; {outcome}"
         )
         self._record(
             action,
@@ -2463,7 +2627,7 @@ class Control:
             effect_key=effect_key,
             compared=compared,
         )
-        raise ActionDenied(message, reason=_PRECONDITION_MISSING, action_id=action.action_id)
+        raise ActionDenied(message, reason=reason, action_id=action.action_id)
 
     def _withdraw(self, request: ApprovalRequest) -> str:
         """Make a request nobody may answer, with the methods a store already has (§6.4).
@@ -2637,12 +2801,20 @@ class Control:
         # `check_consumable` refuses it at every later presentation, and a lapsed grant whose
         # approver is fine still reports `expired` with its event and the store's own write,
         # because the check passes and `_take` decides. §2.4.1 carries the table.
-        self._refuse_approver(action, approval_id, record.approvers if record is not None else ())
+        assert record is not None
+        self._refuse_approver(
+            action, approval_id, record.approvers, compared, record.request.required_roles
+        )
 
     def _refuse_approver(
-        self, action: Action, approval_id: str, approvers: tuple[VerifiedApprover, ...]
+        self,
+        action: Action,
+        approval_id: str,
+        approvers: tuple[VerifiedApprover, ...],
+        compared: _Compared,
+        required: tuple[RequiredRole, ...] = (),
     ) -> None:
-        """§2.7 and §4.1's two refusals, over whatever the row recorded."""
+        """§2.7, §3.6 and §4.1's refusals, over whatever the row recorded."""
         if not approvers:
             raise ApprovalMismatch(
                 f"approval {approval_id} carries no verified approver, and this deployment "
@@ -2650,6 +2822,20 @@ class Control:
                 reason=APPROVER_UNVERIFIED,
                 approval_id=approval_id,
             )
+        for approver in approvers:
+            # SPEC-v0.8 §3.6: **each** approver satisfies **every** required role. A control that
+            # says who may answer is not satisfied by a committee in which one member could, which
+            # is why this is inside the loop and `unsatisfied` is all-of rather than any-of.
+            missing = unsatisfied(required, approver.entitled)
+            if missing is not None:
+                compared.unentitled = missing
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by an approver who does not hold the "
+                    f"role {missing.role!r} required by control {missing.control!r}; the approval "
+                    "is left granted",
+                    reason=APPROVER_UNENTITLED,
+                    approval_id=approval_id,
+                )
         requester = (action.principal.agent, action.principal.user)
         for approver in approvers:
             if approver.principal == requester:
@@ -2723,6 +2909,13 @@ class Control:
         """`APPROVAL_INVALIDATED`'s data: the reason, and for a precondition refusal the two
         fingerprints it compared, hashes only, and the provider's failure by type (§6.2)."""
         data: dict[str, Any] = {"reason": mismatch.reason, "action_hash": action.action_hash}
+        # SPEC-v0.8 §3.7: an entitlement refusal names the control and the role on the event as
+        # well as in the message, because an operator reading the evidence should not have to
+        # parse a sentence to find out which written expectation was not met. By the carrier the
+        # precondition hashes already travel on, so no error type grows a keyword (§11.2).
+        if mismatch.reason == APPROVER_UNENTITLED and compared.unentitled is not None:
+            data["control"] = compared.unentitled.control
+            data["role"] = compared.unentitled.role
         if mismatch.reason in _PRECONDITION_REASONS:
             data.update(compared.data())
         return data
@@ -2766,6 +2959,157 @@ class Control:
         """
         return self._delegate(parent_id, grant, by=by, via="api")
 
+    def _break_glass(self, envelope_id: str, grant: Grant, *, reason: str = "") -> Delegation:
+        """Open a break-glass grant beneath a declared envelope (SPEC-v0.8 §5.3).
+
+        There is no flag. What this creates is an ordinary delegation: recorded, bounded by the
+        envelope on every dimension `contained_dimension` knows, expiring, revocable and
+        attenuable, and named on the receipt of every action taken under it. A setting that
+        skipped a check would have none of those five properties, which is the whole argument
+        of §5.1.
+
+        **The opener is a verified principal and never an assertion, and there is no parameter
+        that says otherwise.** An earlier build took `by: Principal | None`, which was an
+        unauthenticated way to assert an opener *and the roles it holds*: passing a principal
+        whose claims carried the envelope's role opened it in a deployment whose provider
+        resolved somebody else entirely. `§11.2` keeps `_granting_principal` package-internal
+        for exactly that reason, and a public `by=` was the same hole with a docstring. The
+        opener is whoever the `ApproverIdentity` resolves, and a deployment that names none
+        cannot open one at all.
+
+        **Private, like `_delegate`.** `§11.2` adds no public `Control` method in v0.8; the
+        surface item 5 adds is the CLI command, which calls this the way `ctrlrun delegate`
+        calls `_delegate`.
+
+        `reason` is free text on the `DELEGATION_CREATED` event. The kernel does not interpret
+        it, exactly as it does not interpret `source:`.
+        """
+        authority = self._require_authority("break-glass")
+        envelope = authority.envelopes.get(envelope_id)
+        opener = self._opener_for(envelope_id, envelope)
+        now = self._clock()
+        try:
+            planned = authority.plan_break_glass(
+                envelope_id, grant, by=opener, store=self._store, now=now
+            )
+        except IdentityError:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {"reason": PRINCIPAL_EXPIRED, "parent_id": envelope_id},
+            )
+            raise
+        except AuthorityEscalation as escalation:
+            data: dict[str, Any] = {"reason": escalation.reason, "parent_id": envelope_id}
+            if escalation.dimension is not None:
+                data["dimension"] = escalation.dimension
+            self._append_delegation(EventType.DELEGATION_REJECTED, data)
+            raise
+        self._store.put_delegation(planned.to_record())
+        self._append_delegation(
+            EventType.DELEGATION_CREATED,
+            {
+                "delegation_id": planned.delegation_id,
+                "parent_id": planned.parent_id,
+                "depth": planned.depth,
+                "created_by_agent": opener.agent,
+                "created_by_user": opener.user,
+                "created_via": "break-glass",
+                "reason": reason,
+            },
+        )
+        _LOG.warning(
+            "break-glass %s opened beneath %s by %s until %s: %s",
+            planned.delegation_id,
+            envelope_id,
+            opener.agent,
+            planned.grant.expires_at,
+            reason or "no reason given",
+        )
+        return planned
+
+    def _opener_for(self, envelope_id: str, envelope: BreakGlassEnvelope | None) -> Principal:
+        """Who is opening this envelope, and may they? (SPEC-v0.8 §5.3.1.)
+
+        Rule 4 does not apply to an envelope: its subject names the agents a break-glass grant
+        may be **for**, and the opener is a human. What gates the opener is the envelope's
+        `controls:`, whose `approver_role` this checks against the roles the opener holds.
+
+        An unknown envelope is left to `plan_break_glass` to refuse, so `--envelope` naming an
+        ordinary grant gets §5.3.1's message rather than one about a missing configuration.
+        """
+        identity = self._approver_identity
+        if identity is None:
+            raise InvalidArgument(
+                "opening a break-glass envelope needs an approver identity: the envelope names "
+                "the controls that gate who may open it, and with nobody resolved there is no "
+                "principal to check them against. Build the Control with "
+                "approver_identity=ApproverIdentity(provider, roles_claim=...) "
+                "(SPEC-v0.8 §5.3.1). Note that `Control.from_file`, which is what the CLI "
+                "builds, wires none: see SPEC-v0.8 §14.5, which records that as open"
+            )
+        opener = identity.resolve(
+            IdentityContext(action="ctrlrun.break-glass", environment=self.environment)
+        )
+        if opener is None:
+            raise IdentityError(
+                "the approver identity resolved nobody, so this break-glass envelope has no "
+                "opener to check against its controls (SPEC-v0.8 §5.3.1)"
+            )
+        if envelope is None:
+            return opener
+        # **Every cited control must resolve and must name a role.** Elsewhere a control that
+        # names no `approver_role` gates nobody (§3.5), and that is right where the citation is
+        # on an *action*: the control is documentation and the approval decides. Here the
+        # citation **is** the gate, so the same rule reads the opposite way -- a typo in an
+        # envelope's `controls:` silently admitted any verified principal, which an independent
+        # review demonstrated with one transposed letter. `Authority.from_yaml` parses the
+        # section without a registry to check against, so it is checked here, where both are.
+        unresolved = [
+            identifier
+            for identifier in envelope.controls
+            if (control := self._policy.controls.get(identifier)) is None
+            or not control.approver_role
+        ]
+        if unresolved:
+            raise InvalidArgument(
+                f"break-glass envelope {envelope_id!r} cites {unresolved}, which "
+                + (
+                    "name no control in this policy's registry"
+                    if any(self._policy.controls.get(name) is None for name in unresolved)
+                    else "declare no 'approver_role'"
+                )
+                + ". An envelope's controls are what gate who may open it, so a citation that "
+                "resolves to nothing would gate nobody (SPEC-v0.8 §5.3.1)"
+            )
+        required = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in envelope.controls
+            )
+            if control is not None and control.approver_role
+        )
+        held = roles_held(opener, identity.roles_claim)
+        missing = unsatisfied(required, entitled_controls(required, held))
+        if missing is not None:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {
+                    "reason": APPROVER_UNENTITLED,
+                    "parent_id": envelope_id,
+                    "control": missing.control,
+                    "role": missing.role,
+                },
+            )
+            raise AuthorityEscalation(
+                f"{opener.agent!r} does not hold the role {missing.role!r} required by control "
+                f"{missing.control!r}, which gates who may open {envelope_id!r} "
+                "(SPEC-v0.8 §5.3.1)",
+                reason=APPROVER_UNENTITLED,
+                parent_id=envelope_id,
+            )
+        return opener
+
     def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
         """Revoke one delegation (SPEC-v0.3 §5.7).
 
@@ -2790,7 +3134,7 @@ class Control:
         )
 
     def _delegate(
-        self, parent_id: str, grant: Grant, *, by: Principal, via: Literal["api", "cli"]
+        self, parent_id: str, grant: Grant, *, by: Principal, via: CreatedVia
     ) -> Delegation:
         """The one implementation behind `Control.delegate` and `ctrlrun delegate`.
 
@@ -2993,6 +3337,13 @@ class Control:
         # both new fields null, which is what makes "would_have present on every observed run
         # and absent on every refused one" true in both directions.
         receipt = Receipt(
+            # SPEC-v0.8 §5.4 — which grant let this through, on **every** action decided by
+            # authority and not only under break-glass. `AuthorityResult.grant_id` already
+            # reaches the events; what nothing did was put it on the receipt, so answering
+            # "what did this grant let through" meant joining events by hand. A field that
+            # existed only under break-glass would be one nothing exercises on the ordinary
+            # path, and so one nobody would notice breaking.
+            authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,

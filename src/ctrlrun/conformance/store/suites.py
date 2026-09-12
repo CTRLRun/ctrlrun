@@ -29,7 +29,13 @@ from functools import partial
 from typing import Any
 
 from ...action import Action, Principal
-from ...approval import ApprovalStatus, build_request
+from ...approval import (
+    ApprovalStatus,
+    RequiredRole,
+    _granting_principal,
+    _required_roles,
+    build_request,
+)
 from ...effect import COMMITTED_EFFECT, IN_PROGRESS_EFFECT, EffectState
 from ...errors import (
     AmbiguousEffect,
@@ -1018,6 +1024,169 @@ def continuation_taken_once_cross_process(
             results=results,
         )
     return passed("taken-once-cross-process", title)
+
+
+@case("verified-approver", "the approver columns round-trip and one principal counts once")
+def approval_verified_approver(backend: StoreBackend, processes: int = CONTENDERS) -> CaseResult:
+    """SPEC-v0.8 §2.5, §3.6, §4.2: what a store must do with the three columns v0.8 added.
+
+    Three things a store can each get wrong on its own, and every one of them is an approval
+    nobody gave:
+
+    - the roles the request pinned come back as they were written, so the kernel compares against
+      what was in force at the request and not at the answer;
+    - a verified approver is recorded with the entitlement the granting surface computed;
+    - **the same principal answering twice is one approver.** A store that appended would reach a
+      threshold of two on one person's yes, which is the defect `approvals_required` exists to
+      prevent, and the second grant is not an error: a human whose answer was rejected believes
+      it was lost.
+
+    A store that ignores the columns entirely is refused by `Control` at consumption rather than
+    silently trusted (§2.4), which is the fail-closed direction; this case says so out loud so a
+    third-party store learns it here and not from a deployment.
+    """
+    title = approval_verified_approver.title
+    store = backend.open()
+    action = an_action(payment_id="txn_verified")
+    roles = (RequiredRole(control="card-data-handling", role="payments-owner"),)
+    with _required_roles(roles, 2):
+        request = build_request(action, timedelta(minutes=15), store_now(store))
+    store.put_approval_request(request)
+
+    pinned = store.get_approval(request.request_id)
+    if pinned is None or pinned.request.required_roles != roles:
+        return failed(
+            "verified-approver",
+            title,
+            "the roles the request pinned did not come back: wrote "
+            f"{roles}, read {None if pinned is None else pinned.request.required_roles}",
+        )
+    if pinned.request.approvals_required != 2:
+        return failed(
+            "verified-approver",
+            title,
+            f"approvals_required came back {pinned.request.approvals_required}, not 2",
+        )
+
+    alice = Principal(agent="human:alice", user="alice@example.com")
+    for door in ("mcp-operator", "cli"):
+        with _granting_principal(alice, entitled=["card-data-handling"]):
+            partial_grant = store.grant_approval(request.request_id, f"{door}:alice")
+        if partial_grant is not None:
+            return failed(
+                "verified-approver",
+                title,
+                f"the {door} grant produced an Approval at 1 of 2 approvals",
+            )
+
+    after = store.get_approval(request.request_id)
+    if after is None or len(after.approvers) != 1:
+        return failed(
+            "verified-approver",
+            title,
+            "one principal answering twice is "
+            f"{0 if after is None else len(after.approvers)} approvers, not 1",
+        )
+    if after.status is not ApprovalStatus.PENDING:
+        return failed(
+            "verified-approver",
+            title,
+            f"the request is {after.status} after one principal's two answers, not pending",
+        )
+    if after.approvers[0].entitled != ("card-data-handling",):
+        return failed(
+            "verified-approver",
+            title,
+            f"the recorded entitlement is {after.approvers[0].entitled}, not the control it "
+            "was granted for",
+        )
+
+    bob = Principal(agent="human:bob", user="bob@example.com")
+    with _granting_principal(bob, entitled=["card-data-handling"]):
+        reached = store.grant_approval(request.request_id, "mcp-operator:bob")
+    if reached is None:
+        return failed("verified-approver", title, "a second distinct principal did not reach 2")
+    final = store.get_approval(request.request_id)
+    if final is None or final.status is not ApprovalStatus.GRANTED:
+        return failed(
+            "verified-approver",
+            title,
+            f"the request is {None if final is None else final.status} at 2 of 2, not granted",
+        )
+    store.close()
+    return _contended_count(backend, processes, title)
+
+
+#: SPEC-v0.8 §4.5 — the one reason this case is `not_applicable`, and it rests on the store's
+#: own declaration that its storage cannot be opened from another process, which §2.4 already
+#: allows for `url()`. A sequential pass is not evidence about a count: every assertion above
+#: holds on a store that reads and then writes with nothing in between.
+NO_CONTENTION = (
+    "this backend's storage cannot be opened from another process, so the count cannot be "
+    "contended; what passed above is the sequential half only"
+)
+
+
+def _contended_count(backend: StoreBackend, processes: int, title: str) -> CaseResult:
+    """The half that is about a **count**: N processes, and one principal in two of them.
+
+    SPEC-v0.8 §4.3. A store deciding the threshold by a read and then a write passes every
+    sequential assertion in this case and fails here, which is the whole reason `processes` is
+    a parameter: an earlier draft accepted it and never used it, so the case asserted nothing
+    about concurrency while sitting in a suite named for it.
+
+    `alice` answers from **two** of the contenders and `bob` from the rest. Whatever the
+    interleaving, the row must end with exactly two approvers, because there are exactly two
+    principals; a store that appends reaches three or more, and one that loses an update
+    reaches one.
+    """
+    store = backend.open()
+    action = an_action(payment_id="txn_contended")
+    with _required_roles((), 2):
+        request = build_request(action, timedelta(minutes=15), store_now(store))
+    store.put_approval_request(request)
+    store.close()
+
+    people = [("human:alice", "alice@example.com")] * 2 + [("human:bob", "bob@example.com")] * max(
+        1, processes - 2
+    )
+    outcome = race(
+        backend,
+        len(people),
+        [
+            {
+                "kind": "answer",
+                "answer": "grant",
+                "approval_id": request.request_id,
+                "who": f"conformance-{index}",
+                "agent": agent,
+                "user": user,
+            }
+            for index, (agent, user) in enumerate(people)
+        ],
+    )
+    if isinstance(outcome, str):
+        if not storage_is_confined(backend):
+            return dishonest("verified-approver", title, "url()")
+        return na("verified-approver", title, NO_CONTENTION)
+
+    after = backend.open()
+    try:
+        record = after.get_approval(request.request_id)
+    finally:
+        after.close()
+    if record is None:
+        return failed("verified-approver", title, "the contended request did not come back")
+    agents = sorted({approver.agent for approver in record.approvers})
+    if len(record.approvers) != 2 or agents != ["human:alice", "human:bob"]:
+        return failed(
+            "verified-approver",
+            title,
+            f"{len(people)} contenders and two principals left "
+            f"{[approver.agent for approver in record.approvers]}: a count decided by a read "
+            "and then a write either loses one of them or counts one of them twice",
+        )
+    return passed("verified-approver", title)
 
 
 # --- resolution (v0.1 §7 T10; §5.2) ---------------------------------------------------------
@@ -2015,6 +2184,7 @@ SUITES: Mapping[str, tuple[Case, ...]] = {
         approval_expiry,
         approval_atomic,
         approval_checked_first,
+        approval_verified_approver,
     ),
     "resolution": (resolution_only_ambiguous, resolution_two_targets, resolution_attribution),
     "outcome": (outcome_no_failed_on_refusal, outcome_no_not_executed),

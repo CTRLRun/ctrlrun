@@ -54,6 +54,12 @@ POLICY_SCHEMA_V4: Final = "ctrlrun.policy/v4"
 #: would renew without a ceiling, which is the behaviour the key exists to bound.
 POLICY_SCHEMA_V5: Final = "ctrlrun.policy/v5"
 
+#: SPEC-v0.8 §11.3: `v6` adds `approver_role` on a control entry, and items 4 and 5 add
+#: their keys under it. The version moves once, here, for the reason §11.4 gives: an older
+#: reader must refuse a document whose keys it would otherwise ignore, and a reader that
+#: ignored `approver_role` would run a deployment believing nobody was gated.
+POLICY_SCHEMA_V6: Final = "ctrlrun.policy/v6"
+
 #: All of them, newest last, for the message an unknown schema produces. **In version order**,
 #: which `_at_least` reads: a version added out of order would make every gate below lie.
 SUPPORTED_SCHEMAS: Final = (
@@ -62,6 +68,7 @@ SUPPORTED_SCHEMAS: Final = (
     POLICY_SCHEMA_V3,
     POLICY_SCHEMA_V4,
     POLICY_SCHEMA_V5,
+    POLICY_SCHEMA_V6,
 )
 
 
@@ -117,7 +124,7 @@ _TOP_LEVEL_KEYS: Final = frozenset(
 #: §3.1's key sets are closed and a `version:` an older reader silently dropped would be a typo
 #: that never surfaced.
 #: The closed key set of one registry entry (§7.3, and §3.1's rule).
-_CONTROL_KEYS: Final = frozenset({"title", "source"})
+_CONTROL_KEYS: Final = frozenset({"title", "source", "approver_role"})
 
 _V4_TOP_LEVEL_KEYS: Final[Mapping[str, str]] = {
     "controls": (
@@ -155,6 +162,16 @@ _V5_ENTRY_KEYS: Final[Mapping[str, str]] = {
     ),
 }
 
+#: SPEC-v0.8 §4.2 — the M-of-N threshold, gated for `max_attempts`'s reason: an older reader
+#: would ignore it and consume on the first grant, which is a deployment believing two humans
+#: answered when one did.
+_V6_ENTRY_KEYS: Final[Mapping[str, str]] = {
+    "approvals_required": (
+        "an older reader would ignore the threshold and consume on the first grant, which is a "
+        "deployment believing several humans answered when one did"
+    ),
+}
+
 _RULE_KEYS: Final = frozenset({"when", "decision", "controls"})
 
 #: SPEC-v0.2 §3.1 — the keys `ctrlrun.policy/v2` adds to an action entry. The gateway has no
@@ -164,6 +181,7 @@ _ENTRY_KEYS: Final = (
     frozenset({"decision", "rules", "controls", "data"})
     | _V2_ENTRY_KEYS
     | frozenset(_V5_ENTRY_KEYS)
+    | frozenset(_V6_ENTRY_KEYS)
 )
 
 #: And the closed key set of the `mcp` mapping, which is one key wide.
@@ -475,6 +493,15 @@ class PolicyControl:
     id: str
     title: str
     source: str | None = None
+    #: SPEC-v0.8 §3.2 — which role may answer an approval this control was cited on. An opaque
+    #: string: CTRLRun does not know what it means, does not check that such a role exists, and
+    #: makes no compliance claim on the strength of one, exactly as it does not interpret
+    #: `source`. What it does is decide **who may answer an approval the decision already
+    #: required**, which is the first thing a control has ever decided (§3.2).
+    #:
+    #: `None` means this control gates nothing, which is 0.7.0's behaviour for it and is the
+    #: opposite answer to a principal whose claims carry no role (§3.5).
+    approver_role: str | None = None
 
 
 def _in_registry_order(cited: tuple[str, ...], order: tuple[str, ...]) -> tuple[str, ...]:
@@ -522,6 +549,9 @@ class _ActionPolicy:
     #: SPEC-v0.7 §5.3 — how many attempts may execute on one effect key, the first included, or
     #: `None` where the entry names no ceiling. `None` is today's behaviour and is not a number.
     max_attempts: int | None = None
+    #: SPEC-v0.8 §4.2 — how many distinct verified principals must answer, or `None` where the
+    #: entry names none. `None` is one, which is 0.7.0.
+    approvals_required: int | None = None
 
     def data_scope(self, arguments: Mapping[str, Any]) -> frozenset[str]:
         """The labels present in **the arguments actually supplied** (SPEC-v0.6 §7.4).
@@ -741,7 +771,7 @@ class Policy:
             raise PolicyError(
                 f"{source}: 'version' must be a non-empty string, got {_type_name(version)}"
             )
-        controls = _parse_controls(document.get("controls"), source)
+        controls = _parse_controls(document.get("controls"), source, schema)
         actions: dict[str, _ActionPolicy] = {}
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
@@ -789,6 +819,18 @@ class Policy:
         """This action's `mcp:` options, defaulting to the fail-closed ones (§3.1, §11)."""
         entry = self.actions.get(action_name)
         return _DEFAULT_MCP_OPTIONS if entry is None else entry.mcp
+
+    def approvals_required(self, action_name: str) -> int:
+        """How many distinct verified principals must answer this action (SPEC-v0.8 §4.2).
+
+        One where the entry names none, which is 0.7.0, and one for an action no entry names:
+        such an action is denied `unknown_action` before an approval exists, so the number is
+        never read.
+        """
+        entry = self.actions.get(action_name)
+        if entry is None or entry.approvals_required is None:
+            return 1
+        return entry.approvals_required
 
     def max_attempts(self, action_name: str) -> int | None:
         """This action's attempt ceiling, or `None` (SPEC-v0.7 §5.3).
@@ -1118,7 +1160,7 @@ def _checked_control_id(identifier: str, source: str) -> None:
         )
 
 
-def _parse_controls(value: object, source: str) -> dict[str, PolicyControl]:
+def _parse_controls(value: object, source: str, schema: str) -> dict[str, PolicyControl]:
     """The top-level `controls:` registry (SPEC-v0.6 §7.3)."""
     if value is None:
         return {}
@@ -1147,8 +1189,33 @@ def _parse_controls(value: object, source: str) -> dict[str, PolicyControl]:
             raise PolicyError(
                 f"{where}: 'source' must be a non-empty string, got {_type_name(cited)}"
             )
+        role = entry.get("approver_role")
+        if "approver_role" in entry:
+            if not _at_least(schema, POLICY_SCHEMA_V6):
+                raise PolicyError(
+                    f"{where}: 'approver_role' needs 'schema: {POLICY_SCHEMA_V6}'; this document "
+                    f"declares {schema!r}, and an older reader would load it, gate nobody, and "
+                    "report a deployment as checking entitlement when it is not"
+                )
+            if not isinstance(role, str) or not role.strip():
+                raise PolicyError(
+                    f"{where}: 'approver_role' must be a non-empty string, got {_type_name(role)}"
+                )
+            if role != role.strip():
+                # Refused rather than trimmed, because §3.4 matches a role against a claim byte
+                # for byte: trimming here would make the document and the comparison disagree,
+                # and accepting it as written means a role nobody's credential can ever carry,
+                # which refuses every approval the control gates and says nothing about why.
+                raise PolicyError(
+                    f"{where}: 'approver_role' has leading or trailing whitespace ({role!r}); "
+                    "roles are matched byte for byte against a claim, so this one would match "
+                    "nothing and refuse every approval this control gates"
+                )
         registry[identifier] = PolicyControl(
-            id=identifier, title=title, source=cited if isinstance(cited, str) else None
+            id=identifier,
+            title=title,
+            source=cited if isinstance(cited, str) else None,
+            approver_role=role if isinstance(role, str) else None,
         )
     return registry
 
@@ -1265,8 +1332,15 @@ def _parse_entry(
                 f"{where}: {key!r}{_at_line(line_of(key))} needs 'schema: {POLICY_SCHEMA_V5}'; "
                 f"this document declares {schema!r}, and {consequence}"
             )
+    for key, consequence in _V6_ENTRY_KEYS.items():
+        if key in entry and not _at_least(schema, POLICY_SCHEMA_V6):
+            raise PolicyError(
+                f"{where}: {key!r}{_at_line(line_of(key))} needs 'schema: {POLICY_SCHEMA_V6}'; "
+                f"this document declares {schema!r}, and {consequence}"
+            )
     labels = _parse_data(entry.get("data"), where)
     ceiling = _parse_max_attempts(entry, where, line_of)
+    required = _parse_approvals_required(entry, where, line_of)
 
     if has_decision:
         return _ActionPolicy(
@@ -1278,6 +1352,7 @@ def _parse_entry(
             controls=cited,
             data=MappingProxyType(labels),
             max_attempts=ceiling,
+            approvals_required=required,
         )
 
     rules = entry["rules"]
@@ -1294,12 +1369,44 @@ def _parse_entry(
         controls=cited,
         data=MappingProxyType(labels),
         max_attempts=ceiling,
+        approvals_required=required,
     )
 
 
 def _at_line(line: int | None) -> str:
     """` on line N`, or nothing where the document's marks could not be recovered."""
     return "" if line is None else f" on line {line}"
+
+
+def _parse_approvals_required(
+    entry: Mapping[Any, Any], where: str, line_of: Callable[[str], int | None]
+) -> int | None:
+    """The M-of-N threshold, validated at load (SPEC-v0.8 §4.2).
+
+    `v0.7 §5.3`'s rules for `max_attempts`, for the same reason: a document that cannot say how
+    many approvals it requires is a document nobody should deploy, and finding out when the first
+    grant consumes is finding out late.
+
+    `bool` is refused although Python makes it an `int` (`v0.1 §3.2`). `0` is refused rather than
+    read as "no approval needed", which is what `decision: allow` says, or as "never", which is
+    `decision: deny`. Absent means 1, which is 0.7.0.
+    """
+    if "approvals_required" not in entry:
+        return None
+    value = entry["approvals_required"]
+    at = _at_line(line_of("approvals_required"))
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PolicyError(
+            f"{where}: 'approvals_required'{at} must be an integer of at least 1, got "
+            f"{_type_name(value)} {value!r}. It counts the distinct verified principals that "
+            "must answer; remove the key for one"
+        )
+    if value < 1:
+        raise PolicyError(
+            f"{where}: 'approvals_required'{at} must be at least 1, got {value}. Zero approvals "
+            "is 'decision: allow', and an action nobody may approve is 'decision: deny'"
+        )
+    return value
 
 
 def _parse_max_attempts(

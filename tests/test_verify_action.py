@@ -139,8 +139,8 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
 
     assert 'test "$AUTHORITY" = "verified 15/15"' in script
     assert 'test "$TEMPLATES" = "verified 9/9"' in script
-    assert 'test "$AUTHORITY_NA" = "2"' in script
-    assert 'test "$TEMPLATES_NA" = "8"' in script
+    assert 'test "$AUTHORITY_NA" = "4"' in script
+    assert 'test "$TEMPLATES_NA" = "10"' in script
 
 
 @pytest.mark.authority
@@ -155,10 +155,10 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     assert authority.badge["message"] == "verified 15/15"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
     # no `max_attempts` (SPEC-v0.7 §8.9).
-    assert authority.not_applicable == 2
+    assert authority.not_applicable == 4
     assert templates.badge is not None
     assert templates.badge["message"] == "verified 9/9"
-    assert templates.not_applicable == 8
+    assert templates.not_applicable == 10
 
 
 def test_T118_the_action_uploads_the_report_and_writes_a_job_summary():
@@ -211,7 +211,7 @@ def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
     from ctrlrun.verify import scenarios
 
     passing = run(V1_PAYMENTS)
-    assert passing.not_applicable == 8
+    assert passing.not_applicable == 10
     assert passing.badge is not None
     assert passing.badge["color"] == BADGE_PASS_COLOR
 

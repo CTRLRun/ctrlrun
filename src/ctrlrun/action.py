@@ -23,10 +23,18 @@ FrozenValue: TypeAlias = (
     "str | int | bool | tuple[FrozenValue, ...] | Mapping[str, FrozenValue] | None"
 )
 
-#: The claim value types SPEC-v0.3 §2.1 allows. `float` is absent for v0.1 §2.3's reason, and
-#: containers are absent because a provider flattens or drops a structured claim rather than
-#: storing one here.
-ClaimValue: TypeAlias = "str | int | bool"
+#: The claim value types SPEC-v0.3 §2.1 allows, amended by SPEC-v0.8 §3.4. `float` is absent for
+#: v0.1 §2.3's reason.
+#:
+#: **A tuple of strings is admitted since v0.8, and §3.4 argues it.** A roles claim is a JSON
+#: array at every issuer anybody deploys, and the rule this replaced -- that a provider flattens
+#: or drops a structured claim -- meant such a claim arrived *absent*, so its holder was silently
+#: unentitled. Flattening into a delimited string was rejected: that is structure encoded in a
+#: string, and one role named `a,b` away from a defect.
+#:
+#: Safe where a hash is concerned: `v0.3 §2.2` keeps `claims` out of an action's canonical form,
+#: so no action hash and no approval binding moves.
+ClaimValue: TypeAlias = "str | int | bool | tuple[str, ...]"
 
 #: A `Principal` with no claims. Shared, because it is immutable — but it is handed out by a
 #: `default_factory` rather than used as a bare default: Python 3.11 refuses *any* unhashable
@@ -113,11 +121,27 @@ def _frozen_claims(claims: object) -> Mapping[str, ClaimValue]:
                 f"principal.claims[{key!r}] is a float; use an int or a decimal string, for the "
                 "reason v0.1 §2.3 rejects one in an argument"
             )
+        if isinstance(value, list | tuple):
+            # SPEC-v0.8 §3.4's second half. JSON has no tuple, so a claim written as one comes
+            # back a **list**: unamended, every stored action and every receipt carrying an array
+            # claim would raise here on read, which for a receipt breaks `Receipt.from_dict`'s
+            # never-raises contract by name (`v0.7 §6.11`). Normalised on the way in instead.
+            #
+            # `list | tuple` and never `Sequence`: `str` is a `Sequence`, so the wider check would
+            # turn the one-role claim "payments-owner" into twenty-one single characters.
+            items = tuple(value)
+            if not all(isinstance(item, str) and item for item in items):
+                raise InvalidArgument(
+                    f"principal.claims[{key!r}] is a list holding something other than a "
+                    "non-empty string; a structured claim is carried as a list of strings or "
+                    "not at all (SPEC-v0.8 §3.4)"
+                )
+            result[key] = items
+            continue
         if not isinstance(value, str | int):  # bool is a subclass of int, and is allowed
             raise InvalidArgument(
                 f"principal.claims[{key!r}] is {type(value).__name__}; a claim value must be "
-                "str, int or bool — a structured claim is flattened or dropped by the provider "
-                "that read it"
+                "str, int, bool or a list of strings (SPEC-v0.3 §2.1, amended by v0.8 §3.4)"
             )
         result[key] = value
     return MappingProxyType(result)

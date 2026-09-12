@@ -12,10 +12,10 @@ import hashlib
 import logging
 import secrets
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Protocol, runtime_checkable
@@ -85,6 +85,43 @@ class ApprovalStatus(StrEnum):
 #: asserts the reason and never the type alone.
 APPROVER_UNVERIFIED: Final = "approver_unverified"
 APPROVER_IS_REQUESTER: Final = "approver_is_requester"
+APPROVER_UNENTITLED: Final = "approver_unentitled"
+
+#: SPEC-v0.8 §4.2 — `approvals_required` above one where no approver identity is configured.
+#: A value of `ActionDenied.reason` and of `ACTION_DENIED.data.reason`, not a new error type.
+APPROVALS_UNVERIFIABLE: Final = "approvals_unverifiable"
+
+#: SPEC-v0.8 §3.3, §4.5, extending `v0.7 §6.4`'s read-back to the two fields items 3 and 4 pin.
+#: The request carries what was in force when it was built: the roles the cited controls demand
+#: and how many distinct principals must answer. Both travel to the provider through a context
+#: variable, so **a provider that builds its own `ApprovalRequest` and a store that drops the
+#: columns each produce a row pinning neither** -- and a row pinning neither is a row that gates
+#: nobody and grants on one yes, which is the silent downgrade §4.5 says does not exist.
+APPROVAL_UNRECORDED: Final = "approval_unrecorded"
+
+
+@dataclass(frozen=True)
+class RequiredRole:
+    """One control's demand about who may answer (SPEC-v0.8 §3.3).
+
+    **The pair and not the role alone**, because §3.7 requires a refusal to name the control: a
+    refusal naming only a role leaves an operator grepping a registry to find out which written
+    expectation they failed.
+    """
+
+    control: str
+    role: str
+
+    def __post_init__(self) -> None:
+        if not self.control or not self.role:
+            raise InvalidArgument("a required role must name a control and a role")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"control": self.control, "role": self.role}
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]) -> RequiredRole:
+        return cls(control=str(document["control"]), role=str(document["role"]))
 
 
 @dataclass(frozen=True)
@@ -118,7 +155,10 @@ class VerifiedApprover:
         # arrives from a JSON column: mypy is right that a `tuple[str, ...]` cannot be a `str`,
         # and a corrupted row is exactly the case where the declaration is not true.
         given: object = self.entitled
-        if isinstance(given, str | bytes) or not isinstance(given, Iterable):
+        # `list | tuple` and not `Iterable`: a JSON object round-trips to a `dict`, whose
+        # iteration yields its keys, so `{"card-data-handling": 0}` in a tampered column read
+        # as an entitlement. Nothing this package writes produces one.
+        if not isinstance(given, list | tuple):
             raise InvalidArgument(
                 f"a verified approver's 'entitled' must be a list of control ids, got "
                 f"{type(given).__name__}"
@@ -151,7 +191,10 @@ class VerifiedApprover:
             user=document.get("user"),
             issuer=document.get("issuer"),
             granted_at=datetime.fromisoformat(str(document["granted_at"])),
-            entitled=tuple(document.get("entitled") or ()),
+            # Raw, never `tuple(...)`: `__post_init__` is the guard, and wrapping the value
+            # here pre-empts it. `tuple("c1")` is three single-character control ids that
+            # entitle nothing, and each one passes the "non-empty string" check below it.
+            entitled=document.get("entitled") or (),
         )
 
 
@@ -167,9 +210,10 @@ class ApproverIdentity:
     reads what a proxy set for the agent, and a deployment where one object answers both doors
     is one where the agent's own token can grant the agent's own approvals.
 
-    `roles_claim` names the claim an issuer puts roles in. It is item 3's, and nothing reads it
-    yet; it lives here because a provider without it cannot answer §3, so a deployment that sets
-    one and forgets the other would have a silent half-check.
+    `roles_claim` names the claim this issuer puts roles in (§3.4). It lives here because it is
+    a property of the issuer and not of any one surface: the operator MCP server reads it where
+    `--approver-roles-claim` does not override it, and a surface that reads neither holds no
+    roles and so satisfies no control that names one.
     """
 
     provider: IdentityProvider
@@ -199,6 +243,105 @@ class ApproverIdentity:
         return self.provider.resolve(context)
 
 
+def count_grant(
+    record: ApprovalRecord, verified: VerifiedApprover | None, now: datetime
+) -> tuple[tuple[VerifiedApprover, ...], bool]:
+    """What a grant makes of a record: its approvers afterwards, and whether N is reached.
+
+    **One implementation, so three stores cannot come to count differently** (`v0.1 §4.2`'s
+    argument for `check_consumable`, applied to the other transition).
+
+    - An unverified grant records no approver and reaches nothing: a store that cannot say who
+      answered has not collected one of N (§2.7, §4.5).
+    - A second grant from the same resolved principal **updates that entry and does not count**
+      (§4.2, G19): counted once is the requirement, and rejecting the answer would make a human
+      think it was lost.
+    - `granted` is reached when the distinct verified approvers reach the threshold the request
+      pinned, and never before.
+    """
+    required = max(1, record.request.approvals_required)
+    if verified is None:
+        # **At N=1 an unverified answer still grants, and that is 0.7.0 unchanged**: a deployment
+        # that verifies nobody is the one R1 promises is untouched, and the row it produces is
+        # what `Control` refuses at consumption with `approver_unverified` where an approver
+        # identity *is* configured (§2.7). Making it `pending` instead would leave that
+        # deployment unable to approve anything and would take G18's shape with it.
+        #
+        # Above one it advances nothing, which is §4.5: a store that records no approver never
+        # reaches N and never behaves as N=1. A threshold above one already requires an approver
+        # identity (§4.2), so every legitimate answer there is a verified one.
+        return record.approvers, required == 1
+    # **The requester's own yes is counted here and refused at consumption**, which is not what
+    # a first draft of §4.2 said, and the correction is recorded in §14.4. Excluding it from the
+    # count looks stricter and is weaker: at N=1 the record would never reach `granted`, so the
+    # consumption refusal would be `pending`, and **G18 would never fire** on the deployment
+    # shape it was written for. G18 is shipped, graded by `verify`, and says a self-approval is
+    # refused as one.
+    #
+    # So the store counts every verified approver, and the three "does not count" rules are all
+    # refusals at consumption: §4.1's requester, §3.6's entitlement and §2.7's verification. One
+    # rule, in one place, and the store stays a store.
+    kept = [approver for approver in record.approvers if approver.principal != verified.principal]
+    kept.append(replace(verified, granted_at=now))
+    approvers = tuple(kept)
+    return approvers, len(approvers) >= required
+
+
+def roles_held(principal: Principal, roles_claim: str | None) -> frozenset[str]:
+    """The roles this principal holds, per SPEC-v0.8 §3.4's rules, one per line.
+
+    Every rule here is a refusal to invent a role, and the failure they exist to prevent is a
+    **silently** unentitled approver: a claim the issuer sent in a shape nothing carries, read as
+    absent, and an approval refused for a reason nobody can act on.
+
+    - no `roles_claim` configured: nothing. A deployment naming roles in its policy and no claim
+      to read them from has configured half a check, and half a check fails closed.
+    - the claim is absent: nothing. A missing claim is a statement about a person, and the kernel
+      does not invent one.
+    - a string: one role, matched byte for byte later. No folding, no trimming, no pattern.
+    - a tuple of strings: that set, each matched byte for byte.
+    - an int or a bool, which is everything else a `Principal` can carry: nothing, never coerced
+      and never stringified. `True` is not the role `"True"`.
+    """
+    if not roles_claim:
+        return frozenset()
+    value = principal.claims.get(roles_claim)
+    if isinstance(value, str):
+        return frozenset({value}) if value else frozenset()
+    if isinstance(value, tuple):
+        return frozenset(item for item in value if item)
+    if value is not None:
+        # SPEC-v0.8 §3.4's failure mode by name: the issuer sent the claim, in a shape that
+        # carries no role, and every rule above reads it as absent. Silence here is an approval
+        # refused for a reason nobody can act on. Not a refusal, because `None` is the honest
+        # answer to "which roles does this principal hold"; the refusal is the caller's.
+        _LOG.warning(
+            "the claim %r carries %s, which names no role: this principal holds none, and an "
+            "approval it gives is refused by any control that requires one (SPEC-v0.8 §3.4)",
+            roles_claim,
+            type(value).__name__,
+        )
+    return frozenset()
+
+
+def entitled_controls(required: Sequence[RequiredRole], held: frozenset[str]) -> tuple[str, ...]:
+    """The control ids `held` satisfies, in the order they were required (SPEC-v0.8 §3.6)."""
+    return tuple(role.control for role in required if role.role in held)
+
+
+def unsatisfied(required: Sequence[RequiredRole], entitled: Sequence[str]) -> RequiredRole | None:
+    """The first required role this entitlement does not cover, or `None` (SPEC-v0.8 §3.6).
+
+    **Every one must be satisfied, not any.** Any-of lets the weakest control in the set decide
+    who may answer, and makes adding a control to a rule a way of *widening* who may approve it.
+    """
+    covered = set(entitled)
+    for role in required:
+        if role.control not in covered:
+            return role
+    return None
+
+
 #: SPEC-v0.8 §2.5: how a surface that resolved an approver hands that principal to the store
 #: call that records it. **Package-internal on purpose** (§2.5.1): a public one would be an
 #: unauthenticated way to assert a verified approver, which is `trust_approver` spelled as a
@@ -213,6 +356,12 @@ _GRANTING_PRINCIPAL: ContextVar[tuple[Principal, tuple[str, ...]] | None] = Cont
 @contextmanager
 def _granting_principal(principal: Principal, *, entitled: Iterable[str] = ()) -> Iterator[None]:
     """Record `principal` as the verified approver of any grant made inside this block."""
+    if isinstance(entitled, str | bytes):
+        # `Iterable[str]` admits a `str`, and `tuple("c1")` is three control ids named 'c',
+        # '1' — each a non-empty string, so every check downstream passes on nonsense.
+        raise InvalidArgument(
+            "entitled must be a sequence of control ids, not a string; pass ('c1',) or ['c1']"
+        )
     token = _GRANTING_PRINCIPAL.set((principal, tuple(entitled)))
     try:
         yield
@@ -271,6 +420,18 @@ class ApprovalRequest:
     #: the human's decision and the effect; a change landing after the comparison and before
     #: the reservation is not refused (§6.7).
     precondition_fingerprint: str | None = None
+    #: SPEC-v0.8 §3.3 — the roles the controls cited by the evaluation that sent this action to
+    #: approval required, pinned **at request time**, for `v0.6 §7.1`'s reason: the approval binds
+    #: to what the human was shown, the store has no policy, and a command a human answers with
+    #: must not fail because a policy file two hosts away became malformed. Where the policy moved
+    #: in between, the roles the human was asked under are the ones that bind, and the receipt's
+    #: own `policy_hash` records that it moved.
+    required_roles: tuple[RequiredRole, ...] = ()
+    #: SPEC-v0.8 §4.2 — how many distinct verified principals must answer, pinned at request time
+    #: like the roles and for the same reason, and because **this is what lets the store enforce
+    #: it**: the store has no policy, and a store that had to ask one what N is would be a store
+    #: that loads policy files.
+    approvals_required: int = 1
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -283,6 +444,19 @@ class ApprovalRequest:
             raise InvalidArgument(
                 f"approval {self.request_id} expires at or before it was created; "
                 "a request nobody can answer is not a request"
+            )
+        # SPEC-v0.8 §4.2, §12. Refused here rather than coerced: `count_grant` clamped a
+        # corrupt value with `max(1, ...)` and the SQLite read turned a `0` into `1` with
+        # `or 1`, so a row whose threshold had been tampered to nothing read back as an
+        # ordinary single-approval request and nobody could tell. `approvers` and
+        # `required_roles` both raise out of the store read on a corrupted column; this is
+        # the third field and it was the one that did not. Policy load refuses these values
+        # too, so the only way here is a row a store did not write.
+        threshold: object = self.approvals_required
+        if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+            raise InvalidArgument(
+                f"approval {self.request_id} requires {threshold!r} approvals; the threshold "
+                "is an integer of at least 1 (SPEC-v0.8 §4.2)"
             )
 
 
@@ -471,8 +645,18 @@ class ApprovalStore(Protocol):
         """The stored record, or `None` if there is no such approval."""
         ...
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
-        """Move `pending → granted`. Anything else raises `ApprovalMismatch`."""
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
+        """Record one answer. `Approval` where it reached the threshold, `None` where it did not.
+
+        SPEC-v0.8 §4.4: `None` means **recorded and still pending**, which is M-of-N below N. A
+        public API change and not a new method (`v0.6 §9.2`): every implementation that only ever
+        grants at N=1 returns an `Approval` every time, as it does today.
+
+        **`None` here is not `None` from `ApprovalProvider.wait`**, which `v0.1 §4.3` fixes as
+        "answered, no". A provider that returned this straight through would report a partial
+        grant as a denial, and `@protect(wait=True)` would raise `ActionDenied` for a request a
+        second human is still answering.
+        """
         ...
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
@@ -547,6 +731,28 @@ _PRECONDITION_AT_REQUEST: ContextVar[str | None] = ContextVar(
 _PRECONDITION_SCHEMA: Final = "ctrlrun.precondition/v1"
 
 
+#: SPEC-v0.8 §3.3 — the third traveller on `_POLICY_AT_REQUEST`'s route, and for the same reason:
+#: `ApprovalProvider.request(action, ttl)` is frozen by `v0.1 §9.1`, so a provider cannot be handed
+#: a policy, and `Control` is the only object holding both.
+_REQUIRED_ROLES: ContextVar[tuple[RequiredRole, ...]] = ContextVar(
+    "ctrlrun_required_roles", default=()
+)
+
+#: SPEC-v0.8 §4.2 — the threshold, on the same route and for the same reason.
+_APPROVALS_REQUIRED: ContextVar[int] = ContextVar("ctrlrun_approvals_required", default=1)
+
+
+@contextmanager
+def _required_roles(roles: tuple[RequiredRole, ...], required: int = 1) -> Iterator[None]:
+    """Record `roles` and the threshold on any request built inside this block (§3.3, §4.2)."""
+    tokens = (_REQUIRED_ROLES.set(roles), _APPROVALS_REQUIRED.set(required))
+    try:
+        yield
+    finally:
+        _REQUIRED_ROLES.reset(tokens[0])
+        _APPROVALS_REQUIRED.reset(tokens[1])
+
+
 @contextmanager
 def _precondition_at_request(fingerprint: str | None) -> Iterator[None]:
     """Record `fingerprint` on any request built inside this block (SPEC-v0.7 §6.2)."""
@@ -584,6 +790,8 @@ def build_request(action: Action, ttl: timedelta, now: datetime) -> ApprovalRequ
         action=action,
         policy_hash=_POLICY_AT_REQUEST.get(),
         precondition_fingerprint=_PRECONDITION_AT_REQUEST.get(),
+        required_roles=_REQUIRED_ROLES.get(),
+        approvals_required=_APPROVALS_REQUIRED.get(),
         created_at=now,
         expires_at=now + ttl,
     )
@@ -707,7 +915,15 @@ class ScriptedApprovalProvider:
             self._step += 1
             self.polls += 1
             if outcome is ScriptedOutcome.GRANT:
-                return self._store.grant_approval(request_id, self._approver)
+                granted = self._store.grant_approval(request_id, self._approver)
+                # SPEC-v0.8 §4.4: `None` from the store is "recorded, short of N"; `None` from
+                # `wait` is `v0.1 §4.3`'s "answered, no". Returning it straight through would
+                # report a partial grant as a **denial**, and `@protect(wait=True)` would raise
+                # `ActionDenied` for a request a second human is still answering. So this keeps
+                # polling, and an exhausted script times out as it does for an unanswered one.
+                if granted is not None:
+                    return granted
+                continue
             if outcome is ScriptedOutcome.DENY:
                 self._store.deny_approval(request_id, self._approver)
                 return None
