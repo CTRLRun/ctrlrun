@@ -152,7 +152,26 @@ opening the pull request.
   A pull request touching only tooling, docs or CI merges on green.
 - Merge stacked pull requests bottom-up, and never delete a branch another open pull request
   targets.
-- Commit messages say what changed and why, in prose. No attribution trailers.
+- Commit messages say what changed and why, in prose, and end with the `Signed-off-by`
+  trailer described below. No attribution trailers.
+
+## Sign your work
+
+Every commit carries a `Signed-off-by` trailer, and the trailer certifies the
+[Developer Certificate of Origin](DCO): that you wrote the change or have the right to submit
+it under the licence in [LICENSE](LICENSE), and that you know the contribution and its record
+are public. That is the whole agreement. There is no contributor licence agreement and no
+copyright assignment: your copyright stays yours, and what you contribute goes out under
+Apache-2.0 like the rest of the code.
+
+`git commit -s` adds the trailer from your git identity:
+
+    Signed-off-by: Your Name <you@example.com>
+
+The email has to be the commit's author email. CI's `dco` job reads every commit on a pull
+request and names any that lack the trailer; `git rebase --signoff main` adds it to a whole
+branch at once. Only git's own trailer block counts, and nobody is exempt, bots included:
+dependabot signs its commits off already.
 
 ## Releases
 
