@@ -7,6 +7,38 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+### Documentation
+
+- **`docs/SPEC-v0.8.md`**: the v0.8 "Oversight" contract, a delta over v0.1 to v0.7. No code lands
+  with it. It asks one question: *who may say yes, and can the kernel tell?* Seven milestones have
+  verified the principal that acts, and nothing has ever been asked of the principal that permits:
+  `approver` is a non-empty string, `ctrlrun delegate --as` is an assertion typed at a shell, and
+  the operator server authenticates who answered without checking that they were entitled to.
+  Seven items answer that: revocation by selector, the approver resolved as a principal,
+  entitlement from the control registry, M-of-N on distinct verified principals, break-glass as a
+  recorded expiring grant rather than a flag, credential revocation consumed from Shared Signals
+  and CAEP events, and a policy change as a protected action with a diff replay beside it. Tests
+  come from §10 (T272 onward); public names are frozen in §11; guarantees G17 to G21 join
+  `ctrlrun.guarantees/v4`, and `ctrlrun.receipt/v5` and `ctrlrun.policy/v6` each move once.
+
+  **The rule the whole document is built on is opt in, then fail closed**, which is
+  `SPEC-v0.3.md` §1.2's rule for authority applied to the approver: a deployment that names no
+  approver identity behaves exactly as 0.7.0, and one that names one gets no partial mode, no
+  fallback to the string, and no setting that turns a check off.
+
+  **Reading the code changed five things the plan had assumed**, and §1.4 lists them. Three matter
+  beyond this document: `Control` never grants an approval, so the check that matters lives at the
+  consumption and not at the grant; `webhook.handle_inbound` takes no headers, so the webhook
+  cannot produce a verified approver and `SPEC-v0.2.md` §11 freezes its signature; and
+  `ctrlrun revoke --by` already means who performed the revocation, so the new selector is
+  `--created-by` and every script written against 0.7.0 keeps working.
+
+  **What it does not close is in §1.1, before anything else**: a persuaded approver gives a valid
+  approval and the receipt records it as one, and an administrator with write access to the policy
+  file, the store or the code is outside every guard here.
+
 ## [0.7.0] - 2026-09-11 - Execution boundary
 
 Every milestone before this one asked what holds *inside* CTRLRun. v0.7 asks whether it holds at
