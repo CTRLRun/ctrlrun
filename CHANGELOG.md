@@ -11,6 +11,34 @@ any change to one appears here.
 
 ### Added
 
+- **Task-bound authority** (SPEC-v0.9 §6). A grant may carry `tasks:`, a unit-of-work dimension
+  attenuated by the same `child ⊆ parent` rule as actions, resources and environments.
+  `Control.execute(task=...)` and `Control.evaluate(task=...)` take the resolved task id;
+  `@protect(task=...)` takes a template over the call's arguments, like `effect=` and `resource=`.
+  **G24** grades it: a task-bound grant refused off its task, by reason and not by type.
+
+  **A grant that names no `tasks:` authorises any task**, so every existing grant upgrades
+  untouched. `SPEC-v0.3.md` §5.4 settled that asymmetry in writing: a root grant's omissions are
+  an operator's decision, a delegation's are what an attacker would write.
+
+  Two paths deliberately do **not** evaluate the dimension: `Control.resume` and a lease
+  extension. Both rehydrate an action that carries no task, and evaluating it there would put
+  `AUTHORITY_DENIED` on what is the only receipt an MCP multi round-trip ever gets. A resumed leg
+  is therefore unbound by task, which is stated rather than hidden.
+
+  The task reaches the authority decision and the receipt, and **never the action hash**: a field
+  on `Action` would move every hash in existence and invalidate every stored approval.
+
+### Changed
+
+- `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` on a grant is
+  refused in a `v6` document rather than ignored, because an older reader would grant the action
+  on every task. `DIMENSIONS` grows from six entries to seven, and it is exported and iterated by
+  `verify`'s G9, so a `--json` consumer counting dimensions sees seven.
+- The shipped `examples/authority/payments.yaml` binds its `head-of-support` grant to
+  `refund-run:*`, so the milestone's own guarantee is not `N/A` on what this repository ships.
+  The authority badge moves from `verified 19/19` to `verified 20/20`.
+
 - `docs/SPEC-v0.9.md`, the v0.9 "Envelope" contract: consequence budgets, scope providers and
   task-bound authority, as a delta over v0.1 to v0.8. Documentation only. It specifies the
   quantitative half of authority, which `VISION.md` §5 has had no code under it: a grant says
