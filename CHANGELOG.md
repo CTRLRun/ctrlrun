@@ -11,6 +11,87 @@ any change to one appears here.
 
 ### Added
 
+- **M-of-N approvals** (`docs/SPEC-v0.8.md` §4). An action may require more than one yes, and what
+  the threshold counts is **distinct verified principals**: a second answer from a principal that
+  already answered is recorded, moves that entry's `granted_at`, and does not move the count.
+
+  ```yaml
+  schema: ctrlrun.policy/v6
+  actions:
+    payments.refund:
+      decision: approve
+      approvals_required: 2
+  ```
+
+  **The count is decided where the row is written, on all three stores**, and never by a read
+  followed by a write: SQLite counts inside its `BEGIN IMMEDIATE` transaction, Postgres
+  compare-and-sets on the approver list it read and retries, and the in-memory store holds its
+  lock. Two processes answering at the same instant produce two approvers or one, never a
+  threshold reached twice.
+
+  **A yes that cannot be attributed does not count.** `approvals_required` above 1 in a deployment
+  that names no approver identity is a denial, not a silent downgrade to one approval: the kernel
+  cannot tell two anonymous yeses apart, so it refuses rather than counting them. `ctrlrun approve`
+  records no verified approver and therefore never counts toward a threshold, which the CLI says
+  at the moment it is used rather than leaving to be discovered.
+
+  `ApprovalStore.grant_approval` now returns `Approval | None`, where `None` means **recorded and
+  still short of N**. Nothing is granted, no `APPROVAL_GRANTED` event is written, and a consume
+  attempted below the threshold is refused as `pending` with nothing reserved.
+
+  Needs `ctrlrun.policy/v6`. `ctrlrun verify` grades **G19** under `ctrlrun.guarantees/v4`, `N/A`
+  where every action in the document takes one approval.
+
+- **Entitlement from the control registry** (`docs/SPEC-v0.8.md` §3). A control may now name the
+  role that answers for it, and an approval whose recorded entitlement does not cover the roles
+  the request pinned is refused, with the control named in the message, the exception and the
+  `APPROVAL_INVALIDATED` event.
+
+  ```yaml
+  schema: ctrlrun.policy/v6
+  controls:
+    card-data-handling:
+      title: Cardholder data changes are approved by a named owner
+      approver_role: payments-owner
+  ```
+
+  **CTRLRun does not interpret the role.** It does not know what `payments-owner` means, does not
+  check that such a role exists anywhere, and makes no compliance claim on the strength of one,
+  exactly as it does not interpret `source:`. What changed about `SPEC-v0.6.md` §7.3's
+  "attribution, not prevention" is one sentence: a control still decides no *action*, and now
+  decides **who may answer an approval the decision already required**.
+
+  **Omission is not entitlement, and a control naming no role gates nobody.** Two sentences that
+  mean opposite things: a principal whose claims lack the role is not entitled, because a missing
+  claim is a statement about a person and the kernel refuses to invent one; a control with no
+  `approver_role` gates nobody, because a missing role is a statement about the operator's
+  document and inventing one there would refuse every approval in every deployment that has
+  controls and has not heard of v0.8.
+
+  **Roles are matched byte for byte**, in both claim shapes. No case folding, no trimming, no
+  prefix matching and no pattern grammar: a wildcard in a role would be an entitlement nobody
+  wrote. Where an evaluation cites several controls, **every** required role must be held, because
+  any-of lets the weakest control in the set decide who may answer.
+
+  **`ClaimValue` gains a tuple of strings**, amending `SPEC-v0.3.md` §2.1. A roles claim is a JSON
+  array at every issuer anybody deploys, and the old rule meant such a claim arrived *absent*, so
+  its holder was silently unentitled. `JWTIdentityProvider` carries an array-of-strings claim now
+  instead of dropping it, and says so at WARNING rather than DEBUG when it drops anything else it
+  was asked to carry. Safe for hashes: `v0.3 §2.2` keeps claims out of an action's canonical form.
+
+  **The check is bounded and the bound is stated.** What the kernel refuses is an approval whose
+  *recorded* entitlement does not cover the role; what entitled it was decided where the credential
+  was verified, which is the operator MCP server (`ctrlrun mcp-operator --approver-roles-claim`)
+  and an embedding application. `docs/SPEC-mcp-operator.md` §4.3 and §10 are amended to say that,
+  and §4.3 now carries a three-row table instead of one sentence, because the sentence covered
+  two unconfigured cases that behave in opposite ways: a control naming no role admits any
+  verified human, and a control naming a role in a deployment with no claim to read roles from
+  refuses **everyone**. The server warns about the second at startup rather than at the first
+  refusal.
+
+  Needs `ctrlrun.policy/v6`. `ctrlrun verify` grades **G17** under `ctrlrun.guarantees/v4`, `N/A`
+  with a reason that is true of a document naming no approver role.
+
 - **The approver is a principal** (`docs/SPEC-v0.8.md` §2, §4.1). `Approval.approver` is a string
   whose only check is that it is not empty, and `adapter.py` has always conceded what that string
   often is: a channel, wherever the framework's primitive does not identify a person. A deployment

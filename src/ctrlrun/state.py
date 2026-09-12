@@ -37,10 +37,12 @@ from .approval import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovalStore,
+    RequiredRole,
     VerifiedApprover,
     _verified_approver_now,
     check_answerable,
     check_consumable,
+    count_grant,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -735,6 +737,26 @@ class StateStore(ApprovalStore, Protocol):
         ...
 
 
+def _roles_json(roles: tuple[RequiredRole, ...]) -> str | None:
+    """The roles a request pinned, as canonical JSON, or `None` where it pinned none."""
+    if not roles:
+        return None
+    return json.dumps([role.to_dict() for role in roles], sort_keys=True)
+
+
+def _roles_from_json(text: str | None) -> tuple[RequiredRole, ...]:
+    """What the column holds, or `()`. A corrupted column raises, for `_approvers_from_json`'s
+    reason: this is authority about to be spent, not evidence a reader walks past."""
+    if not text:
+        return ()
+    try:
+        return tuple(RequiredRole.from_dict(item) for item in json.loads(text))
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise InvalidArgument(
+            f"the approvals row carries an unreadable 'required_roles' column: {exc}"
+        ) from exc
+
+
 def _approvers_json(approvers: tuple[VerifiedApprover, ...]) -> str | None:
     """The verified approvers as one canonical JSON array, or `None` where there are none.
 
@@ -906,7 +928,7 @@ class InMemoryStateStore:
             records = list(self._approvals.values())
         return _newest_denied(records, action_hash, now)
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
@@ -914,16 +936,20 @@ class InMemoryStateStore:
             # SPEC-v0.8 §2.5: whatever the granting surface verified, or nothing where it
             # verified nobody. A store that did not read this records no approver, and that is
             # refused at consumption rather than skipped.
+            #
+            # SPEC-v0.8 §4.2: and `count_grant` decides whether this grant reaches the
+            # threshold, in the one implementation all three stores apply.
             verified = _verified_approver_now(now)
+            approvers, reached = count_grant(record, verified, now)
             granted = replace(
                 record,
-                status=ApprovalStatus.GRANTED,
-                approver=approver,
-                granted_at=now,
-                approvers=(*record.approvers, verified) if verified else record.approvers,
+                status=ApprovalStatus.GRANTED if reached else record.status,
+                approver=approver if reached else record.approver,
+                granted_at=now if reached else record.granted_at,
+                approvers=approvers,
             )
             self._approvals[approval_id] = granted
-            return granted.as_approval()
+            return granted.as_approval() if reached else None
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)
@@ -1460,8 +1486,8 @@ class SQLiteStateStore:
         try:
             self._connection().execute(
                 "INSERT INTO approvals(approval_id, action_hash, status, action_json, "
-                "created_at, expires_at, policy_hash_at_approval, precondition_fingerprint) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "created_at, expires_at, policy_hash_at_approval, precondition_fingerprint, "
+                "required_roles, approvals_required) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     request.request_id,
                     request.action_hash,
@@ -1471,6 +1497,8 @@ class SQLiteStateStore:
                     _iso(request.expires_at),
                     request.policy_hash,
                     request.precondition_fingerprint,
+                    _roles_json(request.required_roles),
+                    request.approvals_required,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -1584,31 +1612,34 @@ class SQLiteStateStore:
         found = (self._read_approval(connection, row["approval_id"]) for row in rows)
         return tuple(record for record in found if record is not None)
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
         approver = _approver(approver)
         connection = self._connection()
         now = self._clock()
         connection.execute("BEGIN IMMEDIATE")
         try:
             record = self._answerable(connection, approval_id, now)
-            # SPEC-v0.8 §2.5: the verified approver, appended to whatever the row already
-            # holds, inside the same `BEGIN IMMEDIATE` that serialises the status transition.
+            # SPEC-v0.8 §2.5, §4.2: the verified approver and the count, inside the same
+            # `BEGIN IMMEDIATE` that serialises the read and the write. That serialisation is
+            # what makes the count a property of the store's write rather than of a read
+            # followed by one (§4.3).
             verified = _verified_approver_now(now)
-            approvers = (*record.approvers, verified) if verified else record.approvers
+            approvers, reached = count_grant(record, verified, now)
+            status = ApprovalStatus.GRANTED if reached else record.status
             granted = replace(
                 record,
-                status=ApprovalStatus.GRANTED,
-                approver=approver,
-                granted_at=now,
+                status=status,
+                approver=approver if reached else record.approver,
+                granted_at=now if reached else record.granted_at,
                 approvers=approvers,
             )
             connection.execute(
                 "UPDATE approvals SET status=?, approver=?, granted_at=?, approvers=? "
                 "WHERE approval_id=?",
                 (
-                    str(ApprovalStatus.GRANTED),
-                    approver,
-                    _iso(now),
+                    str(status),
+                    granted.approver,
+                    _iso(granted.granted_at) if granted.granted_at else None,
                     _approvers_json(approvers),
                     approval_id,
                 ),
@@ -1617,7 +1648,7 @@ class SQLiteStateStore:
             self._unwind(connection)
             raise
         connection.commit()
-        return granted.as_approval()
+        return granted.as_approval() if reached else None
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)
@@ -1676,6 +1707,8 @@ class SQLiteStateStore:
                 expires_at=datetime.fromisoformat(row["expires_at"]),
                 policy_hash=row["policy_hash_at_approval"],
                 precondition_fingerprint=row["precondition_fingerprint"],
+                required_roles=_roles_from_json(row["required_roles"]),
+                approvals_required=row["approvals_required"] or 1,
             ),
             status=ApprovalStatus(row["status"]),
             approver=row["approver"],

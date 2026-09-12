@@ -663,8 +663,11 @@ type, because a test asserting a type alone cannot tell which of §2.7's four re
 ### 3.8 Where entitlement is decided twice, on purpose
 
 The grant surface computes `entitled` from the request's `required_roles` and refuses on the spot
-where the approver holds none of them, so a human learns at the moment they answer rather than at
-the moment an agent retries.
+where the approver does not hold **every** one of them, so a human learns at the moment they answer
+rather than at the moment an agent retries. Not "holds none of them", which was the earlier wording
+here and is a different rule: §3.6 is all-of, an approver holding one of two required roles is
+refused, and a surface applying any-of would admit an answer the kernel then refuses at
+consumption, which is the worst of both halves.
 
 **What each half is, said in the register `CONTRIBUTING.md` demands.** The consumption check
 **prevents consumption** of an approval whose recorded entitlement does not cover the roles the
@@ -2135,6 +2138,45 @@ is evidence a reader walks past and one tampered row must not blind every reader
 questions.
 
 ### 14.3 Item 3: entitlement from the control registry
+
+**The tests were written after the implementation, and that is worth recording rather than
+hiding.** Every other item in this milestone wrote a red suite first, as `CONTRIBUTING.md` asks;
+this one did not, and all forty-eight passed on their first run. What carried the weight instead
+was the mutation table, and it found within minutes what the ordering had cost: **case-folding the
+*string* claim branch left every test green**, because T303 parametrised only the list shape and
+nothing exercised the other branch. Both shapes are covered now, with a positive control, and the
+lesson is the one the discipline exists for: a test written against code that already works tests
+the code you wrote rather than the rule you meant.
+
+**One mutation is an equivalent mutant, and it is declared rather than claimed.** Recording
+`required` instead of the computed `entitled` at the grant is indistinguishable, because the
+refusal fires first whenever any role is missing, so past that point `entitled` provably equals the
+full required set. `CONTRIBUTING.md` says to say so in the table rather than dress it up as closed.
+
+**`RequiredRole` lives in `approval.py` and `Control` builds the pairs.** The obvious home for the
+lookup was `Policy.required_roles(controls)`, and it was written and then reverted: `policy.py`
+imports `action` and `effect`, `approval.py` imports `action`, `errors` and `identity`, and neither
+imports the other. Putting the accessor on `Policy` meant a new `policy` to `approval` edge for one
+dataclass, and §11.1 freezes no such accessor. `Control` already holds both the evaluation and the
+registry, which is where the join belongs.
+
+**The entitlement refusal reaches its event by the carrier, not by a new keyword.** `§3.7` requires
+`APPROVAL_INVALIDATED` to name the control and the role, and the first attempt added a `detail`
+keyword to `ApprovalMismatch`: a public name §11 does not list, on the closed error set `v0.6 §9.2`
+freezes. The precondition hashes already travel to that event on `_Compared`, so the pair travels
+the same way.
+
+**The grant-side refusal needed a policy of its own to be testable.** `test_mcp_operator.py`'s
+document cites no control with a role, so the first version of that test asserted a 403 it could
+never get: the server had nothing to refuse. The two §3.8 tests carry their own gated document, and
+the request is created through `Control.execute` rather than through the provider, because
+`_required_roles` is set around **that** call and a request built straight from the provider pins
+nothing. A test that skipped the pinning would have asserted a refusal no deployment reaches.
+
+**What G17 moved.** It is `N/A` on both shipped examples, because neither names an `approver_role`,
+which is a true statement about those documents (§3.5). Nine tests and two pins in
+`.github/workflows/ci.yml` moved by one as a result, which is the same class of change G18 forced
+in item 2 and the second time that CI file has been the thing no local gate would catch.
 
 ### 14.4 Item 4: M-of-N
 

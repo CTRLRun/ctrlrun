@@ -177,13 +177,13 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
     assert report.applicable == 9
-    assert report.not_applicable == 8
+    assert report.not_applicable == 10
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with eight N/As a
     # seventeen-guarantee catalogue must not report seventeen over seventeen.
     assert f"{len(reg.GUARANTEES)}/{len(reg.GUARANTEES)}" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
-    assert "8 not applicable: G1, G2, G8, G9, G13, G15, G16, G18." in text
+    assert "10 not applicable: G1, G2, G8, G9, G13, G15, G16, G17, G18, G19." in text
 
 
 def test_T101b_zero_applicable_guarantees_is_not_a_pass(tmp_path):
@@ -861,14 +861,14 @@ def test_the_v1_payments_template_reports_nine_over_nine():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (9, 9, 8)
+    assert (report.passed, report.applicable, report.not_applicable) == (9, 9, 10)
     text = report.to_text()
     assert "9/9 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider
     # for the first and its own approver identity for the second (§8.9, §11.7).
-    assert "8 not applicable: G3, G4, G5, G8, G9, G13, G14, G15." in text
+    assert "10 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19." in text
     assert "10/10" not in text
 
 

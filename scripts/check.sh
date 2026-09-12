@@ -25,6 +25,11 @@ run() {
 run ruff format --check
 run ruff check
 run mypy --strict src
-run pytest
+# `-n auto` across cores, `--dist loadfile` so a file's tests stay on one worker: a suite
+# whose fixtures are per-file (the Postgres schema fixtures especially) pays fewer setups that
+# way, and an ordering assumption inside a file still holds. PYTEST_ARGS overrides for a single
+# test or a serial reproduction.
+# shellcheck disable=SC2086
+run pytest -n auto --dist loadfile ${PYTEST_ARGS:-}
 
 printf '\nall checks passed\n'

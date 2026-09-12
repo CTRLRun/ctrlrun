@@ -369,6 +369,24 @@ def approve(request_id: str, store_url: str | None) -> None:
         approval = store.grant_approval(request_id, CLI_APPROVER)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
+    if approval is None:
+        # SPEC-v0.8 §4.4: recorded, and still short of the threshold the request pinned. No
+        # `APPROVAL_GRANTED` event, because nothing was granted yet: an event naming a grant that
+        # did not happen is the false-green shape in the evidence log (`v0.6 §7.2.3`'s argument).
+        held = 0 if record is None else len(record.request.required_roles)
+        after = store.get_approval(request_id)
+        recorded = 0 if after is None else len(after.approvers)
+        needed = 1 if after is None else after.request.approvals_required
+        click.echo(f"recorded {request_id}: {recorded} of {needed} approvals")
+        # §2.6: a CLI grant records no verified approver, so under M-of-N it never counts. Said
+        # here rather than left for an operator to infer from a number that does not move.
+        if recorded < needed:
+            click.echo(
+                "this answer carries no verified approver, so it will not count where the "
+                "deployment names an approver identity (SPEC-v0.8 §2.6)"
+            )
+        del held
+        return
     if record is not None:
         store.append_event(
             _event(
@@ -1179,6 +1197,14 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
 @click.option("--identity-jwt-leeway", type=float, default=60.0, show_default=True)
 @click.option("--identity-jwt-jwks-min-refresh", type=float, default=30.0, show_default=True)
 @click.option("--identity-jwt-http-timeout", type=float, default=5.0, show_default=True)
+@click.option(
+    "--approver-roles-claim",
+    default=None,
+    help=(
+        "Which verified claim carries this issuer's roles, for the approver entitlement of "
+        "SPEC-v0.8 §3. Without it no role can be read, so any cited control naming one refuses."
+    ),
+)
 @STORE_URL_OPTION
 def mcp_operator(
     listen: str,
@@ -1198,6 +1224,7 @@ def mcp_operator(
     identity_jwt_audience: str | None,
     identity_jwt_token_type: str | None,
     identity_jwt_header: str,
+    approver_roles_claim: str | None,
     identity_jwt_agent_claim: str,
     identity_jwt_user_claim: str | None,
     identity_jwt_claims: tuple[str, ...],
@@ -1246,6 +1273,7 @@ def mcp_operator(
             identity_jwt_leeway=identity_jwt_leeway,
             identity_jwt_jwks_min_refresh=identity_jwt_jwks_min_refresh,
             identity_jwt_http_timeout=identity_jwt_http_timeout,
+            approver_roles_claim=approver_roles_claim,
         )
     except (ValueError, CTRLRunError) as exc:
         raise click.ClickException(str(exc)) from exc

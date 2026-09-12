@@ -108,6 +108,14 @@ GUARANTEES: Final = (
         ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
     ),
     Guarantee(
+        "G17",
+        # 30 characters against `report._TITLE_WIDTH`'s 32. It says what the refusal is about and
+        # not what it prevents: what the kernel refuses is an approval whose **recorded**
+        # entitlement does not cover the role, and §3.8 is the paragraph that bounds the claim.
+        "an unentitled approver refused",
+        ("v0.6 §7.3", "v0.8 §10 T297", "v0.8 §10 T298"),
+    ),
+    Guarantee(
         "G18",
         # 28 characters, because `report._TITLE_WIDTH` is 32 and a wider title breaks the
         # table's alignment: v0.7 had to shorten G12's for the same reason. "the requester
@@ -116,6 +124,13 @@ GUARANTEES: Final = (
         # that two different strings are two different people (SPEC-v0.8 §4.1).
         "the requester cannot approve",
         ("v0.3 §4.2", "v0.8 §10 T285", "v0.8 §10 T286"),
+    ),
+    Guarantee(
+        "G19",
+        # 30 characters. "counts once" and not "is refused": a second yes from one principal is
+        # recorded and not rejected, and what it does not do is move the count (§4.2).
+        "one principal counts once",
+        ("v0.3 §4.2", "v0.8 §10 T311", "v0.8 §10 T310"),
     ),
 )
 
@@ -136,6 +151,16 @@ SYNTHETIC_PREFIX: Final = "ctrlrun-verify"
 # --- N/A reasons: statements about the configuration, never about a failed run (§2.1) ---
 
 NO_APPROVE_RULE: Final = "no action requires approval"
+
+#: SPEC-v0.8 §3.5, §11.7 — G17's own `N/A`, and a statement about the operator's **document**:
+#: a control that names no `approver_role` gates nobody, which is the answer §3.5 gives and the
+#: opposite of what a missing claim on a principal means.
+NO_APPROVER_ROLE: Final = "no cited control names an approver role"
+
+#: SPEC-v0.8 §4.2, §11.7 — G19's own `N/A`, and a statement about the operator's **document**:
+#: a document where every action takes one yes has no count to get wrong. Not "M-of-N is not
+#: configured", which would be a sentence about a deployment verify cannot see.
+NO_M_OF_N: Final = "no action requires more than one approval"
 NO_EFFECT_TEMPLATE: Final = "no action declares an `effect:` template"
 
 #: The sentence that makes G3's N/A actionable rather than mysterious (§2.2). It travels in
@@ -267,6 +292,7 @@ __all__ = [
     "GUARANTEES",
     "NOT_SELECTED",
     "NO_ACTIONS",
+    "NO_APPROVER_ROLE",
     "NO_APPROVE_RULE",
     "NO_AUTHORITY_SECTION",
     "NO_CEILING_DECLARED",

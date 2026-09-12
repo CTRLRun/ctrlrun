@@ -172,6 +172,7 @@ Then, in this order:
 | The provider returned `None` | Refused, `-41007`. A decline is a refusal here, with no `context()` to fall back to and nothing that may be backfilled |
 | It returned a `Principal` with `expires_at` set and now past it | Refused, `-41014` `ctrlrun.principal_expired`. `v0.3 §2.3`'s check, applied at the one entry point that never reaches `Control.execute` |
 | It returned a `Principal` with `user is None` | Refused, `-41013` `ctrlrun.not_a_human` (§3.2) |
+| It returned a `Principal` the cited control's `approver_role` does not cover | Refused, `-41015` `ctrlrun.not_entitled`, with the control and the role named (`SPEC-v0.8.md` §3.7). Its own code for `-41014`'s reason: the answer tells a human which role they were missing, and `-41007` deliberately says nothing about why |
 | Otherwise | The write proceeds, attributed to it (§5.4) |
 
 **No receipt and no events for any row above.** `v0.3 §3.2`'s last paragraph is the rule: a
@@ -240,9 +241,28 @@ answered yes to one exact `action_hash`; it becomes permission only when `Contro
 consumes it, and `Control.execute` evaluates the principal's expiry, then authority, then policy,
 then the approval, in that order (`v0.3 §4.3.1`), every time, for the action the grant names. A
 second authority evaluation here would be evaluating the *approver's* authority against the
-*agent's* action, which is a different question that this release does not answer (see §10:
-authenticating the approver's entitlement to approve is not in scope, and the honest place for it
-is a separation-of-duties model that does not exist yet).
+*agent's* action, which is a different question and one this document still does not answer.
+
+**Amended by `SPEC-v0.8.md` §3, and the amendment is narrower than it sounds.** Since v0.8 this
+server checks the approver's **entitlement**: where the deployment names an approver identity and
+the cited control names an `approver_role`, an answer from a credential that does not carry that
+role is refused here, with the control named, and the roles the answer satisfied are recorded on
+the approval row. That is not an authority evaluation and it is not separation of duties: it is
+one string from the operator's own control registry compared against one claim on a verified
+credential, and CTRLRun interprets neither.
+
+**The unconfigured cases are two, they are not the same, and the earlier wording here stated
+one of them backwards.** `SPEC-v0.8.md` §3.5's rule is that omission is not entitlement and it is
+not refusal either, and which one a deployment gets depends on which half is missing:
+
+| What the deployment configured | What this server does |
+|---|---|
+| No approver identity, or a cited control naming no `approver_role` | The paragraph above is unchanged and describes the deployment: any human whose credential the provider verifies can answer any pending request |
+| A control naming an `approver_role`, and no `--approver-roles-claim` | **Every answer to that request is refused**, here and again at consumption. No claim can be read, so no role is held, and half a check fails closed (`SPEC-v0.8.md` §3.4). The server warns at startup rather than at the first refusal |
+| A control naming an `approver_role`, and a claim the credential does not carry | That answer is refused, `-41015`, with the control and the role named |
+
+Both of the first two are true of real configurations, which is why both are here, and the
+difference between them is the whole of §3.5.
 
 `resolve` is the same shape: it states what happened at a remote. It is `v0.1 §5.2`'s human
 authority, and the store already refuses to apply it to anything but an `AMBIGUOUS` record.
@@ -429,6 +449,7 @@ enforcing, and answering one changes nothing in the world.
 | A write tool with no principal, a declined or rejected credential | HTTP 403, `-41007` |
 | A write tool whose principal has no `user` | HTTP 403, `-41013` |
 | A write tool whose principal has expired | HTTP 403, `-41014` |
+| `approve` whose principal lacks a role a cited control requires | HTTP 403, `-41015` |
 | `approve`/`deny` on an unknown, answered or expired request | HTTP 200, `-41003`, with the store's reason |
 | `resolve` on a record that is not `AMBIGUOUS`, or an unknown key | HTTP 200, `-41003`, with the store's reason |
 | `resolve` with a blank reason | HTTP 200, `-32602` |
@@ -626,6 +647,7 @@ neither is reachable from the gateway.
 |---|---|---|
 | `-41013` | `ctrlrun.not_a_human` | 403 |
 | `-41014` | `ctrlrun.principal_expired` | 403 |
+| `-41015` | `ctrlrun.not_entitled` | 403 |
 
 Reused unchanged: `-41003` `ctrlrun.approval_denied` for a store refusal about an approval or an
 effect, and `-41007` `ctrlrun.no_principal`.
@@ -694,13 +716,22 @@ did before the move to `ctrlrun.reporting`, exit code included.
 
 Everything `v0.6 §11` excludes, plus:
 
-- **Authenticating the approver's *entitlement*.** This server authenticates *who* is answering;
-  it does not check that they were allowed to. `v0.3 §13` and `v0.5`'s do-not-build list already
-  exclude authenticating the approver, separation of duties, M-of-N and break-glass, and nothing
-  here changes that. The honest statement is in §4.3: any human whose credential the provider
-  verifies can answer any pending request, exactly as any human who can run `ctrlrun approve`
-  can today. **This is attribution, not authorization**, and no document may describe it as the
-  latter.
+- **Authenticating the approver's *entitlement*.** ~~This server authenticates *who* is
+  answering; it does not check that they were allowed to.~~ **Amended by `SPEC-v0.8.md` §3**,
+  and the strikethrough is deliberate: this line was true of every release up to 0.7.0, and a
+  reader of an older deployment's documentation should be able to see which sentence applied.
+
+  What is true now: where an approver identity and an `approver_role` are configured, this server
+  **does** check entitlement, refuses an answer the credential is not entitled to give, and
+  records what the answer satisfied. Where they are not, the old sentence still holds exactly:
+  any human whose credential the provider verifies can answer any pending request, exactly as any
+  human who can run `ctrlrun approve` can.
+
+  **What is still out of scope**: separation of duties as a model, and evaluating the approver's
+  *authority* against the agent's action. M-of-N and break-glass arrive with v0.8's items 4 and 5
+  and are not this server's. And the check is bounded the way `SPEC-v0.8.md` §3.8 bounds it: what
+  it compares is one operator-written string against one claim, and what the kernel later refuses
+  is an approval whose **recorded** entitlement does not cover the role.
 - **stdio transport.** An MCP server launched over stdio by the assistant has no credential to
   verify — the process is whatever the client started, and every candidate identity is asserted
   by it. That is `--principal-from-client-info` (`v0.3 §8.1`) in a fourth costume, and it is the
@@ -729,6 +760,7 @@ Everything `v0.6 §11` excludes, plus:
 | A write tool, credential declined or rejected | `-41007`, store unchanged |
 | A write tool, credential names no human | `-41013`, store unchanged |
 | A write tool, credential expired | `-41014`, store unchanged |
+| `approve`, credential missing a required `approver_role` | `-41015`, store unchanged: no grant, no event, no partial row |
 | `resolve` with no reason | `-32602`, store unchanged |
 | An unknown tool, an unknown method, a bad argument | A JSON-RPC error, store unchanged |
 | Anything the store refuses | The store's refusal, unchanged. Store unchanged, **except** that answering a lapsed request records the lapse (§4.2) |

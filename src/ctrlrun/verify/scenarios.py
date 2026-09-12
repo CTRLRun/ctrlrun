@@ -47,7 +47,9 @@ from ..approval import (
     ApprovalStatus,
     ApproverIdentity,
     LocalApprovalProvider,
+    RequiredRole,
     _granting_principal,
+    _required_roles,
 )
 from ..authority import (
     AUTHORITY_EXPIRED,
@@ -730,6 +732,8 @@ class Engine:
         needs_effect: bool = False,
         needs_renewal: bool = False,
         needs_ceiling: bool = False,
+        needs_approver_role: bool = False,
+        needs_threshold: bool = False,
         ceiling_bound: int | None = None,
         grant_filter: Callable[[Grant], bool] | None = None,
         mutation: Mapping[str, Any] | None = None,
@@ -753,6 +757,16 @@ class Engine:
                 continue
             ceiling = self.policy.max_attempts(name)
             if needs_renewal and ceiling is not None and ceiling < 2:
+                continue
+            if needs_approver_role and not self._roles_for(name):
+                # SPEC-v0.8 §3.5, for G17: an action whose cited controls name no role gates
+                # nobody, so it cannot exercise the refusal, and picking it would make G17's
+                # `N/A` reason a statement about this selection rather than about the document.
+                continue
+            if needs_threshold and self.policy.approvals_required(name) < 2:
+                # SPEC-v0.8 §4.2, for G19: an action that takes one yes has no count to get
+                # wrong. Selecting it would make G19's `N/A` reason a statement about this
+                # selection rather than about the document, which is §11.7's rule.
                 continue
             if needs_ceiling and ceiling is None:
                 continue
@@ -858,6 +872,38 @@ class Engine:
             environment=self._default_environment,
         )
         return control, store, recorder, moving
+
+    def _roles_for(self, action_name: str) -> tuple[RequiredRole, ...]:
+        """The roles this action's cited controls require (SPEC-v0.8 §3.3), by name.
+
+        Off the entry's own citations rather than an evaluation, so it can be asked before a
+        selection exists: `§3.5`'s question is whether the **document** gates anything.
+        """
+        entry = self.policy.actions.get(action_name)
+        cited = () if entry is None else entry.controls
+        return tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self.policy.controls.get(identifier)) for identifier in cited
+            )
+            if control is not None and control.approver_role
+        )
+
+    def _required_roles(self, selection: _Selection) -> tuple[RequiredRole, ...]:
+        """The roles this selection's decision would pin on a request (SPEC-v0.8 §3.3).
+
+        Read from the same evaluation `Control` reads, so verify grades what the deployment would
+        do rather than a rule of its own.
+        """
+        evaluation = self.policy.evaluate(selection.build())
+        return tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self.policy.controls.get(identifier))
+                for identifier in evaluation.controls
+            )
+            if control is not None and control.approver_role
+        )
 
     def _control_for(
         self,
@@ -3018,6 +3064,111 @@ class Engine:
         finally:
             store.close()
 
+    # --- G17: an unentitled approver is refused -------------------------------------------
+
+    def g17(self) -> GuaranteeResult:
+        """SPEC-v0.8 §3.6, §11.7. Graded where the document names an approver role.
+
+        **The `N/A` reason is about the document**, which is what `verify/guarantees.py` requires
+        of every reason in it: a policy whose cited controls name no `approver_role` gates nobody,
+        which is §3.5's answer and a true statement about what the operator wrote. Whether that
+        operator configured an approver identity is a fact about their application, which verify
+        cannot see and which it therefore supplies for itself (§11.7).
+
+        Both halves, `v0.4 §1.3`. The observable: an approval recorded without the control's role
+        is refused, and the refusal names the control. The control: the same action, approved by
+        an approver the role covers, commits. A check that refused every approval would pass the
+        first and fail the second.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,), needs_approver_role=True)
+        if selection is None:
+            # **Over the whole document, not over one selection.** `select` is deterministic by
+            # codepoint, so on a document with two approve rules where the ungated one sorts
+            # first, asking about that one alone would report "no cited control names an
+            # approver role" of a document that gates entitlement. `v0.7 §8.9` makes an untrue
+            # `N/A` reason a false green, and every reason here is a statement about the
+            # operator's document.
+            if self.select(decisions=(Decision.APPROVE,)) is None:
+                return self.na("G17", self.unselected(reg.NO_APPROVE_RULE))
+            return self.na("G17", reg.NO_APPROVER_ROLE)
+        roles = self._required_roles(selection)
+        wanted = roles[0]
+        approver = Principal(
+            agent=f"{selection.principal.agent}-approver",
+            user=selection.principal.user,
+            issuer=selection.principal.issuer,
+        )
+        identity = ApproverIdentity(_VerifyApproverProvider(approver))
+        control, store, recorder, _ = self._control_for(
+            "G17", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["required_role"] = f"{wanted.control}:{wanted.role}"
+            action = selection.build()
+            # **Through the pinning route, not straight from the provider.** `_REQUIRED_ROLES` is
+            # set inside `Control._presented`, so a request built from `control.approvals.request`
+            # pins nothing, `unsatisfied((), ...)` refuses nothing, and this scenario would FAIL
+            # on every document that gates anything while passing on the shipped examples, which
+            # are `N/A`. §14.3 records the same lesson for the operator tests; verify's own
+            # scenario is where it was not applied.
+            with _required_roles(roles, self.policy.approvals_required(selection.action)):
+                request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            # Recorded entitled for nothing, which is what a surface that verified the credential
+            # and found no role records (§3.8).
+            with _granting_principal(approver):
+                store.grant_approval(request.request_id, APPROVER)
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='approver_unentitled')",
+                "an action ran under an approval nobody was recorded as entitled to give",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "approver_unentitled",
+                "ApprovalMismatch(reason='approver_unentitled')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            _expect(
+                _named_event(recorder, EventType.APPROVAL_INVALIDATED, reason="approver_unentitled")
+                and any(
+                    event.data.get("control") == wanted.control
+                    for event in recorder.events
+                    if event.type is EventType.APPROVAL_INVALIDATED
+                ),
+                f"APPROVAL_INVALIDATED naming control {wanted.control!r}",
+                f"events were {recorder.types()}",
+            )
+
+            with _required_roles(roles, self.policy.approvals_required(selection.action)):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            with _granting_principal(approver, entitled=[role.control for role in roles]):
+                store.grant_approval(second.request_id, APPROVER)
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, approved by an entitled approver, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G17", selection, store, recorder, body)
+        finally:
+            store.close()
+
     # --- G18: an approver who is the requester is refused ---------------------------------
 
     def g18(self) -> GuaranteeResult:
@@ -3107,6 +3258,114 @@ class Engine:
 
         try:
             return self.graded("G18", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G19: one principal counts once ---------------------------------------------------
+
+    def g19(self) -> GuaranteeResult:
+        """SPEC-v0.8 §4.2, §11.7. Graded where the document asks for more than one approval.
+
+        **The `N/A` reason is about the document**: an action that takes one yes has no count to
+        get wrong, which is a true statement about what the operator wrote and not a claim about
+        a deployment verify cannot see (§11.7).
+
+        Both halves, `v0.4 §1.3`. The observable: one principal answers twice, through two doors
+        and under two different approver strings, and the action is still refused as `pending`.
+        The control: N distinct principals answer and it commits. A count that never reached N
+        would pass the first and fail the second, and a count that moved on the duplicate would
+        fail the first, which is why neither half is evidence alone.
+
+        The two grants carry **different `approver` strings**, because a scenario in which the
+        strings match proves only that the row was deduplicated on a string, and §4.2's rule is
+        about the resolved principal.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,), needs_threshold=True)
+        if selection is None:
+            # Over the whole document, exactly as G17 does it: a document with an ungated
+            # approve rule sorting before a gated one would otherwise report the threshold
+            # reason about a document that does name one.
+            if self.select(decisions=(Decision.APPROVE,)) is None:
+                return self.na("G19", self.unselected(reg.NO_APPROVE_RULE))
+            return self.na("G19", reg.NO_M_OF_N)
+        needed = self.policy.approvals_required(selection.action)
+        roles = self._required_roles(selection)
+        entitled = [role.control for role in roles]
+        approvers = tuple(
+            Principal(
+                agent=f"{selection.principal.agent}-approver-{index}",
+                user=selection.principal.user,
+                issuer=selection.principal.issuer,
+            )
+            for index in range(1, needed + 1)
+        )
+        identity = ApproverIdentity(_VerifyApproverProvider(approvers[0]))
+        control, store, recorder, _ = self._control_for(
+            "G19", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["approvals_required"] = needed
+            action = selection.build()
+            # Through the pinning route: `_APPROVALS_REQUIRED` is read inside `build_request`,
+            # so a request built outside `Control._presented` would pin 1 and this scenario
+            # would grade a threshold the document does not ask for (§14.3).
+            with _required_roles(roles, needed):
+                request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            for door in ("mcp-operator", "cli"):
+                with _granting_principal(approvers[0], entitled=entitled):
+                    store.grant_approval(request.request_id, f"{door}:{APPROVER}")
+            record = store.get_approval(request.request_id)
+            _expect(
+                record is not None and len(record.approvers) == 1,
+                "one principal answering twice is recorded once",
+                f"the row carries {0 if record is None else len(record.approvers)} approvers",
+            )
+            _expect(
+                record is not None and record.status is ApprovalStatus.PENDING,
+                f"the request is still pending at 1 of {needed}",
+                f"the request is {None if record is None else record.status}",
+            )
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='pending')",
+                "an action ran on a count one principal reached alone",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "pending",
+                "ApprovalMismatch(reason='pending')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+
+            # The control: N distinct principals, and the same action commits.
+            with _required_roles(roles, needed):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            for index, approver in enumerate(approvers, start=1):
+                with _granting_principal(approver, entitled=entitled):
+                    store.grant_approval(second.request_id, f"{APPROVER}-{index}")
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                f"the same action, approved by {needed} distinct principals, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G19", selection, store, recorder, body)
         finally:
             store.close()
 

@@ -546,7 +546,7 @@ class Receipt:
             principal=Principal(
                 agent=principal["agent"],
                 user=principal["user"],
-                claims=principal.get("claims") or {},
+                claims=_claims_of(principal.get("claims")),
                 issuer=principal.get("issuer"),
                 expires_at=None if expires_at is None else datetime.fromisoformat(expires_at),
             ),
@@ -602,6 +602,33 @@ class Receipt:
         """Parse one JSONL line written by `to_json`."""
         document: dict[str, Any] = json.loads(line)
         return cls.from_dict(document)
+
+
+def _claims_of(value: object) -> dict[str, Any]:
+    """`Principal.claims` out of a document, never raising (`v0.7 §6.11`, SPEC-v0.8 §3.4).
+
+    `_frozen_claims` refuses a claim JSON can hold — an array of numbers, a float, a nested
+    object — and `Principal` runs it on construction, so a receipt carrying one raised out of
+    `from_dict` and blinded every reader of the chain rather than the one field. Dropped here
+    for `_approvers_of`'s reason, and the drop is visible: the receipt reads back with fewer
+    claims than the principal that produced it, and its stored hash no longer matches.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    # `bool | int | str` and no float branch: a float is not an `int` in Python, so it falls
+    # through to the drop below with every other shape. A branch that cannot fire is
+    # documentation, not defence.
+    kept: dict[str, Any] = {}
+    for name, claim in value.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(claim, bool | int | str):
+            kept[name] = claim
+        elif isinstance(claim, list | tuple) and all(
+            isinstance(item, str) and item for item in claim
+        ):
+            kept[name] = tuple(claim)
+    return kept
 
 
 def _approvers_of(value: object) -> tuple[VerifiedApprover, ...]:

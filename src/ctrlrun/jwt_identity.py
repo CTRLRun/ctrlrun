@@ -571,8 +571,21 @@ def _principal(
         value = claims.get(name)
         if isinstance(value, str | int | bool):  # bool is a subclass of int
             selected[name] = value
+        elif isinstance(value, list) and all(isinstance(item, str) and item for item in value):
+            # SPEC-v0.8 §3.4: a roles claim is a JSON array at every issuer anybody deploys, and
+            # dropping it here is what made its holder silently unentitled. Carried as a tuple,
+            # which is what `Principal.claims` now admits.
+            selected[name] = tuple(value)
         elif value is not None:
-            _LOG.debug("claim %r is %s, which a Principal cannot carry", name, type(value).__name__)
+            # **A warning and not a DEBUG line**, because this is where a silently unentitled
+            # approver begins: a claim an operator asked for by name, that the issuer sent in a
+            # shape this cannot carry, and that every later check then reads as absent (§3.4).
+            _LOG.warning(
+                "claim %r is %s, which a Principal cannot carry, so it is absent: an approver "
+                "role read from this claim will not be held by anybody (SPEC-v0.8 §3.4)",
+                name,
+                type(value).__name__,
+            )
     expires_at = claims.get("exp")
     return Principal(
         agent=agent.strip(),

@@ -23,7 +23,9 @@ from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
+    APPROVALS_UNVERIFIABLE,
     APPROVER_IS_REQUESTER,
+    APPROVER_UNENTITLED,
     APPROVER_UNVERIFIED,
     DEFAULT_APPROVAL_TTL,
     Approval,
@@ -34,11 +36,14 @@ from .approval import (
     ApprovalVerdict,
     ApproverIdentity,
     LocalApprovalProvider,
+    RequiredRole,
     VerifiedApprover,
     _precondition_at_request,
     _precondition_fingerprint,
+    _required_roles,
     check_consumable,
     policy_in_force,
+    unsatisfied,
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
 from .effect import (
@@ -373,19 +378,23 @@ class _Compared:
     per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("approvers", "at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error", "unentitled")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
         self.approvers: tuple[VerifiedApprover, ...] = ()
+        #: SPEC-v0.8 §3.7 — the required role an approver did not hold, so the event can name the
+        #: control as well as the reason.
+        self.unentitled: RequiredRole | None = None
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
         self.approvers = ()
+        self.unentitled = None
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -2277,6 +2286,14 @@ class Control:
         action is suspended awaiting a human, which is not a terminal state (§6.1). The
         `APPROVAL_REQUESTED` event is the evidence.
         """
+        # SPEC-v0.8 §4.2: a threshold above one in a deployment that verifies nobody has no
+        # referent for "distinct principals": the count could never move, or distinctness would
+        # fall back to the string §4.1 forbids. Denied here, before a human is asked, because
+        # asking somebody to answer a request that can never be completed spends their attention
+        # on nothing (`v0.3 §4.3`'s argument for refusing before the approval gate).
+        required = self._policy.approvals_required(action.name)
+        if required > 1 and self._approver_identity is None:
+            self._refuse_unverifiable(action, evaluation, started_at, effect_key, required)
         presented = _PRESENTED_APPROVAL.get(None)
         if presented is not None:
             return presented
@@ -2291,8 +2308,24 @@ class Control:
         # `Control` is the only object holding both a policy and a provider, and the provider
         # protocol takes neither, so it travels the way a presented approval does. The
         # fingerprint travels beside it, by the same route and for the same reason.
+        # SPEC-v0.8 §3.3: which controls the evaluation that sent this action to approval cited,
+        # and what role each demands. Built here rather than on `Policy`, because `Control` is
+        # the only object that holds both the evaluation and the registry, and §11.1 freezes no
+        # accessor for it.
+        roles = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in evaluation.controls
+            )
+            if control is not None and control.approver_role
+        )
         try:
-            with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
+            with (
+                policy_in_force(self._policy_hash),
+                _precondition_at_request(fingerprint),
+                _required_roles(roles, self._policy.approvals_required(action.name)),
+            ):
                 request = self._approvals.request(action, self._approval_ttl)
         except Exception:
             if fingerprint is not None:
@@ -2334,6 +2367,37 @@ class Control:
             request_id=request.request_id,
             action_id=action.action_id,
         )
+
+    def _refuse_unverifiable(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        required: int,
+    ) -> None:
+        """§4.2's refusal: `approvals_required` above one, and nobody to count (§12).
+
+        Not a load error: the policy is loadable and correct, and what is missing is the
+        `Control` it was deployed in, which the loader cannot see.
+        """
+        message = (
+            f"{action.name}: 'approvals_required: {required}' needs an approver identity, and "
+            "this deployment names none; distinct principals cannot be counted where nobody is "
+            "verified (SPEC-v0.8 §4.2)"
+        )
+        self._append(
+            EventType.ACTION_DENIED, action, {"reason": APPROVALS_UNVERIFIABLE}, effect_key
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, APPROVALS_UNVERIFIABLE, evaluation.controls),
+            ReceiptResult.DENIED,
+            started_at,
+            error=message,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(message, reason=APPROVALS_UNVERIFIABLE, action_id=action.action_id)
 
     def _refuse_unfetched_request(
         self,
@@ -2637,12 +2701,20 @@ class Control:
         # `check_consumable` refuses it at every later presentation, and a lapsed grant whose
         # approver is fine still reports `expired` with its event and the store's own write,
         # because the check passes and `_take` decides. §2.4.1 carries the table.
-        self._refuse_approver(action, approval_id, record.approvers if record is not None else ())
+        assert record is not None
+        self._refuse_approver(
+            action, approval_id, record.approvers, compared, record.request.required_roles
+        )
 
     def _refuse_approver(
-        self, action: Action, approval_id: str, approvers: tuple[VerifiedApprover, ...]
+        self,
+        action: Action,
+        approval_id: str,
+        approvers: tuple[VerifiedApprover, ...],
+        compared: _Compared,
+        required: tuple[RequiredRole, ...] = (),
     ) -> None:
-        """§2.7 and §4.1's two refusals, over whatever the row recorded."""
+        """§2.7, §3.6 and §4.1's refusals, over whatever the row recorded."""
         if not approvers:
             raise ApprovalMismatch(
                 f"approval {approval_id} carries no verified approver, and this deployment "
@@ -2650,6 +2722,20 @@ class Control:
                 reason=APPROVER_UNVERIFIED,
                 approval_id=approval_id,
             )
+        for approver in approvers:
+            # SPEC-v0.8 §3.6: **each** approver satisfies **every** required role. A control that
+            # says who may answer is not satisfied by a committee in which one member could, which
+            # is why this is inside the loop and `unsatisfied` is all-of rather than any-of.
+            missing = unsatisfied(required, approver.entitled)
+            if missing is not None:
+                compared.unentitled = missing
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by an approver who does not hold the "
+                    f"role {missing.role!r} required by control {missing.control!r}; the approval "
+                    "is left granted",
+                    reason=APPROVER_UNENTITLED,
+                    approval_id=approval_id,
+                )
         requester = (action.principal.agent, action.principal.user)
         for approver in approvers:
             if approver.principal == requester:
@@ -2723,6 +2809,13 @@ class Control:
         """`APPROVAL_INVALIDATED`'s data: the reason, and for a precondition refusal the two
         fingerprints it compared, hashes only, and the provider's failure by type (§6.2)."""
         data: dict[str, Any] = {"reason": mismatch.reason, "action_hash": action.action_hash}
+        # SPEC-v0.8 §3.7: an entitlement refusal names the control and the role on the event as
+        # well as in the message, because an operator reading the evidence should not have to
+        # parse a sentence to find out which written expectation was not met. By the carrier the
+        # precondition hashes already travel on, so no error type grows a keyword (§11.2).
+        if mismatch.reason == APPROVER_UNENTITLED and compared.unentitled is not None:
+            data["control"] = compared.unentitled.control
+            data["role"] = compared.unentitled.role
         if mismatch.reason in _PRECONDITION_REASONS:
             data.update(compared.data())
         return data
