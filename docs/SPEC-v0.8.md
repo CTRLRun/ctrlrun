@@ -2253,6 +2253,37 @@ lesson one layer down: it accepted a `processes` argument and never used it.
 
 ### 14.5 Item 5: break-glass as a grant
 
+**`delegable` is read at three sites and they are not interchangeable.** §5.2 point 4 named all
+three before the code was written, and building it confirmed each has a different failure: without
+the creation-root site nothing is created; without the rule-3 chain scan nothing can be delegated
+beneath a break-glass grant; without rule 6 the grant is created, looks right in every record, and
+authorises nothing on every evaluation, refused `authority_escalation` with no dimension named.
+Only the third is silent, which is why T326b asserts **evaluation** and not creation.
+
+**The exemption is applied where the value is read, never written onto the grant.** A
+`delegable=True` on the parsed envelope would have been three lines shorter and would have moved
+the policy hash, because `_canonical_grant`'s closed field list always emits `delegable`. The hash
+has to be a statement about the document: T332 pins that an envelope renders `delegable: false`,
+the parser default, and that a deployment where break-glass evaluates correctly hashes identically
+to one where the runtime rule is absent.
+
+**A break-glass grant is not delegable unless it says so.** Writing item 5's tests found this and
+it is not a defect: `delegable` on the grant in `--file` means what it means everywhere, and §5.2
+point 4 exempts the **envelope**, which carries no such key, and changes nothing about the grant
+opened beneath it. An operator who wants to sub-delegate during an incident writes `delegable: true`
+in that file, and `max_ttl` still bounds the whole subtree in time.
+
+**`resources:` is contained only where the parent constrains it**, which is `v0.3 §5.4` unchanged
+and worth stating because an envelope is where it surprises: an envelope declaring no `resources:`
+does not bound them, so an envelope intended to bound resources must say so. Omission is not
+unlimited *for the child* — a child may not drop a dimension its parent constrains — and it is
+also not a constraint the parent never expressed.
+
+**The absence test had to read code rather than text.** `approval.py` explains in a comment that a
+public `_granting_principal` would be "`trust_approver` spelled as a context manager", which is
+prose arguing the flag away. A grep that cannot tell that from a flag pushes the argument out of
+the tree, so T338 tokenizes comments and strings out, and its control plants a flag and finds it.
+
 ### 14.6 Item 6: credential revocation, consumed
 
 ### 14.7 Item 7: a policy change is a protected action

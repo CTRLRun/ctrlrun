@@ -11,6 +11,58 @@ any change to one appears here.
 
 ### Added
 
+- **Break-glass is a grant, and there is no flag** (`docs/SPEC-v0.8.md` §5). An incident needs
+  authority nobody was granted in advance. The wrong answer is a setting: a setting leaves no
+  record, expires never, cannot be revoked and cannot be narrowed. `authority.py` already has
+  grants that are all five, so break-glass is a delegation beneath an **envelope** the policy
+  declared in advance.
+
+  ```yaml
+  authority:
+    break_glass:
+      incident-payments:
+        subject: {agent: "oncall-*"}     # who a grant opened here may be FOR
+        actions: ["payments.*"]
+        constraints: {amount_lte: 50000}
+        max_ttl: PT4H                    # the longest expiry a grant beneath it may carry
+        controls: [incident-response]    # whose approver_role gates who may OPEN it
+  ```
+
+  ```
+  ctrlrun break-glass --envelope incident-payments --file grant.yaml --reason "INC-4412"
+  ```
+
+  **The envelope decides nothing, by construction.** It lives in `Authority.envelopes`, a mapping
+  separate from `grants`, because the candidate set is every entry of `grants` unconditionally: an
+  envelope living there would decide actions, which is the opposite of what it is for. The test
+  asserts it is absent from the candidate set rather than merely unmatched.
+
+  **It is covered by the policy hash, `max_ttl` included.** The argument for declaring the widest
+  authority an incident can reach in a file is that somebody reviewed it *before* the incident, and
+  that argument is only true if widening it moves every receipt.
+
+  **There is no `--as`.** Whoever opens one is the principal the deployment's approver identity
+  resolves, gated by the envelope's `controls:`; a deployment that names no approver identity
+  cannot open one at all. An assertion typed at a shell is exactly what break-glass must not
+  accept.
+
+  **What it is afterwards**: recorded, with `created_via: break-glass`; expiring, and bounded by
+  `max_ttl` from the moment it was opened; revocable, and revoking it stops everything beneath it;
+  attenuable, obeying `child ⊆ parent` on every dimension. A setting has none of those.
+
+  **`Receipt.authority_grant_id`** now names the grant that decided the action, for **every**
+  action decided by authority and not only under break-glass. A field exercised only on the rare
+  path is one nobody notices breaking.
+
+  `created_via` gains its third value, which is a public change rather than an addition: the
+  vocabulary is a closed set and a record carrying an unknown value is unreadable, which answers
+  `authority_unreadable` for every action in the deployment. It moves with every reader in one
+  commit.
+
+  No guarantee id. The roadmap assigned five to v0.8 and G22 to G24 to v0.9, so inventing a sixth
+  would collide or renumber, and a renumber is the maintainer's change. Its evidence is its tests,
+  and one of them greps the shipped package for sixteen names a flag would be spelled as.
+
 - **M-of-N approvals** (`docs/SPEC-v0.8.md` §4). An action may require more than one yes, and what
   the threshold counts is **distinct verified principals**: a second answer from a principal that
   already answered is recorded, moves that entry's `granted_at`, and does not move the count.
