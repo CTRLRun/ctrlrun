@@ -9,6 +9,30 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Added
+
+- **`ctrlrun revoke --created-by PRINCIPAL` and `--under ID`** (`docs/SPEC-v0.8.md` §7). During an
+  incident the operation an operator reaches for is *everything this principal issued* or
+  *everything under this grant*, and until now that was a script over the events file, written
+  under pressure. Both are queries over rows that already exist: no new `StateStore` method, no
+  bulk statement, and no transaction over the set. **Each match is revoked exactly as one id is**,
+  one at a time, so a run that stops halfway leaves the rows it reached revoked and the rest
+  untouched, and a second run finishes. `--created-by` takes `AGENT` or `AGENT/USER`, splitting on
+  the first `/` as `ctrlrun delegate --as` does; `--under` reaches the subtree at every depth and
+  is strictly beneath, so it leaves the id it names alone. A selector that matches nothing **exits
+  non-zero** and says what it searched for, because during an incident a mistyped name that exits 0
+  reads as a finished job. Still no `unrevoke`, in any costume.
+
+  **`--by` is unchanged and still means who performed the revocation.** The roadmap called the new
+  selector `--by <principal>`, which is the opposite meaning on an option that already exists, so
+  the selector is `--created-by` and every script written against 0.7.0 keeps working.
+
+  **What a killed run can leave, stated because the tests bound it rather than assume it:** a
+  revoked row whose `DELEGATION_REVOKED` event was never written. `Control.revoke` writes the row
+  and then appends the event, with no transaction over the pair, so a `SIGKILL` between them leaves
+  one row unaccounted for in the log. That is 0.3 behaviour for a single `ctrlrun revoke` too; a
+  selector only makes the window easy to land in.
+
 ### Documentation
 
 - **`docs/SPEC-v0.8.md`**: the v0.8 "Oversight" contract, a delta over v0.1 to v0.7. No code lands
