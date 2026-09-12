@@ -234,9 +234,12 @@ def test_every_pull_request_commit_is_signed_off():
     job = _workflow("ci.yml")["jobs"]["dco"]
     assert job["if"] == "github.event_name == 'pull_request'"
     run = "\n".join(step.get("run", "") for step in job["steps"])
-    assert "Signed-off-by: " in run
     assert "--no-merges" in run
-    assert "[bot]" in run, "bot commits are exempt, and the exemption has to be visible"
+    # Only git's parsed trailer block counts, so a sentence in the body that mentions the
+    # trailer cannot satisfy the check; and there is no exemption, because one keyed on a
+    # name or an email is a string anyone can set.
+    assert "trailers:key=Signed-off-by" in run
+    assert "[bot]" not in run
 
 
 def test_the_citation_names_the_repository_the_version_and_the_tagline():

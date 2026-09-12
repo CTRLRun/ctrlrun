@@ -170,7 +170,8 @@ Apache-2.0 like the rest of the code.
 
 The email has to be the commit's author email. CI's `dco` job reads every commit on a pull
 request and names any that lack the trailer; `git rebase --signoff main` adds it to a whole
-branch at once. Commits from bots are exempt.
+branch at once. Only git's own trailer block counts, and nobody is exempt, bots included:
+dependabot signs its commits off already.
 
 ## Releases
 

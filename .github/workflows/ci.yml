@@ -413,8 +413,10 @@ jobs:
     # Every commit on a pull request carries a `Signed-off-by:` trailer naming its author's
     # email: the Developer Certificate of Origin, per CONTRIBUTING.md. A shell loop rather than
     # the DCO app, so the rule lives in the repository, pinned like everything else, with
-    # nothing to install and nothing that can be quietly uninstalled. Bot commits are exempt;
-    # dependabot signs anyway.
+    # nothing to install and nothing that can be quietly uninstalled. Only git's own trailer
+    # block counts, so a sentence in the body that happens to mention the trailer does not.
+    # Nobody is exempt, bots included: an exemption keyed on a name or an email is a string
+    # anyone can set, and dependabot signs its commits off anyway.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -430,9 +432,12 @@ jobs:
           missing=0
           for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
             name="$(git log -1 --format=%an "$sha")"
-            case "$name" in *'[bot]') continue ;; esac
             email="$(git log -1 --format=%ae "$sha")"
-            if ! git log -1 --format=%B "$sha" | grep -F 'Signed-off-by: ' | grep -Fq "<$email>"; then
+            # `only` restricts the output to the trailer block git itself recognises, and
+            # `valueonly` leaves the `Name <email>` part; the value has to end in the author's
+            # email, angle brackets included.
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,only)' "$sha" \
+                | awk -v want="<$email>" 'substr($0, length($0) - length(want) + 1) == want { found = 1 } END { exit !found }'; then
               echo "::error::$sha ($(git log -1 --format=%s "$sha")) has no 'Signed-off-by: $name <$email>' trailer. Add one with 'git commit --amend -s', or to every commit on the branch with 'git rebase --signoff $BASE'."
               missing=1
             fi
