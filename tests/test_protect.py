@@ -694,6 +694,8 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         # until item 5 fills it.
         "approvers",
         "authority_grant_id",
+        # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
+        "task",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")

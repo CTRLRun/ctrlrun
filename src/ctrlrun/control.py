@@ -208,6 +208,10 @@ _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
 #: on the precedent of `_PRESENTED_APPROVAL` beneath it: `Control` is shared across calls and
 #: holds no per-call state, and a context variable is per-call by construction.
 _AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_grant_id")
+#: SPEC-v0.9 §6.3.1 — the task reaches the receipt the way `authority_grant_id` does, and for
+#: the same reason: set at the one place that knows it rather than at each receipt site, because
+#: a site that forgot would stamp the **previous** action's task onto this one's evidence.
+_TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
 
 #: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
 #: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
@@ -681,7 +685,7 @@ class Control:
         """
         return self._environment
 
-    def evaluate(self, action: Action) -> Evaluation:
+    def evaluate(self, action: Action, *, task: str | None = None) -> Evaluation:
         """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8).
 
         An expired principal is a `DENY` here rather than the refusal `execute` raises
@@ -696,6 +700,10 @@ class Control:
         can put an approval in front of a human for an attempt `execute` will then refuse, and a
         gateway pre-check can report `approve` for the same attempt. The cost is a wasted answer,
         never an execution: nothing here writes, and every ceiling refusal happens in `execute`.
+
+        **`task` is SPEC-v0.9 §6**, and it is here as well as on `execute` because §6.3.2 requires
+        the two to agree: `ctrlrun.adapter.needs_approval` routes through this method, and an
+        `evaluate` blind to the task would report `ALLOW` for an action `execute` refuses.
         """
         # SPEC-v0.3 §4.3.1 — the environment obeys §2.5 on *every* row of that table, and
         # `evaluate` is one. Read-only, so this refuses rather than denies: an Action from
@@ -708,7 +716,7 @@ class Control:
         # the public "what will happen to this action" query and it would stop answering that
         # question if it reported one axis while `execute` acted on both. It reads the store
         # to resolve delegations and still writes nothing.
-        result = self._authority_result(action)
+        result = self._authority_result(action, task=task)
         if result is not None and not result.passed:
             return Evaluation(Decision.DENY, result.reason)
         return self._policy.evaluate(action)
@@ -805,18 +813,35 @@ class Control:
             )
         return (None, "")
 
-    def _authority_result(self, action: Action) -> AuthorityResult | None:
+    def _authority_result(
+        self, action: Action, *, task: str | None = None, evaluate_task: bool = True
+    ) -> AuthorityResult | None:
         """The authority axis for this action, or `None` where there is no section (§4.1).
 
         SPEC-v0.8 §5.4: it also remembers which grant decided, for the receipt. Here rather
         than at the four call sites, because a site that forgot would produce a receipt whose
         `authority_grant_id` was the **previous** action's, and a stale id on the evidence is
         worse than none. Set on every call, including to `None`, for the same reason.
+
+        **SPEC-v0.9 §6.3.2: `evaluate_task=False` on two of the four call sites.** `resume` and
+        a lease extension both rehydrate an action from the store, which carries no task (§6.3.1
+        keeps it off `Action`), so evaluating the dimension there would deny every resumed leg
+        under a task-bound grant, on what the comment above `resume`'s own call calls the only
+        receipt an MCP multi round-trip ever gets. It is not `v0.3 §5.6.1`'s evaluated-and-
+        recorded, which would still put `AUTHORITY_DENIED` on that receipt; it is a third mode,
+        and §6.3.2 names it as one.
         """
+        _TASK.set(task)
         if self._authority is None:
             _AUTHORITY_GRANT_ID.set(None)
             return None
-        result = self._authority.evaluate(action, now=self._clock(), store=self._store)
+        result = self._authority.evaluate(
+            action,
+            now=self._clock(),
+            store=self._store,
+            task=task,
+            evaluate_task=evaluate_task,
+        )
         # Only where one passed: `grant_id` is also set on a refusal, and a committed receipt
         # is the only thing this field is read on. §4.6's `min` already picked which grant of
         # several decided, so this is that decision and not a guess about it.
@@ -961,6 +986,7 @@ class Control:
         reconcile: Callable[[str], ReconcileOutcome] | None = None,
         reconcile_eagerly: bool = False,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+        task: str | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
@@ -976,6 +1002,13 @@ class Control:
         `reconcile` asks the remote what happened to an effect whose outcome is unknown, and
         is the only authority besides a human that may move a record out of `AMBIGUOUS`
         (SPEC-v0.2 §2.2). It runs at most once per call.
+
+        `task` is the unit of work this call is part of (SPEC-v0.9 §6). It is the **resolved**
+        task id, like `effect_key` beside it and unlike `@protect`'s `task=`, which is a template.
+        A grant naming `tasks` refuses a call that names none (§6.4); a grant naming none accepts
+        any (§6.5), which is why every 0.8.0 caller is unchanged. It reaches the authority
+        decision and **never the action hash**: §6.3.1 argues that at length, and the short form
+        is that a field on `Action` would move every action hash in existence.
 
         `preconditions` reads the state an approval depends on (SPEC-v0.7 §6). It is called
         with the `Action` and returns a mapping, which is hashed through `canonical_bytes` and
@@ -1042,6 +1075,10 @@ class Control:
         # a copy of the context at creation, so a task started after a break-glass action
         # carried that id into an unrelated refusal too.
         _AUTHORITY_GRANT_ID.set(None)
+        # SPEC-v0.9 §6.3.1 — reset beside it, for the reason the comment above gives about a
+        # stale grant id: a refusal whose receipt carried the previous action's task would be the
+        # same defect on a new field.
+        _TASK.set(None)
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -1093,7 +1130,7 @@ class Control:
         )
         # SPEC-v0.3 §4.3.1 — the order, stated once so it can be tested: principal_expired →
         # authority → policy → approval → reservation → execution.
-        result = self._authority_result(action)
+        result = self._authority_result(action, task=task)
         if result is not None:
             if not result.passed:
                 if observation is not None:
@@ -1575,7 +1612,7 @@ class Control:
         # SPEC-v0.3 §5.6.1 gives authority the same treatment, and for a sharper reason: this
         # is the *only* receipt an MCP multi round-trip or ACS action ever gets (§8.3), so a
         # receipt reporting a bare policy reason would be the whole evidence for that action.
-        result = self._authority_result(action)
+        result = self._authority_result(action, evaluate_task=False)
         if result is None:
             evaluation = self._policy.evaluate(action)
         elif result.passed:
@@ -1920,7 +1957,7 @@ class Control:
                 f"{action.principal.expires_at}, so the reservation is not held across the "
                 "round trip; the lease will lapse and the record becomes AMBIGUOUS"
             )
-        result = self._authority_result(action)
+        result = self._authority_result(action, evaluate_task=False)
         if result is not None and not result.passed:
             # SPEC-v0.3 §5.6.1 — an extension asks to keep holding a reservation the grant no
             # longer authorizes. Refused, and the record is deliberately not moved: the lease
@@ -1975,6 +2012,20 @@ class Control:
         would have said about it — and unlike a call outside `context()` (§2.1) there is a
         principal here, so the refusal belongs in the evidence log.
         """
+        return self._resolve_template(action, template, "effect")
+
+    def _resolve_template(self, action: Action, template: str | None, what: str) -> str | None:
+        """`_resolve_effect`'s body, over either template `@protect` resolves.
+
+        **SPEC-v0.9 §6.3.1's task template goes through here, and an independent review is why.**
+        `@protect(task="{run_id}")` with no such argument raised `EffectKeyError` past every
+        recording path: no `ACTION_PROPOSED`, no `ACTION_DENIED`, no denied receipt, and a caller
+        handed a template error about an action nothing recorded. That is the shape
+        `control.py`'s own round-two comment records finding once before, on a store refusal.
+
+        One function rather than two, so the effect template and the task template cannot drift
+        into recording different things for the same class of mistake.
+        """
         if template is None:
             return None
         started_at = self._clock()
@@ -1985,7 +2036,7 @@ class Control:
             self._append(
                 EventType.ACTION_DENIED,
                 action,
-                {"reason": UNRESOLVED_EFFECT, "effect": template, "error": str(exc)},
+                {"reason": UNRESOLVED_EFFECT, what: template, "error": str(exc)},
             )
             # SPEC: §6.1 — a receipt needs a decision and the policy never rendered one, so
             # the fail-closed value is recorded: denied, for a reason that is not a rule.
@@ -3662,6 +3713,7 @@ class Control:
             # existed only under break-glass would be one nothing exercises on the ordinary
             # path, and so one nobody would notice breaking.
             authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
+            task=_TASK.get(None),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,
@@ -3864,6 +3916,7 @@ def protect(
     reconcile_eagerly: bool = False,
     control: Control | None = None,
     preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+    task: str | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
 
@@ -3892,6 +3945,12 @@ def protect(
     provider = _checked_preconditions(preconditions, f"protect({name!r}, preconditions=...)")
     _check_template(name, "effect", effect)
     _check_template(name, "resource", resource)
+    # SPEC-v0.9 §6.3.1. A **template** over the call's arguments, like `effect` and `resource`
+    # above and unlike `Control.execute`'s `task=`, which takes the resolved id. A decorator
+    # whose task could only be a literal would be unusable for the thing a task is: a run id
+    # that changes per call. The operator declares the template; nothing here infers a task
+    # from an argument it was not pointed at, which is the line §6.3 draws.
+    _check_template(name, "task", task)
     held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
     _reconciler(reconcile, reconcile_eagerly, f"protect({name!r}")
 
@@ -3944,6 +4003,7 @@ def protect(
                 environment=resolved.environment,
             )
             effect_key = resolved._resolve_effect(action, effect_template)
+            bound_task = resolved._resolve_template(action, task, "task")
             if reconcile is not None and effect_key is None and not dangling:
                 # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
                 # may come from the policy and that is not loaded yet. A hook with no key to
@@ -3971,6 +4031,7 @@ def protect(
                     reconcile=reconcile,
                     reconcile_eagerly=reconcile_eagerly,
                     preconditions=provider,
+                    task=bound_task,
                 )
             except ApprovalRequired as pending:
                 if not wait:

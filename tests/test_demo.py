@@ -105,6 +105,8 @@ SPEC_RECEIPT_FIELDS = (
     # SPEC-v0.8 §11.3: `ctrlrun.receipt/v5` adds the two.
     "approvers",
     "authority_grant_id",
+    # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
+    "task",
 )
 
 

@@ -24,7 +24,10 @@ from typing import Final
 #: SPEC-v0.8 §11.4: `v4` is G1 to G21, and it moves once, here, with G18. G17, G19, G20 and G21
 #: join it with their items, and item 8 asserts all five present before the release. No stub
 #: rows: a guarantee that reports anything before its check exists is a false green.
-CATALOGUE: Final = "ctrlrun.guarantees/v4"
+#: SPEC-v0.9 §8: `v5` is G1 to G24, and it moves once, here, with G24. G22 and G23 join it with
+#: their items. No stub rows: a guarantee that reports anything before its check exists is a
+#: false green, which is what 0.6.1 had to fix and what G17 shipped as in v0.8.
+CATALOGUE: Final = "ctrlrun.guarantees/v5"
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,15 @@ GUARANTEES: Final = (
         "unapproved policy decides no",
         ("v0.6 §7.1", "v0.8 §10 T354", "v0.8 §10 T355"),
     ),
+    Guarantee(
+        "G24",
+        # 26 characters against `report._TITLE_WIDTH`'s 32. "grant refused" and not "action
+        # refused", because what is compared is the grant's task dimension against the task the
+        # caller named, and the refusal reports `authority_task` rather than a bare no_authority
+        # so an operator can tell this from having no grant at all (SPEC-v0.9 §6.2).
+        "grant refused off its task",
+        ("v0.9 §6.2", "v0.9 §9 T380", "v0.9 §9 T381"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -233,6 +245,9 @@ GRANT_RESOURCE_NOTE: Final = (
     "`ctrlrun-verify-*` resource to make those guarantees applicable"
 )
 NO_DELEGABLE_GRANT: Final = "no grant is delegable"
+#: SPEC-v0.9 §8, G24. A statement about the operator's **document**, like every reason in this
+#: module: it says what the document does not declare, not what the kernel is not configured for.
+NO_TASKS: Final = "no grant names a task"
 
 #: SPEC-v0.7 §8.9, G16's note, printed once beneath the table as `EFFECT_TEMPLATE_NOTE` is. G16
 #: is graded against verify's own stand-in for the operator's provider, because a provider is

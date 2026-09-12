@@ -120,7 +120,7 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 19/19"
+          test "$AUTHORITY" = "verified 20/20"
           # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
           # to diverge from; G15 is N/A because neither document declares `max_attempts`.
           # G16 is graded on both: verify brings its own precondition provider (SPEC-v0.7 §8.9).
@@ -130,9 +130,13 @@ jobs:
           # own approver identity: whether
           # an operator configured one is a fact about their application and never an N/A
           # reason here (SPEC-v0.8 §11.7). Both counts moved by one when it landed.
+          #
+          # SPEC-v0.9 §6 moved the templates count again: G24 is N/A for a document whose
+          # grants name no task, which the templates example's do not. The authority example
+          # binds one, so its count is unchanged and its passing total moved 19 to 20 instead.
           test "$AUTHORITY_NA" = "2"
           test "$TEMPLATES" = "verified 11/11"
-          test "$TEMPLATES_NA" = "10"
+          test "$TEMPLATES_NA" = "11"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml

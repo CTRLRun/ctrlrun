@@ -25,6 +25,9 @@ AUTHORITY_PAYMENTS = REPO_ROOT / "examples" / "authority" / "payments.yaml"
 
 V2 = "schema: ctrlrun.policy/v2\n"
 V3 = "schema: ctrlrun.policy/v3\n"
+#: SPEC-v0.9 §10.1 — `tasks` on a grant is a `v7` key, refused in an older document, so the
+#: fixture that carries every dimension has to declare the version that has them all.
+V7 = "schema: ctrlrun.policy/v7\n"
 
 ACTIONS = """
 actions:
@@ -41,7 +44,10 @@ actions:
     decision: allow
 """
 
-#: One delegable grant carrying every dimension, so G9 has all six to exercise.
+#: One delegable grant carrying every dimension, so G9 has all of `DIMENSIONS` to exercise.
+#: **Derived, not counted**: SPEC-v0.9 §8.0 grew `DIMENSIONS` from six to seven, and a fixture
+#: that named six would report "6 of 7" and exercise the new one never, which is the silent
+#: half of that section's two failure modes.
 FULL_AUTHORITY = """
 authority:
   grants:
@@ -53,6 +59,7 @@ authority:
       environments: ["production"]
       delegable: true
       expires_at: "2027-01-01T00:00:00Z"
+      tasks: ["refund-run:*"]
 """
 
 #: Grants that name actions the policy does not list: nothing is authorized, which is a
@@ -94,10 +101,12 @@ def test_T108_the_authority_example_exercises_G7_G8_and_G9():
     assert report.exit_code == 0
     # Graded on SQLite, where the one N/A is G13: SQLite has no clock of its own to diverge
     # from (SPEC-v0.7 §8.9). A Postgres --store-url grades that one too.
-    # Fifteen since v0.8 item 2: G18 is graded wherever a document sends an action to
-    # approval, and verify supplies the approver identity it grades against (§11.7).
-    assert report.passed == 19
-    assert report.applicable == 19
+    # **Derived, never a literal.** Adding G19 broke nine hardcoded assertions across three
+    # files in v0.8, and adding G24 would have broken these two: every guarantee this document
+    # can exercise passes, and the ones it cannot are the N/A set. Written this way the next
+    # guarantee moves the number rather than the test.
+    assert report.passed == report.applicable
+    assert report.applicable == len(reg.GUARANTEES) - report.not_applicable
 
 
 def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypatch):
@@ -108,11 +117,16 @@ def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypa
     """
     from ctrlrun.authority import AUTHORITY_CONSTRAINT, Authority, AuthorityResult
 
-    path = _write(tmp_path, V3 + FULL_AUTHORITY + ACTIONS)
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
     original = Authority.evaluate
 
-    def wrong_reason(self, action, *, now, store):
-        result = original(self, action, now=now, store=store)
+    def wrong_reason(self, action, *, now, store, task=None, evaluate_task=True):
+        # SPEC-v0.9 §10.3 — the new keywords are **forwarded**, not merely accepted. A patch that
+        # swallowed them would evaluate every action with no task, and a fixture whose grant
+        # names one would then deny `authority_task` before the expiry this test is about.
+        result = original(
+            self, action, now=now, store=store, task=task, evaluate_task=evaluate_task
+        )
         if not result.passed and result.reason == "authority_expired":
             return AuthorityResult(False, AUTHORITY_CONSTRAINT, grant_id=result.grant_id)
         return result
@@ -152,7 +166,7 @@ def test_T109_no_authority_section_makes_G8_and_G9_not_applicable_and_leaves_G7_
 
 @pytest.mark.parametrize("dimension", DIMENSIONS)
 def test_T110_G9_exercises_every_dimension_the_parent_constrains(tmp_path, dimension):
-    path = _write(tmp_path, V3 + FULL_AUTHORITY + ACTIONS)
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
 
     result = _by_id(run(path, only=("G9",)))["G9"]
 
@@ -172,7 +186,7 @@ def test_T110_a_kernel_where_omission_means_unlimited_makes_G9_fail(tmp_path, mo
     counterexample must carry the offending delegation."""
     from ctrlrun import authority as authority_module
 
-    path = _write(tmp_path, V3 + FULL_AUTHORITY + ACTIONS)
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
     original = authority_module.contained_dimension
 
     def omission_is_inheritance(parent, child):
@@ -219,13 +233,12 @@ authority:
     result = _by_id(run(path, only=("G9",)))["G9"]
 
     assert result.status is Status.PASS, result.reason
-    assert set(result.detail["dimensions_unconstrained"]) == {
-        "resources",
-        "constraints",
-        "environments",
-    }
-    assert set(result.detail["dimensions_exercised"]) == {"subject", "actions", "expires_at"}
-    assert "3 of 6 dimensions" in result.detail["summary"]
+    # Derived from DIMENSIONS, not counted: SPEC-v0.9 §8.0 grew it, and a literal here is what
+    # turns adding a dimension into an unrelated-looking test failure.
+    exercised = {"subject", "actions", "expires_at"}
+    assert set(result.detail["dimensions_unconstrained"]) == set(DIMENSIONS) - exercised
+    assert set(result.detail["dimensions_exercised"]) == exercised
+    assert f"3 of {len(DIMENSIONS)} dimensions" in result.detail["summary"]
 
 
 # --- T111: grants that reach no action ----------------------------------------------------
@@ -282,7 +295,7 @@ def test_T112_only_runs_the_named_guarantee_and_writes_no_badge(tmp_path, monkey
     own action, and none exists."""
     from ctrlrun.verify import scenarios
 
-    path = _write(tmp_path, V3 + FULL_AUTHORITY + ACTIONS)
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
     opened: list[str] = []
     original = scenarios.Engine._control_for
     plain = scenarios.Engine.control
@@ -327,7 +340,7 @@ def test_T112_only_runs_the_named_guarantee_and_writes_no_badge(tmp_path, monkey
 
 
 def test_T112_an_unknown_only_id_exits_2_naming_it(tmp_path):
-    path = _write(tmp_path, V3 + FULL_AUTHORITY + ACTIONS)
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
 
     with pytest.raises(VerifyRefused) as refused:
         run(path, only=("G99",))

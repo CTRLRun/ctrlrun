@@ -46,19 +46,23 @@ from .policy import POLICY_UNAPPROVED, Decision
 #: SPEC-v0.7 §6.11. `v4` adds `precondition_at_request` and `precondition_at_recheck`, and it is
 #: the first bump that does not rehash every older receipt: a receipt read from a store is
 #: hashed as the document it was read from, and renders under its own schema's label and keys.
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v5"
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v6"
 
 _V1: Final = "ctrlrun.receipt/v1"
 _V2: Final = "ctrlrun.receipt/v2"
 _V3: Final = "ctrlrun.receipt/v3"
 _V4: Final = "ctrlrun.receipt/v4"
 _V5: Final = "ctrlrun.receipt/v5"
+#: SPEC-v0.9 §10.1: `v6` is `task` (item 1), `scope_hash` (item 2) and `budget_charges` (item 5).
+#: The version moves once, with whichever lands first, and the later items fill their fields
+#: under the version already in place. Item 7 asserts all three are written by something.
+_V6: Final = "ctrlrun.receipt/v6"
 
 #: SPEC-v0.8 §8.5 — every receipt schema this binary reads. The policy replay checks it before
 #: rebuilding an action: `from_dict` does not raise on an unknown one, so a receipt written by a
 #: later version rebuilt fine and was silently **graded**, on fields this binary may be reading
 #: wrongly. `v0.6 §3.2` draws the same line for a store row.
-KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5})
+KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5, _V6})
 
 #: SPEC-v0.7 §6.11: each schema's top-level key set, exactly its released writers': `v1`, 19
 #: keys, by 0.1.0 and 0.2.0; `v2`, 21, by 0.3.0rc1 to 0.5.0; `v3`, 26, by 0.6.0 and 0.6.1;
@@ -91,7 +95,20 @@ _V4_KEYS: Final = (*_V3_KEYS, "precondition_at_request", "precondition_at_rechec
 #: reader can parse a `v5` receipt from any later item: `authority_grant_id` is item 5's and is
 #: `None` until then, which is what "absent or null" means for a field nothing has filled.
 _V5_KEYS: Final = (*_V4_KEYS, "approvers", "authority_grant_id")
-_KEYS: Final = {_V1: _V1_KEYS, _V2: _V2_KEYS, _V3: _V3_KEYS, _V4: _V4_KEYS, _V5: _V5_KEYS}
+#: SPEC-v0.9 §10.1 — `v6`'s frozen shape is `task` (item 1), `scope_hash` (item 2) and
+#: `budget_charges` (item 5). **The tuple grows as each item lands, not all at once**, on the
+#: guarantee catalogue's own rule: a key listed here is a key `to_dict` projects, so naming one
+#: before something writes it is a `KeyError` on every receipt, which is the field-level form of
+#: a stub row. Item 7 asserts all three are present before the release.
+_V6_KEYS: Final = (*_V5_KEYS, "task")
+_KEYS: Final = {
+    _V1: _V1_KEYS,
+    _V2: _V2_KEYS,
+    _V3: _V3_KEYS,
+    _V4: _V4_KEYS,
+    _V5: _V5_KEYS,
+    _V6: _V6_KEYS,
+}
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
 #: SPEC-v0.6 §6.2. The `prev_hash` of receipt 1, and the hash the head row starts at (§3.7), so
@@ -455,6 +472,10 @@ class Receipt:
     #: break-glass. Item 5 fills it; `None` until then, which is the "absent or null" §11.4's
     #: frozen shape promises a reader.
     authority_grant_id: str | None = None
+    #: SPEC-v0.9 §6: the task this action was bound to, or `None` where the caller named none,
+    #: which is every 0.8.0 call. **Not part of the action hash** (§6.3.1): a field on `Action`
+    #: would move every hash in existence and invalidate every stored approval.
+    task: str | None = None
     #: The schema this receipt is written under (§6.11). A receipt this binary builds is
     #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`
     #: where it declared none, which renders with no `schema` key at all.
@@ -542,6 +563,11 @@ class Receipt:
             "precondition_at_recheck": self.precondition_at_recheck,
             "approvers": [approver.to_dict() for approver in self.approvers],
             "authority_grant_id": self.authority_grant_id,
+            # Always present and nullable, like `authority_grant_id` directly above it rather
+            # than like `_authority_data`'s omitted keys: `_KEYS` projects a fixed tuple, so a
+            # conditional key is a `KeyError`, and a reader tells "no task" from "this binary
+            # predates tasks" by the schema label.
+            "task": self.task,
         }
 
     def to_json(self) -> str:
@@ -609,18 +635,29 @@ class Receipt:
             policy_version=document.get("policy_version"),
             controls=_controls_of(document.get("controls")),
             precondition_at_request=(
-                document.get("precondition_at_request") if schema in (_V4, _V5) else None
+                document.get("precondition_at_request") if schema in (_V4, _V5, _V6) else None
             ),
             precondition_at_recheck=(
-                document.get("precondition_at_recheck") if schema in (_V4, _V5) else None
+                document.get("precondition_at_recheck") if schema in (_V4, _V5, _V6) else None
             ),
             # SPEC-v0.8 §2.5, and `v0.7 §6.11`'s rule for a key a document's schema does not
             # declare: read it only from a `v5` document, so no reader surfaces a field an older
             # writer never wrote. **Never raises**, whatever the column holds: `from_dict` is
             # the one function every reader of a chain goes through, and a raise on one tampered
             # row would blind every reader at once.
-            approvers=_approvers_of(document.get("approvers")) if schema == _V5 else (),
-            authority_grant_id=document.get("authority_grant_id") if schema == _V5 else None,
+            approvers=_approvers_of(document.get("approvers")) if schema in (_V5, _V6) else (),
+            authority_grant_id=(
+                document.get("authority_grant_id") if schema in (_V5, _V6) else None
+            ),
+            # SPEC-v0.9 §6, under `v0.7 §6.11`'s rule: read only from a `v6` document, so no
+            # reader surfaces a field an older writer never wrote. A non-string is dropped rather
+            # than raised on, for the reason three fields above: `from_dict` is what every reader
+            # of a chain goes through.
+            task=(
+                document.get("task")
+                if schema == _V6 and isinstance(document.get("task"), str)
+                else None
+            ),
             schema=schema,
         )
 

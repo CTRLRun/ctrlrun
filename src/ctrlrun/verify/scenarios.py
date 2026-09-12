@@ -53,6 +53,7 @@ from ..approval import (
 )
 from ..authority import (
     AUTHORITY_EXPIRED,
+    AUTHORITY_TASK,
     CONTAINMENT,
     DEEP_WILDCARD,
     DIMENSIONS,
@@ -543,6 +544,24 @@ class _Selection:
     grant: Grant | None = None
     rule_reason: str = ""
 
+    @property
+    def task(self) -> str | None:
+        """A concrete task the selected grant admits, or `None` where it names none.
+
+        SPEC-v0.9 §6.3.2 puts `ctrlrun.verify.run` on the "supplies one" row of `v0.3 §4.3.1`'s
+        table, and it has to: once a document names `tasks:` on the grant a scenario selects,
+        **every** scenario driving that grant needs a task or the kernel refuses it
+        `authority_task`, and twenty guarantees would report a defect that is the document's
+        binding working exactly as written.
+
+        Derived from the document's own pattern rather than invented, for `_from_pattern`'s
+        reason: a literal that happened not to match would make every control leg fail for a
+        reason that is not the kernel's.
+        """
+        if self.grant is None or not self.grant.tasks:
+            return None
+        return str(_from_pattern(self.grant.tasks[0]))
+
     def build(self) -> Action:
         return Action(
             name=self.action,
@@ -591,6 +610,8 @@ class Engine:
     def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
         #: Set by `select()` when the miss was on the authority axis (see `unselected`).
         self._grant_miss: str | None = None
+        #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
+        self._task: str | None = None
         self._loaded = loaded
         self._scratch = scratch
         self._store_url = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
@@ -951,6 +972,10 @@ class Engine:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
+        # SPEC-v0.9 §6.3.2. Set here rather than threaded through thirty call sites, and set on
+        # every call including to `None`, for `_AUTHORITY_GRANT_ID`'s reason in `control.py`: a
+        # scenario that inherited the previous one's task would drive the wrong grant.
+        self._task = selection.task
         # SPEC-v0.8 §8.4, for G21. **The document must declare its own change as an approval**,
         # or `_policy_approval_state` short-circuits on the declaration branch and the effect
         # branch -- which is what G21's title is about -- is never exercised. An independent
@@ -1061,13 +1086,24 @@ class Engine:
         effect_key: str | None,
         approval_id: str | None,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+        task: str | None = None,
     ) -> Receipt:
+        # SPEC-v0.9 §6.3.2 — the active selection's task unless a scenario named one, so a
+        # document that binds its grant to a task does not turn every other guarantee red. G24
+        # is the one scenario that passes its own, because its whole subject is the off-task
+        # refusal.
+        if task is None:
+            task = self._task
         if approval_id is None:
-            return control.execute(action, executor, effect_key, preconditions=preconditions)
+            return control.execute(
+                action, executor, effect_key, preconditions=preconditions, task=task
+            )
         from ..control import with_approval
 
         with with_approval(approval_id):
-            return control.execute(action, executor, effect_key, preconditions=preconditions)
+            return control.execute(
+                action, executor, effect_key, preconditions=preconditions, task=task
+            )
 
     def refused(
         self,
@@ -1555,6 +1591,13 @@ class Engine:
                         "user": selection.principal.user,
                         "resource": selection.resource,
                         "effect_key": key,
+                        # SPEC-v0.9 §6.3.2 — the children cross a process boundary, so the task
+                        # travels in the payload rather than in `self._task`, which is this
+                        # process's. Without it G4's eight children are refused `authority_task`
+                        # under any document whose grant names a task, and the *control* leg
+                        # fails: eight processes that never ran, reported green by a guarantee
+                        # about concurrency.
+                        "task": selection.task,
                         "approval_id": approval_id,
                         "counter_dir": str(counters),
                         "result_dir": str(results),
@@ -1768,7 +1811,10 @@ class Engine:
             # everything, and the report would say so in green.
             if selection is not None:
                 detail["control"] = "an action this configuration admits reaches a decision"
-                evaluation = control.evaluate(selection.build())
+                # SPEC-v0.9 §6.3.2 — `Control.evaluate` takes the task for the reason that
+                # section gives: it must agree with `execute`, and a control leg that asked
+                # without one would report DENY for a document whose grant names a task.
+                evaluation = control.evaluate(selection.build(), task=selection.task)
                 _expect_control(
                     evaluation.decision is not Decision.DENY,
                     f"{selection.action} evaluates to something other than a denial",
@@ -1822,7 +1868,11 @@ class Engine:
 
         fake.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
         fake.__name__ = "ctrlrun_verify_action"
-        decorated: Callable[..., Any] = protect(selection.action, control=control)(fake)
+        # SPEC-v0.9 §6.3.2 — `@protect` is `Control.execute`'s other door, and a document that
+        # binds its grant to a task refuses every call through it without one.
+        decorated: Callable[..., Any] = protect(
+            selection.action, control=control, task=selection.task
+        )(fake)
         return decorated
 
     def g7(self) -> GuaranteeResult:
@@ -3652,6 +3702,87 @@ class Engine:
         finally:
             store.close()
 
+    # --- G24: a task-bound grant is refused off its task ----------------------------------
+
+    def g24(self) -> GuaranteeResult:
+        """SPEC-v0.9 §6.2, §8. Both halves, `v0.4 §1.3`.
+
+        The positive control is the grant on a task it names: without it a kernel that refused
+        every task whatever would grade `PASS`, which is what `v0.4 §2.2` means by a guarantee
+        that could not have failed.
+
+        The refusal is asserted **by reason** and not by type. `authority_task` is the whole
+        point of §6.2: a task mismatch folded into `matches_shape` would report `no_authority`,
+        which an operator cannot tell from having written no grant at all.
+        """
+        if self.authority is None:
+            return self.na("G24", reg.NO_AUTHORITY_SECTION)
+        bound = [
+            self.authority.grants[grant_id]
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].tasks
+        ]
+        if not bound:
+            return self.na("G24", reg.NO_TASKS)
+        parent = bound[0]
+        selection = self.select(grant_filter=lambda grant: grant.id == parent.id)
+        if selection is None:
+            return self.na("G24", reg.NO_GRANT_MATCHES)
+        patterns = parent.tasks or ()
+        # A concrete task the document's own pattern admits, built by replacing the glob rather
+        # than invented: a literal that happened not to match would make the control fail for a
+        # reason that is not the kernel's.
+        on_task = patterns[0].replace(DEEP_WILDCARD, "run").replace(WILDCARD, "run")
+        off_task = f"{reg.SYNTHETIC_PREFIX}-not-a-task"
+        control, store, recorder, _ = self._control_for("G24", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = parent.id
+            detail["tasks"] = list(patterns)
+            detail["on_task"] = on_task
+            detail["off_task"] = off_task
+            action = selection.build()
+            executor = _Executor()
+            receipt = self.execute(
+                control,
+                action,
+                executor,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+                task=on_task,
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and executor.calls == 1,
+                f"on {on_task!r}, a task the grant names, the action runs",
+                f"it ended {receipt.result} after {executor.calls} executor calls",
+            )
+            later = selection.build()
+            off_executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, later, off_executor, selection.effect_key, None, task=off_task
+                ),
+                (AuthorityDenied,),
+                f"AuthorityDenied(reason='authority_task') on {off_task!r}",
+                "the action ran on a task the grant does not name",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == AUTHORITY_TASK,
+                "AuthorityDenied(reason='authority_task')",
+                f"AuthorityDenied(reason={reason!r})",
+            )
+            _expect(
+                off_executor.calls == 0,
+                "the executor is not reached off-task",
+                f"the executor was called {off_executor.calls} times",
+            )
+
+        try:
+            return self.graded("G24", selection, store, recorder, body)
+        finally:
+            store.close()
+
 
 #: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
 #: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a
@@ -4056,6 +4187,9 @@ def _narrow(parent: Grant, selection: _Selection) -> tuple[Grant, Principal, dic
         environments=None if parent.environments is None else (selection.environment,),
         expires_at=None if parent.expires_at is None else parent.expires_at - _ONE_HOUR,
         delegable=False,
+        # SPEC-v0.9 §8.0 — carried, or `_narrowed`'s own guard below raises
+        # `VerifyInternalError` on any document that names tasks, before a single widening runs.
+        tasks=None if parent.tasks is None else parent.tasks,
     )
     offending = contained_dimension(parent, child)
     if offending is not None:
@@ -4096,6 +4230,13 @@ def _widen(parent: Grant, narrowed: Grant, dimension: str) -> Grant | None:
         if parent.expires_at is None:
             return None
         return replace(narrowed, expires_at=parent.expires_at + _ONE_HOUR)
+    if dimension == "tasks":
+        # SPEC-v0.9 §6.2. `DEEP_WILDCARD` rather than an extra pattern, matching `actions` and
+        # `resources` above: the widening has to be one no parent pattern can contain, and a
+        # sibling task id would be contained by a parent whose pattern already globs.
+        if parent.tasks is None:
+            return None
+        return replace(narrowed, tasks=(DEEP_WILDCARD,))
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")
 
 
@@ -4120,4 +4261,6 @@ def _omit(narrowed: Grant, parent: Grant, dimension: str) -> Grant | None:
         return None if parent.environments is None else replace(narrowed, environments=None)
     if dimension == "expires_at":
         return None if parent.expires_at is None else replace(narrowed, expires_at=None)
+    if dimension == "tasks":
+        return None if parent.tasks is None else replace(narrowed, tasks=None)
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")

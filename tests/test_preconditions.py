@@ -305,11 +305,11 @@ def test_a_committed_receipt_records_that_the_world_was_checked(control, state_s
 
     receipt = present(control, action, request_id, world)
 
-    assert receipt.schema == RECEIPT_SCHEMA == "ctrlrun.receipt/v5"
+    assert receipt.schema == RECEIPT_SCHEMA
     assert receipt.precondition_at_request == fingerprint(AT_REQUEST)
     assert receipt.precondition_at_recheck == fingerprint(AT_REQUEST)
     document = receipt.to_dict()
-    assert document["schema"] == "ctrlrun.receipt/v5"
+    assert document["schema"] == RECEIPT_SCHEMA
     assert document["precondition_at_request"] == fingerprint(AT_REQUEST)
     assert document["precondition_at_recheck"] == fingerprint(AT_REQUEST)
     stored = state_store.get_approval(request_id)
@@ -1565,14 +1565,14 @@ def test_T265_a_chain_written_by_061_and_continued_by_07_verifies_end_to_end(
     # The label this binary writes, which is `v5` since v0.8 item 2. What the test is about is
     # unchanged: a chain written by 0.6.1 and continued by this binary verifies end to end,
     # each receipt hashed by the rule its own version wrote.
-    new = [receipt for receipt in receipts if receipt.schema == "ctrlrun.receipt/v5"]
+    new = [receipt for receipt in receipts if receipt.schema == RECEIPT_SCHEMA]
     assert len(old) == len(built.facts["receipts"]) >= 4
     assert len(new) == 2 and len(receipts) == len(old) + len(new)
     for receipt in old:
         assert receipt.chain_hash() == receipt.hash, f"v3 seq {receipt.seq} rehashes differently"
     for receipt in new:
         document = json.loads(_stored_json(built, receipt.seq))
-        assert document["schema"] == "ctrlrun.receipt/v5"
+        assert document["schema"] == RECEIPT_SCHEMA
         assert document["precondition_at_recheck"] == fingerprint(AT_REQUEST)
 
     report = verify_chain(store)
@@ -2084,7 +2084,7 @@ def _g16(path, **kwargs):
 def test_T269_G16_is_in_the_catalogue():
     from ctrlrun.verify import guarantees as reg
 
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v5"
     assert "G16" in reg.BY_ID
     assert reg.BY_ID["G16"].descends_from
 
@@ -2335,6 +2335,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         "ctrlrun.receipt/v3": 26,
         "ctrlrun.receipt/v4": 28,
         "ctrlrun.receipt/v5": 30,
+        "ctrlrun.receipt/v6": 31,
         "ctrlrun.receipt/v9": 26,
         "": 25,
     }
@@ -2342,7 +2343,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         document = replace(base, schema=label).to_dict()
         assert len(document) == count, (label, sorted(document))
         assert document.get("schema") == (label or None)
-        if label not in ("ctrlrun.receipt/v4", "ctrlrun.receipt/v5"):
+        if label not in ("ctrlrun.receipt/v4", "ctrlrun.receipt/v5", "ctrlrun.receipt/v6"):
             assert FABRICATED not in json.dumps(document), label
     assert replace(base, schema="ctrlrun.receipt/v1").to_dict()["principal"] == {
         "agent": "ops-agent",
