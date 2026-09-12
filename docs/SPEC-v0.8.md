@@ -1368,8 +1368,9 @@ actions:
   **What that cache costs, stated because §8.6 would otherwise overclaim.** It can be made to lie
   by a write this kernel does not perform: an administrator who deletes the effect row leaves a
   process that has already cached the yes still deciding, until it restarts. The deletion stops
-  every `Control` built afterwards and every one that had not yet asked, and it is recorded as a
-  chain break (`v0.6 §6`), but it is **not retroactive for a running process**. That is the shape
+  every `Control` built afterwards and every one that had not yet asked, and it is **not detected**
+  — the receipt chain is over receipts, and deleting an `effects` row touches none — and it is
+  **not retroactive for a running process**. That is the shape
   of every cached authorization decision, it is bounded by the process lifetime, and §8.6 carries
   it as a residual rather than as a fail-closed claim.
 - **Lazily, not in the constructor**, because a constructor that queried the store would make
@@ -1428,10 +1429,20 @@ against the **proposed** policy, and prints the ones whose decision or reason ch
   is stated here because it is exactly the kind of thing this section exists to state.
 - **An administrator with write access to the store** deletes the effect record that marks the
   approval. Every `Control` built afterwards, and every one that had not yet asked, then refuses
-  every action: a denial of service, fail closed, and the receipt chain records the surrounding
-  deletion as a break (`v0.6 §6`). **A process that had already cached the yes keeps deciding until
-  it restarts** (§8.4), so the refusal is not retroactive, and no page may say a deletion stops a
-  running deployment.
+  every action: a denial of service, fail closed. **The deletion itself is not detected.** An
+  earlier draft of this line said the receipt chain records it as a break, and an independent
+  review showed that is false: the chain is over *receipts* (`v0.6 §6.4`), and deleting an
+  `effects` row touches none of them, so `ctrlrun receipts --verify` still answers `ok`. That is
+  the "documented as detection, implemented as nothing" shape this section exists to avoid, and it
+  is corrected here rather than quietly dropped. **A process that had already cached the yes keeps
+  deciding until it restarts** (§8.4), so the refusal is not retroactive, and no page may say a
+  deletion stops a running deployment.
+
+- **A held continuation resumes without the check.** `Control.resume` re-evaluates policy and runs
+  the executor, and the approved-policy gate has one call site, in `execute`. `v0.6 §7.2.3`'s
+  argument for not re-deciding a continuation that a human already approved is sound and this does
+  not change it; what changes is the sentence above, which said "refuses every action" and is true
+  of every *new* action and not of a resumption already in flight.
 - **An administrator with write access to the code** switches `require_approved_policy` off.
   `THREAT_MODEL.md`'s malicious-administrator line is unchanged and names this.
 - **A persuaded approver** approves a policy change as they would approve anything else (§1.1).
@@ -1985,7 +1996,7 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 | Revocation feed stale past its bound | Every principal of a covered issuer refused with `revocation_feed_stale` |
 | Revocation feed unreachable, malformed, or naming an unknown subject | Consumed, logged, no decision changed; stale from that moment if it could not be read |
 | `require_approved_policy` and no committed `policy:<hash>` effect | Every evaluation denied with `policy_unapproved`, except `ctrlrun.policy.change`. The negative answer is never cached, so an approval that lands later takes effect without a restart (§8.4) |
-| The effect row deleted under a running process that already cached the yes | It keeps deciding until it restarts. Bounded by the process lifetime, recorded as a chain break, and stated in §8.6 as a residual rather than claimed as fail-closed |
+| The effect row deleted under a running process that already cached the yes | It keeps deciding until it restarts. Bounded by the process lifetime, **not detected by the receipt chain**, and stated in §8.6 as a residual rather than claimed as fail-closed |
 | `require_approved_policy` and a policy that does not declare the change action as `approve` | The same refusal, naming the key (§8.2.1) |
 | A standalone authority document declaring `break_glass:` | Refused at load, naming the block: its gate lives in a control registry that document cannot see (§5.2) |
 | An envelope entry declaring `delegable:` or `expires_at:`, or an id in both `grants:` and `break_glass:` | Refused at load, naming the key or both mappings (§5.2) |

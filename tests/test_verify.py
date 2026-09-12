@@ -176,7 +176,7 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
-    assert report.applicable == 10
+    assert report.applicable == 11
     assert report.not_applicable == 10
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with eight N/As a
@@ -852,7 +852,7 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_ten_over_ten():
+def test_the_v1_payments_template_reports_eleven_over_eleven():
     """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1).
 
     Ten and not nine since v0.8 item 6, and nine and not eight since item 2. G18 is graded
@@ -863,9 +863,9 @@ def test_the_v1_payments_template_reports_ten_over_ten():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (10, 10, 10)
+    assert (report.passed, report.applicable, report.not_applicable) == (11, 11, 10)
     text = report.to_text()
-    assert "10/10 declared guarantees pass." in text
+    assert "11/11 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider

@@ -137,9 +137,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
         # SPEC-v0.8 item 2: G18 joins the catalogue. It is graded wherever the document sends
         # an action to approval, which the first two of these do, and `N/A` for G1's reason
         # where nothing does. So the first two gain a pass and the third gains an N/A.
-        (ALL_APPLICABLE, "14/14 declared guarantees pass. 6 not applicable"),
-        (WITH_NOT_APPLICABLE, "10/10 declared guarantees pass. 10 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 20 not applicable"),
+        (ALL_APPLICABLE, "15/15 declared guarantees pass. 6 not applicable"),
+        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass. 10 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 21 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )

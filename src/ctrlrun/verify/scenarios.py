@@ -85,7 +85,15 @@ from ..errors import (
     PolicyError,
 )
 from ..identity import IdentityContext
-from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
+from ..policy import (
+    POLICY_CHANGE_ACTION,
+    Condition,
+    Decision,
+    Policy,
+    _ActionPolicy,
+    _Rule,
+    discover_policy_path,
+)
 from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
     Event,
@@ -906,6 +914,30 @@ class Engine:
             if control is not None and control.approver_role
         )
 
+    def _identity_the_document_needs(self) -> ApproverIdentity | None:
+        """An approver identity where the **document** cannot be exercised without one (§11.7).
+
+        SPEC-v0.8 §4.2 denies `approvals_required` above 1 in a deployment that verifies
+        nobody, before a human is asked. That refusal is correct and it reaches every scenario,
+        not only the ones about M-of-N: a shipped example declaring a threshold made
+        `ctrlrun verify` exit 3 with an internal error on guarantees that have nothing to do
+        with approvals. So where the document asks for a threshold or names an approver role,
+        verify supplies one, exactly as §11.7 says it does for G17 and G18 -- and the reason is
+        the same, that whether the operator configured one is a fact about their code.
+
+        Where the document asks for neither, this returns `None` and every scenario keeps the
+        0.7.0 shape, so a guarantee is graded against the deployment shape it was written for.
+        """
+        needs = any(
+            self.policy.approvals_required(name) > 1 or self._roles_for(name)
+            for name in self.policy.actions
+        )
+        if not needs:
+            return None
+        return ApproverIdentity(
+            _VerifyApproverProvider(self._verify_approver(0)), roles_claim=_VERIFY_ROLES_CLAIM
+        )
+
     def _control_for(
         self,
         gid: str,
@@ -913,12 +945,21 @@ class Engine:
         *,
         clock: _Clock | None = None,
         approver_identity: ApproverIdentity | None = None,
+        require_approved_policy: bool = False,
+        declares_change: bool = False,
     ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
+        # SPEC-v0.8 §8.4, for G21. **The document must declare its own change as an approval**,
+        # or `_policy_approval_state` short-circuits on the declaration branch and the effect
+        # branch -- which is what G21's title is about -- is never exercised. An independent
+        # review demonstrated it: with the effect check deleted, G21 still passed.
+        policy = self.policy
+        if declares_change and POLICY_CHANGE_ACTION not in policy.actions:
+            policy = policy.with_action(POLICY_CHANGE_ACTION, {"decision": "approve"})
         control = Control(
-            self.policy,
+            policy,
             store,
             LocalApprovalProvider(store, clock=moving),
             clock=moving,
@@ -928,7 +969,11 @@ class Engine:
             # SPEC-v0.8 §11.7: verify configures the approver identity it grades against, and
             # only where a scenario asks for one. Every other scenario keeps the 0.7.0 shape,
             # which is what keeps `ctrlrun verify` green on a deployment that verifies nobody.
-            approver_identity=approver_identity,
+            approver_identity=approver_identity or self._identity_the_document_needs(),
+            # SPEC-v0.8 §11.7, for G21: verify sets the flag for its own scenario and says so
+            # in a note. Every other scenario keeps the 0.7.0 shape, so a guarantee that did
+            # not ask for it is graded against the deployment shape it was written for.
+            require_approved_policy=require_approved_policy,
         )
         return control, store, recorder, moving
 
@@ -943,9 +988,70 @@ class Engine:
         """
         if selection.decision is not Decision.APPROVE:
             return None
-        request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
-        store.grant_approval(request.request_id, APPROVER)
+        # SPEC-v0.8 §3, §4: the document may pin roles and a threshold, and a request built
+        # here rather than through `Control._presented` pins neither. Both are read from the
+        # policy and applied, so a document using either is graded rather than crashing verify.
+        roles = self._roles_for(selection.action)
+        needed = self.policy.approvals_required(selection.action)
+        with _required_roles(roles, needed):
+            request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+        # **As many distinct principals as the document asks for.** An earlier build granted
+        # once with no verified approver, so a shipped example declaring `approvals_required: 2`
+        # made `ctrlrun verify` exit 3 with an internal error on guarantees that have nothing to
+        # do with M-of-N -- which is what an operator with a threshold in their policy would
+        # have met.
+        self._grant_to_threshold(
+            store,
+            request.request_id,
+            selection.action,
+            entitled=[role.control for role in roles],
+        )
         return request.request_id
+
+    def _grant_to_threshold(
+        self,
+        store: StateStore,
+        request_id: str,
+        action_name: str,
+        *,
+        principal: Principal | None = None,
+        entitled: Sequence[str] = (),
+    ) -> None:
+        """Grant as many distinct verified approvers as this action's threshold asks for.
+
+        SPEC-v0.8 §4.2. A scenario that granted once against a document declaring
+        `approvals_required: 2` left the record `pending` and reported its own guarantee as
+        failing for a reason that has nothing to do with it -- which is how G16 and G17 came to
+        fail on the shipped example the moment it declared a threshold.
+
+        `principal` pins the first approver where a scenario cares who answered (G17 and G18
+        both do); the rest are distinct by index.
+        """
+        # **The request's pinned threshold, not the policy's.** They are the same where the
+        # request was built through `Control._presented`, and differ where a scenario built one
+        # itself -- and the store enforces the pinned one, so reading the policy here granted
+        # twice against a row that needed once and met "already granted".
+        record = store.get_approval(request_id)
+        needed = max(1, record.request.approvals_required if record is not None else 1)
+        for index in range(needed):
+            who = (
+                principal if index == 0 and principal is not None else self._verify_approver(index)
+            )
+            with _granting_principal(who, entitled=entitled):
+                store.grant_approval(request_id, f"{APPROVER}-{index}")
+
+    def _verify_approver(self, index: int) -> Principal:
+        """One of verify's own approvers, distinct by index (§4.2, §11.7).
+
+        `SYNTHETIC_PREFIX`-named, so a principal that ever appeared where it should not have is
+        recognizable on sight, and never the requester: §4.1 refuses a self-approval and a
+        scenario that tripped over it would be grading G18 by accident.
+        """
+        return Principal(
+            agent=f"{reg.SYNTHETIC_PREFIX}-approver-{index}",
+            user=f"{reg.SYNTHETIC_PREFIX}-approver-{index}@example.invalid",
+            issuer=f"https://{reg.SYNTHETIC_PREFIX}.example",
+        )
 
     def execute(
         self,
@@ -1767,7 +1873,17 @@ class Engine:
                     # §3.5 — verify grants its own approval, through the call
                     # `ctrlrun approve` makes, and the report says so.
                     detail["approved_by_verify"] = True
-                    store.grant_approval(pending.request_id, APPROVER)
+                    # Through the threshold helper, which records a **verified** approver.
+                    # Where the document asks for a role or a threshold, verify configures an
+                    # approver identity (§11.7), and from that moment a grant carrying no
+                    # verified approver is refused `approver_unverified` -- so a raw
+                    # `grant_approval` here failed G7 for a reason about G17.
+                    self._grant_to_threshold(
+                        store,
+                        pending.request_id,
+                        selection.action,
+                        entitled=[role.control for role in self._roles_for(selection.action)],
+                    )
                     from ..control import with_approval
 
                     with with_approval(pending.request_id):
@@ -3003,7 +3119,12 @@ class Engine:
                 "an action that requires approval ran without one",
             )
             request_id = str(getattr(asked, "request_id", ""))
-            store.grant_approval(request_id, APPROVER)
+            self._grant_to_threshold(
+                store,
+                request_id,
+                selection.action,
+                entitled=[role.control for role in self._roles_for(selection.action)],
+            )
 
             world["state"] = f"{reg.SYNTHETIC_PREFIX}-the-state-it-moved-to"
             executor = _Executor()
@@ -3118,8 +3239,9 @@ class Engine:
                 request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
             # Recorded entitled for nothing, which is what a surface that verified the credential
             # and found no role records (§3.8).
-            with _granting_principal(approver):
-                store.grant_approval(request.request_id, APPROVER)
+            self._grant_to_threshold(
+                store, request.request_id, selection.action, principal=approver
+            )
             executor = _Executor()
             refusal = self.refused(
                 lambda: self.execute(
@@ -3153,8 +3275,13 @@ class Engine:
 
             with _required_roles(roles, self.policy.approvals_required(selection.action)):
                 second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
-            with _granting_principal(approver, entitled=[role.control for role in roles]):
-                store.grant_approval(second.request_id, APPROVER)
+            self._grant_to_threshold(
+                store,
+                second.request_id,
+                selection.action,
+                principal=approver,
+                entitled=[role.control for role in roles],
+            )
             committed = _Executor()
             receipt = self.execute(
                 control, action, committed, selection.effect_key, second.request_id
@@ -3204,8 +3331,9 @@ class Engine:
             detail["approved_by_verify"] = True
             detail["approver_identity"] = "supplied by verify (SPEC-v0.8 §11.7)"
             request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
-            with _granting_principal(requester):
-                store.grant_approval(request.request_id, APPROVER)
+            self._grant_to_threshold(
+                store, request.request_id, selection.action, principal=requester
+            )
             executor = _Executor()
             refusal = self.refused(
                 lambda: self.execute(
@@ -3244,9 +3372,16 @@ class Engine:
             other = Principal(
                 agent=f"{requester.agent}-approver", user=requester.user, issuer=requester.issuer
             )
-            second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
-            with _granting_principal(other):
-                store.grant_approval(second.request_id, APPROVER)
+            pinned = self._roles_for(selection.action)
+            with _required_roles(pinned, self.policy.approvals_required(selection.action)):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            self._grant_to_threshold(
+                store,
+                second.request_id,
+                selection.action,
+                principal=other,
+                entitled=[role.control for role in pinned],
+            )
             committed = _Executor()
             receipt = self.execute(
                 control, action, committed, selection.effect_key, second.request_id
@@ -3453,6 +3588,75 @@ class Engine:
         finally:
             store.close()
 
+    # --- G21: a policy nobody approved decides nothing --------------------------------------
+
+    def g21(self) -> GuaranteeResult:
+        """SPEC-v0.8 §8.4, §11.7. Graded with a **note**, never `N/A`.
+
+        Whether a deployment passes `require_approved_policy=True` is a fact about a constructor
+        call in its own code, which no document verify reads can state, so verify sets the flag
+        for its own scenario and the note says exactly that.
+
+        Both halves, `v0.4 §1.3`. The observable: with the flag set and no committed
+        `policy:<hash>` effect, an action the document would have allowed is denied
+        `policy_unapproved` and the executor is not reached. The control: the **same** action,
+        under the same document with the flag unset, runs. A kernel that denied everything would
+        pass the first and fail the second.
+        """
+        selection = self.select(decisions=(Decision.ALLOW,))
+        if selection is None:
+            return self.na("G21", self.unselected(reg.EVERY_ACTION_DENIED))
+        control, store, recorder, _ = self._control_for("G21", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["note"] = reg.POLICY_APPROVAL_NOTE
+            detail["require_approved_policy"] = "set by verify (SPEC-v0.8 §11.7)"
+            action = selection.build()
+            guarded, guarded_store, _, _ = self._control_for(
+                "G21-guarded", selection, require_approved_policy=True, declares_change=True
+            )
+            # Its own scratch store, closed when the scenario ends: the guarded `Control` must
+            # find **no** committed `policy:<hash>` effect, and sharing the store with the
+            # control half would make that a property of ordering rather than of the flag.
+            detail["guarded_store"] = type(guarded_store).__name__
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(guarded, action, executor, selection.effect_key, None),
+                (ActionDenied,),
+                "ActionDenied(reason='policy_unapproved')",
+                "an action ran under a policy nobody approved",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "policy_unapproved",
+                "ActionDenied(reason='policy_unapproved')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            committed = _Executor()
+            receipt = self.execute(
+                control, selection.build(), committed, selection.effect_key, None
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, without the requirement, runs",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G21", selection, store, recorder, body)
+        finally:
+            store.close()
+
+
+#: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
+#: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a
+#: real issuer's would be `roles` or `groups`.
+_VERIFY_ROLES_CLAIM: Final = "roles"
 
 #: G12's loopback address: the literal, never `localhost` and never `::1` (SPEC-v0.7 §8.9).
 _LOOPBACK: Final = "127.0.0.1"

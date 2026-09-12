@@ -418,12 +418,25 @@ def test_each_authority_example_loads_on_both_axes(path):
 
 @pytest.mark.authority
 @pytest.mark.parametrize("path", _authority_documents(), ids=lambda path: path.stem)
-def test_each_authority_example_declares_v3(path):
-    """§12.1 — `authority:` needs `ctrlrun.policy/v3`, and a reader that ignored the section
-    would run every action with no authority check at all."""
-    from ctrlrun.policy import POLICY_SCHEMA_V3
+def test_each_authority_example_declares_v3_or_later(path):
+    """§12.1 — `authority:` needs at least `ctrlrun.policy/v3`, and a reader that ignored the
+    section would run every action with no authority check at all.
 
-    assert Policy.from_yaml(path.read_text(encoding="utf-8")).schema == POLICY_SCHEMA_V3
+    **At least**, not exactly: `examples/authority/payments.yaml` declares `v6` since v0.8,
+    because it exercises `approver_role` and `approvals_required` -- which the milestone's own
+    definition of done requires of at least one shipped document, so G17 and G19 are not `N/A`
+    on everything this repository ships. Pinning the exact version made that impossible and
+    would have to be relaxed by whichever milestone shipped it.
+    """
+    from ctrlrun.policy import SUPPORTED_SCHEMAS
+
+    schema = Policy.from_yaml(path.read_text(encoding="utf-8")).schema
+    known = list(SUPPORTED_SCHEMAS)
+
+    assert schema in known
+    assert known.index(schema) >= known.index("ctrlrun.policy/v3"), (
+        f"{path.name} declares {schema}, which predates the authority section"
+    )
 
 
 @pytest.mark.authority

@@ -11,7 +11,7 @@
 # The names here are illustrative. Replace every one before use: a grant names a real
 # principal in a real organization, and adopting somebody else's is how a template becomes an
 # incident.
-schema: ctrlrun.policy/v3
+schema: ctrlrun.policy/v6
 
 authority:
   # A chain may be at most three links long. Depth is recomputed on every evaluation by
@@ -57,10 +57,34 @@ authority:
 # The autonomy policy. It cannot see the principal — `agent_eq` and every other
 # principal-addressing condition is refused at load — so these rules say what is true of the
 # *action* for everybody, and the grants above say who may propose it.
+# SPEC-v0.8 §3. A control may name the role that answers for it, and an approval from a
+# principal whose verified claims do not carry that role is refused, with the control named.
+#
+# CTRLRun does not interpret the role. It does not know what `payments-approver` means, does
+# not check that such a role exists anywhere, and claims nothing about a standard or an audit
+# on the strength of one -- exactly as it does not interpret `source:`. What it does is compare one string from
+# this registry against one claim on a credential somebody else verified.
+#
+# **Omission is not entitlement, and it is not refusal either.** A control with no
+# `approver_role` gates nobody, which is why `pci-dss-3-2` below still says nothing about who
+# may answer. A principal whose claims lack the role is not entitled. The two look alike in a
+# diff and mean opposite things.
+controls:
+  payments-approval:
+    title: A refund above the autonomous band is approved by a payments approver
+    source: internal/payments-runbook#refund-approval
+    approver_role: payments-approver
+
 actions:
   stripe.refund:
     effect: "refund:{payment_id}"
     resource: "payment:{payment_id}"
+    controls: [payments-approval]
+    # SPEC-v0.8 §4. Two distinct **verified** principals, counted by the store inside its own
+    # write. A second yes from somebody who already answered is recorded and does not move the
+    # count; `ctrlrun approve` at a shell records no verified approver, so it never counts
+    # toward this at all, and says so when it is used.
+    approvals_required: 2
     rules:
       # Both ends are bound. `amount_lte` on its own lets a negative amount through, and a
       # refund of a negative amount is a charge.

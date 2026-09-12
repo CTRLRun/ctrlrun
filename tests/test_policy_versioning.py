@@ -1594,6 +1594,11 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         # SPEC-v0.8 §5.3, §11.1. Opening a break-glass envelope is an act, and acts get
         # commands. It is a v0.8 addition on the v0.8 line, not a v0.6 one.
         "break-glass",
+        # SPEC-v0.8 §8.3, §11.1. A group, not a command: `propose` and `replay` live under it.
+        # There is deliberately no `policy approve` -- a proposal is an ordinary approval
+        # request, so `ctrlrun approve` answers it, and a second command would be a second
+        # approval path.
+        "policy",
     ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)
