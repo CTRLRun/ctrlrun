@@ -238,8 +238,9 @@ before the store call that consumes the approval (`v0.7 §6.2`). The approver ch
 and the order is normative:
 
 1. `get_approval(approval_id)`, the read `_recheck` already performs.
-2. **A status gate, and it is load-bearing: the approver checks apply only to a record whose status
-   is `granted`.** Any other status is left to the store exactly as today (§2.4.1).
+2. **A gate, and it is load-bearing: the approver checks apply only to a record that is `granted`
+   and that this clock does not already consider lapsed.** Everything else is left to the store
+   exactly as today (§2.4.1).
 3. **The approver checks of §2.7, §3.6, §4.1 and §4.2**, in that order, each raising
    `ApprovalMismatch` with its own reason.
 4. The precondition comparison of `v0.7 §6.2`, unchanged, and last before the store call because it
@@ -259,9 +260,9 @@ and v0.8 does not move it: whose clock decides an approval's expiry is `v0.1 §4
 the answer is the store's, and `v0.7 §12.5` reversed a change that got that wrong. The approver
 checks are decidable from the row alone and need no clock.
 
-### 2.4.1 Why the status gate exists, and what it costs to omit it
+### 2.4.1 Why the gate exists, and what it costs to omit it
 
-Without it, this milestone would report the wrong reason for three refusals that have nothing to do
+Without it, this milestone would report the wrong reason for four refusals that have nothing to do
 with approvers, because `Control` no longer applies `check_consumable` and the store applies it
 only inside `_take`:
 
@@ -269,12 +270,30 @@ only inside `_take`:
 |---|---|---|
 | A human **denied** it | `ActionDenied(approval_denied)`, with `APPROVAL_DENIED`, `ACTION_DENIED` and a `DENIED` receipt | `ApprovalMismatch(approver_unverified)`, with `APPROVAL_INVALIDATED` and a `BLOCKED` receipt: a human's no stops appearing in the evidence as a no |
 | Already **consumed** (a replayed approval, G2) | `consumed` | `approver_unverified` |
-| The action **hash moved** (G1) | `action_hash_mismatch` | `approver_unverified` |
+| The action **hash moved** (G1) | `mismatch`, which is `HASH_MISMATCH`'s value | `approver_unverified` |
+| `granted` and **past its expiry** | `expired`, with `APPROVAL_EXPIRED` appended and the row moved to `expired` by the store's own lapse write | `approver_unverified`, **no `APPROVAL_EXPIRED` event, and no lapse write at all** |
 
-All three carry no `VerifiedApprover`, because nothing granted them under an approver identity, so
+All four carry no `VerifiedApprover`, because nothing granted them under an approver identity, so
 §2.7's second row would fire first and swallow the real reason. Two of them are shipped guarantees.
-The gate is one comparison and it keeps `check_consumable`'s ordering authoritative, which is what
-`v0.1 §4.2` froze it for. T291b is its test.
+The gate keeps `check_consumable`'s ordering authoritative, which is what `v0.1 §4.2` froze it for.
+
+**The fourth row is why the gate is not just a status test**, and it is the subtler half.
+`check_consumable` tests expiry **after** status, so a lapsed grant is still `granted` and would
+pass a status-only gate. Two things then disappear rather than one: `_secure` appends
+`APPROVAL_EXPIRED` only when the reason it caught is `expired`, and the lapse **write** happens
+only inside `_take`, where `check_consumable` returns `expire=True` and the store performs it. A
+refusal raised before `_take` never reaches either, so the row stays `granted` for ever and the
+lapse leaves no event. §2.4's "nothing is written by a refusal" is about the approver refusals and
+was never about this write, which `v0.1 §4.2 A3` requires.
+
+**And the clock in this gate only ever defers.** Where this `Control`'s clock says the grant has
+lapsed, the approver checks are **skipped** and `_take` reports the lapse exactly as 0.7.0 does,
+with its write and its event. The clock is never used to *refuse*: the store still decides, and may
+disagree, which is `v0.1 §4.2 A3`'s answer and the one `v0.7 §12.5` restored after a change got it
+wrong. So "the approver checks need no clock" stays true of the checks; what needs one is knowing
+when to stand aside.
+
+T291b is the test, all four rows.
 
 **Why the approver checks go before the precondition fetch.** A refused approval must not cost a
 provider call (`v0.7 §6.6` argues the same for a refused verdict), and an approver who was never
@@ -509,6 +528,12 @@ and §11.1 carries it. It is safe where a hash is concerned: `v0.3 §2.2` keeps 
 canonical form of an action, so no action hash and no approval binding moves. Rejected: flattening
 an array into a delimited string, which is structure encoded in a string and a role named
 `a,b` away from a defect.
+
+**`list | tuple`, with `str` and `bytes` excluded by name**, in the amendment and in every
+implementation of it. `str` is itself a `Sequence`, so a check written as
+`isinstance(value, Sequence)` before the string branch turns the one-role claim `"payments-owner"`
+into a tuple of twenty-one single characters, which breaks this section's own "the claim is a
+string: one role" rule and T303's byte-for-byte matching.
 
 **And the amendment has a second half, without which it breaks every reader.** A `Principal` is
 written to JSON and rebuilt from it in four places: the `action_json` column both shipped stores
@@ -825,12 +850,23 @@ Four things about `authority.py` decide the shape, and each was read rather than
    branch supplies the meaning, because an envelope exists only to be a parent. The reason behind
    the `delegable` rule, that nothing else bounds the population a delegable grant can reach, is
    met by `max_ttl`, which bounds every child in time by construction and is **required**.
-4. **`_check_chain`'s rule 6 reads `delegable` again, on every evaluation, over every ancestor
-   including the root**, and `delegable` defaults to `False`. Unaddressed, a break-glass grant is
-   created successfully and then authorises nothing, refused `authority_escalation` with no
-   dimension named, which is the least diagnosable refusal in the file. **An envelope ancestor
-   counts as delegable by construction**, in rule 6 as in creation, and T326b asserts an action
-   under a live break-glass grant is allowed at *evaluation* and not only created.
+4. **`delegable` is read at three sites that decide something, and each has to be named.** It
+   defaults to `False`, and an envelope carries no such key:
+
+   | Site | What it decides | Unaddressed |
+   |---|---|---|
+   | `_parent_for_creation`'s root test | may this parent be delegated beneath at all | the break-glass grant is never created |
+   | `_parent_for_creation`'s rule-3 chain scan, over `walk.ancestors` | may a delegation be created **beneath** a break-glass grant | `AuthorityEscalation(parent_not_valid)`, so §5.4's attenuation bullet and T337 cannot hold |
+   | `_check_chain`'s rule 6, over `walk.ancestors`, on every evaluation | does the grant authorise anything | the grant is created and then authorises nothing, refused `authority_escalation` with no dimension named, which is the least diagnosable refusal in the file |
+
+   **An envelope ancestor counts as delegable at all three**, and "counts as" is a rule applied at
+   the read sites, **not** a `delegable=True` written onto the parsed `Grant`: `_canonical_grant`
+   renders that field, so writing it would put a key in the policy hash that the operator's
+   document does not contain, and §5.2 makes that hash load-bearing. For the same reason
+   **`delegable:` and `expires_at:` are refused keys on an envelope entry**, naming them, because
+   the parser accepts both today and an operator writing `delegable: true` would then owe an
+   `expires_at` an envelope does not carry. T326b asserts evaluation; T337 asserts the second
+   level.
 
 **Why the envelope is in the policy.** It is covered by the policy hash, so the widest authority an
 incident can reach was evidenced *before* the incident by a document somebody reviewed, rather than
@@ -839,13 +875,14 @@ grants, including `max_ttl`: today it renders `max_delegation_depth` and `author
 `_canonical_grant`'s closed field list, so an envelope outside it would be outside the hash and
 widening `max_ttl` would move no receipt. §11.1 carries that change.
 
-**A standalone authority document has no control registry.** `Authority.from_yaml(standalone=True)`
-closes its top-level keys at `schema` and `authority`, which is the gateway's shape and
-`verify --authority`'s, so an envelope's `controls:` cannot be checked against a registry there.
-The rule is `v0.6 §7.3`'s for a dangling citation, applied to this case: **a citation that cannot
-be resolved is a load error**, so an envelope citing a control in a standalone document fails to
-load and says why. An envelope that cites none loads and is opened by any verified principal
-(§5.3.1).
+**A standalone authority document may not declare `break_glass:` at all**, refused by name at
+load. `Authority.from_yaml(standalone=True)` closes its top-level keys at `schema` and `authority`,
+which is the gateway's shape and `verify --authority`'s, so it has no control registry to resolve
+an envelope's `controls:` against. Allowing envelopes there and making an unresolvable citation a
+load error, which was the first answer, leaves that shape able to express only an **ungated**
+envelope: the one deployment that cannot state the gate would be the one whose break-glass anyone
+verified could open. So the whole block is refused there, and an operator who wants break-glass in
+that shape moves the authority section into the policy document, where the registry is.
 
 Rejected: an unbounded runtime grant, which is a flag with a record attached. Rejected: a flag on
 `Grant` marking it envelope-only, which puts the exclusion inside `_candidates` where a deleted
@@ -1188,8 +1225,9 @@ actions:
 - **A proposal of that name is gated by a marker the flow sets, and the honest statement is
   §2.5.1's.** `Control.execute(action, executor, effect_key)` takes an `Action` the caller built
   and carries no channel distinguishing `ctrlrun policy propose` from any other in-process caller,
-  so what gates it is a package-internal context variable the flow sets, listed in §11.1 beside
-  `_granting_principal` and carrying the same residual: **an application that calls the private
+  so what gates it is a package-internal context variable the flow sets, `_policy_change_in_flight`,
+  named and listed in **§11.2** beside `_granting_principal`, not in §11.1, whose closing line is
+  "and no other public name". It carries the same residual: **an application that calls the private
   interface is inside the process trust boundary**, as §2.5.1 already concedes. So the claim is not
   "nothing else can propose it"; it is **"nothing outside the flow proposes it by accident, and the
   shipped surfaces are the only ones that set the marker"**. `require_approved_policy`'s property
@@ -1401,12 +1439,13 @@ forbids (the third).
   provider anywhere** still reaches the approver checks: the test drives the 0.6-shaped path and
   asserts the refusal. Without this, every check in §2 to §4 is dead on the default path and every
   other test still passes (§2.4).
-- **T291b:** the status gate of §2.4.1. With an `ApproverIdentity` configured and no
-  `VerifiedApprover` on the row, a **denied** approval still raises `ActionDenied(approval_denied)`
+- **T291b:** the gate of §2.4.1, all four rows. With an `ApproverIdentity` configured and no
+  `VerifiedApprover` on the row: a **denied** approval still raises `ActionDenied(approval_denied)`
   with `APPROVAL_DENIED` and a `DENIED` receipt; a **consumed** one still reports `consumed` (G2);
-  and a **mutated action** still reports the hash mismatch (G1). Without the gate all three report
-  `approver_unverified`, two shipped guarantees change their reason, and a human's no stops
-  appearing in the evidence as a no.
+  a **mutated action** still reports `mismatch` (G1); and a **granted but lapsed** one still
+  reports `expired`, appends exactly one `APPROVAL_EXPIRED`, and leaves the row moved to `expired`
+  by the store's own write. The fourth is the one a status-only gate fails: without it the lapse
+  has no event and no write, and the row stays `granted` for ever.
 - **T292:** the migration, both directions, on SQLite and Postgres, from a database built by
   0.7.0's own code and not a hand-written fixture: rows with no approver columns open, migrate and
   keep every value; an 0.7.0 binary against the migrated database refuses and names both versions.
@@ -1519,7 +1558,13 @@ forbids (the third).
 - **T331:** the walk resolves a break-glass delegation's root out of `envelopes`, and a delegation
   naming an unknown envelope is `unknown_parent` as any unknown parent is.
 - **T332:** the policy hash covers the envelope, `max_ttl` included: widening `max_ttl` moves
-  `policy_hash`, and the test pins that it does (§5.2).
+  `policy_hash`, and the test pins that it does. The rendered form carries **no `delegable` key**,
+  because "counts as delegable" is a rule at the read sites and not a value written onto the grant
+  (§5.2 point 4).
+- **T332b:** an envelope entry declaring `delegable:` or `expires_at:` is refused at load, naming
+  the key; an id in both `grants:` and `break_glass:` is refused, naming both; and a **standalone
+  authority document declaring `break_glass:` at all** is refused, naming the block and saying that
+  its gate lives in a registry that document cannot see (§5.2).
 - **T333:** the receipt of an action decided under it carries `authority_grant_id`, and so does the
   receipt of an action decided by an ordinary grant: the field is not break-glass-specific (§5.4).
 - **T334:** §5.3.1's rule: the opener is the resolved principal and an envelope's subject does not
@@ -1534,7 +1579,10 @@ forbids (the third).
   `Authority.evaluate` does not answer `authority_unreadable` for the deployment. This is the test
   for the failure mode a closed `Literal` produces (§5.3).
 - **T336:** revoking it revokes everything beneath it, and §7's selectors reach it.
-- **T337:** a delegation beneath it attenuates and cannot outlive it.
+- **T337:** a delegation beneath it attenuates and cannot outlive it, **and is created at all**:
+  `_parent_for_creation`'s rule-3 chain scan reads `delegable` over every ancestor including the
+  envelope, so without §5.2 point 4's third site a second-level delegation is refused
+  `parent_not_valid`. Asserted on both backends, creation and then evaluation.
 - **T338:** THE absence test. No flag, environment variable or CLI option anywhere in the tree
   skips a check: the tree is grepped for the names the milestone's plan lists, and the assertion is
   part of the suite rather than a claim in a PR body.
@@ -1696,11 +1744,11 @@ type, no new event type, no new approval provider and no new sink.
   at all; a break-glass grant is a `DELEGATION_CREATED` whose `created_via` says what it was.
 - **No new error type.** Four refusals share `ApprovalMismatch` and are told apart by `reason`,
   which is why every test asserts the reason.
-- **Two package-internal markers, deliberately not public, each with its residual stated.**
-  `_granting_principal` (§2.5), because a public one would be an unauthenticated way to assert a
-  verified approver, which is `trust_approver` spelled as a context manager; and the policy-change
-  marker (§8.2.1), because `Control.execute` carries no channel distinguishing one in-process
-  caller from another. Neither is exported, and neither is claimed to stop an application that
+- **Two package-internal markers, deliberately not public, each named here and each with its
+  residual stated.** `ctrlrun.approval._granting_principal` (§2.5), because a public one would be
+  an unauthenticated way to assert a verified approver, which is `trust_approver` spelled as a
+  context manager; and `ctrlrun.control._policy_change_in_flight` (§8.2.1), because
+  `Control.execute` carries no channel distinguishing one in-process caller from another. Neither is exported, and neither is claimed to stop an application that
   calls a private interface: §2.5.1 states that residual once, and §8.2.1 points at it rather than
   claiming a refusal it cannot deliver.
 - **No change to the v0.5 adapter contract.** `ApprovalAnswer` keeps its shape (§2.6).
@@ -1801,6 +1849,8 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 | Revocation feed unreachable, malformed, or naming an unknown subject | Consumed, logged, no decision changed; stale from that moment if it could not be read |
 | `require_approved_policy` and no committed `policy:<hash>` effect | Every evaluation denied with `policy_unapproved`, except `ctrlrun.policy.change` |
 | `require_approved_policy` and a policy that does not declare the change action as `approve` | The same refusal, naming the key (§8.2.1) |
+| A standalone authority document declaring `break_glass:` | Refused at load, naming the block: its gate lives in a control registry that document cannot see (§5.2) |
+| An envelope entry declaring `delegable:` or `expires_at:`, or an id in both `grants:` and `break_glass:` | Refused at load, naming the key or both mappings (§5.2) |
 | `ctrlrun.policy.change` proposed without the flow's marker | Refused. The marker is package-internal, so this stops an accident and not an application calling a private interface, which §2.5.1's residual already covers (§8.2.1) |
 | Policy fails to load | `PolicyError`, and distinct from `policy_unapproved` |
 | Replay cannot rebuild a receipt's action | Named and skipped; never counted as unchanged |
