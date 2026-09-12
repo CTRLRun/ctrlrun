@@ -1098,6 +1098,9 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # SPEC-v0.8 §5.3 — break-glass is a grant, so opening one is a delegation with its own
         # command rather than a flag on this list.
         "break-glass",
+        # SPEC-v0.8 §8.3 — a policy change is an action, so proposing one is a command. No
+        # `policy approve`: that is `ctrlrun approve`.
+        "policy",
         # SPEC-v0.3 §6.4, §6.5 — build-list item 4.
         "stats",
         "verify",

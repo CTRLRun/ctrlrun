@@ -96,8 +96,8 @@ def test_T108_the_authority_example_exercises_G7_G8_and_G9():
     # from (SPEC-v0.7 §8.9). A Postgres --store-url grades that one too.
     # Fifteen since v0.8 item 2: G18 is graded wherever a document sends an action to
     # approval, and verify supplies the approver identity it grades against (§11.7).
-    assert report.passed == 16
-    assert report.applicable == 16
+    assert report.passed == 17
+    assert report.applicable == 17
 
 
 def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypatch):

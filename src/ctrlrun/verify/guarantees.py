@@ -140,6 +140,14 @@ GUARANTEES: Final = (
         "revoked before its exp: no",
         ("v0.3 §3.4", "v0.8 §10 T340", "v0.8 §10 T341"),
     ),
+    Guarantee(
+        "G21",
+        # 30 characters against `report._TITLE_WIDTH`'s 32. "decides nothing" and not "is
+        # refused": what a deployment gets under an unapproved policy is not one refusal, it is
+        # every action denied, and a title saying "refused" would understate it.
+        "unapproved policy decides no",
+        ("v0.6 §7.1", "v0.8 §10 T354", "v0.8 §10 T355"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -175,6 +183,15 @@ NO_M_OF_N: Final = "no action requires more than one approval"
 #: constructor call in its application, which no document verify reads can say; so verify
 #: supplies one, grades the kernel's behaviour under it, and says so here rather than making a
 #: claim about a document that is silent on the subject.
+#: SPEC-v0.8 §8.4, §11.7 — G21's note, and a note for the same reason G20's is one: whether a
+#: deployment passes `require_approved_policy=True` is a fact about a constructor call in its
+#: own code, which no document verify reads can state. Verify sets the flag for its own
+#: scenario and says so here rather than claiming anything about a document that is silent.
+POLICY_APPROVAL_NOTE: Final = (
+    "G21 is graded with require_approved_policy set by verify: whether this deployment sets it "
+    "is a fact about its own code, which verify cannot read"
+)
+
 REVOCATION_NOTE: Final = (
     "G20 is graded against a revocation feed verify supplies: whether this deployment "
     "configures one is a fact about its own code, which verify cannot read"

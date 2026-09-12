@@ -11,6 +11,54 @@ any change to one appears here.
 
 ### Added
 
+- **A policy change is a protected action** (`docs/SPEC-v0.8.md` §8). The policy is the one file
+  that decides every other decision, and until now it was changed by editing it. v0.6 made the
+  change **evidenced**: every receipt records the hash of the policy that decided it. v0.8 makes it
+  **approved**: a policy nobody approved decides nothing.
+
+  ```
+  ctrlrun policy propose --file new.yaml
+  ctrlrun approve <request>              # there is no `ctrlrun policy approve`
+  ```
+
+  ```python
+  Control(policy, store, require_approved_policy=True)
+  ```
+
+  **An ordinary action, which is why §8 adds no event type.** `ctrlrun.policy.change` has an
+  ordinary action hash, an ordinary effect key (`policy:<hash>`), ordinary events and an ordinary
+  receipt, so §2, §3 and §4 apply with no second path to keep correct: an unverifiable approver is
+  refused, an unentitled one is refused, a proposer approving their own change is refused, and
+  M-of-N counts. A committed receipt for that action **is** the approval of that hash.
+
+  **The approval is per deployment, and that is not obvious.** The hash folds in the effective
+  authority and the effective environment, so the same file in `staging` and in `prod` is two
+  hashes and needs two approvals — which is what an operator wants and what nothing else would say.
+  Comments, key order and whitespace do not move it.
+
+  **The name is reserved and declarable**, and a first draft had that backwards. A document may
+  declare `ctrlrun.policy.change` under `ctrlrun.policy/v6`; nothing else may name it in a
+  `resource:` or `effect:` template. Under `require_approved_policy` the policy in force must
+  declare it with `decision: approve` — a policy that declares it `allow`, or omits it, decides
+  nothing, with the refusal naming the key. That is the rule that closes the obvious escape:
+  installing such a policy still needs an approval under the old one, and the moment it is
+  installed the deployment stops deciding anything.
+
+  **`ctrlrun policy replay --file new.yaml --last N`** reports which recorded decisions change
+  under a proposed policy. It writes nothing, executes nothing and reserves nothing, and it reports
+  *what changes* — never safer, riskier, too permissive, a score or a grade. A receipt whose action
+  cannot be rebuilt is named and skipped, never counted as unchanged.
+
+  **What it does not close, in full.** An administrator with write access to the policy file can
+  still widen *who* may approve the next change. What they cannot manufacture is the approving
+  principal: the approver's credential is verified by the provider configured in code, and §4.1
+  refuses their own. So the property is exactly **"a policy change that no verified principal other
+  than the proposer approved decides nothing"**, and not "a policy cannot be changed by whoever
+  holds the file". An approval also binds a hash and not an ordering, so any hash ever approved
+  stays approved and a superseded policy can be restored with nothing in the evidence saying so.
+
+  `ctrlrun verify` grades **G21** with the flag set by verify, under a note rather than an `N/A`.
+
 - **A credential revoked before its `exp` is refused** (`docs/SPEC-v0.8.md` §6). `jwt_identity.py`
   used to say, in as many words, that *a verified token is valid until its `exp`* and that nothing
   polls. Both sentences are gone.

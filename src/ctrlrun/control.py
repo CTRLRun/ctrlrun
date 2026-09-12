@@ -96,6 +96,8 @@ from .identity import IdentityContext, IdentityProvider
 from .policy import (
     DEFAULT_ENVIRONMENT,
     OBSERVE,
+    POLICY_CHANGE_ACTION,
+    POLICY_UNAPPROVED,
     Decision,
     Evaluation,
     Policy,
@@ -205,6 +207,27 @@ _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
 #: on the precedent of `_PRESENTED_APPROVAL` beneath it: `Control` is shared across calls and
 #: holds no per-call state, and a context variable is per-call by construction.
 _AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_grant_id")
+
+#: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
+#: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
+#: carries the same residual §2.5.1 concedes: an application inside the process can call a
+#: private function, so the claim is not "nothing else can propose one". It is **"nothing
+#: outside the flow proposes one by accident, and the shipped surfaces are its only setters"**.
+#: §8.6's property does not rest on this gate, which is why narrowing it costs nothing.
+_POLICY_CHANGE_IN_FLIGHT: ContextVar[bool] = ContextVar(
+    "ctrlrun_policy_change_in_flight", default=False
+)
+
+
+@contextmanager
+def _policy_change_in_flight() -> Iterator[None]:
+    """Mark the `ctrlrun.policy.change` built inside this block as the flow's own (§8.2.1)."""
+    token = _POLICY_CHANGE_IN_FLIGHT.set(True)
+    try:
+        yield
+    finally:
+        _POLICY_CHANGE_IN_FLIGHT.reset(token)
+
 
 _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
@@ -516,6 +539,7 @@ class Control:
         authority: Authority | None = None,
         environment: str | None = None,
         approver_identity: ApproverIdentity | None = None,
+        require_approved_policy: bool = False,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -534,6 +558,17 @@ class Control:
         #: `Control` never *resolves* one: it never grants an approval, so what it does with
         #: this is check what the granting surface recorded (§1.4 item 1).
         self._approver_identity = approver_identity
+        # SPEC-v0.8 §8.4. **In code and not in the file it governs**, or the file would switch
+        # off its own governance. Default false: opt in, then fail closed.
+        self._require_approved_policy = require_approved_policy
+        #: Cached **only when the answer is yes** (§8.4). A negative answer is re-asked on every
+        #: decision, so a long-lived process that started before the approval landed begins
+        #: working the moment it lands, with no restart; the cost is one keyed read per decision
+        #: while a deployment is unapproved, which is the state where nothing is running anyway.
+        #: A positive answer is cached for this `Control`'s life, because a COMMITTED effect
+        #: does not become uncommitted through any path this kernel offers -- which is also
+        #: §8.6's residual: deleting the row underneath a running process does not stop it.
+        self._policy_approved = False
         #: SPEC-v0.6 §7.1's *"both are folded into the one canonical structure before hashing"*.
         #: `Policy` cannot see a separately-loaded `Authority` and this can, so the hash every
         #: receipt and every approval request carries is composed here. Where the authority came
@@ -612,6 +647,11 @@ class Control:
         return self._identity
 
     @property
+    def require_approved_policy(self) -> bool:
+        """Does this deployment refuse to decide under a policy nobody approved? (§8.4.)"""
+        return self._require_approved_policy
+
+    @property
     def approver_identity(self) -> ApproverIdentity | None:
         """How this deployment verifies who answered an approval, or `None` (SPEC-v0.8 §2.3)."""
         return self._approver_identity
@@ -665,6 +705,73 @@ class Control:
         if result is not None and not result.passed:
             return Evaluation(Decision.DENY, result.reason)
         return self._policy.evaluate(action)
+
+    def _require_approved(
+        self,
+        action: Action,
+        *,
+        evaluation: Evaluation | None,
+        started_at: datetime,
+        effect_key: str | None,
+    ) -> None:
+        """Refuse every decision under a policy nobody approved (SPEC-v0.8 §8.4).
+
+        **A keyed read, not a scan.** `get_effect(f"policy:{hash}")` is on the frozen protocol
+        and is O(1) on both shipped stores; `receipts()` could only answer this by returning
+        every receipt in the store, parsed, on the first decision of every process. It is the
+        same key the proposal reserved, so the two cannot drift.
+
+        **Two rules, and the second is what closes §8.6's obvious escape.** There must be a
+        committed effect at that key, *and* the policy in force must declare
+        `ctrlrun.policy.change` with `decision: approve`. Without the second an administrator
+        writes a policy whose change rule is `allow`; installing it still needs an approval
+        under the old policy, and the moment it is installed the deployment stops deciding
+        anything, with the refusal naming the key.
+        """
+        if not self._require_approved_policy:
+            return
+        if action.name == POLICY_CHANGE_ACTION:
+            # §8.4. Exactly one action, matched by name and never by prefix: a name like
+            # `ctrlrun.policy.changes` is a different action and is refused with everything
+            # else (T360).
+            return
+        if self._policy_approved:
+            return
+        reason, detail = self._policy_approval_state()
+        if reason is None:
+            self._policy_approved = True
+            return
+        _LOG.warning("%s: %s", action.name, detail)
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason}, effect_key)
+        self._record(
+            action,
+            evaluation if evaluation is not None else Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            started_at,
+            error=detail,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(detail, reason=reason, action_id=action.action_id)
+
+    def _policy_approval_state(self) -> tuple[str | None, str]:
+        """`(None, "")` where this policy is approved, else the reason and what to say."""
+        entry = self._policy.actions.get(POLICY_CHANGE_ACTION)
+        if entry is None or POLICY_CHANGE_ACTION not in self._policy.approving_actions():
+            return (
+                POLICY_UNAPPROVED,
+                f"this deployment requires an approved policy, and the policy in force does "
+                f"not declare {POLICY_CHANGE_ACTION!r} with 'decision: approve'. A policy that "
+                "cannot send its own change to a human decides nothing (SPEC-v0.8 §8.2.1)",
+            )
+        record = self._store.get_effect(f"policy:{self._policy_hash}")
+        if record is None or record.state is not EffectState.COMMITTED:
+            return (
+                POLICY_UNAPPROVED,
+                f"this deployment requires an approved policy and nobody approved "
+                f"{self._policy_hash}. Propose it with 'ctrlrun policy propose --file "
+                "<this policy>' and have it approved (SPEC-v0.8 §8.4)",
+            )
+        return (None, "")
 
     def _authority_result(self, action: Action) -> AuthorityResult | None:
         """The authority axis for this action, or `None` where there is no section (§4.1).
@@ -862,6 +969,16 @@ class Control:
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
+        if action.name == POLICY_CHANGE_ACTION and not _POLICY_CHANGE_IN_FLIGHT.get():
+            # SPEC-v0.8 §8.2.1. The reserved name is the flow's, and an ordinary caller
+            # reaching it would be proposing a policy change without one. Refused before
+            # anything is evaluated or recorded, because there is nothing here to decide: the
+            # action is well-formed and simply is not this caller's to build.
+            raise InvalidArgument(
+                f"{POLICY_CHANGE_ACTION!r} is reserved for the policy-change flow "
+                "(SPEC-v0.8 §8.2.1). Propose a policy with 'ctrlrun policy propose --file "
+                "<new.yaml>', which builds this action and marks it as the flow's own"
+            )
         # SPEC-v0.8 §5.4. **Cleared at the top of the call, not only set at the authority
         # gate.** §4.3.1 puts `principal_expired` first, so `execute` records a denied receipt
         # *before* `_authority_result` runs; with only the gate setting this, that receipt
@@ -913,6 +1030,13 @@ class Control:
                 f"{action.name}: the principal's credential expired at "
                 f"{action.principal.expires_at}"
             )
+        # SPEC-v0.8 §8.4: **a policy nobody approved decides nothing**, and that is checked
+        # before anything else is decided, because what follows would be decided *by* it. The
+        # policy-change action itself is exempt by name: the proposal is how a policy becomes
+        # approved, so gating it on an approved policy is the bootstrap that cannot complete.
+        self._require_approved(
+            action, evaluation=None, started_at=started_at, effect_key=effect_key
+        )
         # SPEC-v0.3 §4.3.1 — the order, stated once so it can be tested: principal_expired →
         # authority → policy → approval → reservation → execution.
         result = self._authority_result(action)
@@ -2959,6 +3083,110 @@ class Control:
         """
         return self._delegate(parent_id, grant, by=by, via="api")
 
+    def _propose_policy(
+        self,
+        candidate: Policy,
+        *,
+        authority: Authority | None = None,
+        approval_id: str | None = None,
+    ) -> Receipt:
+        """Propose a policy change as an ordinary action (SPEC-v0.8 §8.2, §8.3).
+
+        Ordinary action hash, ordinary effect key, ordinary events, ordinary receipt -- which
+        is why §8 adds no event type: `v0.1 §6.2`'s vocabulary already describes a proposal, an
+        approval request, a grant, a consumption and a commit, which is the whole life of a
+        policy change. So §2, §3 and §4 apply without a second path: an unverifiable approver
+        is refused, an unentitled one is refused, a proposer approving their own change is
+        refused, and M-of-N counts.
+
+        **`to` is computed the way the `Control` that will enforce it computes its own hash**,
+        with that authority and that environment substituted (§8.2). `hash_with_authority` folds
+        both in, so the same file in `staging` and in `prod` hashes differently and an approval
+        is per deployment. That is what an operator wants, it is not obvious, and T353 pins it.
+
+        Private, like `_delegate` and `_break_glass`: §11.1 adds the CLI group and no public
+        `Control` method.
+        """
+        target = hash_with_authority(candidate, authority, self._environment)
+        action = Action(
+            name=POLICY_CHANGE_ACTION,
+            arguments={"from": self._policy_hash, "to": target},
+            principal=self._principal_for_proposal(),
+            resource="policy",
+            environment=self._environment,
+        )
+
+        def _installed() -> dict[str, str]:
+            # The "execution" of a policy change is the fact that it was approved: nothing is
+            # written to disk here, because installing the file is the operator's act and this
+            # kernel does not edit an operator's policy. What the committed effect records is
+            # that this hash was approved, which is exactly what §8.4 reads back.
+            return {"approved": target}
+
+        with _policy_change_in_flight():
+            if approval_id is None:
+                return self.execute(action, _installed, f"policy:{target}")
+            with with_approval(approval_id):
+                return self.execute(action, _installed, f"policy:{target}")
+
+    def _principal_for_proposal(self) -> Principal:
+        """Who is proposing, resolved as any other principal is (§8.2)."""
+        found = _CONTEXT.get(None)
+        if found is not None:
+            return found.principal
+        resolved = (
+            None
+            if self._identity is None
+            else self._identity.resolve(
+                IdentityContext(action=POLICY_CHANGE_ACTION, environment=self._environment)
+            )
+        )
+        if resolved is None:
+            raise IdentityError(
+                "a policy change has a proposer, and nothing resolved one. Run inside "
+                "ctrlrun.context(agent=..., user=...), or configure an identity provider "
+                "(SPEC-v0.8 §8.2)"
+            )
+        return resolved
+
+    def _replay_policy(self, candidate: Policy, *, limit: int) -> list[dict[str, Any]]:
+        """What the last `limit` receipts would decide under `candidate` (SPEC-v0.8 §8.5).
+
+        **Writes nothing, executes nothing, reserves nothing**, and reports *what changes*:
+        never safer, riskier, too permissive, a score or a grade. `v0.4 §3.9`'s rule for
+        `verify` applied here, because a replay that scored an operator's document would be the
+        same claim in a new costume.
+
+        A receipt whose action cannot be rebuilt is **named and skipped**, never counted as
+        unchanged, on the distinction `v0.6 §3.2` draws for an unknown schema version.
+        """
+        rows: list[dict[str, Any]] = []
+        receipts = list(self._store.receipts())[-limit:] if limit > 0 else []
+        for receipt in receipts:
+            rebuilt = _action_from_receipt(receipt, self._environment)
+            if rebuilt is None:
+                rows.append(
+                    {
+                        "receipt_id": receipt.receipt_id,
+                        "action": receipt.action,
+                        "skipped": "this receipt does not carry what an action is rebuilt from",
+                    }
+                )
+                continue
+            before = self._policy.evaluate(rebuilt)
+            after = candidate.evaluate(rebuilt)
+            if before.decision is after.decision and before.reason == after.reason:
+                continue
+            rows.append(
+                {
+                    "receipt_id": receipt.receipt_id,
+                    "action": receipt.action,
+                    "from": {"decision": str(before.decision), "reason": before.reason},
+                    "to": {"decision": str(after.decision), "reason": after.reason},
+                }
+            )
+        return rows
+
     def _break_glass(self, envelope_id: str, grant: Grant, *, reason: str = "") -> Delegation:
         """Open a break-glass grant beneath a declared envelope (SPEC-v0.8 §5.3).
 
@@ -3726,6 +3954,20 @@ def _warn_template_mismatch(
         decorated,
         from_policy,
     )
+
+
+def _action_from_receipt(receipt: Receipt, environment: str) -> Action | None:
+    """Rebuild the action a receipt records, or `None` where it cannot be (SPEC-v0.8 §8.5)."""
+    try:
+        return Action(
+            name=receipt.action,
+            arguments=dict(receipt.arguments),
+            principal=receipt.principal,
+            resource=receipt.resource,
+            environment=receipt.environment or environment,
+        )
+    except (InvalidArgument, TypeError, ValueError):
+        return None
 
 
 def _reconciler(reconcile: object, reconcile_eagerly: object, where: str) -> _Reconciler:
