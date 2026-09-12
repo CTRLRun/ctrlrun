@@ -132,6 +132,14 @@ GUARANTEES: Final = (
         "one principal counts once",
         ("v0.3 §4.2", "v0.8 §10 T311", "v0.8 §10 T310"),
     ),
+    Guarantee(
+        "G20",
+        # 28 characters against `report._TITLE_WIDTH`'s 32. "before its exp" is the whole of
+        # what is new: a credential *past* its exp was always refused, and a title saying only
+        # "a revoked credential refused" would grade v0.3 and claim v0.8.
+        "revoked before its exp: no",
+        ("v0.3 §3.4", "v0.8 §10 T340", "v0.8 §10 T341"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -161,6 +169,16 @@ NO_APPROVER_ROLE: Final = "no cited control names an approver role"
 #: a document where every action takes one yes has no count to get wrong. Not "M-of-N is not
 #: configured", which would be a sentence about a deployment verify cannot see.
 NO_M_OF_N: Final = "no action requires more than one approval"
+
+#: SPEC-v0.8 §11.7 — G20's note, printed once beneath the table as `PRECONDITION_NOTE` is, and
+#: **not** an `N/A`. Whether a deployment configures a revocation feed is a fact about a
+#: constructor call in its application, which no document verify reads can say; so verify
+#: supplies one, grades the kernel's behaviour under it, and says so here rather than making a
+#: claim about a document that is silent on the subject.
+REVOCATION_NOTE: Final = (
+    "G20 is graded against a revocation feed verify supplies: whether this deployment "
+    "configures one is a fact about its own code, which verify cannot read"
+)
 NO_EFFECT_TEMPLATE: Final = "no action declares an `effect:` template"
 
 #: The sentence that makes G3's N/A actionable rather than mysterious (§2.2). It travels in

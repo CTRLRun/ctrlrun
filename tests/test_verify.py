@@ -176,7 +176,7 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
-    assert report.applicable == 9
+    assert report.applicable == 10
     assert report.not_applicable == 10
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with eight N/As a
@@ -852,24 +852,30 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_nine_over_nine():
+def test_the_v1_payments_template_reports_ten_over_ten():
     """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1).
 
-    Nine and not eight since v0.8 item 2: G18 is graded here, because this document sends an
-    action to approval and verify supplies the approver identity it grades against (§11.7).
+    Ten and not nine since v0.8 item 6, and nine and not eight since item 2. G18 is graded
+    here because this document sends an action to approval and verify supplies the approver
+    identity it grades against; G20 because verify supplies the revocation feed and says so in
+    a note rather than claiming anything about a document that is silent on it (§11.7).
     """
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (9, 9, 10)
+    assert (report.passed, report.applicable, report.not_applicable) == (10, 10, 10)
     text = report.to_text()
-    assert "9/9 declared guarantees pass." in text
+    assert "10/10 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider
     # for the first and its own approver identity for the second (§8.9, §11.7).
     assert "10 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19." in text
-    assert "10/10" not in text
+    # §2.1's rule, and the reason this line exists: **the not-applicable ten are not in the
+    # denominator.** Ten pass and ten are N/A, so a run that folded them in would report 20/20.
+    # It used to read `"10/10" not in text`, which said the same thing while the pass count was
+    # nine and says the opposite now that it is ten.
+    assert "20/20" not in text
 
 
 # --- an N/A reason must be a true statement about the configuration (§2.1) ----------------

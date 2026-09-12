@@ -218,6 +218,12 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 # importing it at module scope. The claims themselves are untyped JSON off somebody else's
 # wire, validated at the boundary before anything reaches a `Principal`.
 "src/ctrlrun/jwt_identity.py" = ["ANN401"]
+# SPEC-v0.8 §6.2. `urllib.request.build_opener` returns `OpenerDirector`, which is not exported
+# as a name this can annotate without importing a private module, and the feed's opener is the
+# same object `jwt_identity`'s is -- deliberately, because two copies of the no-redirect handler
+# would be two things to keep correct at the one input that decides which credentials are
+# refused. Same exemption, same reason.
+"src/ctrlrun/revocation.py" = ["ANN401"]
 # `verify` drives the kernel with values it synthesized from somebody's YAML: an argument is
 # `str | int | bool | None` by SPEC-v0.1 §2.3 and nothing narrower, and a fake executor's
 # return value has no type at all — the same reasoning that exempts `state.py`. N818: the

@@ -11,6 +11,48 @@ any change to one appears here.
 
 ### Added
 
+- **A credential revoked before its `exp` is refused** (`docs/SPEC-v0.8.md` §6). `jwt_identity.py`
+  used to say, in as many words, that *a verified token is valid until its `exp`* and that nothing
+  polls. Both sentences are gone.
+
+  ```python
+  from ctrlrun.revocation import FileRevocationFeed
+
+  JWTIdentityProvider(..., revocations=FileRevocationFeed(path, issuers=[ISSUER]))
+  ```
+
+  Security Event Tokens are consumed, from a file the operator's own transmitter writes or by RFC
+  8936 poll delivery. **Nothing subscribes and nothing introspects**: a subscription needs an
+  endpoint this project serves and an introspection call is a question it asks nobody. Consuming an
+  event is reading it.
+
+  **The match is against the token's own `iss`, `sub` and `jti`, never against
+  `Principal.agent`.** `agent` is whatever `agent_claim` names, which a deployment may set to
+  `client_id`, so matching an `iss_sub` identifier against it would compare two different things
+  and admit exactly the deployment the feature was bought for. The check runs inside the provider,
+  where the raw verified claims are still in hand, and nothing new is stored on `Principal`.
+
+  **Two things this closes less than it sounds, both stated wherever the feature is described.** A
+  revoked credential leaves a **log line and no receipt**: resolution happens before an action
+  exists, so there is no `action_id` to attribute a refusal to, where an *expired* credential
+  leaves a receipt. And a feed is worth what its source is worth: whoever can write the file can
+  refuse the operator's own agents, which is a denial of service against them and is fail-closed.
+  They cannot **admit** a principal the issuer revoked, because the feed is only ever consulted to
+  refuse. That asymmetry is the security property.
+
+  **`max_staleness` is the operator's call.** Unset means no bound, which is 0.7.0's availability.
+  Set, and every principal of a covered issuer is refused past it with `revocation_feed_stale`,
+  because "has this been revoked" is exactly the question a stale feed cannot answer. Configuring
+  it makes the feed's availability part of the deployment's, and a kernel choosing that for an
+  operator would be choosing their outage budget.
+
+  Behind `ctrlrun[identity]`, beside the provider it serves. `import ctrlrun` imports no part of
+  it. `ctrlrun verify` grades **G20** against a feed verify supplies, with a note saying so rather
+  than an `N/A` claiming something about a document that is silent on the subject.
+
+  No standards claim. RFC 8935, RFC 8936, RFC 9493 and CAEP are consumed as code, and the words
+  compatible, conformant, aligned and certified appear nowhere.
+
 - **Break-glass is a grant, and there is no flag** (`docs/SPEC-v0.8.md` §5). An incident needs
   authority nobody was granted in advance. The wrong answer is a setting: a setting leaves no
   record, expires never, cannot be revoked and cannot be narrowed. `authority.py` already has
