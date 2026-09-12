@@ -36,7 +36,7 @@ from ..receipt import (
     verify_chain,
 )
 from ..reporting import inspection_for, since_boundary, stats_document
-from ..state import RESOLUTIONS, SQLiteStateStore, StateStore
+from ..state import RESOLUTIONS, DelegationRecord, SQLiteStateStore, StateStore
 from .demo import run_demo
 
 #: Who the CLI records as the answer's author. Free text in v0.1 (SPEC-v0.1 §4.1).
@@ -931,27 +931,167 @@ def delegate(
 
 
 @main.command()
-@click.argument("delegation_id")
+@click.argument("delegation_id", required=False)
 @click.option("--by", "by", default=CLI_APPROVER, show_default=True, help="Who revoked it.")
+@click.option(
+    "--created-by",
+    "created_by",
+    default=None,
+    help="Revoke every delegation this principal created: AGENT or AGENT/USER.",
+)
+@click.option(
+    "--under",
+    "under",
+    default=None,
+    help="Revoke every delegation beneath this grant or delegation id, at any depth.",
+)
 @STORE_URL_OPTION
-def revoke(delegation_id: str, by: str, store_url: str | None) -> None:
+def revoke(
+    delegation_id: str | None,
+    by: str,
+    created_by: str | None,
+    under: str | None,
+    store_url: str | None,
+) -> None:
     """Revoke a delegation, and with it every delegation beneath it.
 
     Transitive by structure and not reversible: there is no `unrevoke`, because the operation
     whose safety matters is the one taken in a hurry (SPEC-v0.3 §5.7). Revoking an
     already-revoked delegation is idempotent and exits 0.
+
+    `--created-by` and `--under` are selectors over rows that already exist (SPEC-v0.8 §7).
+    Each match is revoked **exactly as one id is**: one revocation, one record, one event, in
+    turn, so a run that stops halfway leaves the rows it reached revoked and the rest untouched,
+    and a second run finishes. A selector that matches nothing exits non-zero (§7.5), because
+    during an incident a mistyped name that exits 0 reads as "done".
+
+    `--by` is unchanged and means what it has always meant: who performed the revocation.
     """
+    selected = _one_selector(delegation_id, created_by, under)
     try:
         control = _control_on(store_url)
-        before = control.store.get_delegation(delegation_id)
-        control.revoke(delegation_id, by=by)
+        if selected is None:
+            _revoke_one(control, str(delegation_id), by)
+            return
+        _revoke_selected(control, selected, by)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
+
+
+def _one_selector(
+    delegation_id: str | None, created_by: str | None, under: str | None
+) -> tuple[str, str] | None:
+    """`None` for a single id, or the one selector given, as `(kind, value)` (SPEC-v0.8 §7.2).
+
+    Two ways of naming what to revoke in one invocation is a command whose blast radius depends
+    on which the reader believes, so every combination is a usage error rather than a precedence
+    rule nobody would remember at 3am.
+    """
+    named = [name for name, value in (("--created-by", created_by), ("--under", under)) if value]
+    if len(named) > 1:
+        raise click.UsageError("--created-by and --under name different sets; give one of them")
+    if named and delegation_id is not None:
+        raise click.UsageError(
+            f"{named[0]} selects the rows to revoke, so a delegation id cannot be given as well"
+        )
+    if not named:
+        if delegation_id is None:
+            raise click.UsageError("give a delegation id, or --created-by PRINCIPAL, or --under ID")
+        return None
+    return ("--created-by", created_by) if created_by else ("--under", str(under))
+
+
+def _revoke_one(control: Control, delegation_id: str, by: str) -> None:
+    """One id, exactly as v0.3 §5.7 revoked it, and the shape a selector run repeats."""
+    before = control.store.get_delegation(delegation_id)
+    control.revoke(delegation_id, by=by)
     if before is not None and before.revoked_at is not None:
         click.echo(f"{delegation_id} was already revoked at {iso_timestamp(before.revoked_at)}")
         return
     click.echo(f"revoked {delegation_id} by {by}")
     click.echo("every delegation beneath it is denied from the next evaluation")
+
+
+def _revoke_selected(control: Control, selected: tuple[str, str], by: str) -> None:
+    """Every row the selector matches, one at a time (SPEC-v0.8 §7.3, §7.4)."""
+    kind, value = selected
+    rows = control.store.delegations(include_revoked=True)
+    matched = _created_by(rows, value) if kind == "--created-by" else _beneath(rows, value)
+    if not matched:
+        raise click.ClickException(
+            f"no delegation matched {kind} {value!r}; nothing was revoked. A selector that "
+            "matched nothing exits non-zero so a mistyped name does not read as a finished job"
+        )
+    already = [record for record in matched if record.is_revoked]
+    for record in matched:
+        if record.is_revoked:
+            continue
+        # One at a time, through the same call a single id takes: a bulk write would leave a
+        # killed run with rows nobody can account for, and there is no transaction over the set.
+        control.revoke(record.delegation_id, by=by)
+        click.echo(f"revoked {record.delegation_id} by {by}")
+    click.echo(
+        f"revoked {len(matched) - len(already)} of {len(matched)} matching "
+        f"{kind} {value}; {len(already)} already revoked"
+    )
+    click.echo("every delegation beneath them is denied from the next evaluation")
+
+
+def _created_by(rows: tuple[DelegationRecord, ...], value: str) -> list[DelegationRecord]:
+    """The rows this principal created: AGENT, or AGENT/USER (SPEC-v0.8 §7.3).
+
+    Split on the first '/', as `delegate --as` splits, and refusing the same thing it refuses:
+    a name with two separators is ambiguous, and a selector nobody can read is one that revokes
+    the wrong subtree during an incident.
+    """
+    agent, separator, user = value.partition("/")
+    if not agent:
+        raise click.UsageError("--created-by needs an agent name: AGENT or AGENT/USER")
+    if separator and not user:
+        # `--created-by agent/` is a typed-and-lost user, not "any user": reading it as the
+        # latter would revoke every row that agent created, which is the widest reading of an
+        # ambiguous command during an incident. Refused rather than guessed.
+        raise click.UsageError(
+            f"--created-by {value!r} ends with '/': write AGENT for every user, or AGENT/USER "
+            "for one"
+        )
+    if "/" in user:
+        raise click.UsageError(
+            f"--created-by {value!r} has more than one '/': write AGENT or AGENT/USER, and note "
+            "that an agent name containing '/' cannot be written, as 'delegate --as' says"
+        )
+    return [
+        record
+        for record in rows
+        if record.created_by_agent == agent and (not separator or record.created_by_user == user)
+    ]
+
+
+def _beneath(rows: tuple[DelegationRecord, ...], parent_id: str) -> list[DelegationRecord]:
+    """Every row whose parent chain reaches `parent_id`, at any depth (SPEC-v0.8 §7.3).
+
+    Strictly beneath: a row is not under itself, so `--under <a delegation>` revokes that
+    delegation's descendants and leaves it alone, which is what the words say.
+
+    The walk is bounded by the rows it has already seen, because a chain edited into a cycle
+    with `sqlite3` and a text editor is reachable (SPEC-v0.3 §5.5 makes the same point about
+    evaluation) and an incident command must not hang on one.
+    """
+    by_id = {record.delegation_id: record for record in rows}
+    matched = []
+    for record in rows:
+        seen: set[str] = {record.delegation_id}
+        current = record.parent_id
+        while current not in seen:
+            if current == parent_id:
+                matched.append(record)
+                break
+            seen.add(current)
+            parent = by_id.get(current)
+            if parent is None:
+                break
+            current = parent.parent_id
+    return matched
 
 
 def _delegation_dict(delegation: Delegation) -> dict[str, Any]:

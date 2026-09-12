@@ -1931,6 +1931,47 @@ arguments are written down as they are decided, not afterwards.
 
 ### 14.1 Item 1: revocation by selector
 
+**A killed run can leave a revoked row with no event, and that is v0.3 behaviour rather than
+anything the selector adds.** `Control.revoke` writes the row and then appends the event: two
+writes, no transaction over the pair, and `StateStore` is frozen (`v0.6 §9.2`). A `SIGKILL`
+between them leaves the delegation revoked, correctly and durably, with no `DELEGATION_REVOKED`
+behind it. A selector run does not create the window; it makes it easy to land in, because it
+takes the same two writes two hundred times instead of once. T276 asserts the bound it can
+assert, that **at most one** row is missing its event, and the first draft of that test asserted
+equality, which is stricter than the code has ever promised. Closing it needs the row and the
+event in one store call, which is a store method, which is the maintainer's call and not an
+item's.
+
+**Two guards were green under mutation, and both were subsumed rather than absent.** The
+mutation table caught them, which is what it is for.
+
+- Removing the refusal of `--created-by a/b/c` left T278 green, because `a/b/c` then parses as
+  the agent `a` and the user `b/c`, matches nothing, and exits non-zero through §7.5's
+  empty-selector error instead. The test asserted an exit code where it had to assert a message.
+- Removing the skip over already-revoked rows left T275 green, because `Control.revoke` is
+  idempotent and appends no second event whatever the loop does. What the skip is actually for
+  is the terminal: without it a rerun prints `revoked <id>` for two hundred rows it did not
+  revoke. The test now asserts that line's absence, which is the only thing that makes the skip
+  load-bearing.
+
+Both are `CONTRIBUTING.md`'s first shape of a false green, and both would have read as covered.
+
+**`--under` is strictly beneath.** A row is not under itself, so `--under <a delegation id>`
+revokes that delegation's descendants and leaves the delegation alone. The alternative reading
+costs nothing to implement and is worse to use: an operator who wants the row as well already has
+`ctrlrun revoke <id>`, and one who wanted only the subtree would have no way back.
+
+**Polling the store to trigger the kill made T276 pass for the wrong reason.** Opening a
+`StateStore` per poll costs more than the two hundred revocations it is watching, so the kill
+landed after the child had finished and the test asserted its window had been opened when it had
+not. It polls the JSONL event file instead, which is a read of a file the command is already
+appending to.
+
+**No new `StateStore` method, and none was tempting.** `delegations(include_revoked=True)` and
+`revoke_delegation` already exist, the filter is twenty lines above the store, and the subtree
+walk is bounded by the rows it has already seen because a cycle is reachable with `sqlite3` and a
+text editor, which is the point `v0.3 §5.5` makes about evaluation.
+
 ### 14.2 Item 2: the approver is a principal
 
 ### 14.3 Item 3: entitlement from the control registry
