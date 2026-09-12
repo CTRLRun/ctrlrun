@@ -42,6 +42,7 @@ from .policy import (
     parse_conditions,
     reject_nested_mode,
     require_v3,
+    require_v7,
     strict_load,
 )
 from .policy import _equal as _type_strict_equal
@@ -50,6 +51,11 @@ from .state import DelegationRecord, StateStore
 #: SPEC-v0.3 §4.4 — an action name is dotted (`v0.1 §2.1`) and a resource is `type:id`.
 ACTION_SEPARATOR: Final = "."
 RESOURCE_SEPARATOR: Final = ":"
+#: SPEC-v0.9 §6.2 — segment-bounded like a resource, and measured rather than assumed: with a
+#: separator, `invoice-run-*` matches `invoice-run-7` and does **not** reach a nested
+#: `invoice-run-7:step-2`; without one it reaches both. The fail-closed reading is the one where
+#: a pattern an operator wrote for a run does not silently acquire that run's sub-tasks.
+TASK_SEPARATOR: Final = ":"
 
 #: The only spelling for "everything", and one token long so a review can grep for it.
 DEEP_WILDCARD: Final = "**"
@@ -61,6 +67,13 @@ AUTHORITY_ESCALATION: Final = "authority_escalation"
 AUTHORITY_REVOKED: Final = "authority_revoked"
 AUTHORITY_EXPIRED: Final = "authority_expired"
 AUTHORITY_CONSTRAINT: Final = "authority_constraint"
+#: SPEC-v0.9 §6.2 — a grant that names tasks, evaluated against a task it does not name or
+#: against an action carrying none. Its own reason rather than a silent non-match: the
+#: `environments` precedent would put this in `matches_shape`, where a task-bound grant simply
+#: stops matching and the operator gets `no_authority`, indistinguishable from having no grant
+#: at all. `SPEC-v0.8 §5.2` records what that costs: a refusal that does not name its dimension
+#: is the least diagnosable one in the file. G24 asserts this value.
+AUTHORITY_TASK: Final = "authority_task"
 NO_AUTHORITY: Final = "no_authority"
 
 #: §4.3 — fixed rather than short-circuited, so the evidence for one configuration does not
@@ -73,6 +86,11 @@ REASON_PRECEDENCE: Final = (
     AUTHORITY_ESCALATION,
     AUTHORITY_REVOKED,
     AUTHORITY_EXPIRED,
+    # SPEC-v0.9 §6.2 — above `authority_constraint` on this section's own rule, that the reason
+    # should name what will still be wrong after the caller changes the request. A task is a
+    # property of the run and a constraint a property of one call's arguments: change the
+    # arguments and the task is still wrong.
+    AUTHORITY_TASK,
     AUTHORITY_CONSTRAINT,
     NO_AUTHORITY,
 )
@@ -123,7 +141,19 @@ CONTAINMENT: Final = "containment"
 
 #: §5.4's rows, in the order they are checked. Each is separately testable and separately
 #: mutable; T76 breaks each one alone.
-DIMENSIONS: Final = ("subject", "actions", "resources", "constraints", "environments", "expires_at")
+DIMENSIONS: Final = (
+    "subject",
+    "actions",
+    "resources",
+    "constraints",
+    "environments",
+    "expires_at",
+    # SPEC-v0.9 §8.0 — exported, iterated by `verify`'s G9 and printed as `len(DIMENSIONS)`, and
+    # asserted by exact list equality in `tests/test_verify_authority.py`. Growing it without
+    # `_narrowed` carrying the field raises `VerifyInternalError`; adding the containment row
+    # without growing it reports "6 of 6" and exercises neither, which is the silent failure.
+    "tasks",
+)
 
 #: §5.4 — how a child operand must compare with its parent's, per operator. `neq` is equality
 #: rather than the superset a deny-list would need: `v0.1 §3.2` has no deny-list operator and a
@@ -155,6 +185,10 @@ _GRANT_KEYS: Final = frozenset(
         "environments",
         "expires_at",
         "delegable",
+        # SPEC-v0.9 §6.1, and a `ctrlrun.policy/v7` key: an older reader meeting it would grant
+        # the action on every task, so `policy.py` refuses it in a `v6` document rather than
+        # ignoring it (§10.1).
+        "tasks",
     }
 )
 _SUBJECT_KEYS: Final = frozenset({"agent", "user"})
@@ -333,6 +367,10 @@ class Grant:
     environments: tuple[str, ...] | None = None
     expires_at: datetime | None = None
     delegable: bool = False
+    #: SPEC-v0.9 §6.1 — the unit of work this grant is for. `None` grants any task (§6.5), which
+    #: is `v0.3 §4.2`'s rule for `resources` and the reason every existing grant upgrades
+    #: untouched. A child that omits it under a parent that names it is rejected (§6.2).
+    tasks: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # An empty id is legal only on the `Control.delegate` path and only until the call
@@ -368,6 +406,15 @@ class Grant:
                         f"grant {self.id!r}: an environment must be a non-empty string, "
                         f"got {name!r}"
                     )
+        if self.tasks is not None:
+            object.__setattr__(self, "tasks", tuple(self.tasks))
+            if not self.tasks:
+                raise InvalidArgument(
+                    f"grant {self.id!r}: 'tasks' must be a non-empty list, or absent — "
+                    "an absent 'tasks' is what grants any task (SPEC-v0.9 §6.5)"
+                )
+            for pattern in self.tasks:
+                validate_pattern(pattern, separator=TASK_SEPARATOR, where=f"grant {self.id!r} task")
         for key, condition in self.constraints.items():
             if not isinstance(condition, Condition):
                 raise InvalidArgument(
@@ -423,6 +470,20 @@ class Grant:
         # closed list, and a glob over it buys nothing but a way to typo `prod*` into
         # matching `production-canary`.
         return self.environments is None or action.environment in self.environments
+
+    def task_holds(self, task: str | None) -> bool:
+        """Is this grant good for the task the caller named? (SPEC-v0.9 §6.4, §6.5.)
+
+        A grant naming no task holds for any, including none: `v0.3 §4.2`'s rule for an absent
+        `resources`, and §6.5 is where the asymmetry with §5.4 is argued. A grant naming tasks
+        refuses a caller who named none, because a dimension anybody may decline to supply is
+        one an attacker may decline to supply.
+        """
+        if self.tasks is None:
+            return True
+        if task is None:
+            return False
+        return any(matches(pattern, task, separator=TASK_SEPARATOR) for pattern in self.tasks)
 
     def constraints_hold(self, action: Action) -> bool:
         """All constraints, ANDed. An absent argument makes one false and logs (§4.5)."""
@@ -534,6 +595,12 @@ def grant_to_json(grant: Grant) -> str:
         "environments": None if grant.environments is None else list(grant.environments),
         "expires_at": None if grant.expires_at is None else grant.expires_at.isoformat(),
         "delegable": grant.delegable,
+        # SPEC-v0.9 §6. A delegation is stored as this JSON and read back through
+        # `grant_from_json` on **every** evaluation (§5.6), so a dimension missing here reads
+        # back as `None`: the child would be unbound by task while its parent named one, and
+        # §5.6's re-check would then refuse it `authority_escalation` on `tasks` forever. The
+        # round trip is the containment, not a convenience.
+        "tasks": None if grant.tasks is None else list(grant.tasks),
     }
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -577,6 +644,7 @@ def grant_from_json(text: str, *, delegation_id: str) -> Grant:
             environments=_optional_tuple(document.get("environments"), delegation_id),
             expires_at=None if expires_at is None else datetime.fromisoformat(str(expires_at)),
             delegable=bool(document.get("delegable", False)),
+            tasks=_optional_tuple(document.get("tasks"), delegation_id),
         )
     except (InvalidArgument, PolicyError, TypeError, ValueError) as exc:
         raise _UnreadableError(delegation_id, str(exc)) from exc
@@ -647,6 +715,14 @@ def contained_dimension(parent: Grant, child: Grant) -> str | None:
         child.expires_at is None or child.expires_at > parent.expires_at
     ):
         return "expires_at"
+    # SPEC-v0.9 §6.2 — the same shape as `resources`: a parent that constrains the dimension is
+    # not discharged by a child that omits it (`v0.3 §5.4`), and a parent that names none
+    # constrains nothing here.
+    if parent.tasks is not None and (
+        child.tasks is None
+        or not _patterns_contained(parent.tasks, child.tasks, separator=TASK_SEPARATOR)
+    ):
+        return "tasks"
     return None
 
 
@@ -881,7 +957,15 @@ class Authority:
             )
         return authority
 
-    def evaluate(self, action: Action, *, now: datetime, store: StateStore) -> AuthorityResult:
+    def evaluate(
+        self,
+        action: Action,
+        *,
+        now: datetime,
+        store: StateStore,
+        task: str | None = None,
+        evaluate_task: bool = True,
+    ) -> AuthorityResult:
         """Does any grant cover this action? (SPEC-v0.3 §4.3.)
 
         Passes iff at least one grant matches subject, action name, resource and environment,
@@ -894,6 +978,13 @@ class Authority:
         evaluation and that walk reads the store. An optional one would give an implementation
         a fail-open reading in which a revoked delegation evaluates as valid, and "a chain of
         any depth is cut by one write" would stop being true.
+
+        **`task` is SPEC-v0.9 §6, and this signature amends the one `v0.3 §11` froze** (§10.3).
+        It defaults to `None`, which a grant naming no task authorises (§6.5) and a grant naming
+        one refuses (§6.4). `evaluate_task=False` is §6.3.2's third mode, for `Control.resume`
+        and for a lease extension: the action is rehydrated from the store and carries no task,
+        so evaluating the dimension there would deny every resumed leg, on what
+        `control.py` calls the only receipt an MCP multi round-trip ever gets.
         """
         passed: list[AuthorityResult] = []
         failed: dict[str, list[AuthorityResult]] = {}
@@ -922,6 +1013,8 @@ class Authority:
                 outcomes.append(AuthorityResult(False, AUTHORITY_EXPIRED))
             if not grant.constraints_hold(action):
                 outcomes.append(AuthorityResult(False, AUTHORITY_CONSTRAINT))
+            if evaluate_task and not grant.task_holds(task):
+                outcomes.append(AuthorityResult(False, AUTHORITY_TASK))
             named = None if delegation is None else grant_id
             if outcomes:
                 # §4.3 — every reason a grant failed for, collected rather than
@@ -1433,6 +1526,9 @@ def _canonical_grant(grant: Grant) -> PlainValue:
         "expires_at": None if grant.expires_at is None else grant.expires_at.isoformat(),
         "resources": None if grant.resources is None else list(grant.resources),
         "subject": {"agent": grant.subject.agent, "user": grant.subject.user},
+        # SPEC-v0.9 §6.7 — a dimension outside the hash is one an operator widens without the
+        # hash moving, which is `SPEC-v0.8 §5.2`'s reason for `max_ttl` in this same field list.
+        "tasks": None if grant.tasks is None else list(grant.tasks),
     }
 
 
@@ -1473,6 +1569,7 @@ def _optional_from_yaml(
     # as well as in `Policy`, because §8.3's `--authority` document is never read by the
     # policy loader at all.
     require_v3(document, str(schema), source)
+    require_v7(document, str(schema), source)
     return _from_section(document[_AUTHORITY_KEY], source, standalone=standalone)
 
 
@@ -1678,6 +1775,7 @@ def _parse_grant(entry: object, where: str, *, unassigned: bool = False) -> Gran
             ),
             expires_at=_parse_expires_at(entry, where),
             delegable=delegable,
+            tasks=(_parse_patterns(entry["tasks"], "tasks", where) if "tasks" in entry else None),
         )
     except InvalidArgument as exc:
         # The model refuses what the loader refuses (§4.8), so the loader delegates the

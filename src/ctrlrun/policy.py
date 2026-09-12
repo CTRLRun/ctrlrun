@@ -60,6 +60,11 @@ POLICY_SCHEMA_V5: Final = "ctrlrun.policy/v5"
 #: ignored `approver_role` would run a deployment believing nobody was gated.
 POLICY_SCHEMA_V6: Final = "ctrlrun.policy/v6"
 
+#: SPEC-v0.9 §10.1: `v7` adds `tasks` on a grant (item 1) and `budgets` on one (item 3). The
+#: version moves once, here, with item 1, and item 3 fills it under the version already in
+#: place: two branches racing a schema bump is how a catalogue ends up with a stub row.
+POLICY_SCHEMA_V7: Final = "ctrlrun.policy/v7"
+
 #: All of them, newest last, for the message an unknown schema produces. **In version order**,
 #: which `_at_least` reads: a version added out of order would make every gate below lie.
 SUPPORTED_SCHEMAS: Final = (
@@ -69,6 +74,7 @@ SUPPORTED_SCHEMAS: Final = (
     POLICY_SCHEMA_V4,
     POLICY_SCHEMA_V5,
     POLICY_SCHEMA_V6,
+    POLICY_SCHEMA_V7,
 )
 
 
@@ -792,6 +798,7 @@ class Policy:
             )
         mode = _parse_mode(document, source)
         require_v4(document, str(schema), source)
+        require_v7(document, str(schema), source)
         version = document.get("version")
         if "version" in document and (not isinstance(version, str) or not version.strip()):
             raise PolicyError(
@@ -1149,6 +1156,50 @@ def require_v4(document: Mapping[Any, Any], schema: str, source: str) -> None:
                 f"{source}: {key!r} needs 'schema: {POLICY_SCHEMA_V4}'; this document "
                 f"declares {schema!r}, and {consequence}"
             )
+
+
+#: SPEC-v0.9 §10.1 — the grant-entry keys that need `ctrlrun.policy/v7`, and what an older
+#: reader would do with each. Both are authorization dimensions, so both fail the same way: an
+#: older reader ignores the key and grants more than the document says.
+_V7_GRANT_KEYS: Final[Mapping[str, str]] = {
+    "tasks": (
+        "an older reader would ignore the binding and authorise the grant on every task, which "
+        "is the whole of what the key restricts"
+    ),
+}
+
+
+def require_v7(document: Mapping[Any, Any], schema: str, source: str) -> None:
+    """Refuse a `ctrlrun.policy/v7` grant key in an older document (SPEC-v0.9 §10.1).
+
+    `require_v3`'s shape, two versions up, and shared with `authority.py` for the same reason:
+    `SPEC-v0.3 §8.3`'s `--authority` file carries `schema` and `authority` and nothing else, so
+    a gate that lived only in the policy loader would not run on that path at all. The keys are
+    one level deeper than v3's and v4's, hence the walk rather than a membership test.
+    """
+    if _at_least(schema, POLICY_SCHEMA_V7):
+        return
+    section = document.get("authority")
+    if not isinstance(section, Mapping):
+        return
+    entries: list[Any] = []
+    grants = section.get("grants")
+    if isinstance(grants, list):
+        entries.extend(grants)
+    elif isinstance(grants, Mapping):
+        entries.extend(grants.values())
+    envelopes = section.get("break_glass")
+    if isinstance(envelopes, Mapping):
+        entries.extend(envelopes.values())
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        for key, consequence in _V7_GRANT_KEYS.items():
+            if key in entry:
+                raise PolicyError(
+                    f"{source}: {key!r} on a grant needs 'schema: {POLICY_SCHEMA_V7}'; this "
+                    f"document declares {schema!r}, and {consequence}"
+                )
 
 
 def _parse_mode(document: Mapping[Any, Any], source: str) -> Literal["observe", "enforce"]:

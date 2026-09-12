@@ -219,6 +219,11 @@ def _delegable_child(parent) -> str:
         }
     if parent.expires_at is not None:
         document["expires_at"] = parent.expires_at.isoformat()
+    if parent.tasks is not None:
+        # SPEC-v0.9 §6.2 — one more dimension under the same structural rule this docstring
+        # states. A helper that restated five of six would silently stop being "every dimension
+        # the parent constrains" the moment the shipped example gained the sixth.
+        document["tasks"] = list(parent.tasks)
     return _yaml.safe_dump(document)
 
 

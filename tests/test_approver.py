@@ -245,7 +245,7 @@ def test_T283_a_resolving_surface_records_the_principal_and_no_claim_value(store
 
 
 def test_T284_the_receipt_carries_the_approvers_and_keeps_the_string(store, clock):
-    """§2.5, §11.3: `ctrlrun.receipt/v5`, and `approver` still says what 0.7.0 said."""
+    """§2.5, §11.3: the current schema, and `approver` still says what 0.7.0 said."""
     control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
     action = _action(control)
     request_id = _requested(control, action)
@@ -253,8 +253,9 @@ def test_T284_the_receipt_carries_the_approvers_and_keeps_the_string(store, cloc
 
     receipt = _present(control, action, request_id)
 
-    assert receipt.schema == "ctrlrun.receipt/v5"
-    assert RECEIPT_SCHEMA == "ctrlrun.receipt/v5"
+    # Derived, not literal: SPEC-v0.9 §10.1 bumps this to v6 and a hardcoded label here would
+    # make a schema bump look like a behaviour change in the approver path.
+    assert receipt.schema == RECEIPT_SCHEMA
     assert receipt.approver == "mcp-operator:bob"
     assert [who.agent for who in receipt.approvers] == ["human:bob"]
     document = receipt.to_dict()
@@ -827,7 +828,7 @@ def test_T293_a_chain_spanning_two_receipt_schemas_verifies(store, clock):
 
     written = [receipt for receipt in store.receipts() if receipt.action_id == action.action_id]
     document = written[-1].to_dict()
-    assert document["schema"] == "ctrlrun.receipt/v5"
+    assert document["schema"] == RECEIPT_SCHEMA
     assert document["approvers"], "a v5 document carries what a v5 writer wrote"
 
     older = dict(document, schema="ctrlrun.receipt/v4")
@@ -843,7 +844,7 @@ def test_T294_the_catalogue_is_v4_and_carries_G18():
     """§11.4: the version moves once, here, and G18 lands with it."""
     from ctrlrun.verify.guarantees import CATALOGUE, GUARANTEES
 
-    assert CATALOGUE == "ctrlrun.guarantees/v4"
+    assert CATALOGUE == "ctrlrun.guarantees/v5"
     identifiers = [guarantee.id for guarantee in GUARANTEES]
     assert "G18" in identifiers
     assert identifiers == sorted(identifiers, key=lambda name: int(name[1:]))

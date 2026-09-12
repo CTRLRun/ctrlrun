@@ -11,7 +11,7 @@
 # The names here are illustrative. Replace every one before use: a grant names a real
 # principal in a real organization, and adopting somebody else's is how a template becomes an
 # incident.
-schema: ctrlrun.policy/v6
+schema: ctrlrun.policy/v7
 
 authority:
   # A chain may be at most three links long. Depth is recomputed on every evaluation by
@@ -35,6 +35,11 @@ authority:
       environments: ["production"]
       delegable: true
       expires_at: "2027-01-01T00:00:00Z"
+      # SPEC-v0.9 §6. The unit of work this authority is for. A grant that omits `tasks:`
+      # authorises any task (§6.5), which is what every grant below does and why they are
+      # unchanged; naming one here binds this authority, and every delegation beneath it, to
+      # the refund runs it was granted for. `ctrlrun verify` grades G24 against this grant.
+      tasks: ["refund-run:*"]
 
     # 2. A service account that reconciles, and may never move money. It holds no `delegable`
     # key at all, which is the default and means it cannot create a delegation.
