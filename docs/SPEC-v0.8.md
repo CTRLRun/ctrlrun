@@ -286,6 +286,14 @@ refusal raised before `_take` never reaches either, so the row stays `granted` f
 lapse leaves no event. §2.4's "nothing is written by a refusal" is about the approver refusals and
 was never about this write, which `v0.1 §4.2 A3` requires.
 
+**One verdict, from one clock read.** The gate is `check_consumable(record, approval_id,
+action_hash, self._clock())` with its `record` tested and its `refusal` and `expire` **discarded**:
+the pure function `v0.1 §4.2` froze already decides exactly this, in exactly this order, and
+`control.py` already imports and calls it. So there is no second implementation and no new clock
+read. The verdict is computed **once** and reused by `_recheck`'s existing precondition-path raise:
+two reads a tick apart could produce a gate that says "not lapsed" followed by a raise that says
+`expired`, which is the divergence shape `v0.7 §12.5` reversed.
+
 **And the clock in this gate only ever defers.** Where this `Control`'s clock says the grant has
 lapsed, the approver checks are **skipped** and `_take` reports the lapse exactly as 0.7.0 does,
 with its write and its event. The clock is never used to *refuse*: the store still decides, and may
@@ -628,7 +636,8 @@ which is the failure `CONTRIBUTING.md` names and which v0.7's precondition work 
 against from its first sentence.
 
 **Two defences, two tests.** `CONTRIBUTING.md`'s first shape of a false green is a guard that can
-only fire where a later one would, with the same observable result, so §10 gives the grant-side refusal and the consume-side
+only fire where a later one would, with the same observable result, so §10 gives the grant-side
+refusal and the consume-side
 refusal separate tests, and the consume-side test presents a row whose `entitled` a store wrote
 without checking, which the grant-side refusal cannot reach.
 
@@ -860,9 +869,11 @@ Four things about `authority.py` decide the shape, and each was read rather than
    | `_check_chain`'s rule 6, over `walk.ancestors`, on every evaluation | does the grant authorise anything | the grant is created and then authorises nothing, refused `authority_escalation` with no dimension named, which is the least diagnosable refusal in the file |
 
    **An envelope ancestor counts as delegable at all three**, and "counts as" is a rule applied at
-   the read sites, **not** a `delegable=True` written onto the parsed `Grant`: `_canonical_grant`
-   renders that field, so writing it would put a key in the policy hash that the operator's
-   document does not contain, and §5.2 makes that hash load-bearing. For the same reason
+   the read sites, **not** a `delegable=True` written onto the parsed `Grant`. Envelopes render
+   through `_canonical_grant` like any grant, and its closed field list always emits `delegable`,
+   so an envelope hashes with `delegable: false`, the parser default every grant omitting the key
+   already hashes as. That is the point: the rendered value comes from the document and never from
+   the runtime rule, so the hash cannot move because of a read-site decision. For the same reason
    **`delegable:` and `expires_at:` are refused keys on an envelope entry**, naming them, because
    the parser accepts both today and an operator writing `delegable: true` would then owe an
    `expires_at` an envelope does not carry. T326b asserts evaluation; T337 asserts the second
@@ -1558,9 +1569,10 @@ forbids (the third).
 - **T331:** the walk resolves a break-glass delegation's root out of `envelopes`, and a delegation
   naming an unknown envelope is `unknown_parent` as any unknown parent is.
 - **T332:** the policy hash covers the envelope, `max_ttl` included: widening `max_ttl` moves
-  `policy_hash`, and the test pins that it does. The rendered form carries **no `delegable` key**,
-  because "counts as delegable" is a rule at the read sites and not a value written onto the grant
-  (§5.2 point 4).
+  `policy_hash`, and the test pins that it does. It also pins that the envelope renders
+  `delegable: false`, the parser default, **and that the read-site rule of §5.2 point 4 does not
+  move it**: a deployment where break-glass grants evaluate correctly hashes identically to one
+  where the rule is absent, which is what keeps the hash a statement about the document.
 - **T332b:** an envelope entry declaring `delegable:` or `expires_at:` is refused at load, naming
   the key; an id in both `grants:` and `break_glass:` is refused, naming both; and a **standalone
   authority document declaring `break_glass:` at all** is refused, naming the block and saying that
@@ -1748,7 +1760,8 @@ type, no new event type, no new approval provider and no new sink.
   residual stated.** `ctrlrun.approval._granting_principal` (§2.5), because a public one would be
   an unauthenticated way to assert a verified approver, which is `trust_approver` spelled as a
   context manager; and `ctrlrun.control._policy_change_in_flight` (§8.2.1), because
-  `Control.execute` carries no channel distinguishing one in-process caller from another. Neither is exported, and neither is claimed to stop an application that
+  `Control.execute` carries no channel distinguishing one in-process caller from another. Neither
+  is exported, and neither is claimed to stop an application that
   calls a private interface: §2.5.1 states that residual once, and §8.2.1 points at it rather than
   claiming a refusal it cannot deliver.
 - **No change to the v0.5 adapter contract.** `ApprovalAnswer` keeps its shape (§2.6).
