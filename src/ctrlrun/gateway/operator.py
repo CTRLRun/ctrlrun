@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from ..action import Principal
-from ..approval import ApprovalRecord, ApprovalStatus
+from ..approval import ApprovalRecord, ApprovalStatus, _granting_principal
 from ..control import Control
 from ..effect import RESOLVED_BY_HUMAN, EffectState
 from ..errors import CTRLRunError, IdentityError, InvalidArgument
@@ -764,12 +764,12 @@ class OperatorServer:
     ) -> dict[str, Any]:
         who = self._attribution(principal)
         if tool.name == "approve":
-            return self._approve(str(arguments["request_id"]), who)
+            return self._approve(str(arguments["request_id"]), who, principal)
         if tool.name == "deny":
-            return self._deny(str(arguments["request_id"]), who)
+            return self._deny(str(arguments["request_id"]), who, principal)
         return self._resolve_effect(arguments, who)
 
-    def _approve(self, request_id: str, who: str) -> dict[str, Any]:
+    def _approve(self, request_id: str, who: str, principal: Principal) -> dict[str, Any]:
         """The two calls `ctrlrun approve` makes, in the same order (§4.5).
 
         The record's `action_hash` is whatever was stored when the request was created (`v0.1
@@ -779,7 +779,13 @@ class OperatorServer:
         """
         store = self.store
         record = store.get_approval(request_id)
-        approval = store.grant_approval(request_id, who)
+        # SPEC-v0.8 §2.6: **this server is the surface that can do this**, and until now it
+        # resolved a principal for every request and then discarded it into the string `who`.
+        # The principal its own provider verified is recorded beside that string, so an
+        # approval granted here is consumable in a deployment that checks (§2.7). It is recorded
+        # whether or not the deployment checks, because it is true either way.
+        with _granting_principal(principal):
+            approval = store.grant_approval(request_id, who)
         # `grant_approval` refuses an unknown id (`v0.1 §4.1`, `check_answerable`) and nothing
         # deletes an approval row, so the record exists by here. This is an invariant check and
         # not a guard against a caller: the previous spelling, `if record is not None:`, was a
@@ -808,10 +814,11 @@ class OperatorServer:
             "expires_at": iso_timestamp(approval.expires_at),
         }
 
-    def _deny(self, request_id: str, who: str) -> dict[str, Any]:
+    def _deny(self, request_id: str, who: str, principal: Principal) -> dict[str, Any]:
         store = self.store
         record = store.get_approval(request_id)
-        store.deny_approval(request_id, who)
+        with _granting_principal(principal):
+            store.deny_approval(request_id, who)
         if record is None:  # pragma: no cover - deny_approval refused an unknown id above
             raise _Refused(
                 _INTERNAL_ERROR,

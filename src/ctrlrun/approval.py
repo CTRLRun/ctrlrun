@@ -9,6 +9,7 @@ owns the models, the reason vocabulary, and the two providers that ask a human.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -19,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Protocol, runtime_checkable
 
-from .action import Action, canonical_bytes
+from .action import Action, Principal, canonical_bytes
 from .errors import (
     ActionDenied,
     ApprovalMismatch,
@@ -27,6 +28,9 @@ from .errors import (
     CTRLRunError,
     InvalidArgument,
 )
+from .identity import IdentityContext, IdentityProvider, StaticIdentityProvider
+
+_LOG = logging.getLogger("ctrlrun")
 
 #: SPEC-v0.1 §4.1 — an approval request lives for fifteen minutes unless told otherwise.
 DEFAULT_APPROVAL_TTL: Final = timedelta(minutes=15)
@@ -74,6 +78,166 @@ class ApprovalStatus(StrEnum):
     DENIED = "denied"
     EXPIRED = "expired"
     CONSUMED = "consumed"
+
+
+#: SPEC-v0.8 §2.7, §4.1: the reasons an approver refusal carries. Values of the existing
+#: `ApprovalMismatch.reason` field, because four refusals sharing a type is why every test
+#: asserts the reason and never the type alone.
+APPROVER_UNVERIFIED: Final = "approver_unverified"
+APPROVER_IS_REQUESTER: Final = "approver_is_requester"
+
+
+@dataclass(frozen=True)
+class VerifiedApprover:
+    """Who answered, as the surface that took the answer verified them (SPEC-v0.8 §2.5).
+
+    **No claim value is here and none ever will be.** `v0.3 §2.4`'s rule is that evidence
+    carries claim *names* where values are withheld, and what an entitlement decision means is
+    *which control this approver satisfied*, which is what `entitled` says. A row holding the
+    role value would put an identity provider's payload in an evidence table for no gain.
+
+    `entitled` is filled by item 3 and is empty until then.
+    """
+
+    agent: str
+    user: str | None
+    issuer: str | None
+    granted_at: datetime
+    entitled: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.agent:
+            raise InvalidArgument("a verified approver must carry a non-empty agent")
+        _require_aware(self.granted_at, "verified approver granted_at")
+        # **`str` is a `Sequence`, and that is the whole of this check.** `tuple("abc")` is
+        # `("a", "b", "c")`, so a corrupted column holding a bare string became three control
+        # ids that entitle nothing and refuse nothing, and `_approvers_from_json`'s promise to
+        # raise on a corrupted row was quietly false. Same hazard §3.4 states for the roles
+        # claim, in a second place.
+        # Read as `object`, because the declared type is what a *caller* promises and this value
+        # arrives from a JSON column: mypy is right that a `tuple[str, ...]` cannot be a `str`,
+        # and a corrupted row is exactly the case where the declaration is not true.
+        given: object = self.entitled
+        if isinstance(given, str | bytes) or not isinstance(given, Iterable):
+            raise InvalidArgument(
+                f"a verified approver's 'entitled' must be a list of control ids, got "
+                f"{type(given).__name__}"
+            )
+        entitled = tuple(given)
+        if not all(isinstance(item, str) and item for item in entitled):
+            raise InvalidArgument(
+                "a verified approver's 'entitled' must hold non-empty control ids"
+            )
+        object.__setattr__(self, "entitled", entitled)
+
+    @property
+    def principal(self) -> tuple[str, str | None]:
+        """What `§4.1` compares: agent and user, and nothing else."""
+        return (self.agent, self.user)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "user": self.user,
+            "issuer": self.issuer,
+            "entitled": list(self.entitled),
+            "granted_at": self.granted_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]) -> VerifiedApprover:
+        return cls(
+            agent=str(document["agent"]),
+            user=document.get("user"),
+            issuer=document.get("issuer"),
+            granted_at=datetime.fromisoformat(str(document["granted_at"])),
+            entitled=tuple(document.get("entitled") or ()),
+        )
+
+
+@dataclass(frozen=True)
+class ApproverIdentity:
+    """How a deployment verifies who answered an approval (SPEC-v0.8 §2.3).
+
+    **Opt in, then fail closed.** A `Control` built without one behaves exactly as 0.7.0 did;
+    one built with it refuses any approval whose row carries no `VerifiedApprover`, wherever
+    that approval came from and whatever the store did with the column.
+
+    A second instance of `v0.3`'s `IdentityProvider` and never the agent's: the agent's provider
+    reads what a proxy set for the agent, and a deployment where one object answers both doors
+    is one where the agent's own token can grant the agent's own approvals.
+
+    `roles_claim` names the claim an issuer puts roles in. It is item 3's, and nothing reads it
+    yet; it lives here because a provider without it cannot answer §3, so a deployment that sets
+    one and forgets the other would have a silent half-check.
+    """
+
+    provider: IdentityProvider
+    roles_claim: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.roles_claim is not None and not self.roles_claim.strip():
+            raise InvalidArgument("roles_claim must be a non-empty string or None")
+        if isinstance(self.provider, StaticIdentityProvider):
+            # §2.3: a warning and not a refusal: a single-operator deployment where the shell
+            # genuinely is the human is real, and the record it produces is true. What is not
+            # true is that such a record distinguishes anybody, and an operator who has not
+            # thought about that should read it here rather than discover it in an audit.
+            _LOG.warning(
+                "the approver identity uses StaticIdentityProvider, which answers with one "
+                "name for every request: every approval it verifies will carry an identical "
+                "approver, and only self-approval can still be told apart (SPEC-v0.8 §2.3)"
+            )
+
+    def resolve(self, context: IdentityContext) -> Principal | None:
+        """The principal this door's provider verifies, or `None` where it declines.
+
+        A decline is not backfilled from anything the calling code said: there is no `context()`
+        on this door to fall back to, and falling back would turn "nobody proved who this was"
+        into an approval (`v0.3 §3.2`).
+        """
+        return self.provider.resolve(context)
+
+
+#: SPEC-v0.8 §2.5: how a surface that resolved an approver hands that principal to the store
+#: call that records it. **Package-internal on purpose** (§2.5.1): a public one would be an
+#: unauthenticated way to assert a verified approver, which is `trust_approver` spelled as a
+#: context manager. The shipped surfaces are its only callers, and the residual is stated in
+#: §2.5.1 rather than hidden: anything inside the application's own process can call a private
+#: function, so the kernel's claim is about what the shipped surfaces record.
+_GRANTING_PRINCIPAL: ContextVar[tuple[Principal, tuple[str, ...]] | None] = ContextVar(
+    "ctrlrun_granting_principal", default=None
+)
+
+
+@contextmanager
+def _granting_principal(principal: Principal, *, entitled: Iterable[str] = ()) -> Iterator[None]:
+    """Record `principal` as the verified approver of any grant made inside this block."""
+    token = _GRANTING_PRINCIPAL.set((principal, tuple(entitled)))
+    try:
+        yield
+    finally:
+        _GRANTING_PRINCIPAL.reset(token)
+
+
+def _verified_approver_now(now: datetime) -> VerifiedApprover | None:
+    """The verified approver a store should record for a grant taken at `now`, if any.
+
+    Read by the shipped stores inside `grant_approval` and `deny_approval`. A store that does
+    not read it records nothing, and `Control` then refuses every approval it granted, which is
+    the fail-closed direction and the reason the check lives at consumption (§2.4).
+    """
+    found = _GRANTING_PRINCIPAL.get(None)
+    if found is None:
+        return None
+    principal, entitled = found
+    return VerifiedApprover(
+        agent=principal.agent,
+        user=principal.user,
+        issuer=principal.issuer,
+        granted_at=now,
+        entitled=entitled,
+    )
 
 
 @dataclass(frozen=True)
@@ -155,6 +319,11 @@ class ApprovalRecord:
     approver: str | None = None
     granted_at: datetime | None = None
     consumed_at: datetime | None = None
+    #: SPEC-v0.8 §2.5: every approver a resolving surface verified, in the order they answered.
+    #: Empty where the surface could not resolve one, which `Control` refuses at consumption
+    #: wherever an `ApproverIdentity` is configured (§2.7). Item 4 makes this list longer than
+    #: one; until then a granted record carries nought or one.
+    approvers: tuple[VerifiedApprover, ...] = ()
 
     @property
     def approval_id(self) -> str:

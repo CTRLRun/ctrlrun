@@ -21,7 +21,10 @@ from typing import Final
 #: to tell a new guarantee from a corrupted line.
 #: SPEC-v0.7 §9.4: `v3` is G1 to G16. It moves once, with G13, and the other four join it as
 #: their items land; nothing is released in between.
-CATALOGUE: Final = "ctrlrun.guarantees/v3"
+#: SPEC-v0.8 §11.4: `v4` is G1 to G21, and it moves once, here, with G18. G17, G19, G20 and G21
+#: join it with their items, and item 8 asserts all five present before the release. No stub
+#: rows: a guarantee that reports anything before its check exists is a false green.
+CATALOGUE: Final = "ctrlrun.guarantees/v4"
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,16 @@ GUARANTEES: Final = (
         # already moved when the recheck read it.
         "a moved fingerprint is refused",
         ("v0.1 §4.2", "v0.7 §8 T253", "v0.7 §8 T254"),
+    ),
+    Guarantee(
+        "G18",
+        # 28 characters, because `report._TITLE_WIDTH` is 32 and a wider title breaks the
+        # table's alignment: v0.7 had to shorten G12's for the same reason. "the requester
+        # cannot approve" and not "self-approval is refused", because what is compared is the
+        # resolved principal on each side and never a string, and "self" invites the reading
+        # that two different strings are two different people (SPEC-v0.8 §4.1).
+        "the requester cannot approve",
+        ("v0.3 §4.2", "v0.8 §10 T285", "v0.8 §10 T286"),
     ),
 )
 

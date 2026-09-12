@@ -23,13 +23,18 @@ from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
+    APPROVER_IS_REQUESTER,
+    APPROVER_UNVERIFIED,
     DEFAULT_APPROVAL_TTL,
     Approval,
     ApprovalProvider,
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    ApprovalVerdict,
+    ApproverIdentity,
     LocalApprovalProvider,
+    VerifiedApprover,
     _precondition_at_request,
     _precondition_fingerprint,
     check_consumable,
@@ -83,7 +88,6 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
-    BLOCKED_APPROVAL_MISMATCH,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
@@ -363,19 +367,25 @@ class _Compared:
     failure by its type name, never its message: a provider that put the balance it read into
     its exception would otherwise carry raw state into the evidence through the one field
     nobody thought to check (§6.5).
+
+    SPEC-v0.8 §2.5 adds `approvers` to it, because it is already the per-call scratch the
+    presenting pass fills and the receipt reads: the alternative was a second `get_approval`
+    per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
+        self.approvers: tuple[VerifiedApprover, ...] = ()
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
+        self.approvers = ()
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -479,6 +489,7 @@ class Control:
         identity: IdentityProvider | None = None,
         authority: Authority | None = None,
         environment: str | None = None,
+        approver_identity: ApproverIdentity | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -492,6 +503,11 @@ class Control:
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
         self._identity = identity
         self._authority = authority
+        #: SPEC-v0.8 §2.3: opt in, then fail closed. `None` is 0.7.0 exactly; anything else
+        #: makes an approval consumable only where the row carries a verified approver (§2.7).
+        #: `Control` never *resolves* one: it never grants an approval, so what it does with
+        #: this is check what the granting surface recorded (§1.4 item 1).
+        self._approver_identity = approver_identity
         #: SPEC-v0.6 §7.1's *"both are folded into the one canonical structure before hashing"*.
         #: `Policy` cannot see a separately-loaded `Authority` and this can, so the hash every
         #: receipt and every approval request carries is composed here. Where the authority came
@@ -568,6 +584,11 @@ class Control:
     def identity(self) -> IdentityProvider | None:
         """The provider this Control resolves principals from, if any (SPEC-v0.3 §3.1)."""
         return self._identity
+
+    @property
+    def approver_identity(self) -> ApproverIdentity | None:
+        """How this deployment verifies who answered an approval, or `None` (SPEC-v0.8 §2.3)."""
+        return self._approver_identity
 
     @property
     def authority(self) -> Authority | None:
@@ -1155,7 +1176,15 @@ class Control:
             # A *presented* approval that does not authorize this action. §6.2 lists
             # `ApprovalMismatch` among the exceptions observe mode does not raise, so it is
             # recorded and the action runs; the approval is left unconsumed either way.
-            observation.block(BLOCKED_APPROVAL_MISMATCH)
+            #
+            # **The reason and not the constant, which is a behaviour change SPEC-v0.8 §4.1
+            # argues for rather than a side effect of item 2.** This recorded
+            # `approval_mismatch` for every mismatch, so an operator reading an observe-mode
+            # report could not tell a moved precondition from an approver who may not answer.
+            # Recording the specific reason for the approver refusals alone would leave a
+            # vocabulary nobody can explain, so every mismatch now records its own reason. The
+            # values are the ones `_secure` raises, and §11.1's table lists them.
+            observation.block(mismatch.reason)
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
@@ -1222,12 +1251,18 @@ class Control:
         grant is spent.
         """
         if approval_id is not None:
+            found = self._store.get_approval(approval_id)
             verdict = check_consumable(
-                self._store.get_approval(approval_id),
+                found,
                 approval_id,
                 action.action_hash,
                 self._clock(),
             )
+            # SPEC-v0.8 §4.1: observe mode records what enforce mode would have done, and
+            # enforce mode refuses a self-approval. This path never calls `_recheck`, so the
+            # check is made here too or the row §4.1 describes does not exist. Before the
+            # verdict's own refusal, on the same order `_recheck` uses.
+            self._check_approver(action, approval_id, found, compared, verdict)
             if verdict.refusal is not None:
                 raise verdict.refusal
             # `as_approval()` and not a hand-built `Approval`: one construction, so observe
@@ -1375,6 +1410,12 @@ class Control:
             # An approval consumed before this event carried the comparison, or by a path that
             # compared nothing: the record still says what it was requested with.
             compared.at_request = record.request.precondition_fingerprint
+        if record is not None:
+            # SPEC-v0.8 §2.5: who answered, recovered from the row for the same reason. **The
+            # resumed leg's receipt is the only receipt an MCP multi round-trip or an ACS action
+            # ever gets** (`SPEC-mcp-operator.md` §8.3), so without this the approvers reach the
+            # evidence on every action except the ones that get exactly one receipt.
+            compared.approvers = record.approvers
         return started, approval, compared
 
     def _outcome(
@@ -2526,14 +2567,100 @@ class Control:
         compared.reset()
         record = self._store.get_approval(approval_id)
         stored = None if record is None else record.request.precondition_fingerprint
+        compared.at_request = stored
+        # **One verdict, from one clock read**, reused by the approver gate below and by the
+        # precondition path's raise (SPEC-v0.8 §2.4.1). Two reads a tick apart could produce a
+        # gate that says "not lapsed" followed by a raise that says `expired`, which is the
+        # divergence `v0.7 §12.5` reversed.
+        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
+        # SPEC-v0.8 §2.4: **the early return is gone.** It returned here whenever no provider
+        # was named and the record carried no fingerprint, which is every deployment that does
+        # not use `v0.7 §6`, and an approver check added after it would have been dead on that
+        # path, green, and invisible to a mutation table.
+        self._check_approver(action, approval_id, record, compared, verdict)
         if preconditions is None and stored is None:
             return
-        compared.at_request = stored
-        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.refusal is not None:
             raise verdict.refusal
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)
+
+    def _check_approver(
+        self,
+        action: Action,
+        approval_id: str,
+        record: ApprovalRecord | None,
+        compared: _Compared,
+        verdict: ApprovalVerdict,
+    ) -> None:
+        """Who answered, and whether they may have (SPEC-v0.8 §2.7, §4.1).
+
+        **Gated on a record that is `granted` and that this clock does not consider lapsed**
+        (§2.4.1). Everything else is left to the store, unchanged, and the reason is four rows
+        long: a denied approval carries no verified approver, so an ungated check would refuse
+        it `approver_unverified` and a human's no would stop appearing in the evidence as a no;
+        a consumed one is `G2`'s replayed approval and a moved hash is `G1`, both of which would
+        lose their reason; and a lapsed grant would lose `APPROVAL_EXPIRED` **and the store's
+        own lapse write**, because that write happens inside `_take` and a refusal raised here
+        never reaches it.
+
+        The gate is the `check_consumable` verdict `_recheck` computed, the pure function
+        `v0.1 §4.2` froze: no second implementation of a frozen rule, no second clock read, and
+        the store still decides expiry and may disagree.
+
+        **The lapsed row is checked and not skipped**, which is the difference between this and
+        the version an independent review broke twice: first by skipping it, which was fail-open
+        under clock skew, and then by deferring it past `_take`, which closed that and left a
+        consumed grant and a reservation nothing releases. The comment below carries the cost.
+        """
+        if record is not None:
+            # Recorded whatever this deployment checks, so a receipt says who answered even
+            # where no approver identity is configured and nothing was refused.
+            compared.approvers = record.approvers
+        if self._approver_identity is None:
+            return
+        if verdict.record is None and not verdict.expire:
+            # Denied, consumed, hash-moved, pending, unknown: the store's reason wins and this
+            # check stands aside, because an ungated refusal would report an approver problem
+            # for a human's no, for `G1`'s moved hash and for `G2`'s replayed approval.
+            return
+        # **`verdict.expire` is the lapsed row, and it is checked rather than skipped.** It means
+        # granted, hash matching, and past its expiry by *this* clock, which is the one case where
+        # `check_consumable` refuses a record the approver checks can still read. Skipping it was
+        # fail-open: the store keeps its own clock, so where this host ran ahead the checks stood
+        # aside and `consume_approval_and_reserve` then consumed the grant happily, and a
+        # self-approval committed under a twenty-minute skew.
+        #
+        # What it costs to check it here instead: a grant that is **both** lapsed and refused on
+        # approver grounds reports the approver reason rather than `expired`, so that row keeps no
+        # `APPROVAL_EXPIRED` event and no lapse write. The grant is unusable either way,
+        # `check_consumable` refuses it at every later presentation, and a lapsed grant whose
+        # approver is fine still reports `expired` with its event and the store's own write,
+        # because the check passes and `_take` decides. §2.4.1 carries the table.
+        self._refuse_approver(action, approval_id, record.approvers if record is not None else ())
+
+    def _refuse_approver(
+        self, action: Action, approval_id: str, approvers: tuple[VerifiedApprover, ...]
+    ) -> None:
+        """§2.7 and §4.1's two refusals, over whatever the row recorded."""
+        if not approvers:
+            raise ApprovalMismatch(
+                f"approval {approval_id} carries no verified approver, and this deployment "
+                "names an approver identity; the approval is left granted",
+                reason=APPROVER_UNVERIFIED,
+                approval_id=approval_id,
+            )
+        requester = (action.principal.agent, action.principal.user)
+        for approver in approvers:
+            if approver.principal == requester:
+                # §4.1: on the resolved principal and never on the string, which is why two
+                # grants whose `approver` strings differ are still one principal here.
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by {approver.agent!r}, which is the "
+                    "principal that requested the action; the approval is left granted",
+                    reason=APPROVER_IS_REQUESTER,
+                    approval_id=approval_id,
+                )
 
     def _compare(
         self,
@@ -2896,6 +3023,10 @@ class Control:
             # there was none.
             precondition_at_request=None if compared is None else compared.at_request,
             precondition_at_recheck=None if compared is None else compared.at_recheck,
+            # SPEC-v0.8 §2.5: what §2 verified reaches the evidence, or the milestone records
+            # nothing. Read from the row rather than from the `Approval`, which carries only the
+            # string `v0.1 §4.1` froze.
+            approvers=() if compared is None else compared.approvers,
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained

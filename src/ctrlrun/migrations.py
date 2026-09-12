@@ -308,6 +308,30 @@ _PRECONDITION_FINGERPRINT_PG: Final = (
     'ALTER TABLE approvals ADD COLUMN IF NOT EXISTS precondition_fingerprint TEXT COLLATE "C"',
 )
 
+#: SPEC-v0.8 §11.1: what a verified approver is recorded in, and the two columns the request
+#: pins for items 3 and 4. Three columns and one migration, because they are one change to one
+#: table and a store has no use for a half of it.
+#:
+#: **`approvers` is `COLLATE "C"` on Postgres and the reason is not cosmetic.** Item 4 makes it
+#: a compare-and-set column, and a non-deterministic collation can make two distinct blobs
+#: compare equal, which fails the *unsafe* way: a compare-and-set that wrongly matches succeeds,
+#: and the lost update the CAS exists to close comes straight back, on exactly the deployments
+#: whose `lc_collate` is an ICU locale (§4.3).
+#:
+#: Nullable and **not backfilled**: every approval granted before this migration was granted by
+#: a surface that recorded no principal, which is exactly what `NULL` means, and which
+#: `Control` refuses at consumption wherever an approver identity is configured (§2.9).
+_VERIFIED_APPROVER: Final = (
+    "ALTER TABLE approvals ADD COLUMN approvers TEXT",
+    "ALTER TABLE approvals ADD COLUMN required_roles TEXT",
+    "ALTER TABLE approvals ADD COLUMN approvals_required INTEGER",
+)
+_VERIFIED_APPROVER_PG: Final = (
+    'ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approvers TEXT COLLATE "C"',
+    'ALTER TABLE approvals ADD COLUMN IF NOT EXISTS required_roles TEXT COLLATE "C"',
+    "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approvals_required INTEGER",
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -319,6 +343,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "0005_precondition_fingerprint",
         _PRECONDITION_FINGERPRINT,
         postgres=_PRECONDITION_FINGERPRINT_PG,
+    ),
+    Migration(
+        "0006_verified_approver",
+        _VERIFIED_APPROVER,
+        postgres=_VERIFIED_APPROVER_PG,
     ),
 )
 

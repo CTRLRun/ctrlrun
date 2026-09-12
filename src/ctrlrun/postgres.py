@@ -46,6 +46,7 @@ from .approval import (
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
 )
@@ -78,6 +79,8 @@ from .state import (
     _action_from_json,
     _action_json,
     _approver,
+    _approvers_from_json,
+    _approvers_json,
     _at,
     _checked,
     _iso,
@@ -693,7 +696,8 @@ class PostgresStateStore:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
                 "granted_at, expires_at, consumed_at, policy_hash_at_approval, "
-                f"precondition_fingerprint FROM {self._q}.approvals WHERE approval_id = %s",
+                "precondition_fingerprint, approvers "
+                f"FROM {self._q}.approvals WHERE approval_id = %s",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -713,6 +717,7 @@ class PostgresStateStore:
             approver=row[4],
             granted_at=_at(row[6]),
             consumed_at=_at(row[8]),
+            approvers=_approvers_from_json(None if row[11] is None else str(row[11])),
         )
 
     # --- reservation (SPEC-v0.6 §4.2) ---------------------------------------------------
@@ -1516,20 +1521,29 @@ class PostgresStateStore:
         self._use_schema(connection)
         try:
             record = self._answerable(connection, approval_id, now)
+            # SPEC-v0.8 §2.5: the verified approver the granting surface resolved, appended to
+            # whatever the row already holds.
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             granted = replace(
-                record, status=ApprovalStatus.GRANTED, approver=approver, granted_at=now
+                record,
+                status=ApprovalStatus.GRANTED,
+                approver=approver,
+                granted_at=now,
+                approvers=approvers,
             )
             with connection.cursor() as cursor:
                 # Conditional on what `check_answerable` saw. Unconditional, a concurrent
                 # `deny_approval` was silently overwritten and `find_granted_approval` then
                 # returned an approval a human had refused.
                 cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s "
-                    "WHERE approval_id=%s AND status=%s",
+                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s, "
+                    "approvers=%s WHERE approval_id=%s AND status=%s",
                     (
                         str(ApprovalStatus.GRANTED),
                         approver,
                         _iso(now),
+                        _approvers_json(approvers),
                         approval_id,
                         str(record.status),
                     ),
@@ -1553,11 +1567,19 @@ class PostgresStateStore:
         self._use_schema(connection)
         try:
             record = self._answerable(connection, approval_id, now)
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s "
+                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, approvers=%s "
                     "WHERE approval_id=%s AND status=%s",
-                    (str(ApprovalStatus.DENIED), approver, approval_id, str(record.status)),
+                    (
+                        str(ApprovalStatus.DENIED),
+                        approver,
+                        _approvers_json(approvers),
+                        approval_id,
+                        str(record.status),
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise ApprovalMismatch(

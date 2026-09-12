@@ -102,6 +102,9 @@ SPEC_RECEIPT_FIELDS = (
     # SPEC-v0.7 §6.11: `ctrlrun.receipt/v4`. Fingerprints, never the state they hash.
     "precondition_at_request",
     "precondition_at_recheck",
+    # SPEC-v0.8 §11.3: `ctrlrun.receipt/v5` adds the two.
+    "approvers",
+    "authority_grant_id",
 )
 
 

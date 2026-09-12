@@ -238,9 +238,9 @@ before the store call that consumes the approval (`v0.7 §6.2`). The approver ch
 and the order is normative:
 
 1. `get_approval(approval_id)`, the read `_recheck` already performs.
-2. **A gate, and it is load-bearing: the approver checks apply only to a record that is `granted`
-   and that this clock does not already consider lapsed.** Everything else is left to the store
-   exactly as today (§2.4.1).
+2. **A gate, and it is load-bearing: the approver checks stand aside for a record the store will
+   refuse for its own reason** (denied, consumed, hash-moved, pending, unknown), and run on every
+   other, the lapsed row included. §2.4.1 and §2.4.2 carry the table and the argument.
 3. **The approver checks of §2.7, §3.6, §4.1 and §4.2**, in that order, each raising
    `ApprovalMismatch` with its own reason.
 4. The precondition comparison of `v0.7 §6.2`, unchanged, and last before the store call because it
@@ -255,14 +255,40 @@ use `v0.7 §6`. Adding the approver checks after that return would leave them de
 path, green, and mutation-invisible. With an `ApproverIdentity` configured, the read and the
 approver checks run on **every** presenting pass under `APPROVE`.
 
-**`check_consumable` stays where it is.** `Control` does not apply it on the no-fingerprint path
-and v0.8 does not move it: whose clock decides an approval's expiry is `v0.1 §4.2 A3`'s question,
-the answer is the store's, and `v0.7 §12.5` reversed a change that got that wrong. The approver
-checks are decidable from the row alone and need no clock.
+**The gate is `check_consumable`'s own verdict, computed once from one clock read**, and reused by
+`_recheck`'s existing precondition raise. Not a second implementation of a frozen rule, and not a
+second clock read: two reads a tick apart could produce a gate that says "not lapsed" followed by a
+raise that says `expired`, which is the divergence `v0.7 §12.5` reversed.
+
+**The expiry *decision* stays the store's.** `Control` does not refuse for expiry and does not
+write a lapse: a lapsed grant whose approver is fine falls through to `_take` untouched, which is
+`v0.1 §4.2 A3`'s answer. What this clock is used for is knowing which rows the gate stands aside
+for, and §2.4.2 is the argument for the one row where that distinction is load-bearing.
+
+**A refusal mutates no approval and reserves no effect, and §2.4.2 is why that sentence
+survived.** Not the approval, which stays granted, on `v0.6 §7.2`'s precedent: the action is
+refused, the human's yes is not spent on a question it did not answer, and the approval still
+expires. Not the effect, because nothing is reserved. **Evidence is written**, and the distinction
+is the point: a refusal appends `APPROVAL_INVALIDATED` and writes a `BLOCKED` receipt, because a
+refusal nobody can find afterwards is not a refusal this project ships. The refusal produces an `APPROVAL_INVALIDATED` event and a `BLOCKED` receipt,
+exactly as a precondition refusal does. **Every refusal the approver checks make is raised before
+`_take` for exactly this reason**: a check that refuses after the store call cannot say this, and
+the design that tried was rejected for it (§2.4.2). Not every refusal in §2 and §4 is one of
+theirs: §2.7's fifth row, fewer than `approvals_required` distinct approvers, is the store's own
+`pending`, raised inside `_take`, which is where it belongs.
+
+**Observe mode reaches these checks through a different path**, `_observe_take`, which does not
+call `_recheck`, so §4.1's row is implemented there too. Two consequences, both stated because
+neither is obvious. An `ApprovalMismatch` raised there returns before `reserve_effect`, so an
+observed action refused on approver grounds takes no reservation: not new behaviour, but a new
+member of a class every observe-mode `ApprovalMismatch` was already in, and one case short of
+`_observe_take`'s own argument for reserving. And `_observe_secure` records the mismatch's **own
+reason** where it recorded one constant for every mismatch, which §4.1 argues and which §11.1's
+table and `BLOCKED_BY_STATE` both had to grow for.
 
 ### 2.4.1 Why the gate exists, and what it costs to omit it
 
-Without it, this milestone would report the wrong reason for four refusals that have nothing to do
+Without it, this milestone would report the wrong reason for five refusals that have nothing to do
 with approvers, because `Control` no longer applies `check_consumable` and the store applies it
 only inside `_take`:
 
@@ -271,53 +297,55 @@ only inside `_take`:
 | A human **denied** it | `ActionDenied(approval_denied)`, with `APPROVAL_DENIED`, `ACTION_DENIED` and a `DENIED` receipt | `ApprovalMismatch(approver_unverified)`, with `APPROVAL_INVALIDATED` and a `BLOCKED` receipt: a human's no stops appearing in the evidence as a no |
 | Already **consumed** (a replayed approval, G2) | `consumed` | `approver_unverified` |
 | The action **hash moved** (G1) | `mismatch`, which is `HASH_MISMATCH`'s value | `approver_unverified` |
-| `granted` and **past its expiry** | `expired`, with `APPROVAL_EXPIRED` appended and the row moved to `expired` by the store's own lapse write | `approver_unverified`, **no `APPROVAL_EXPIRED` event, and no lapse write at all** |
+| **Pending** | `pending` | `approver_unverified` |
+| **No such approval** | `unknown` | `approver_unverified` |
 
-All four carry no `VerifiedApprover`, because nothing granted them under an approver identity, so
-§2.7's second row would fire first and swallow the real reason. Two of them are shipped guarantees.
-The gate keeps `check_consumable`'s ordering authoritative, which is what `v0.1 §4.2` froze it for.
+So the gate stands aside for all five, the store's reason wins, and two shipped guarantees keep
+theirs.
 
-**The fourth row is why the gate is not just a status test**, and it is the subtler half.
-`check_consumable` tests expiry **after** status, so a lapsed grant is still `granted` and would
-pass a status-only gate. Two things then disappear rather than one: `_secure` appends
-`APPROVAL_EXPIRED` only when the reason it caught is `expired`, and the lapse **write** happens
-only inside `_take`, where `check_consumable` returns `expire=True` and the store performs it. A
-refusal raised before `_take` never reaches either, so the row stays `granted` for ever and the
-lapse leaves no event. §2.4's "nothing is written by a refusal" is about the approver refusals and
-was never about this write, which `v0.1 §4.2 A3` requires.
+### 2.4.2 The lapsed row, which took three attempts
 
-**One verdict, from one clock read.** The gate is `check_consumable(record, approval_id,
-action_hash, self._clock())` with its `record` tested and its `refusal` and `expire` **discarded**:
-the pure function `v0.1 §4.2` froze already decides exactly this, in exactly this order, and
-`control.py` already imports and calls it. So there is no second implementation and no new clock
-read. The verdict is computed **once** and reused by `_recheck`'s existing precondition-path raise:
-two reads a tick apart could produce a gate that says "not lapsed" followed by a raise that says
-`expired`, which is the divergence shape `v0.7 §12.5` reversed.
+**A grant that is `granted`, whose hash matches, and that is past its expiry by *this* clock is the
+one row where `check_consumable` refuses a record the approver checks can still read.** It is
+`verdict.expire`. What to do with it is the hardest decision in §2, it was got wrong twice, and
+both wrong answers are recorded here because the next reader will reach for one of them.
 
-**And the clock in this gate only ever defers.** Where this `Control`'s clock says the grant has
-lapsed, the approver checks are **skipped** and `_take` reports the lapse exactly as 0.7.0 does,
-with its write and its event. The clock is never used to *refuse*: the store still decides, and may
-disagree, which is `v0.1 §4.2 A3`'s answer and the one `v0.7 §12.5` restored after a change got it
-wrong. So "the approver checks need no clock" stays true of the checks; what needs one is knowing
-when to stand aside.
+**The first answer was to skip it**, on the reasoning that refusing on approver grounds would cost
+the lapse its `APPROVAL_EXPIRED` event and the store's own lapse write, both of which happen inside
+`_take`. That is fail-open. The store keeps its own clock, so on a host running ahead the checks
+stood aside, `consume_approval_and_reserve` consumed the grant by the store's clock, and the action
+ran **with no approver check at all**: a self-approval committing under a twenty-minute skew. It is
+`v0.7 §12.5`'s divergence inverted from "safe and untrue" into fail-open, on the path §2.4 calls
+every deployment that does not use `v0.7 §6`.
 
-T291b is the test, all four rows.
+**The second answer was to defer it past `_take`** and refuse once the store had disagreed and
+consumed. That closes the hole and moves the damage: `consume_approval_and_reserve` does both
+halves of `v0.1 §4.2 A4` in one transaction, so the refusal then left a **consumed grant**, an
+effect key **`RESERVED` with a live lease and nothing to release it**, no `EFFECT_RESERVED` and no
+`APPROVAL_CONSUMED` event, and a receipt whose error said the approval was left granted when it was
+not. The key then lapses into `AMBIGUOUS`, which is a human resolving an action the kernel itself
+refused and which provably never ran. `_spend_unneeded_approval`'s docstring records an earlier
+review finding the same shape: *an ambiguity manufactured by the permissive decision path*. And
+there is no clean cleanup: `fail_effect` requires `EXECUTING`, so `RESERVED → FAILED` does not
+exist, and `mark_ambiguous` would assert "unknown" about an action known not to have run.
 
-**Why the approver checks go before the precondition fetch.** A refused approval must not cost a
-provider call (`v0.7 §6.6` argues the same for a refused verdict), and an approver who was never
-entitled does not become entitled because a balance is unchanged.
+**The answer is to check it, before `_take`, like the others.** The gate stands aside only for the
+five rows above; the lapsed row is checked.
 
-**Nothing is written by a refusal.** Not the approval, which stays granted, on `v0.6 §7.2`'s
-precedent: the action is refused, the human's yes is not spent on a question it did not answer, and
-the approval still expires. Not the effect, because nothing is reserved. The refusal produces an
-`APPROVAL_INVALIDATED` event and a `BLOCKED` receipt, exactly as a precondition refusal does.
+| The row | What it reports | What it costs |
+|---|---|---|
+| Lapsed, approver **fine** | `expired`, with `APPROVAL_EXPIRED` and the store's own lapse write | nothing: the check passes, `_take` decides, and `v0.1 §4.2 A3` keeps the expiry decision with the store |
+| Lapsed, approver **refused** | the approver reason | that row keeps no `APPROVAL_EXPIRED` and no lapse write |
 
-**Observe mode reaches these checks through a different path**, `_observe_take`, which does not
-call `_recheck`. §4.1's observe-mode row is implemented there, and §11.1 records the consequence:
-`_observe_secure` records the fixed constant `approval_mismatch` for every `ApprovalMismatch`
-today, so reporting a specific reason for the approver refusals changes what observe mode records
-for **every** mismatch. That is a behaviour change, it is listed in §11.1's reason table, and the
-changelog carries it under "stricter than 0.7.0".
+The cost is the second row and it is the cheapest of the three answers. The grant is unusable
+either way: `check_consumable` refuses it at every later presentation, and it expires for real.
+What is bought is that the lapsed row cannot be a way past §2.7 on a host whose clock runs ahead,
+and that **nothing is written by a refusal** stays literally true, which neither of the other two
+answers could say.
+
+T291b covers the five store-owned rows and the lapsed-with-a-good-approver row; T291c is the skew reproduction
+and asserts the grant is still granted and nothing reserved; the lapsed-with-a-bad-approver row has
+its own test saying what it gives up.
 
 ### 2.5 How a verified approver reaches the row, without a new store method
 
@@ -438,6 +466,24 @@ IdentityContext(
 question being answered is "may this principal approve *this* action". `agent` and `user` are
 `None` and never the answering surface's assertion: `v0.3 §3.1` calls them a hint a provider may
 ignore, and a hint sourced from the caller of an approval command is the caller naming themselves.
+
+### 2.8.1 What binds today, and what waits for item 3
+
+**Item 2 does not call `ApproverIdentity.resolve`, and this section says so rather than reading as
+though it did.** The one shipped surface that resolves an approver is the operator MCP server, and
+it resolves through *its own* provider, built from `--principal-header` or `--identity-jwt`, with
+the headers of the request being answered: that is what it has done since it shipped, and item 2
+changes only what it does with the answer. On `Control`, `ApproverIdentity` is the switch that
+turns the consumption check on (§2.3), and its `provider` is what item 3 reads the roles claim
+through.
+
+So the context above is the contract for a surface that resolves **through `ApproverIdentity`**,
+and item 3 is where the operator server starts doing that, with `--approver-roles-claim` beside it.
+Until then, `action` and `environment` on the server's own context name the *tool* being called,
+which is `v0.3`'s shape for that server and not a promise this section made.
+
+A test that builds the context itself and then asserts the fields it just wrote proves nothing, and
+§10.2's T290 was exactly that until an independent review said so.
 
 ### 2.9 The upgrade note, stated because it will surprise somebody
 
@@ -1462,18 +1508,25 @@ forbids (the third).
   provider anywhere** still reaches the approver checks: the test drives the 0.6-shaped path and
   asserts the refusal. Without this, every check in §2 to §4 is dead on the default path and every
   other test still passes (§2.4).
-- **T291b:** the gate of §2.4.1, all four rows. With an `ApproverIdentity` configured and no
+- **T291b:** the gate of §2.4.1, every row. With an `ApproverIdentity` configured and no
   `VerifiedApprover` on the row: a **denied** approval still raises `ActionDenied(approval_denied)`
   with `APPROVAL_DENIED` and a `DENIED` receipt; a **consumed** one still reports `consumed` (G2);
-  a **mutated action** still reports `mismatch` (G1); and a **granted but lapsed** one still
-  reports `expired`, appends exactly one `APPROVAL_EXPIRED`, and leaves the row moved to `expired`
-  by the store's own write. The fourth is the one a status-only gate fails: without it the lapse
-  has no event and no write, and the row stays `granted` for ever.
-- **T292:** the migration, both directions, on SQLite and Postgres, from a database built by
-  0.7.0's own code and not a hand-written fixture: rows with no approver columns open, migrate and
-  keep every value; an 0.7.0 binary against the migrated database refuses and names both versions.
-- **T293:** a v3, v4 and v5 receipt chain verifies end to end, each receipt hashed by the rule its
-  own version wrote (`v0.7 §6.11`).
+  a **mutated action** still reports `mismatch` (G1); a **pending** one reports `pending` and an
+  **unknown** one `unknown`, which is the reason §2.7's fifth row and all of item 4's M-of-N
+  depend on; and a **granted but lapsed** one whose approver is fine still reports `expired`,
+  appends exactly one `APPROVAL_EXPIRED`, and leaves the row moved to `expired` by the store's own
+  write. The lapsed row is the one a status-only gate gets wrong in both directions, and §2.4.2
+  is its argument: its own test asserts what checking it costs, which is that a grant both lapsed
+  **and** approver-refused keeps no `APPROVAL_EXPIRED` and no lapse write.
+- **T291c:** the skew §2.4.2 exists for. A `Control` whose clock runs ahead of the store's presents
+  a self-approved grant: refused `approver_is_requester`, the executor not called, **the approval
+  still granted and nothing reserved**. Without the last two assertions the test cannot tell a
+  refusal before the store call from one after, which is what let the deferral look correct.
+- **T292:** the migration ledger reaches `HEAD` and the column round-trips through a file-backed
+  store. The 0.6.1-built upgrade in both directions is `test_preconditions.py`'s T264, and §14.2
+  says why this one does not duplicate it.
+- **T293:** a chain carrying a `v5` receipt verifies end to end, and a `v4` document still parses
+  with neither `v5` key. The stored-v3-continued-by-this-binary chain is T265's.
 - **T294:** `ctrlrun.guarantees/v3` becomes `v4` here, and `verify` reports the catalogue version
   and G18, graded, never `N/A` (§11.7).
 - **T295:** the upgrade case of §2.9: an approval granted at 0.7.0, still pending, presented after
@@ -1855,7 +1908,7 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 
 | Situation | Outcome |
 |---|---|
-| `ApproverIdentity` configured, row carries no verified approver | `ApprovalMismatch(approver_unverified)`; nothing reserved; approval left granted |
+| `ApproverIdentity` configured, row carries no verified approver | `ApprovalMismatch(approver_unverified)`; nothing reserved; approval left granted. True literally, because every refusal in §2 and §4 is raised before `_take` (§2.4.2) |
 | Approver provider raises | Refused at the answering surface; never backfilled from the calling code (`v0.3 §3.2`) |
 | Approver provider declines | Refused at the answering surface; no approval granted |
 | Roles claim absent, or carried by a provider that carries no claims | `approver_unentitled`, with a warning naming the claim and the control |
@@ -1864,6 +1917,9 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 | `roles_claim` unset and a role is required | `approver_unentitled` |
 | Several controls with roles, one unsatisfied | `approver_unentitled`, naming that control |
 | Approver equals requester | `approver_is_requester` |
+| A grant that is lapsed by this clock **and** refused on approver grounds | The approver reason, and that row keeps no `APPROVAL_EXPIRED` and no lapse write (§2.4.2) |
+| A grant lapsed by this clock whose approver is fine | `expired`, with its event and the store's own lapse write: the check passes and `_take` decides |
+| A corrupted `approvers` column | `InvalidArgument` from the store read, named and traceable to the row; a corrupted one on a *receipt* is dropped instead, because a receipt is evidence a reader walks past (§14.2) |
 | Fewer than `approvals_required` distinct approvers | Record stays `pending`; consumption refused with `pending` |
 | `approvals_required > 1` with no `ApproverIdentity` | Action denied with `approvals_unverifiable`, naming the action and the key (§4.2) |
 | Store that does not record several approvers, N > 1 | Never reaches N; never behaves as N = 1 |
@@ -1973,6 +2029,97 @@ walk is bounded by the rows it has already seen because a cycle is reachable wit
 text editor, which is the point `v0.3 §5.5` makes about evaluation.
 
 ### 14.2 Item 2: the approver is a principal
+
+**The check is at the consumption because `Control` never grants**, which §1.4 recorded and which
+building it confirmed: the only code that calls `grant_approval` outside a test is the CLI, the
+operator server, `handle_inbound`, the scripted provider, the adapters and verify's own scenarios.
+`Control._withdraw` calls `deny_approval`, which is the kernel closing a request it created rather
+than a human answering one, and §2.6's table gives it its own row. None of them is `Control`
+deciding anything.
+
+**The gate took three attempts and §2.4.2 records all three**, because the next reader will reach
+for one of the two that were wrong. Skipping the lapsed row is fail-open under clock skew: a
+self-approval committed, reproduced by the review. Deferring it past `_take` closes that and
+strands a reservation the kernel cannot release, which lapses into an `AMBIGUOUS` record a human
+must resolve for an action the kernel itself refused; `fail_effect` requires `EXECUTING`, so there
+is no `RESERVED → FAILED` to clean it up with, and `mark_ambiguous` would assert "unknown" about an
+action known not to have run. Checking it before `_take` like every other row costs one thing, that
+a grant which is both lapsed and approver-refused keeps no `APPROVAL_EXPIRED` and no lapse write,
+and buys the sentence the other two answers could not say: **nothing is written by a refusal**.
+
+**Two of those three were found by review rather than by the suite**, and the second was a defect
+introduced by the fix for the first, which is the shape `CONTRIBUTING.md` asks a second review pass
+for. The tests that exist now are the ones that would have caught them: T291c reproduces the skew
+**and asserts the grant is still granted and nothing reserved**, which the first version of that
+test did not, so it could not have told a refusal before `_take` from one after.
+
+**The observe-mode vocabulary change had a consumer nobody had looked at.** `would_have.
+blocked_reason` is a closed set because `ctrlrun stats` buckets counts on it, and `receipt.py` says
+so in as many words: *a bucketed count over a string nobody constrained is a report that quietly
+stops adding up*. Recording each mismatch's own reason made exactly that true, measured: an
+observe-mode approval refusal landed in no bucket, `would_have_been_blocked` went from 1 to 0, and
+the command whose whole job is "what changes if you turn enforcement on" under-reported it. The set
+grew with the change, T296b asserts the count, and the receipt that stopped counting was a plain
+hash mismatch with nothing to do with v0.8.
+
+**The early return was exactly as dangerous as §2.4 said.** M6 restores it, every approver test in
+the file goes green, and only T291 fails: a check placed after that return is dead on the path
+every 0.6-shaped deployment takes, and nothing else in the suite notices.
+
+**One test file covering one store is one store covered.** The first draft of `test_approver.py`
+used the in-memory store alone, and the mutation table caught it: blanking the verified approver in
+the **SQLite** write path left every test green, because none of them had ever executed that path.
+The fixture now runs every test on in-memory, SQLite and Postgres, which is `v0.6 §2`'s argument
+for the store conformance suite applied to a test file, and M7a and M7b are two rows rather than
+one.
+
+**G18's title is 28 characters because the report table is 32 wide**, which v0.7 had to discover
+for G12 as well. It is "the requester cannot approve" and not "self-approval is refused", because
+what is compared is the resolved principal on each side and "self" invites the reading that two
+different approver strings are two different people, which is the reading §4.1 exists to refuse.
+
+**What the two version bumps moved in the suite, listed rather than absorbed.** Twelve test files
+outside this item's own changed, and every edit in them was a count, a name or a key set that was
+true of 0.7.0 and is not now: the receipt's exact JSON key set, which `v5` widens by two; the
+verify counts, because G18 is graded wherever a document sends an action to approval, so the
+shipped examples move from 14/14 to 15/15 and from 8/8 to 9/9 and the catalogue pins move from `v3`
+to `v4`; the last migration, pinned by name and now asserted as `HEAD`; and the receipt schema
+label this binary writes. **The verify counts are also pinned in `.github/workflows/ci.yml`**,
+which would have turned the `verify` job red on a branch whose suite was entirely green, and which
+nothing in the local gate would have caught.
+
+**`_granting_principal` stayed package-internal and the operator server is its first caller.** That
+server has resolved a principal for every request since it shipped and then discarded it into
+`mcp-operator:<user>`; item 2 is, on that surface, four lines that stop discarding it.
+
+**And the bucket this item widened was already missing a human's no.** `check_consumable` catches a
+denied record one branch before the generic status branch, so the reason recorded for it is
+`approval_denied` and not `denied`: the set as first written carried a value nothing can produce
+and missed the one that is, and an observe-mode run where a human refused was counted nowhere.
+That predates v0.8. It is fixed here because this is the commit that writes the set and argues at
+length for closing exactly this, and shipping it wrong would have made the argument false on its
+own terms.
+
+**Observe mode had to be implemented, not asserted.** §4.1's row said observe mode records
+`approver_is_requester`, and `_observe_take` never called `_recheck`, so it recorded nothing: the
+section described something that did not exist, and T296 presented no approval at all, which made
+it a negative test against behaviour its own setup prevented. Both are fixed: the check runs on
+that path, `_observe_secure` records the mismatch's own reason where it recorded one constant for
+every mismatch, and T296 asserts the reason and the consequence. The vocabulary change is the one
+§4.1 argued for, and it reaches refusals that have nothing to do with v0.8, which is why it is in
+§11.1's table and in the changelog rather than left to a reader to notice.
+
+**A resumed leg's receipt is the only receipt some actions ever get.** `_resumed_context`
+recovers the precondition fingerprints from the record and did not recover the approvers, so
+§2.5's "carried onto the receipt" was false for exactly the MCP multi round-trip and ACS actions
+that get one receipt (`SPEC-mcp-operator.md` §8.3). One line, and the review found it.
+
+**A corrupted `approvers` column is a `CTRLRunError` and a corrupted one on a receipt is not.**
+The store read raises, named, because an approval is authority about to be spent and one bad row
+must stop this action; `Receipt._approvers_of` drops a malformed entry instead, because a receipt
+is evidence a reader walks past and one tampered row must not blind every reader at once
+(`v0.7 §6.11`). The two rules look inconsistent and are the same rule applied to different
+questions.
 
 ### 14.3 Item 3: entitlement from the control registry
 

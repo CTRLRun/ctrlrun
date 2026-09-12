@@ -11,6 +11,46 @@ any change to one appears here.
 
 ### Added
 
+- **The approver is a principal** (`docs/SPEC-v0.8.md` §2, §4.1). `Approval.approver` is a string
+  whose only check is that it is not empty, and `adapter.py` has always conceded what that string
+  often is: a channel, wherever the framework's primitive does not identify a person. A deployment
+  may now name an **`ApproverIdentity`**, and where one is named an approval is consumable only if
+  the store holds a **`VerifiedApprover`** for it: a principal the granting surface resolved,
+  recorded on the approval row, and carried onto the receipt.
+
+  **Opt in, then fail closed**, which is `SPEC-v0.3.md` §1.2's rule for authority applied to the
+  approver. A `Control` built without one behaves exactly as 0.7.0 did, asserted field by field on
+  the whole approve-and-execute path. One built with it gets no partial mode: an approval whose row
+  carries no verified approver is refused with `approver_unverified`, **including one granted
+  before the provider was configured**, including one granted through a surface that cannot
+  resolve, and including one held by a store that ignores the column.
+
+  **`ctrlrun verify` grades seventeen guarantees now**, G18 among them under
+  `ctrlrun.guarantees/v4`: an approval granted by the principal that requested the action is
+  refused, compared on the resolved principal and never on the string. Verify supplies the approver
+  identity it grades against, so what it reports is the kernel's refusal and never whether an
+  operator configured anything, which is a fact about their application and not about their
+  document.
+
+  **Which surfaces can produce a verified approver, stated plainly because it is narrower than the
+  feature's name suggests.** The operator MCP server can, and now does: it has resolved a principal
+  for every request since it shipped and then discarded it into `mcp-operator:<user>`. An embedding
+  application can. **`ctrlrun approve`, the webhook and the adapters cannot**, and the approvals
+  they grant are refused wherever an approver identity is configured. A deployment whose approvals
+  arrive through one of those three turns its approval path off by configuring this, which is the
+  rule working rather than a defect, and §2.6's table is the thing to read before configuring.
+
+  **Observe mode now records a mismatch's own reason where it recorded one constant for all of
+  them.** `would_have.blocked_reason` said `approval_mismatch` for every `ApprovalMismatch`, so a
+  moved precondition and an approver who may not answer were one word in a report. Recording the
+  specific reason for the approver refusals alone would have left a vocabulary nobody can explain,
+  so every mismatch records its own. This reaches refusals that have nothing to do with v0.8, and
+  it is listed here rather than left for an operator to notice in a diff.
+
+  Needs `ctrlrun.receipt/v5`, which adds `approvers` and `authority_grant_id`, and migration
+  `0006_verified_approver`. Every reader upgrades before any writer switches (`SPEC-v0.3.md`
+  §12.2).
+
 - **`ctrlrun revoke --created-by PRINCIPAL` and `--under ID`** (`docs/SPEC-v0.8.md` §7). During an
   incident the operation an operator reaches for is *everything this principal issued* or
   *everything under this grant*, and until now that was a script over the events file, written

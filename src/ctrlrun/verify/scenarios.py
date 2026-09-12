@@ -42,7 +42,13 @@ from typing import Any, Final
 from uuid import uuid4
 
 from ..action import Action, Principal
-from ..approval import DEFAULT_APPROVAL_TTL, ApprovalStatus, LocalApprovalProvider
+from ..approval import (
+    DEFAULT_APPROVAL_TTL,
+    ApprovalStatus,
+    ApproverIdentity,
+    LocalApprovalProvider,
+    _granting_principal,
+)
 from ..authority import (
     AUTHORITY_EXPIRED,
     CONTAINMENT,
@@ -75,6 +81,7 @@ from ..errors import (
     NotExecuted,
     PolicyError,
 )
+from ..identity import IdentityContext
 from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
 from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
@@ -104,6 +111,13 @@ _LOG = logging.getLogger(__name__)
 #: Who verify records as the author of the approvals it grants itself (§3.5). Not a person,
 #: and named so no reader of the evidence mistakes it for one.
 APPROVER: Final = "ctrlrun-verify"
+
+#: SPEC-v0.8 §11.7: the approver identity G18 grades against. Verify builds its own scenarios,
+#: so it supplies the provider too; what it grades is the kernel's refusal, never whether the
+#: operator configured one, which is a fact about a constructor call and not about a document.
+#:
+#: Not `StaticIdentityProvider`: that one warns, by design (`v0.3 §3.3`), and a passing verify
+#: run writes no kernel warning to stderr. `_VerifyApproverProvider`, below, is what it uses.
 
 #: §3.6 — the base instant where no grant carries an `expires_at`.
 FALLBACK_T0: Final = datetime(2026, 1, 1, tzinfo=UTC)
@@ -546,6 +560,16 @@ def _from_pattern(pattern: str | None) -> str | None:
     return pattern
 
 
+@dataclass(frozen=True)
+class _VerifyApproverProvider:
+    """An `IdentityProvider` answering one principal, for G18's own scenario (SPEC-v0.8 §11.7)."""
+
+    principal: Principal
+
+    def resolve(self, context: IdentityContext) -> Principal | None:
+        return self.principal
+
+
 class Engine:
     """Derives and runs the scenarios for one configuration (§3).
 
@@ -836,7 +860,12 @@ class Engine:
         return control, store, recorder, moving
 
     def _control_for(
-        self, gid: str, selection: _Selection, *, clock: _Clock | None = None
+        self,
+        gid: str,
+        selection: _Selection,
+        *,
+        clock: _Clock | None = None,
+        approver_identity: ApproverIdentity | None = None,
     ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
@@ -849,6 +878,10 @@ class Engine:
             sinks=[recorder],
             authority=self.authority,
             environment=selection.environment,
+            # SPEC-v0.8 §11.7: verify configures the approver identity it grades against, and
+            # only where a scenario asks for one. Every other scenario keeps the 0.7.0 shape,
+            # which is what keeps `ctrlrun verify` green on a deployment that verifies nobody.
+            approver_identity=approver_identity,
         )
         return control, store, recorder, moving
 
@@ -2982,6 +3015,98 @@ class Engine:
 
         try:
             return self.graded("G16", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G18: an approver who is the requester is refused ---------------------------------
+
+    def g18(self) -> GuaranteeResult:
+        """SPEC-v0.8 §4.1, §11.7. Graded wherever the document sends an action to approval.
+
+        **Verify supplies the approver identity, and that is the point.** Whether the operator
+        configured one is a fact about a constructor call in their application, which verify
+        cannot see and which `verify/guarantees.py` forbids as an `N/A` reason: every reason
+        there is a statement about the operator's *document*. So the `N/A` here is the one G1
+        and G2 already use, that no action requires approval, and it is true of the document.
+
+        Both halves, `v0.4 §1.3`'s rule. The observable: an approval granted by the principal
+        that requested the action is refused, and the executor is not reached. The control: the
+        same action, approved by a different principal, commits. A check that refused every
+        approval would pass the first and fail the second.
+
+        **The strings differ and the principals are the same**, which is what makes this a test
+        of §4.1's comparison rather than of a string. Both grants carry `APPROVER` as the
+        `approver` string; what differs is the principal the grant recorded.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,))
+        if selection is None:
+            return self.na("G18", self.unselected(reg.NO_APPROVE_RULE))
+        requester = selection.principal
+        identity = ApproverIdentity(_VerifyApproverProvider(requester))
+        control, store, recorder, _ = self._control_for(
+            "G18", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            action = selection.build()
+            detail["approved_by_verify"] = True
+            detail["approver_identity"] = "supplied by verify (SPEC-v0.8 §11.7)"
+            request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            with _granting_principal(requester):
+                store.grant_approval(request.request_id, APPROVER)
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='approver_is_requester')",
+                "an action ran under an approval granted by the principal that requested it",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "approver_is_requester",
+                "ApprovalMismatch(reason='approver_is_requester')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            record = store.get_approval(request.request_id)
+            _expect(
+                record is not None and record.status is ApprovalStatus.GRANTED,
+                "the approval is left granted and not consumed",
+                f"the approval is {None if record is None else record.status}",
+            )
+            _expect(
+                _named_event(
+                    recorder, EventType.APPROVAL_INVALIDATED, reason="approver_is_requester"
+                ),
+                "APPROVAL_INVALIDATED with reason 'approver_is_requester'",
+                f"events were {recorder.types()}",
+            )
+
+            # The control: a different principal, the same approver string, and it commits.
+            other = Principal(
+                agent=f"{requester.agent}-approver", user=requester.user, issuer=requester.issuer
+            )
+            second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            with _granting_principal(other):
+                store.grant_approval(second.request_id, APPROVER)
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, approved by a different principal, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G18", selection, store, recorder, body)
         finally:
             store.close()
 

@@ -677,7 +677,7 @@ def _g14(tmp_path, document: str = WITH_EFFECTS):
 
 
 def test_T239_G14_is_in_the_catalogue():
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
     assert "G14" in reg.BY_ID
     assert reg.BY_ID["G14"].descends_from, "a guarantee names the tests it is the deployed form of"
 

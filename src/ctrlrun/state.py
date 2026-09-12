@@ -37,6 +37,8 @@ from .approval import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovalStore,
+    VerifiedApprover,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
 )
@@ -733,6 +735,42 @@ class StateStore(ApprovalStore, Protocol):
         ...
 
 
+def _approvers_json(approvers: tuple[VerifiedApprover, ...]) -> str | None:
+    """The verified approvers as one canonical JSON array, or `None` where there are none.
+
+    `None` and not `"[]"`: a row granted by a surface that resolved nobody and a row granted
+    before the column existed are the same thing to a reader, and both are what `NULL` means
+    (SPEC-v0.8 §2.5).
+    """
+    if not approvers:
+        return None
+    return json.dumps([approver.to_dict() for approver in approvers], sort_keys=True)
+
+
+def _approvers_from_json(text: str | None) -> tuple[VerifiedApprover, ...]:
+    """What the column holds, or `()`. A column a store dropped reads as no approver at all,
+    which `Control` refuses at consumption rather than skipping (SPEC-v0.8 §2.5).
+
+    **A corrupted column is a `CTRLRunError` and not a `JSONDecodeError`.** This read sits under
+    `get_approval`, which sits under `_recheck`, which sits under `execute`: a raw decoding error
+    from a tampered row would reach an agent as an exception no caller catches and no receipt
+    records. Fail closed, named, and traceable to the row.
+
+    It does **not** get `Receipt.from_dict`'s never-raises treatment, and the difference is
+    deliberate: a receipt is evidence a reader walks past, so one bad row must not blind every
+    reader, while an approval is authority about to be spent, so one bad row must stop this
+    action rather than be read as "no approver" (§2.5, `v0.7 §6.11`).
+    """
+    if not text:
+        return ()
+    try:
+        return tuple(VerifiedApprover.from_dict(item) for item in json.loads(text))
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise InvalidArgument(
+            f"the approvals row carries an unreadable 'approvers' column: {exc}"
+        ) from exc
+
+
 class InMemoryStateStore:
     """Everything held in process memory: for tests and `ctrlrun demo`.
 
@@ -872,11 +910,17 @@ class InMemoryStateStore:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
+            now = self._clock()
+            # SPEC-v0.8 §2.5: whatever the granting surface verified, or nothing where it
+            # verified nobody. A store that did not read this records no approver, and that is
+            # refused at consumption rather than skipped.
+            verified = _verified_approver_now(now)
             granted = replace(
                 record,
                 status=ApprovalStatus.GRANTED,
                 approver=approver,
-                granted_at=self._clock(),
+                granted_at=now,
+                approvers=(*record.approvers, verified) if verified else record.approvers,
             )
             self._approvals[approval_id] = granted
             return granted.as_approval()
@@ -885,8 +929,13 @@ class InMemoryStateStore:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
+            now = self._clock()
+            verified = _verified_approver_now(now)
             self._approvals[approval_id] = replace(
-                record, status=ApprovalStatus.DENIED, approver=approver
+                record,
+                status=ApprovalStatus.DENIED,
+                approver=approver,
+                approvers=(*record.approvers, verified) if verified else record.approvers,
             )
 
     def consume_approval(self, approval_id: str, action_hash: str) -> Approval:
@@ -1542,12 +1591,27 @@ class SQLiteStateStore:
         connection.execute("BEGIN IMMEDIATE")
         try:
             record = self._answerable(connection, approval_id, now)
+            # SPEC-v0.8 §2.5: the verified approver, appended to whatever the row already
+            # holds, inside the same `BEGIN IMMEDIATE` that serialises the status transition.
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             granted = replace(
-                record, status=ApprovalStatus.GRANTED, approver=approver, granted_at=now
+                record,
+                status=ApprovalStatus.GRANTED,
+                approver=approver,
+                granted_at=now,
+                approvers=approvers,
             )
             connection.execute(
-                "UPDATE approvals SET status=?, approver=?, granted_at=? WHERE approval_id=?",
-                (str(ApprovalStatus.GRANTED), approver, _iso(now), approval_id),
+                "UPDATE approvals SET status=?, approver=?, granted_at=?, approvers=? "
+                "WHERE approval_id=?",
+                (
+                    str(ApprovalStatus.GRANTED),
+                    approver,
+                    _iso(now),
+                    _approvers_json(approvers),
+                    approval_id,
+                ),
             )
         except BaseException:
             self._unwind(connection)
@@ -1561,10 +1625,17 @@ class SQLiteStateStore:
         now = self._clock()
         connection.execute("BEGIN IMMEDIATE")
         try:
-            self._answerable(connection, approval_id, now)
+            record = self._answerable(connection, approval_id, now)
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             connection.execute(
-                "UPDATE approvals SET status=?, approver=? WHERE approval_id=?",
-                (str(ApprovalStatus.DENIED), approver, approval_id),
+                "UPDATE approvals SET status=?, approver=?, approvers=? WHERE approval_id=?",
+                (
+                    str(ApprovalStatus.DENIED),
+                    approver,
+                    _approvers_json(approvers),
+                    approval_id,
+                ),
             )
         except BaseException:
             self._unwind(connection)
@@ -1610,6 +1681,7 @@ class SQLiteStateStore:
             approver=row["approver"],
             granted_at=_at(row["granted_at"]),
             consumed_at=_at(row["consumed_at"]),
+            approvers=_approvers_from_json(row["approvers"]),
         )
 
     def _expire_locked(self, connection: sqlite3.Connection, approval_id: str) -> None:

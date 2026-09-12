@@ -1626,7 +1626,7 @@ def _verify(tmp_path, document, *, only):
 def test_T252_G15_is_in_the_catalogue():
     from ctrlrun.verify import guarantees as reg
 
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
     assert "G15" in reg.BY_ID
     assert "v0.1 §5.4" in reg.BY_ID["G15"].descends_from
 
