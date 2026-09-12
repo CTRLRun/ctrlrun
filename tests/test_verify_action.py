@@ -137,9 +137,9 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 17/17"' in script
+    assert 'test "$AUTHORITY" = "verified 19/19"' in script
     assert 'test "$TEMPLATES" = "verified 11/11"' in script
-    assert 'test "$AUTHORITY_NA" = "4"' in script
+    assert 'test "$AUTHORITY_NA" = "2"' in script
     assert 'test "$TEMPLATES_NA" = "10"' in script
 
 
@@ -152,10 +152,10 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    assert authority.badge["message"] == "verified 17/17"
+    assert authority.badge["message"] == "verified 19/19"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
     # no `max_attempts` (SPEC-v0.7 §8.9).
-    assert authority.not_applicable == 4
+    assert authority.not_applicable == 2
     assert templates.badge is not None
     assert templates.badge["message"] == "verified 11/11"
     assert templates.not_applicable == 10
