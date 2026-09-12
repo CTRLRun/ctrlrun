@@ -1047,6 +1047,14 @@ def _created_by(rows: tuple[DelegationRecord, ...], value: str) -> list[Delegati
     agent, separator, user = value.partition("/")
     if not agent:
         raise click.UsageError("--created-by needs an agent name: AGENT or AGENT/USER")
+    if separator and not user:
+        # `--created-by agent/` is a typed-and-lost user, not "any user": reading it as the
+        # latter would revoke every row that agent created, which is the widest reading of an
+        # ambiguous command during an incident. Refused rather than guessed.
+        raise click.UsageError(
+            f"--created-by {value!r} ends with '/': write AGENT for every user, or AGENT/USER "
+            "for one"
+        )
     if "/" in user:
         raise click.UsageError(
             f"--created-by {value!r} has more than one '/': write AGENT or AGENT/USER, and note "

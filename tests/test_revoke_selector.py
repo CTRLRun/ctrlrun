@@ -15,6 +15,7 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 from click.testing import CliRunner
@@ -122,17 +123,30 @@ def workspace(request, tmp_path, monkeypatch):
     PostgresStateStore.create_schema(POSTGRES_URL, schema)
     migrated = PostgresStateStore(POSTGRES_URL, schema=schema)
     migrated.close()
-    url = f"{POSTGRES_URL}?ctrlrun_schema={schema}"
     try:
-        yield _Workspace(tmp_path, ["--store-url", url])
+        yield _Workspace(tmp_path, ["--store-url", _with_schema(POSTGRES_URL, schema)], schema)
     finally:
         PostgresStateStore.drop_schema(POSTGRES_URL, schema)
 
 
+def _with_schema(url: str, schema: str) -> str:
+    """`url` with CTRLRun's schema parameter added, keeping every parameter it already has.
+
+    A naive f-string appends a second '?' to a URL carrying `?sslmode=require`, and
+    `_peel_schema` then reads `ctrlrun_schema` as part of the `sslmode` value and falls back to
+    `public`. The test would pass while the command wrote outside its scratch schema, into the
+    database every other test shares.
+    """
+    parts = urlsplit(url)
+    pairs = [*parse_qsl(parts.query), ("ctrlrun_schema", schema)]
+    return urlunsplit(parts._replace(query=urlencode(pairs)))
+
+
 class _Workspace:
-    def __init__(self, path, store_args):
+    def __init__(self, path, store_args, schema=None):
         self.path = path
         self.store_args = store_args
+        self.schema = schema
 
     def cli(self, *arguments):
         return CliRunner().invoke(main, [*arguments, *self.store_args])
@@ -162,9 +176,10 @@ class _Workspace:
             return SQLiteStateStore(self.path / ".ctrlrun" / "state.db")
         from ctrlrun.postgres import PostgresStateStore
 
-        url = self.store_args[1]
-        bare, _, schema = url.partition("?ctrlrun_schema=")
-        return PostgresStateStore(bare, schema=schema)
+        # The base URL and the schema, kept apart rather than re-parsed out of the CLI's own
+        # argument: a test that reads a different schema from the one the command wrote to is a
+        # test that asserts nothing.
+        return PostgresStateStore(POSTGRES_URL, schema=self.schema)
 
 
 @pytest.fixture
@@ -412,6 +427,21 @@ def test_T278_an_agent_name_containing_a_slash_cannot_be_written(workspace, tree
 
     assert result.exit_code != 0
     assert "more than one '/'" in result.output
+    assert "no delegation matched" not in result.output
+    assert _revoked(workspace, tree) == set()
+
+
+def test_T278_a_trailing_separator_is_a_typed_and_lost_user(workspace, tree):
+    """`--created-by human-cfo/` is refused rather than read as "every user".
+
+    The widest reading of an ambiguous command is the wrong default during an incident, and
+    without the guard this exits non-zero anyway through §7.5's empty-selector error, which is
+    the subsumed shape the mutation table caught twice already. So the message is asserted.
+    """
+    result = workspace.cli("revoke", "--created-by", "human-cfo/")
+
+    assert result.exit_code != 0
+    assert "ends with '/'" in result.output
     assert "no delegation matched" not in result.output
     assert _revoked(workspace, tree) == set()
 
