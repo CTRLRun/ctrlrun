@@ -16,7 +16,13 @@ import pytest
 from ctrlrun.action import Action, Principal
 from ctrlrun.approval import ApproverIdentity, _granting_principal
 from ctrlrun.control import Control
-from ctrlrun.errors import ActionDenied, ApprovalMismatch, ApprovalRequired, InvalidArgument
+from ctrlrun.errors import (
+    ActionDenied,
+    ApprovalMismatch,
+    ApprovalRequired,
+    InvalidArgument,
+    PolicyError,
+)
 from ctrlrun.identity import StaticIdentityProvider
 from ctrlrun.policy import POLICY_CHANGE_ACTION, Policy, hash_with_authority
 from ctrlrun.state import InMemoryStateStore, SQLiteStateStore
@@ -144,9 +150,15 @@ def _action(control, name: str = "payments.refund", **arguments: Any) -> Action:
     )
 
 
-def _approved(control, store, clock, *, by=OWNER):
-    """Run the whole flow: propose, approve, present. Returns the committed receipt."""
-    candidate = Policy.from_yaml(POLICY)
+def _approved(control, store, clock, *, by=OWNER, policy=None):
+    """Run the whole flow: propose, approve, present. Returns the committed receipt.
+
+    `policy` defaults to the document the `control` itself loaded, because the hash being
+    approved must be **that** deployment's: a helper that always proposed the base document
+    would approve a hash the control never enforces, and every test using it would pass on a
+    kernel that checked nothing.
+    """
+    candidate = Policy.from_yaml(policy) if policy else control.policy
     with pytest.raises(ApprovalRequired) as pending:
         control._propose_policy(candidate, authority=control.authority)
     with _granting_principal(by, entitled=["change-management"]):
@@ -316,6 +328,103 @@ def test_T358_a_policy_that_does_not_send_its_own_change_to_a_human_decides_noth
     assert refused.value.reason == "policy_unapproved"
     assert POLICY_CHANGE_ACTION in str(refused.value)
     assert "decision: approve" in str(refused.value)
+
+
+# --- T360b: nothing else may name the reserved action, or reserve its effect key -------------
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("resource", "ctrlrun.policy.change"),
+        ("effect", "ctrlrun.policy.change:{payment_id}"),
+        ("effect", "policy:{payment_id}"),
+    ],
+)
+def test_T360_no_other_action_may_name_the_reserved_action_or_its_effect_key(key, value):
+    """§8.2.1. The mutation table found nothing covering this at all.
+
+    The reserved name is what gates the §8.4 exemption and the §8.2.1 marker. An action that
+    could render `policy:<hash>` as its effect key would be a way to **mint the marker of an
+    approved policy** from an action nobody reviewed as one: `Control.execute` commits an
+    effect at whatever key the template produces, and §8.4 reads that key back as the approval.
+    """
+    policy = POLICY.replace(
+        "  payments.refund:\n    decision: allow",
+        f'  payments.refund:\n    decision: allow\n    {key}: "{value}"',
+    )
+
+    with pytest.raises(PolicyError) as refused:
+        Policy.from_yaml(policy)
+
+    assert "payments.refund" in str(refused.value)
+
+
+def test_T360_the_reserved_action_may_still_name_its_own_resource():
+    """The control: the rule is about **other** actions, and a check that refused this one
+    would make the reserved action undeclarable, which is the bootstrap §8.2.1 exists to
+    avoid."""
+    assert Policy.from_yaml(POLICY).actions[POLICY_CHANGE_ACTION] is not None
+
+
+# --- T358b: "always approve" is all-of and never any-of ---------------------------------------
+
+
+def test_T358_a_change_rule_that_only_sometimes_approves_decides_nothing(store, clock):
+    """§8.2.1, and the mutation table found nothing covering the difference.
+
+    `approving_actions` reads whether an entry **always** goes to a human. An entry that
+    approves above a threshold and allows below it is a policy whose change can be made without
+    one, under the condition the author chose -- so `any` would accept exactly the document an
+    administrator writes to get around this.
+    """
+    policy = POLICY.replace(
+        "  ctrlrun.policy.change:\n    decision: approve\n    controls: [change-management]",
+        "  ctrlrun.policy.change:\n"
+        "    controls: [change-management]\n"
+        "    rules:\n"
+        "      - when: { amount_gte: 1000 }\n"
+        "        decision: approve\n"
+        "      - decision: allow",
+    )
+    control = _control(store, clock, policy=policy)
+
+    # **The proposal needs no human at all**, which is the hole itself: the change action's own
+    # arguments carry no `amount`, so the `amount_gte` rule is ignored and the `allow` rule
+    # decides. It commits, and the effect that marks the hash approved is minted with nobody
+    # having answered anything.
+    receipt = control._propose_policy(Policy.from_yaml(policy), authority=control.authority)
+    assert str(receipt.result) == "committed", "the proposal was expected to bypass approval"
+    assert store.get_effect(f"policy:{control._policy_hash}") is not None
+
+    # And the deployment still decides nothing, because the declaration rule is what refuses.
+    # Without this half the test passes whether `approving_actions` is all-of or any-of, which
+    # is what the mutation table reported when it was first written.
+    with pytest.raises(ActionDenied) as refused:
+        control.execute(_action(control), _Executor(), KEY)
+
+    assert refused.value.reason == "policy_unapproved"
+    assert "decision: approve" in str(refused.value), (
+        "it was refused for the missing effect, not for the change rule that only sometimes "
+        "sends a change to a human"
+    )
+
+
+def test_T358_a_change_rule_that_always_approves_is_accepted(store, clock):
+    """The control for the test above: every rule approving is the shape that works."""
+    policy = POLICY.replace(
+        "  ctrlrun.policy.change:\n    decision: approve\n    controls: [change-management]",
+        "  ctrlrun.policy.change:\n"
+        "    controls: [change-management]\n"
+        "    rules:\n"
+        "      - when: { amount_gte: 1000 }\n"
+        "        decision: approve\n"
+        "      - decision: approve",
+    )
+    control = _control(store, clock, policy=policy)
+    _approved(control, store, clock, policy=policy)
+
+    assert str(control.execute(_action(control), _Executor(), KEY).result) == "committed"
 
 
 # --- T359, T360: the reserved name ------------------------------------------------------------
