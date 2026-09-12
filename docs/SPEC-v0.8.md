@@ -982,12 +982,23 @@ line is a silent widening.
 
 ### 5.3 Opening it
 
-```
-ctrlrun break-glass --envelope incident-payments --file grant.yaml --reason "INC-4412"
+```python
+control._break_glass(
+    "incident-payments", grant_from_yaml(text), reason="INC-4412"
+)
 ```
 
-The grant in `--file` is an ordinary one-grant document, as `ctrlrun delegate --file` takes. What
-happens is `Control._delegate` with the envelope as parent, so:
+**There is no CLI command in 0.8.0, and §14.5 records why.** One was built and removed before the
+release: `Control.from_file`, which is what the CLI builds, wires no `ApproverIdentity` and there
+is no configuration key for one, so `ctrlrun break-glass` could not succeed in any configuration
+the CLI can load. It failed closed, which is the right direction and not a reason to ship it: a
+command that cannot work is a claim the CLI makes that the code does not honour, and this
+specification refuses that shape everywhere else. The mechanism below is unchanged, is reached
+from an embedding application that built its own `Control`, and the shell surface returns in the
+milestone that gives the CLI a way to verify an approver.
+
+The grant is an ordinary one-grant document, as `ctrlrun delegate --file` takes. What happens is
+`Control._delegate` with the envelope as parent, so:
 
 - **containment is checked by the code that already checks it**, `contained_dimension`, on every
   dimension it knows, which is six and includes `expires_at`. A grant wider than the envelope on
@@ -1858,7 +1869,7 @@ the section it cites, and only then is there code.
 | One policy block, and what loading it changes | 5 | `authority.break_glass`, entries with `max_ttl`; `Authority.envelopes`; `canonical_grants` renders envelopes | The envelope must be covered by the policy hash and must never decide an action, and `_candidates` returns every entry of `_grants` unconditionally. A separate mapping is the only shape that gives both without a filter somebody can delete (§5.2). |
 | Two lookups in the walk | 5 | `Authority._walk` and `_parent_for_creation` resolve a root from `_grants`, then `envelopes` | A break-glass delegation names an envelope as its parent, and the walk resolves roots from `_grants` alone today (§5.2). |
 | One `created_via` value | 5 | the third value beside `api` and `cli` | The vocabulary is a closed `Literal` and an unknown value makes a row unreadable, which makes `Authority.evaluate` answer `authority_unreadable` for every action in the deployment. The `Literal`, the mapping and every reader move together (§5.3). |
-| One CLI command | 5 | `ctrlrun break-glass --envelope --file --reason` | Opening one is an act and acts get commands; it reuses `delegate`'s parsing. No `--as`: the opener is the resolved principal, never an assertion (§5.3.1). |
+| ~~One CLI command~~ | 5 | **Withdrawn before 0.8.0.** `Control._break_glass`, package-internal beside `_delegate` | The command was built and removed: the CLI builds `Control.from_file`, which wires no `ApproverIdentity`, so it could not succeed in any configuration the CLI can load (§5.3, §14.5). No `--as` was the rule while it existed, and it is why the replacement takes no principal either: the opener is the resolved principal, never an assertion (§5.3.1). |
 | Two receipt fields | 2, 5 | `Receipt.approvers`, `Receipt.authority_grant_id` | What §2 verified has to reach the evidence. `AuthorityResult.grant_id` reaches the events already and nothing puts it on the receipt (§5.4). |
 | One module | 6 | `ctrlrun.revocation`: `RevocationFeed` (with `max_staleness`), `FileRevocationFeed`, `PollingRevocationFeed`; `JWTIdentityProvider(revocations=...)` | Consuming a SET needs JWT verification, which is why it is in `ctrlrun[identity]` beside the provider it serves and not in core. |
 | Two operator-server options | 2, 3 | `ctrlrun mcp-operator --approver-roles-claim`, and the server's existing provider used as the approver identity | Without a configuration surface the only verifying surface in §2.6 could not be configured (§2.6). |
@@ -2290,19 +2301,27 @@ does not bound them, so an envelope intended to bound resources must say so. Omi
 unlimited *for the child* — a child may not drop a dimension its parent constrains — and it is
 also not a constraint the parent never expressed.
 
-**Open, and the maintainer's call: `ctrlrun break-glass` cannot succeed in any configuration
-the CLI can load.** `Control.from_file` wires no `ApproverIdentity` -- there is no configuration
+**Decided, and the command was withdrawn: `ctrlrun break-glass` could not succeed in any
+configuration the CLI can load.** `Control.from_file` wires no `ApproverIdentity` -- there is no configuration
 key for one, and §2.6.1 rules out giving the CLI a provider of its own -- so the command §11.1 adds
 for this item always exits 1 saying an approver identity is needed, which is advice the CLI cannot
 act on. It fails closed, and the gated path is the only path: `delegate --parent <an envelope>` is
 refused by name. But it means the shell example in §5.3 does not run today, and break-glass is
 reachable only from an embedding application that built its own `Control`.
 
-Three ways out, none of them a build item's to choose: a configuration key naming an approver
-identity provider, which is surface §11.1 does not list; a credential option on this one command,
-which is the same surface with a narrower blast radius; or striking the shell example and saying
-the command serves deployments that configure one in code. **Asked rather than decided**, on the
-rule that an item which disagrees with its specification stops.
+Three ways out were on the table and the third was taken. A **configuration key** naming the
+approver's identity provider is the worst of them and not merely the largest: it would let whoever
+holds the policy file decide who verifies approvers, which is the direction §8.4 refuses for
+`require_approved_policy` and for the same reason. A **credential option** on the one command
+needs the whole JWT configuration the CLI does not have -- issuer, audience, key source, algorithm
+list -- so it is not one flag but ten, invented under release pressure and reviewed by nobody.
+
+So the command is **withdrawn**, the mechanism ships, and the shell surface returns in the
+milestone that gives the CLI a way to verify an approver. What that costs is stated rather than
+hidden: **break-glass in 0.8.0 is reachable only from an application that builds its own
+`Control`**, and an operator whose incident response is a shell has nothing here yet. What it
+avoids is a command on `ctrlrun --help` that always exits 1, which is the shape this project
+refuses when it is a guard and should refuse when it is a door.
 
 **The absence test had to read code rather than text.** `approval.py` explains in a comment that a
 public `_granting_principal` would be "`trust_approver` spelled as a context manager", which is

@@ -143,9 +143,14 @@ policy cannot be changed by whoever holds the file.
         controls: [incident-response]    # whose approver_role gates who may OPEN it
   ```
 
-  ```
-  ctrlrun break-glass --envelope incident-payments --file grant.yaml --reason "INC-4412"
-  ```
+  **There is no CLI command for it in 0.8.0.** One was built and withdrawn before the release:
+  the CLI builds a `Control` that wires no approver identity, and there is no configuration key
+  for one, so `ctrlrun break-glass` could not succeed in any configuration the CLI can load. It
+  failed closed, which is the right direction and not a reason to ship it — a command that cannot
+  work is a claim the CLI makes that the code does not honour. Opening an envelope in 0.8.0 is
+  reached from an application that built its own `Control`; the shell surface returns in the
+  milestone that gives the CLI a way to verify an approver. `docs/SPEC-v0.8.md` §14.5 records the
+  two alternatives and why each was worse.
 
   **The envelope decides nothing, by construction.** It lives in `Authority.envelopes`, a mapping
   separate from `grants`, because the candidate set is every entry of `grants` unconditionally: an
