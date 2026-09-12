@@ -80,6 +80,7 @@ from ..errors import (
     CTRLRunError,
     DuplicateEffect,
     InvalidArgument,
+    MissingDependency,
     NotExecuted,
     PolicyError,
 )
@@ -3366,6 +3367,89 @@ class Engine:
 
         try:
             return self.graded("G19", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G20: a credential revoked before its exp is refused -------------------------------
+
+    def g20(self) -> GuaranteeResult:
+        """SPEC-v0.8 §6.4, §11.7. Graded with a **note**, never `N/A`.
+
+        Whether this deployment configures a revocation feed is a fact about a constructor call
+        in its own code, which no document verify reads can state, and `verify/guarantees.py`
+        forbids an `N/A` reason that is not about the operator's document. So verify supplies a
+        feed, grades the kernel's behaviour under it, and the note says exactly that.
+
+        Both halves, `v0.4 §1.3`. The observable: a verified credential with a **future `exp`**,
+        revoked by a consumed event, is refused at resolution. The control: an unrevoked
+        credential from the same issuer, in the same run, resolves. A provider that refused
+        every credential would pass the first and fail the second, and a feed that refuses
+        everything is not a feed.
+
+        It grades `ctrlrun.revocation` directly rather than through an action, because §6.4 is
+        explicit that the refusal happens at resolution and writes nothing: there is no receipt
+        to assert and no event, and a scenario that drove an action would be asserting the
+        absence of evidence through two layers that do not produce any.
+        """
+        selection = self.select()
+        if selection is None:
+            return self.na("G20", self.unselected(reg.NO_ACTIONS))
+        try:
+            from ..revocation import FileRevocationFeed
+        except MissingDependency as absent:
+            # `ctrlrun[identity]` is an extra, and a guarantee verify cannot exercise because a
+            # dependency is missing is `N/A` with that as its reason -- a statement about this
+            # installation, which §11.7 permits where a statement about the document would be
+            # false.
+            return self.na("G20", str(absent).split(";")[0])
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["note"] = reg.REVOCATION_NOTE
+            detail["feed_supplied_by_verify"] = True
+            issuer = f"https://{reg.SYNTHETIC_PREFIX}.example"
+            revoked, unrevoked = f"{reg.SYNTHETIC_PREFIX}-revoked", f"{reg.SYNTHETIC_PREFIX}-live"
+            path = self._scratch / "revocations.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "iss": issuer,
+                        "jti": f"{reg.SYNTHETIC_PREFIX}-set",
+                        "events": {
+                            "https://schemas.openid.net/secevent/caep/event-type/session-revoked": {
+                                "subject": {"format": "iss_sub", "iss": issuer, "sub": revoked}
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            feed = FileRevocationFeed(path, issuers=[issuer])
+
+            _expect(
+                feed.revoked(issuer=issuer, subject=revoked, token_id=None),
+                "the revoked credential is reported revoked",
+                "the feed reported it live, so a revoked credential would be admitted",
+            )
+            _expect_control(
+                not feed.revoked(issuer=issuer, subject=unrevoked, token_id=None),
+                "an unrevoked credential from the same issuer is not",
+                "the feed reported every credential revoked, which is not a feed",
+            )
+            _expect(
+                not feed.revoked(
+                    issuer=f"https://other-{reg.SYNTHETIC_PREFIX}.example",
+                    subject=revoked,
+                    token_id=None,
+                ),
+                "an issuer this feed does not cover is unaffected by it",
+                "the feed decided for an issuer it does not cover",
+            )
+
+        control, store, recorder, _ = self._control_for("G20", selection)
+        del control
+        try:
+            return self.graded("G20", selection, store, recorder, body)
         finally:
             store.close()
 
