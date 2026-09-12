@@ -181,6 +181,9 @@ def test_the_community_files_exist_and_say_what_they_must():
         "CTRLRun/ctrlrun-docs",
         "tools/docs_audit",
         "trusted publishing",
+        # The contribution agreement is the DCO and nothing more; the file has to say so.
+        "Developer Certificate of Origin",
+        "git commit -s",
     ):
         assert phrase in contributing, phrase
 
@@ -215,12 +218,28 @@ def test_the_community_files_exist_and_say_what_they_must():
         "Mutation table",
         "CLAIMS.md",
         "docs_audit",
+        "Signed-off-by",
     ):
         assert phrase in pr_template, phrase
 
     assert (
         (REPO_ROOT / ".github" / "CODEOWNERS").read_text().strip().splitlines()[-1].startswith("*")
     )
+
+
+def test_every_pull_request_commit_is_signed_off():
+    """CONTRIBUTING.md asks for a `Signed-off-by` trailer on every commit; the `dco` job is
+    what makes that a gate rather than a request. It runs on pull requests only: a push to
+    `main` is a merge of commits the job already read."""
+    job = _workflow("ci.yml")["jobs"]["dco"]
+    assert job["if"] == "github.event_name == 'pull_request'"
+    run = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "--no-merges" in run
+    # Only git's parsed trailer block counts, so a sentence in the body that mentions the
+    # trailer cannot satisfy the check; and there is no exemption, because one keyed on a
+    # name or an email is a string anyone can set.
+    assert "trailers:key=Signed-off-by" in run
+    assert "[bot]" not in run
 
 
 def test_the_citation_names_the_repository_the_version_and_the_tagline():
