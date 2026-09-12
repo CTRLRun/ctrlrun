@@ -140,7 +140,7 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     assert 'test "$AUTHORITY" = "verified 20/20"' in script
     assert 'test "$TEMPLATES" = "verified 11/11"' in script
     assert 'test "$AUTHORITY_NA" = "2"' in script
-    assert 'test "$TEMPLATES_NA" = "10"' in script
+    assert 'test "$TEMPLATES_NA" = "11"' in script
 
 
 @pytest.mark.authority
