@@ -439,6 +439,24 @@ question being answered is "may this principal approve *this* action". `agent` a
 `None` and never the answering surface's assertion: `v0.3 §3.1` calls them a hint a provider may
 ignore, and a hint sourced from the caller of an approval command is the caller naming themselves.
 
+### 2.8.1 What binds today, and what waits for item 3
+
+**Item 2 does not call `ApproverIdentity.resolve`, and this section says so rather than reading as
+though it did.** The one shipped surface that resolves an approver is the operator MCP server, and
+it resolves through *its own* provider, built from `--principal-header` or `--identity-jwt`, with
+the headers of the request being answered: that is what it has done since it shipped, and item 2
+changes only what it does with the answer. On `Control`, `ApproverIdentity` is the switch that
+turns the consumption check on (§2.3), and its `provider` is what item 3 reads the roles claim
+through.
+
+So the context above is the contract for a surface that resolves **through `ApproverIdentity`**,
+and item 3 is where the operator server starts doing that, with `--approver-roles-claim` beside it.
+Until then, `action` and `environment` on the server's own context name the *tool* being called,
+which is `v0.3`'s shape for that server and not a promise this section made.
+
+A test that builds the context itself and then asserts the fields it just wrote proves nothing, and
+§10.2's T290 was exactly that until an independent review said so.
+
 ### 2.9 The upgrade note, stated because it will surprise somebody
 
 An approval granted at 0.7.0 and still pending in the store, presented after an `ApproverIdentity`
@@ -1979,11 +1997,21 @@ building it confirmed: the only code that calls `grant_approval` outside a test 
 operator server, `handle_inbound`, the scripted provider, the adapters, verify's own scenarios and
 `Control._withdraw`. None of them is `Control` deciding anything.
 
-**The gate of §2.4.1 is `check_consumable` with its verdict's `record` tested and its `refusal` and
-`expire` discarded.** It needed no new expiry logic, no second implementation of a frozen rule and
-no new clock read: `control.py` already imports that function and already calls it twice. The
-mutation table's M3 removes the gate and T291b's four rows go red together, which is what a gate
-protecting four shipped reasons should do.
+**The gate of §2.4.1 is `check_consumable`'s verdict, and `expire` is not discarded after all.**
+The first version tested `verdict.record` and threw the rest away, which reads correctly and is
+fail-open: `check_consumable` returns no record for a *lapsed* grant as well as for a denied,
+consumed or hash-moved one, so on a host whose clock ran ahead of the store's the approver checks
+stood aside, `consume_approval_and_reserve` then consumed the grant by the store's own clock, and
+the action ran with **no approver check at all**. An independent review reproduced it: a
+self-approval committing under a twenty-minute skew, which is `v0.7 §12.5`'s divergence inverted
+from "safe and untrue" into fail-open, on the 0.6-shaped path §2.4 calls every deployment.
+
+So the lapsed row is a **deferral**, not a skip. Where the store disagrees and consumes a grant
+this clock called lapsed, §2.7's and §4.1's checks run on the record the presenting pass read and
+refuse. The grant is spent in that branch, which happens only where clocks already disagree, and
+spent-and-refused is the fail-closed direction. T291c is the reproduction, and it goes red against
+the skip. And the verdict is computed **once**, from one clock read, which §2.4.1 required and the
+first version did not do: it read the clock twice, a tick apart.
 
 **The early return was exactly as dangerous as §2.4 said.** M6 restores it, every approver test in
 the file goes green, and only T291 fails: a check placed after that return is dead on the path
@@ -2001,19 +2029,40 @@ for G12 as well. It is "the requester cannot approve" and not "self-approval is 
 what is compared is the resolved principal on each side and "self" invites the reading that two
 different approver strings are two different people, which is the reading §4.1 exists to refuse.
 
-**What the two version bumps moved in the suite, listed rather than absorbed.** Eighteen tests
-outside this item's own file changed, and every one of them was a count or a key set that was true
-of 0.7.0 and is not true now: four pin the receipt's exact JSON key set, which `v5` widens by two;
-eleven pin verify counts, because G18 is graded wherever a document sends an action to approval, so
-the shipped examples move from 14/14 to 15/15 and from 8/8 to 9/9; one pins the last migration by
-name, and now asserts `HEAD`; and the remaining two pin the receipt schema label this binary
-writes. **The verify counts are also pinned in `.github/workflows/ci.yml`**, which would have
-turned the `verify` job red on a branch whose suite was entirely green, and which nothing in the
-local gate would have caught.
+**What the two version bumps moved in the suite, listed rather than absorbed.** Twelve test files
+outside this item's own changed, and every edit in them was a count, a name or a key set that was
+true of 0.7.0 and is not true now: the receipt's exact JSON key set, which `v5` widens by two; the
+verify counts, because G18 is graded wherever a document sends an action to approval, so the
+shipped examples move from 14/14 to 15/15 and from 8/8 to 9/9 and the catalogue pins move from
+`v3` to `v4`; the last migration, pinned by name and now asserted as `HEAD`; and the receipt schema
+label this binary writes. **The verify counts are also pinned in `.github/workflows/ci.yml`**,
+which would have turned the `verify` job red on a branch whose suite was entirely green, and which
+nothing in the local gate would have caught.
 
 **`_granting_principal` stayed package-internal and the operator server is its first caller.** That
 server has resolved a principal for every request since it shipped and then discarded it into
 `mcp-operator:<user>`; item 2 is, on that surface, four lines that stop discarding it.
+
+**Observe mode had to be implemented, not asserted.** §4.1's row said observe mode records
+`approver_is_requester`, and `_observe_take` never called `_recheck`, so it recorded nothing: the
+section described something that did not exist, and T296 presented no approval at all, which made
+it a negative test against behaviour its own setup prevented. Both are fixed: the check runs on
+that path, `_observe_secure` records the mismatch's own reason where it recorded one constant for
+every mismatch, and T296 asserts the reason and the consequence. The vocabulary change is the one
+§4.1 argued for, and it reaches refusals that have nothing to do with v0.8, which is why it is in
+§11.1's table and in the changelog rather than left to a reader to notice.
+
+**A resumed leg's receipt is the only receipt some actions ever get.** `_resumed_context`
+recovers the precondition fingerprints from the record and did not recover the approvers, so
+§2.5's "carried onto the receipt" was false for exactly the MCP multi round-trip and ACS actions
+that get one receipt (`SPEC-mcp-operator.md` §8.3). One line, and the review found it.
+
+**A corrupted `approvers` column is a `CTRLRunError` and a corrupted one on a receipt is not.**
+The store read raises, named, because an approval is authority about to be spent and one bad row
+must stop this action; `Receipt._approvers_of` drops a malformed entry instead, because a receipt
+is evidence a reader walks past and one tampered row must not blind every reader at once
+(`v0.7 §6.11`). The two rules look inconsistent and are the same rule applied to different
+questions.
 
 ### 14.3 Item 3: entitlement from the control registry
 

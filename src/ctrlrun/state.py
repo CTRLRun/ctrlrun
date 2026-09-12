@@ -38,9 +38,9 @@ from .approval import (
     ApprovalStatus,
     ApprovalStore,
     VerifiedApprover,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
-    verified_approver_now,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -749,10 +749,26 @@ def _approvers_json(approvers: tuple[VerifiedApprover, ...]) -> str | None:
 
 def _approvers_from_json(text: str | None) -> tuple[VerifiedApprover, ...]:
     """What the column holds, or `()`. A column a store dropped reads as no approver at all,
-    which `Control` refuses at consumption rather than skipping (SPEC-v0.8 §2.5)."""
+    which `Control` refuses at consumption rather than skipping (SPEC-v0.8 §2.5).
+
+    **A corrupted column is a `CTRLRunError` and not a `JSONDecodeError`.** This read sits under
+    `get_approval`, which sits under `_recheck`, which sits under `execute`: a raw decoding error
+    from a tampered row would reach an agent as an exception no caller catches and no receipt
+    records. Fail closed, named, and traceable to the row.
+
+    It does **not** get `Receipt.from_dict`'s never-raises treatment, and the difference is
+    deliberate: a receipt is evidence a reader walks past, so one bad row must not blind every
+    reader, while an approval is authority about to be spent, so one bad row must stop this
+    action rather than be read as "no approver" (§2.5, `v0.7 §6.11`).
+    """
     if not text:
         return ()
-    return tuple(VerifiedApprover.from_dict(item) for item in json.loads(text))
+    try:
+        return tuple(VerifiedApprover.from_dict(item) for item in json.loads(text))
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise InvalidArgument(
+            f"the approvals row carries an unreadable 'approvers' column: {exc}"
+        ) from exc
 
 
 class InMemoryStateStore:
@@ -898,7 +914,7 @@ class InMemoryStateStore:
             # SPEC-v0.8 §2.5: whatever the granting surface verified, or nothing where it
             # verified nobody. A store that did not read this records no approver, and that is
             # refused at consumption rather than skipped.
-            verified = verified_approver_now(now)
+            verified = _verified_approver_now(now)
             granted = replace(
                 record,
                 status=ApprovalStatus.GRANTED,
@@ -913,7 +929,8 @@ class InMemoryStateStore:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
-            verified = verified_approver_now(self._clock())
+            now = self._clock()
+            verified = _verified_approver_now(now)
             self._approvals[approval_id] = replace(
                 record,
                 status=ApprovalStatus.DENIED,
@@ -1576,7 +1593,7 @@ class SQLiteStateStore:
             record = self._answerable(connection, approval_id, now)
             # SPEC-v0.8 §2.5: the verified approver, appended to whatever the row already
             # holds, inside the same `BEGIN IMMEDIATE` that serialises the status transition.
-            verified = verified_approver_now(now)
+            verified = _verified_approver_now(now)
             approvers = (*record.approvers, verified) if verified else record.approvers
             granted = replace(
                 record,
@@ -1609,7 +1626,7 @@ class SQLiteStateStore:
         connection.execute("BEGIN IMMEDIATE")
         try:
             record = self._answerable(connection, approval_id, now)
-            verified = verified_approver_now(now)
+            verified = _verified_approver_now(now)
             approvers = (*record.approvers, verified) if verified else record.approvers
             connection.execute(
                 "UPDATE approvals SET status=?, approver=?, approvers=? WHERE approval_id=?",

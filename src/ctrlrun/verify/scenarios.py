@@ -117,7 +117,7 @@ APPROVER: Final = "ctrlrun-verify"
 #: operator configured one, which is a fact about a constructor call and not about a document.
 #:
 #: Not `StaticIdentityProvider`: that one warns, by design (`v0.3 §3.3`), and a passing verify
-#: run writes no kernel warning to stderr.
+#: run writes no kernel warning to stderr. `_VerifyApproverProvider`, below, is what it uses.
 
 #: §3.6 — the base instant where no grant carries an `expires_at`.
 FALLBACK_T0: Final = datetime(2026, 1, 1, tzinfo=UTC)

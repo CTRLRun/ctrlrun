@@ -46,9 +46,9 @@ from .approval import (
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
-    verified_approver_now,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -1523,7 +1523,7 @@ class PostgresStateStore:
             record = self._answerable(connection, approval_id, now)
             # SPEC-v0.8 §2.5: the verified approver the granting surface resolved, appended to
             # whatever the row already holds.
-            verified = verified_approver_now(now)
+            verified = _verified_approver_now(now)
             approvers = (*record.approvers, verified) if verified else record.approvers
             granted = replace(
                 record,
@@ -1567,7 +1567,7 @@ class PostgresStateStore:
         self._use_schema(connection)
         try:
             record = self._answerable(connection, approval_id, now)
-            verified = verified_approver_now(now)
+            verified = _verified_approver_now(now)
             approvers = (*record.approvers, verified) if verified else record.approvers
             with connection.cursor() as cursor:
                 cursor.execute(

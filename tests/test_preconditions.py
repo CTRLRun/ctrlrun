@@ -988,7 +988,11 @@ def test_observe_mode_rechecks_records_and_runs_spending_no_grant(tmp_path, fake
     assert executor.calls == 1, "observe mode refused something"
     assert receipt.result is ReceiptResult.OBSERVED
     assert receipt.would_have is not None
-    assert receipt.would_have.blocked_reason == "approval_mismatch"
+    # SPEC-v0.8 §4.1: observe mode records the mismatch's **own** reason now, where it recorded
+    # the constant `approval_mismatch` for every one of them. This is a precondition refusal and
+    # has nothing to do with v0.8's approver; it is the clearest example of what that change
+    # reaches, which is why the changelog lists it rather than leaving it to a diff.
+    assert receipt.would_have.blocked_reason == CHANGED
     data = invalidated(store, request_id)[0].data
     assert data["reason"] == CHANGED
     assert data["precondition_at_recheck"] == fingerprint(MOVED)
@@ -2077,7 +2081,7 @@ def _g16(path, **kwargs):
     return report, next(result for result in report.guarantees if result.id == "G16")
 
 
-def test_T269_G16_is_in_the_v3_catalogue():
+def test_T269_G16_is_in_the_catalogue():
     from ctrlrun.verify import guarantees as reg
 
     assert reg.CATALOGUE == "ctrlrun.guarantees/v4"

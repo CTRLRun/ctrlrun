@@ -28,7 +28,7 @@ from .errors import (
     CTRLRunError,
     InvalidArgument,
 )
-from .identity import IdentityContext, IdentityProvider
+from .identity import IdentityContext, IdentityProvider, StaticIdentityProvider
 
 _LOG = logging.getLogger("ctrlrun")
 
@@ -159,7 +159,7 @@ class ApproverIdentity:
     def __post_init__(self) -> None:
         if self.roles_claim is not None and not self.roles_claim.strip():
             raise InvalidArgument("roles_claim must be a non-empty string or None")
-        if type(self.provider).__name__ == "StaticIdentityProvider":
+        if isinstance(self.provider, StaticIdentityProvider):
             # §2.3: a warning and not a refusal: a single-operator deployment where the shell
             # genuinely is the human is real, and the record it produces is true. What is not
             # true is that such a record distinguishes anybody, and an operator who has not
@@ -201,7 +201,7 @@ def _granting_principal(principal: Principal, *, entitled: Iterable[str] = ()) -
         _GRANTING_PRINCIPAL.reset(token)
 
 
-def verified_approver_now(now: datetime) -> VerifiedApprover | None:
+def _verified_approver_now(now: datetime) -> VerifiedApprover | None:
     """The verified approver a store should record for a grant taken at `now`, if any.
 
     Read by the shipped stores inside `grant_approval` and `deny_approval`. A store that does

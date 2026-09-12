@@ -31,6 +31,7 @@ from .approval import (
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    ApprovalVerdict,
     ApproverIdentity,
     LocalApprovalProvider,
     VerifiedApprover,
@@ -373,19 +374,23 @@ class _Compared:
     per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("approvers", "at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "deferred_approver_check", "error")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
         self.approvers: tuple[VerifiedApprover, ...] = ()
+        #: SPEC-v0.8 §2.4.1: this clock called the grant lapsed, so the approver checks stood
+        #: aside; if the store disagrees and consumes it, they run after the store call.
+        self.deferred_approver_check = False
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
         self.approvers = ()
+        self.deferred_approver_check = False
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -1176,7 +1181,15 @@ class Control:
             # A *presented* approval that does not authorize this action. §6.2 lists
             # `ApprovalMismatch` among the exceptions observe mode does not raise, so it is
             # recorded and the action runs; the approval is left unconsumed either way.
-            observation.block(BLOCKED_APPROVAL_MISMATCH)
+            #
+            # **The reason and not the constant, which is a behaviour change SPEC-v0.8 §4.1
+            # argues for rather than a side effect of item 2.** This recorded
+            # `approval_mismatch` for every mismatch, so an operator reading an observe-mode
+            # report could not tell a moved precondition from an approver who may not answer.
+            # Recording the specific reason for the approver refusals alone would leave a
+            # vocabulary nobody can explain, so every mismatch now records its own reason. The
+            # values are the ones `_secure` raises, and §11.1's table lists them.
+            observation.block(mismatch.reason or BLOCKED_APPROVAL_MISMATCH)
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
@@ -1243,12 +1256,18 @@ class Control:
         grant is spent.
         """
         if approval_id is not None:
+            found = self._store.get_approval(approval_id)
             verdict = check_consumable(
-                self._store.get_approval(approval_id),
+                found,
                 approval_id,
                 action.action_hash,
                 self._clock(),
             )
+            # SPEC-v0.8 §4.1: observe mode records what enforce mode would have done, and
+            # enforce mode refuses a self-approval. This path never calls `_recheck`, so the
+            # check is made here too or the row §4.1 describes does not exist. Before the
+            # verdict's own refusal, on the same order `_recheck` uses.
+            self._check_approver(action, approval_id, found, compared, verdict)
             if verdict.refusal is not None:
                 raise verdict.refusal
             # `as_approval()` and not a hand-built `Approval`: one construction, so observe
@@ -1396,6 +1415,12 @@ class Control:
             # An approval consumed before this event carried the comparison, or by a path that
             # compared nothing: the record still says what it was requested with.
             compared.at_request = record.request.precondition_fingerprint
+        if record is not None:
+            # SPEC-v0.8 §2.5: who answered, recovered from the row for the same reason. **The
+            # resumed leg's receipt is the only receipt an MCP multi round-trip or an ACS action
+            # ever gets** (`SPEC-mcp-operator.md` §8.3), so without this the approvers reach the
+            # evidence on every action except the ones that get exactly one receipt.
+            compared.approvers = record.approvers
         return started, approval, compared
 
     def _outcome(
@@ -1789,6 +1814,9 @@ class Control:
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
+                # SPEC-v0.8 §2.4.1: the store disagreed with this clock about expiry and
+                # consumed the grant, so the checks that stood aside for the lapse run now.
+                self._check_approver_after_take(action, approval_id, compared)
                 break
             except AmbiguousEffect as refused:
                 # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
@@ -2548,18 +2576,46 @@ class Control:
         record = self._store.get_approval(approval_id)
         stored = None if record is None else record.request.precondition_fingerprint
         compared.at_request = stored
+        # **One verdict, from one clock read**, reused by the approver gate below and by the
+        # precondition path's raise (SPEC-v0.8 §2.4.1). Two reads a tick apart could produce a
+        # gate that says "not lapsed" followed by a raise that says `expired`, which is the
+        # divergence `v0.7 §12.5` reversed.
+        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         # SPEC-v0.8 §2.4: **the early return is gone.** It returned here whenever no provider
         # was named and the record carried no fingerprint, which is every deployment that does
         # not use `v0.7 §6`, and an approver check added after it would have been dead on that
         # path, green, and invisible to a mutation table.
-        self._check_approver(action, approval_id, record, compared)
+        self._check_approver(action, approval_id, record, compared, verdict)
         if preconditions is None and stored is None:
             return
-        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.refusal is not None:
             raise verdict.refusal
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)
+
+    def _check_approver_after_take(
+        self, action: Action, approval_id: str | None, compared: _Compared
+    ) -> None:
+        """The deferred approver check, run after the store disagreed about expiry (§2.4.1).
+
+        **This is the fail-open hole an independent review found, closed.** The gate below skips
+        the approver checks where *this* clock considers the grant lapsed, because refusing here
+        would cost the lapse its `APPROVAL_EXPIRED` event and the store's own lapse write. But a
+        skip is permanent, and the store has its own clock: where this host runs ahead, the gate
+        skipped and `consume_approval_and_reserve` then consumed the grant happily, so the action
+        ran **with no approver check at all**. A self-approval committed under a twenty-minute
+        skew, which is `v0.7 §12.5`'s divergence inverted into fail-open.
+
+        So the skip is a deferral and nothing more: where the store consumed a grant this clock
+        called lapsed, the checks run now, on the record read on the presenting pass, and refuse.
+        The grant is spent in that branch. That is the fail-closed direction and it costs a human
+        a second answer only on a deployment whose clocks already disagree, which `v0.7 §3` gives
+        an operator an event to find.
+        """
+        if approval_id is None or not compared.deferred_approver_check:
+            return
+        record = self._store.get_approval(approval_id)
+        self._refuse_approver(action, approval_id, () if record is None else record.approvers)
 
     def _check_approver(
         self,
@@ -2567,6 +2623,7 @@ class Control:
         approval_id: str,
         record: ApprovalRecord | None,
         compared: _Compared,
+        verdict: ApprovalVerdict,
     ) -> None:
         """Who answered, and whether they may have (SPEC-v0.8 §2.7, §4.1).
 
@@ -2579,9 +2636,12 @@ class Control:
         own lapse write**, because that write happens inside `_take` and a refusal raised here
         never reaches it.
 
-        The gate is `check_consumable`, the pure function `v0.1 §4.2` froze, with its `record`
-        tested and its `refusal` and `expire` discarded: no second implementation of a frozen
-        rule, no new clock read, and the store still decides expiry and may disagree.
+        The gate is the `check_consumable` verdict `_recheck` computed, the pure function
+        `v0.1 §4.2` froze: no second implementation of a frozen rule, no second clock read, and
+        the store still decides expiry and may disagree.
+
+        **The lapsed row is a deferral and not a skip**, which is the difference between this and
+        the version an independent review broke: `_check_approver_after_take` says why.
         """
         if record is not None:
             # Recorded whatever this deployment checks, so a receipt says who answered even
@@ -2589,10 +2649,19 @@ class Control:
             compared.approvers = record.approvers
         if self._approver_identity is None:
             return
-        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.record is None:
+            # Denied, consumed or hash-moved: the store's reason wins and this check stands
+            # aside for good. Lapsed by this clock: stand aside *for now*, because the store may
+            # disagree, and a disagreement it resolves in favour of the grant must not be a way
+            # past §2.7.
+            compared.deferred_approver_check = verdict.expire
             return
-        approvers = verdict.record.approvers
+        self._refuse_approver(action, approval_id, verdict.record.approvers)
+
+    def _refuse_approver(
+        self, action: Action, approval_id: str, approvers: tuple[VerifiedApprover, ...]
+    ) -> None:
+        """§2.7 and §4.1's two refusals, over whatever the row recorded."""
         if not approvers:
             raise ApprovalMismatch(
                 f"approval {approval_id} carries no verified approver, and this deployment "
@@ -2936,7 +3005,6 @@ class Control:
         attempt: int = 1,
         observation: _Observation | None = None,
         compared: _Compared | None = None,
-        approvers: tuple[VerifiedApprover, ...] = (),
     ) -> Receipt:
         # SPEC-v0.3 §6.3 — one place turns a terminal outcome into an observed receipt, so
         # `result`, `execution` and `would_have` cannot disagree about the same action. The
@@ -2977,7 +3045,7 @@ class Control:
             # SPEC-v0.8 §2.5: what §2 verified reaches the evidence, or the milestone records
             # nothing. Read from the row rather than from the `Approval`, which carries only the
             # string `v0.1 §4.1` froze.
-            approvers=approvers or (() if compared is None else compared.approvers),
+            approvers=() if compared is None else compared.approvers,
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained

@@ -345,27 +345,28 @@ def test_T289_a_static_approver_identity_warns_once_and_does_not_refuse(caplog):
 # --- T290: the IdentityContext an approval resolution gets -------------------------------------
 
 
-def test_T290_the_context_names_the_stored_request_and_asserts_nothing(store, clock):
-    """§2.8: the action and environment of the action being approved, and no caller assertion."""
+def test_T290_the_approver_identity_is_a_switch_and_a_delegator_today(store, clock):
+    """§2.8.1: what item 2 actually wires, asserted instead of a context the test wrote itself.
+
+    The first version of this built an `IdentityContext`, handed it to `identity.resolve`, and
+    asserted the fields it had just written: a tautology an independent review caught. Nothing
+    in the shipped tree calls `ApproverIdentity.resolve` yet. What item 2 wires is the switch,
+    and what §2.8's contract binds is a surface that resolves through it, which item 3 adds.
+    """
     provider = _Recording(APPROVER)
     identity = ApproverIdentity(provider)
     control = _control(store, clock, approver_identity=identity)
-    action = _action(control)
-    request_id = _requested(control, action)
-    record = store.get_approval(request_id)
 
-    identity.resolve(
-        IdentityContext(
-            action=record.request.action.name,
-            environment=record.request.action.environment,
-            headers={"authorization": "Bearer x"},
-        )
+    assert control.approver_identity is identity, "the switch is readable, per §11.1"
+    assert provider.contexts == [], (
+        "nothing in item 2 resolves through ApproverIdentity; §2.8.1 says so, and item 3 is "
+        "where that changes"
     )
 
-    context = provider.contexts[-1]
-    assert context.action == "payments.refund"
-    assert context.environment == control.environment
-    assert context.agent is None and context.user is None
+    # And the delegation itself carries a provider's answer through without touching it.
+    given = IdentityContext(action="payments.refund", environment=control.environment)
+    assert identity.resolve(given) is APPROVER
+    assert provider.contexts == [given], "the context reaches the provider unaltered"
 
 
 # --- T291: the early return is gone ------------------------------------------------------------
@@ -454,6 +455,48 @@ def test_T291b_a_lapsed_grant_still_expires_with_its_event_and_its_write(store, 
     assert str(store.get_approval(request_id).status) == "expired"
 
 
+# --- T291c: the skew that turned the gate into a skip ------------------------------------------
+
+
+def test_T291c_a_clock_ahead_of_the_stores_does_not_skip_the_approver_check(store, clock):
+    """§2.4.1: the lapsed row is a deferral, not a skip, and this is why.
+
+    An independent review broke the first version of the gate here. It stood aside whenever
+    *this* clock called the grant lapsed, because refusing on approver grounds would cost the
+    lapse its `APPROVAL_EXPIRED` event and the store's own lapse write. But a skip is permanent
+    and the store keeps its own clock: with this host running ahead, the gate stood aside, the
+    store consumed the grant happily, and the action ran **with no approver check at all**. The
+    reproduction was a self-approval committing under a twenty-minute skew.
+
+    Here the store's clock stays still and the `Control`'s runs ahead of the expiry, which is
+    the same disagreement from the other side, and the approval is the requester's own.
+    """
+    control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(AGENT)))
+    action = _action(control)
+    request_id = _requested(control, action)
+    _grant_verified(store, request_id, Principal(agent=AGENT.agent, user=AGENT.user))
+
+    ahead = _Clock()
+    ahead.now = clock.now + timedelta(hours=48)
+    skewed = Control(
+        Policy.from_yaml(POLICY),
+        store,
+        clock=ahead,
+        approver_identity=ApproverIdentity(_Recording(AGENT)),
+        identity=StaticIdentityProvider(agent=AGENT.agent, user=AGENT.user),
+    )
+    executor = _Executor()
+
+    with pytest.raises(ApprovalMismatch) as refused, with_approval(request_id):
+        skewed.execute(action, executor, KEY)
+
+    assert refused.value.reason == IS_REQUESTER, (
+        "the gate skipped the approver check because this clock called the grant lapsed, and "
+        "the store then consumed it: a self-approval ran"
+    )
+    assert executor.calls == 0
+
+
 # --- T295: the upgrade case --------------------------------------------------------------------
 
 
@@ -478,51 +521,155 @@ def test_T295_an_approval_granted_before_the_provider_was_configured_is_refused(
 OBSERVE_POLICY = POLICY.replace("ctrlrun.policy/v1", "ctrlrun.policy/v3") + "mode: observe\n"
 
 
-def test_T296_observe_mode_records_the_approver_reason_and_runs(store, clock):
-    """§4.1: and the deliberate consequence: a mismatch records its own reason, not a constant."""
-    control = Control(
+def _observing(store, clock, identity):
+    return Control(
         Policy.from_yaml(OBSERVE_POLICY),
         store,
         clock=clock,
-        approver_identity=ApproverIdentity(_Recording(AGENT)),
+        approver_identity=identity,
         identity=StaticIdentityProvider(agent=AGENT.agent, user=AGENT.user),
     )
-    action = _action(control)
+
+
+def test_T296_observe_mode_records_the_approver_reason_and_runs(store, clock):
+    """§4.1: what enforce mode would have done, recorded, with the action still running.
+
+    **An approval is presented here, which the first version of this test did not do.** Without
+    one, `_observe_take` never reaches an approval at all, so the test asserted only that
+    observe mode runs the action, which is true of every observe-mode run and of a deployment
+    where this row is unimplemented. An independent review found it: a negative test against
+    behaviour the setup already prevented, in a window that was never opened.
+    """
+    identity = ApproverIdentity(_Recording(AGENT))
+    enforcing = _control(store, clock, approver_identity=identity)
+    action = _action(enforcing)
+    request_id = _requested(enforcing, action)
+    _grant_verified(store, request_id, Principal(agent=AGENT.agent, user=AGENT.user))
     executor = _Executor()
 
-    receipt = control.execute(action, executor, KEY)
+    with with_approval(request_id):
+        receipt = _observing(store, clock, identity).execute(action, executor, KEY)
 
-    assert executor.calls == 1, "observe mode runs the action"
+    assert executor.calls == 1, "observe mode runs the action whatever it found"
     assert str(receipt.result) == "observed"
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == IS_REQUESTER
+    assert str(store.get_approval(request_id).status) == "granted", "no grant is spent"
+
+
+def test_T296_every_other_mismatch_now_records_its_own_reason(store, clock):
+    """The deliberate consequence §4.1 names, asserted rather than left to a reader.
+
+    Observe mode recorded the constant `approval_mismatch` for every `ApprovalMismatch`, so a
+    moved precondition and an approver who may not answer were one word in a report. Recording
+    the specific reason for the approver refusals alone would leave a vocabulary nobody can
+    explain, so every mismatch records its own reason now. Here: a hash that moved, which is
+    `G1`'s case and has nothing to do with v0.8.
+    """
+    enforcing = _control(store, clock)
+    action = _action(enforcing)
+    request_id = _requested(enforcing, action)
+    store.grant_approval(request_id, "cli:local")
+    moved = _action(enforcing, amount=999, payment_id="EU-42")
+    executor = _Executor()
+
+    with with_approval(request_id):
+        receipt = _observing(store, clock, None).execute(moved, executor, "refund:EU-99")
+
+    assert executor.calls == 1
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "mismatch", (
+        "the constant `approval_mismatch` is what this recorded before, for every mismatch"
+    )
+
+
+# --- T297: the resumed leg is the only receipt some actions get ------------------------------
+
+
+def test_T297_a_resumed_leg_carries_the_approvers_onto_its_receipt(store, clock):
+    """§2.5 and `SPEC-mcp-operator.md` §8.3, which is why this is not a nicety.
+
+    A suspended action writes no receipt on the leg that suspended, so the resumed leg's is the
+    **only** receipt an MCP multi round-trip or an ACS action ever gets. `_resumed_context`
+    recovers the precondition fingerprints from the record and recovered nothing about who
+    approved, so "carried onto the receipt" was false for exactly those actions. An independent
+    review found it.
+    """
+    from ctrlrun.errors import Suspended
+
+    control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
+    action = _action(control)
+    request_id = _requested(control, action)
+    _grant_verified(store, request_id)
+
+    def suspends():
+        raise Suspended("continuation-EU-42")
+
+    with pytest.raises(Suspended), with_approval(request_id):
+        control.execute(action, suspends, KEY)
+
+    receipt = control.resume("continuation-EU-42", lambda: "refunded")
+
+    assert str(receipt.result) == "committed"
+    assert receipt.approver == "mcp-operator:bob"
+    assert [who.agent for who in receipt.approvers] == ["human:bob"], (
+        "the resumed leg is the only receipt this action gets, and it says who approved"
+    )
 
 
 # --- T292, T293, T294 live beside the machinery they exercise ----------------------------------
 
 
-def test_T292_the_migration_keeps_every_row_and_adds_the_column(tmp_path, clock):
-    """§11.1's `0006_verified_approver`, forward-only, on a database with rows in it."""
+def test_T292_the_migration_is_at_head_and_the_column_round_trips(tmp_path, clock):
+    """`0006_verified_approver`, and what this test does **not** claim to cover.
+
+    An independent review found the first version of this asserting nothing: it opened a store
+    with *this* binary, which applies `0006` at creation, reopened it, and called the survival
+    of a row evidence of a migration. No pre-`0006` database was ever built.
+
+    The real upgrade coverage is `test_preconditions.py::test_T264`, which builds a database
+    with 0.6.1's own code and migrates it to `HEAD` with every row intact, on both backends.
+    What is left here is the half that belongs beside item 2: the column round-trips through a
+    real file-backed store, and the migration ledger says HEAD.
+    """
+    from ctrlrun.migrations import HEAD
+
     path = tmp_path / "state.db"
     first = SQLiteStateStore(path, clock=clock)
     control = _control(first, clock)
     action = _action(control)
     request_id = _requested(control, action)
-    first.store_approver = None
-    first.grant_approval(request_id, "cli:local")
+    _grant_verified(first, request_id)
     first.close()
 
     reopened = SQLiteStateStore(path, clock=clock)
     try:
         record = reopened.get_approval(request_id)
         assert record is not None
-        assert record.approver == "cli:local"
-        assert record.approvers == ()
+        assert record.approver == "mcp-operator:bob"
+        assert [who.agent for who in record.approvers] == ["human:bob"]
+        applied = [
+            row[0]
+            for row in reopened._connection().execute(
+                "SELECT migration_id FROM schema_version ORDER BY 1"
+            )
+        ]
+        assert applied[-1] == HEAD
+        assert "0006_verified_approver" in applied
     finally:
         reopened.close()
 
 
-def test_T293_a_v4_receipt_still_reads_and_a_v5_chain_verifies(store, clock):
-    """`v0.7 §6.11`: a receipt renders under its own schema, and the chain spans both."""
-    from ctrlrun.receipt import Receipt
+def test_T293_a_chain_spanning_two_receipt_schemas_verifies(store, clock):
+    """`v0.7 §6.11`: a receipt renders under its own schema, and the chain spans both.
+
+    The first version round-tripped one relabelled document and never called `verify_chain`,
+    which an independent review called what it was. The cross-version chain over a *stored* v3
+    and a continued v5 is `test_preconditions.py::test_T265`; this asserts the half item 2 adds,
+    that a v5 receipt's two new keys are read only from a v5 document and that a chain carrying
+    one verifies end to end.
+    """
+    from ctrlrun.receipt import Receipt, verify_chain
 
     control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
     action = _action(control)
@@ -530,9 +677,14 @@ def test_T293_a_v4_receipt_still_reads_and_a_v5_chain_verifies(store, clock):
     _grant_verified(store, request_id)
     _present(control, action, request_id)
 
+    report = verify_chain(store)
+    assert report.ok, report.breaks
+    assert report.verified == len(store.receipts())
+
     written = [receipt for receipt in store.receipts() if receipt.action_id == action.action_id]
     document = written[-1].to_dict()
     assert document["schema"] == "ctrlrun.receipt/v5"
+    assert document["approvers"], "a v5 document carries what a v5 writer wrote"
 
     older = dict(document, schema="ctrlrun.receipt/v4")
     older.pop("approvers")

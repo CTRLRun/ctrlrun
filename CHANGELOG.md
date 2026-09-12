@@ -40,6 +40,13 @@ any change to one appears here.
   arrive through one of those three turns its approval path off by configuring this, which is the
   rule working rather than a defect, and §2.6's table is the thing to read before configuring.
 
+  **Observe mode now records a mismatch's own reason where it recorded one constant for all of
+  them.** `would_have.blocked_reason` said `approval_mismatch` for every `ApprovalMismatch`, so a
+  moved precondition and an approver who may not answer were one word in a report. Recording the
+  specific reason for the approver refusals alone would have left a vocabulary nobody can explain,
+  so every mismatch records its own. This reaches refusals that have nothing to do with v0.8, and
+  it is listed here rather than left for an operator to notice in a diff.
+
   Needs `ctrlrun.receipt/v5`, which adds `approvers` and `authority_grant_id`, and migration
   `0006_verified_approver`. Every reader upgrades before any writer switches (`SPEC-v0.3.md`
   §12.2).
