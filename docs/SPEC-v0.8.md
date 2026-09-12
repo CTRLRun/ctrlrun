@@ -1522,6 +1522,19 @@ forbids (the third).
   a self-approved grant: refused `approver_is_requester`, the executor not called, **the approval
   still granted and nothing reserved**. Without the last two assertions the test cannot tell a
   refusal before the store call from one after, which is what let the deferral look correct.
+- **T283b:** `entitled` is validated before it is converted. `str` is a `Sequence`, so
+  `tuple("abc")` is three control ids: a corrupted column was accepted as an approver entitled for
+  controls that do not exist, which made `_approvers_from_json`'s promise to raise false for the
+  shape a corruption most easily takes.
+- **T296b:** the report still adds up. An observe-mode approval refusal, and an observe-mode
+  **denial by a human**, are each counted by `ctrlrun stats`. `would_have.blocked_reason` is a
+  closed vocabulary because `v0.3 §6.4` buckets counts on it, and recording each mismatch's own
+  reason put them in no bucket at all. Driven with no `ApproverIdentity` anywhere, because the
+  receipts that stopped counting have nothing to do with v0.8, and the denial one was already
+  uncounted before it.
+- **T296c:** a resumed leg carries the approvers onto its receipt. That leg is the **only** receipt
+  an MCP multi round-trip or an ACS action ever gets (`SPEC-mcp-operator.md` §8.3), so without it
+  §2.5's "carried onto the receipt" is false for exactly the actions that get one receipt.
 - **T292:** the migration ledger reaches `HEAD` and the column round-trips through a file-backed
   store. The 0.6.1-built upgrade in both directions is `test_preconditions.py`'s T264, and §14.2
   says why this one does not duplicate it.
