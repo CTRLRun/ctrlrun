@@ -913,6 +913,7 @@ class Engine:
         *,
         clock: _Clock | None = None,
         approver_identity: ApproverIdentity | None = None,
+        require_approved_policy: bool = False,
     ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
@@ -929,6 +930,10 @@ class Engine:
             # only where a scenario asks for one. Every other scenario keeps the 0.7.0 shape,
             # which is what keeps `ctrlrun verify` green on a deployment that verifies nobody.
             approver_identity=approver_identity,
+            # SPEC-v0.8 §11.7, for G21: verify sets the flag for its own scenario and says so
+            # in a note. Every other scenario keeps the 0.7.0 shape, so a guarantee that did
+            # not ask for it is graded against the deployment shape it was written for.
+            require_approved_policy=require_approved_policy,
         )
         return control, store, recorder, moving
 
@@ -3450,6 +3455,70 @@ class Engine:
         del control
         try:
             return self.graded("G20", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G21: a policy nobody approved decides nothing --------------------------------------
+
+    def g21(self) -> GuaranteeResult:
+        """SPEC-v0.8 §8.4, §11.7. Graded with a **note**, never `N/A`.
+
+        Whether a deployment passes `require_approved_policy=True` is a fact about a constructor
+        call in its own code, which no document verify reads can state, so verify sets the flag
+        for its own scenario and the note says exactly that.
+
+        Both halves, `v0.4 §1.3`. The observable: with the flag set and no committed
+        `policy:<hash>` effect, an action the document would have allowed is denied
+        `policy_unapproved` and the executor is not reached. The control: the **same** action,
+        under the same document with the flag unset, runs. A kernel that denied everything would
+        pass the first and fail the second.
+        """
+        selection = self.select(decisions=(Decision.ALLOW,))
+        if selection is None:
+            return self.na("G21", self.unselected(reg.EVERY_ACTION_DENIED))
+        control, store, recorder, _ = self._control_for("G21", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["note"] = reg.POLICY_APPROVAL_NOTE
+            detail["require_approved_policy"] = "set by verify (SPEC-v0.8 §11.7)"
+            action = selection.build()
+            guarded, guarded_store, _, _ = self._control_for(
+                "G21-guarded", selection, require_approved_policy=True
+            )
+            # Its own scratch store, closed when the scenario ends: the guarded `Control` must
+            # find **no** committed `policy:<hash>` effect, and sharing the store with the
+            # control half would make that a property of ordering rather than of the flag.
+            detail["guarded_store"] = type(guarded_store).__name__
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(guarded, action, executor, selection.effect_key, None),
+                (ActionDenied,),
+                "ActionDenied(reason='policy_unapproved')",
+                "an action ran under a policy nobody approved",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "policy_unapproved",
+                "ActionDenied(reason='policy_unapproved')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            committed = _Executor()
+            receipt = self.execute(
+                control, selection.build(), committed, selection.effect_key, None
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, without the requirement, runs",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G21", selection, store, recorder, body)
         finally:
             store.close()
 

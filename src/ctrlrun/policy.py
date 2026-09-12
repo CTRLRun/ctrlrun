@@ -165,6 +165,20 @@ _V5_ENTRY_KEYS: Final[Mapping[str, str]] = {
 #: SPEC-v0.8 §4.2 — the M-of-N threshold, gated for `max_attempts`'s reason: an older reader
 #: would ignore it and consume on the first grant, which is a deployment believing two humans
 #: answered when one did.
+#: SPEC-v0.8 §8.2. The one action name the policy-change flow owns, and the only reserved name
+#: in this project. **Reserved and declarable**, which a first draft had backwards: `evaluate`
+#: answers `DENY unknown_action` for any name a document does not list, so a name no document
+#: may declare is a name every proposal is denied for, no committed receipt is ever written,
+#: and a deployment with `require_approved_policy=True` denies every action for ever. The two
+#: rules were mutually exclusive.
+POLICY_CHANGE_ACTION: Final = "ctrlrun.policy.change"
+
+#: SPEC-v0.8 §8.4 — the refusal a deployment gets under a policy nobody approved. Its own
+#: reason, never folded into `unknown_action` or a generic denial: "this policy was never
+#: approved" and "this policy denies this action" are different facts and an operator acts on
+#: them differently.
+POLICY_UNAPPROVED: Final = "policy_unapproved"
+
 _V6_ENTRY_KEYS: Final[Mapping[str, str]] = {
     "approvals_required": (
         "an older reader would ignore the threshold and consume on the first grant, which is a "
@@ -553,6 +567,18 @@ class _ActionPolicy:
     #: entry names none. `None` is one, which is 0.7.0.
     approvals_required: int | None = None
 
+    def decisions(self) -> tuple[Decision, ...]:
+        """Every decision this entry can reach (SPEC-v0.8 §8.2.1).
+
+        One for a `decision:` entry, one per rule for a `rules:` entry. `Policy.approving_actions`
+        reads it to answer "does this action always go to a human", which is not the same as
+        "can it": an entry that approves under one condition and allows under another is a
+        policy whose change can be made without one.
+        """
+        if self.decision is not None:
+            return (self.decision,)
+        return tuple(rule.decision for rule in self.rules)
+
     def data_scope(self, arguments: Mapping[str, Any]) -> frozenset[str]:
         """The labels present in **the arguments actually supplied** (SPEC-v0.6 §7.4).
 
@@ -776,6 +802,14 @@ class Policy:
         for name, entry in entries.items():
             if not isinstance(name, str) or not name:
                 raise PolicyError(f"{source}: action names must be non-empty strings, got {name!r}")
+            if name == POLICY_CHANGE_ACTION and not _at_least(str(schema), POLICY_SCHEMA_V6):
+                # SPEC-v0.8 §8.2.1. An older reader would treat it as an ordinary action name
+                # and decide a policy change by whatever rule it found, with nothing saying the
+                # document meant the reserved one.
+                raise PolicyError(
+                    f"{source}: declaring {name!r} needs 'schema: {POLICY_SCHEMA_V6}'; this "
+                    f"document declares {schema!r}"
+                )
             actions[name] = _parse_entry(
                 entry,
                 f"{source}: action {name!r}",
@@ -785,6 +819,7 @@ class Policy:
                 # own marks and only where a refusal is about to name one.
                 line_of=partial(_entry_key_line, text, name),
             )
+        _reject_reserved_elsewhere(actions, source)
         return cls(
             actions=MappingProxyType(actions),
             source=source,
@@ -795,6 +830,22 @@ class Policy:
             controls=MappingProxyType(controls),
             _canonical=_canonical_policy(document, str(schema), mode, environment, source),
         )
+
+    def approving_actions(self) -> frozenset[str]:
+        """The action names whose entry sends them to a human under every rule (§8.2.1).
+
+        Used by `Control` to answer "does this policy declare its own change as an approval",
+        which is the rule that stops an administrator writing a change rule of `allow`. An
+        entry with `rules:` counts only where **every** rule decides `approve`: one that
+        allows under some condition is a policy whose change can be made without a human under
+        that condition.
+        """
+        approving: set[str] = set()
+        for name, entry in self.actions.items():
+            decisions = entry.decisions()
+            if decisions and all(decision is Decision.APPROVE for decision in decisions):
+                approving.add(name)
+        return frozenset(approving)
 
     def data_scope(self, action: Action) -> frozenset[str]:
         """The set of data labels this action's supplied arguments carry (SPEC-v0.6 §7.4)."""
@@ -1293,6 +1344,34 @@ def _parse_cited(value: object, where: str, known: frozenset[str]) -> tuple[str,
         if item not in cited:
             cited.append(item)
     return tuple(cited)
+
+
+def _reject_reserved_elsewhere(actions: Mapping[str, _ActionPolicy], source: str) -> None:
+    """SPEC-v0.8 §8.2.1: nothing else may name the reserved action as a resource or an effect.
+
+    The name is what gates the exemption in §8.4 and the marker in §8.2.1, and a document that
+    could make an ordinary action expand to `policy:<hash>` -- or render `ctrlrun.policy.change`
+    as its resource -- would be a document that could mint the marker of an approved policy from
+    an action nobody reviewed as one. Matched as a substring of the template, because a
+    template is expanded later and a placeholder could otherwise carry the name in.
+    """
+    for name, entry in actions.items():
+        if name == POLICY_CHANGE_ACTION:
+            continue
+        for label, template in (("resource", entry.resource), ("effect", entry.effect)):
+            if template is not None and POLICY_CHANGE_ACTION in template:
+                raise PolicyError(
+                    f"{source}: action {name!r} names {POLICY_CHANGE_ACTION!r} in its "
+                    f"{label!r} template. That name is reserved for the policy-change flow "
+                    "(SPEC-v0.8 §8.2.1), and an action that could expand to it would be a way "
+                    "to mark a policy approved without proposing one"
+                )
+        if entry.effect is not None and entry.effect.startswith("policy:"):
+            raise PolicyError(
+                f"{source}: action {name!r} declares an 'effect:' template beginning 'policy:', "
+                "which is the effect key a policy approval is recorded under (SPEC-v0.8 §8.4). "
+                "An action reserving that key could mark a policy approved"
+            )
 
 
 def _parse_entry(

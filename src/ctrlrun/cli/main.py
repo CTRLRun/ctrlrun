@@ -25,7 +25,13 @@ from ..approval import ApprovalRecord, LocalApprovalProvider
 from ..authority import Delegation, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
-from ..errors import AuthorityEscalation, CTRLRunError, InvalidArgument, PolicyError
+from ..errors import (
+    ApprovalRequired,
+    AuthorityEscalation,
+    CTRLRunError,
+    InvalidArgument,
+    PolicyError,
+)
 from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Policy
 from ..receipt import (
     Event,
@@ -944,6 +950,132 @@ def delegate(
     click.echo(f"created {created.delegation_id}")
     click.echo(f"parent {created.parent_id} at depth {created.depth}")
     click.echo(f"revoke it with: ctrlrun revoke {created.delegation_id}")
+
+
+@main.group()
+def policy() -> None:
+    """Propose a policy change, or replay one against what already happened.
+
+    A policy is the one file that decides every other decision, and until v0.8 it was changed
+    by editing it. v0.6 made the change evidenced: every receipt records the hash of the policy
+    that decided it. v0.8 makes it approved: **a policy nobody approved decides nothing**, in a
+    deployment that asks for that with `Control(require_approved_policy=True)`.
+
+    There is no `ctrlrun policy approve`. A proposal is an ordinary approval request, so the
+    command that answers it is `ctrlrun approve`, and a second one would be a second approval
+    path (SPEC-v0.8 §8.3).
+    """
+
+
+@policy.command("propose")
+@click.option(
+    "--file",
+    "candidate_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The policy being proposed. It is not installed; approving its hash is what this does.",
+)
+@click.option("--as", "as_who", default=None, help="The proposing principal: AGENT or AGENT/USER.")
+@click.option(
+    "--approval", "approval_id", default=None, help="Present an approval already granted."
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+@STORE_URL_OPTION
+def policy_propose(
+    candidate_file: Path,
+    as_who: str | None,
+    approval_id: str | None,
+    as_json: bool,
+    store_url: str | None,
+) -> None:
+    """Propose a policy change under the policy currently in force.
+
+    The candidate is loaded, its hash computed **the way the Control that will enforce it
+    computes its own** -- with this deployment's authority and environment folded in, so an
+    approval is per deployment -- and the change runs through the ordinary approval path. A
+    committed receipt for that action is the approval of that hash.
+
+    This does not install the file. Installing it is the operator's act; what needs approving
+    is the hash, and the two are deliberately separate so that approving cannot be the thing
+    that changes what is running.
+    """
+    from ..control import _CONTEXT, _Invocation
+    from ..policy import Policy
+
+    try:
+        control = _control_on(store_url)
+        candidate = Policy.from_file(candidate_file)
+        token = None
+        if as_who:
+            agent, _, user = as_who.partition("/")
+            if not agent:
+                raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
+            token = _CONTEXT.set(_Invocation(Principal(agent=agent, user=user or None)))
+        try:
+            receipt = control._propose_policy(
+                candidate, authority=control.authority, approval_id=approval_id
+            )
+        finally:
+            if token is not None:
+                _CONTEXT.reset(token)
+    except ApprovalRequired as pending:
+        click.echo(f"proposed {pending.request_id}")
+        click.echo(f"approve it with: ctrlrun approve {pending.request_id}")
+        click.echo(
+            f"then: ctrlrun policy propose --file {candidate_file} --approval {pending.request_id}"
+        )
+        return
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(receipt.to_dict(), ensure_ascii=False))
+        return
+    click.echo(f"{receipt.result} {receipt.arguments['to']}")
+
+
+@policy.command("replay")
+@click.option(
+    "--file",
+    "candidate_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The proposed policy to evaluate the recorded actions against.",
+)
+@click.option("--last", "limit", default=100, show_default=True, help="How many receipts to read.")
+@click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
+@STORE_URL_OPTION
+def policy_replay(candidate_file: Path, limit: int, as_json: bool, store_url: str | None) -> None:
+    """Report which recorded decisions would change under a proposed policy.
+
+    It writes nothing, executes nothing and reserves nothing. It reports **what changes** and
+    never whether a policy is safer, riskier or too permissive: this kernel does not grade an
+    operator's document, and a replay that scored one would be the same claim in a new costume
+    (SPEC-v0.8 §8.5).
+
+    A receipt whose action cannot be rebuilt is named and skipped, never counted as unchanged.
+    """
+    from ..policy import Policy
+
+    try:
+        control = _control_on(store_url)
+        rows = control._replay_policy(Policy.from_file(candidate_file), limit=limit)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps({"changed": rows}, ensure_ascii=False))
+        return
+    if not rows:
+        click.echo(f"no recorded decision changes under {candidate_file}")
+        return
+    for row in rows:
+        if "skipped" in row:
+            click.echo(f"{row['receipt_id']}  {row['action']}  skipped: {row['skipped']}")
+            continue
+        click.echo(
+            f"{row['receipt_id']}  {row['action']}  "
+            f"{row['from']['decision']} ({row['from']['reason']})  ->  "
+            f"{row['to']['decision']} ({row['to']['reason']})"
+        )
 
 
 @main.command("break-glass")
