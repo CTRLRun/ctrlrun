@@ -85,8 +85,10 @@ check off does not exist.
 Four, and every section is measured against them.
 
 **R1. Opt in, then fail closed.** This is `v0.3 §1.2`'s rule for authority, applied to the
-approver. A `Control` built with no `approver_identity` behaves exactly as 0.7.0 did, and G17 to
-G19 report `N/A` with that reason. A `Control` built with one gets no partial mode: an approval
+approver. A `Control` built with no `approver_identity` behaves exactly as 0.7.0 did. What `verify`
+reports about G17 to G19 is **not** an `N/A` for that reason, and §11.7 says why: verify configures
+its own scenarios, so "nobody configured this" is a statement about verify's own construction and
+never about the operator's document. A `Control` built with one gets no partial mode: an approval
 whose record carries no verified approver is refused at consumption, including an approval granted
 before the provider was configured, including one granted through a surface that cannot resolve,
 and including one held by a store that does not persist the column. **A store that drops a column
@@ -236,12 +238,14 @@ before the store call that consumes the approval (`v0.7 §6.2`). The approver ch
 and the order is normative:
 
 1. `get_approval(approval_id)`, the read `_recheck` already performs.
-2. **The approver checks of §2.7, §3.6, §4.1 and §4.2**, in that order, each raising
+2. **A status gate, and it is load-bearing: the approver checks apply only to a record whose status
+   is `granted`.** Any other status is left to the store exactly as today (§2.4.1).
+3. **The approver checks of §2.7, §3.6, §4.1 and §4.2**, in that order, each raising
    `ApprovalMismatch` with its own reason.
-3. The precondition comparison of `v0.7 §6.2`, unchanged, and last before the store call because it
+4. The precondition comparison of `v0.7 §6.2`, unchanged, and last before the store call because it
    is the only one that makes a network call and the window it narrows is measured from its own
    fetch.
-4. `_take`, whose store call applies `check_consumable` exactly as it does today.
+5. `_take`, whose store call applies `check_consumable` exactly as it does today.
 
 **The early return is lifted, and this is the sentence an implementer must not miss.** `_recheck`
 returns immediately today when no precondition provider is named and the record carries no
@@ -254,6 +258,23 @@ approver checks run on **every** presenting pass under `APPROVE`.
 and v0.8 does not move it: whose clock decides an approval's expiry is `v0.1 §4.2 A3`'s question,
 the answer is the store's, and `v0.7 §12.5` reversed a change that got that wrong. The approver
 checks are decidable from the row alone and need no clock.
+
+### 2.4.1 Why the status gate exists, and what it costs to omit it
+
+Without it, this milestone would report the wrong reason for three refusals that have nothing to do
+with approvers, because `Control` no longer applies `check_consumable` and the store applies it
+only inside `_take`:
+
+| The row | What 0.7.0 reports | What an ungated approver check would report |
+|---|---|---|
+| A human **denied** it | `ActionDenied(approval_denied)`, with `APPROVAL_DENIED`, `ACTION_DENIED` and a `DENIED` receipt | `ApprovalMismatch(approver_unverified)`, with `APPROVAL_INVALIDATED` and a `BLOCKED` receipt: a human's no stops appearing in the evidence as a no |
+| Already **consumed** (a replayed approval, G2) | `consumed` | `approver_unverified` |
+| The action **hash moved** (G1) | `action_hash_mismatch` | `approver_unverified` |
+
+All three carry no `VerifiedApprover`, because nothing granted them under an approver identity, so
+§2.7's second row would fire first and swallow the real reason. Two of them are shipped guarantees.
+The gate is one comparison and it keeps `check_consumable`'s ordering authoritative, which is what
+`v0.1 §4.2` froze it for. T291b is its test.
 
 **Why the approver checks go before the precondition fetch.** A refused approval must not cost a
 provider call (`v0.7 §6.6` argues the same for a refused verdict), and an approver who was never
@@ -321,33 +342,6 @@ process can call a private function, and a store is code the operator chose. So 
 is not "this principal was verified"; it is **"the surface that granted this approval recorded a
 principal its provider resolved, and the surfaces that ship do exactly that"**. §2.6's table is
 what makes that sentence checkable, and §3.8 carries the same distinction for entitlement.
-
-# ctrlrun.approval
-@contextmanager
-def granting_principal(principal: Principal | None, *, entitled: Sequence[str] = ()) -> Iterator[None]: ...
-```
-
-A surface that has resolved an approver wraps its `grant_approval` or `deny_approval` call in it.
-The shipped stores read it inside those methods and write the row. A third-party store that ignores
-it records nothing, and §2.7's consume-side check then refuses every approval it grants, which is
-the fail-closed direction and is the whole reason the check is at consumption.
-
-**What is recorded**, as `VerifiedApprover`, canonical JSON in one column:
-
-```python
-@dataclass(frozen=True)
-class VerifiedApprover:
-    agent: str
-    user: str | None
-    issuer: str | None
-    entitled: tuple[str, ...]     # the control ids this approver satisfied (§3)
-    granted_at: datetime
-```
-
-**No claim value is ever stored.** `v0.3 §2.4`'s rule: evidence carries claim *names* where values
-are withheld, and here it carries neither, because what an entitlement decision means is *which
-control this approver satisfied*, which is exactly what `entitled` says. A row that stored the role
-value would put an identity provider's payload in an evidence table for no gain.
 
 ### 2.6 Every surface that can answer, and what each one does
 
@@ -516,6 +510,18 @@ canonical form of an action, so no action hash and no approval binding moves. Re
 an array into a delimited string, which is structure encoded in a string and a role named
 `a,b` away from a defect.
 
+**And the amendment has a second half, without which it breaks every reader.** A `Principal` is
+written to JSON and rebuilt from it in four places: the `action_json` column both shipped stores
+write and read, and `Receipt.to_dict`/`from_dict`. JSON has no tuple, so a tuple claim comes back a
+**list**, and `_frozen_claims` refuses anything that is not `str | int`. Unamended, every stored
+action and every receipt carrying an array claim would raise `InvalidArgument` on read, which for
+receipts breaks a contract by name: `Receipt.from_dict` never raises over a key, because "a raise
+on one tampered row would blind every reader at once" (`v0.7 §6.11`). So **`_frozen_claims` accepts
+a sequence of strings and normalises it to a tuple on the way in**, with the element type checked
+(strings only, no nesting, and `v0.1 §2.3`'s float rejection inherited). T299b writes and reads
+back a receipt and a held continuation carrying an array claim, on both backends, and verifies the
+chain across them.
+
 The rules, and each is its own test:
 
 - **The claim is absent**: the principal holds no roles. **Not entitled** wherever any role is
@@ -527,9 +533,12 @@ The rules, and each is its own test:
 - **The claim is a tuple of strings**: that set of roles, each matched exactly.
 - **The claim is an int or a bool** (the other things a `Principal` can carry): **not entitled**,
   never coerced, never stringified.
-- **The claim is something a `Principal` cannot carry**: it never reaches this check, because the
-  provider dropped it or `Principal.__post_init__` refused it at resolution. The first case is the
-  absent rule above; the second is an `IdentityError` before any approval exists, which is
+- **The claim is an array containing something that is not a string**: the provider does not carry
+  it, so it is absent, and the absent rule applies. The provider's own drop moves from DEBUG to a
+  **warning** where the dropped claim is the one an `ApproverIdentity` names, because a silently
+  unentitled approver is the failure this rule exists to make visible.
+- **The claim is a structure `Principal.__post_init__` refuses**: it never reaches this check at
+  all, because resolution raised `IdentityError` before any approval existed, which is
   `v0.3 §3.2`'s behaviour unchanged.
 - **`roles_claim` is `None`**: no role can be read, so no role is satisfied, so any required role
   refuses. A deployment naming roles in its policy and no claim to read them from has configured
@@ -706,8 +715,18 @@ through, which is attribution and not prevention.
 
   So the condition moves to **the value being changed**: the update carries
   `AND approvers IS NOT DISTINCT FROM %s`, the previously read blob, with `rowcount` checked and a
-  bounded retry on a miss. A miss means somebody else answered first, which is information, not an
-  error to swallow.
+  bounded retry on a miss. `IS NOT DISTINCT FROM` and not `=`, because the first grant compares
+  against `NULL`. A miss means somebody else answered first, which is information, not an error to
+  swallow; the retry converges because the store runs READ COMMITTED with an explicit `BEGIN`, so a
+  re-read inside the transaction sees the winner's commit.
+
+  **And the column is `COLLATE "C"` in the Postgres dialect**, which `migrations.py` already
+  requires of every identity column: byte comparison, no locale. The moment `approvers` becomes a
+  comparison column, a non-deterministic collation can make two distinct blobs compare equal, and
+  here that fails the **unsafe** way: a compare-and-set that wrongly matches succeeds, and the lost
+  update this rule exists to close comes straight back, on exactly the deployments whose
+  `lc_collate` is an ICU locale. T313 runs against a database created with a non-C default
+  collation.
 - **In-memory**, under the existing lock.
 
 The store conformance suite (`v0.6 §2`) gains a case: a store that reports it records several
@@ -740,7 +759,7 @@ still answering. Both are type-correct under `mypy --strict`, so nothing but a t
 |---|---|
 | `ScriptedApprovalProvider.wait` | Keeps polling, and raises `ApprovalTimeout` when the script is exhausted, exactly as it does for a request nobody answered. Never returns `None` for a partial grant |
 | `InterruptApprovalProvider.wait` | The same: the framework interrupt is still pending, so the answer is "not yet", which its `wait` already expresses by polling to its deadline |
-| `ctrlrun approve` | Prints how many more approvals are needed and exits 0 |
+| `ctrlrun approve` | Says the answer was recorded, and **that it will not count without a verified approver** where the deployment requires one, naming §2.6. It does not count down, because a CLI grant never counts under M-of-N (§2.6, §4.2) |
 | `gateway/operator.py`'s `approve` tool | Returns `{"status": "pending", "approvals_required": N, "approvals_recorded": k}` |
 | `webhook.handle_inbound` | Answers 200 with the same fact: the answer was recorded |
 
@@ -784,35 +803,49 @@ authority:
       environments: ["prod"]
       constraints: {amount_lte: 50000}
       max_ttl: PT4H                    # the longest expiry a grant beneath it may carry
-      controls: [incident-response]    # whose approver_role gates who may OPEN it (§5.3)
+      controls: [incident-response]    # whose approver_role gates who may OPEN it (§5.3.1)
 ```
 
 An envelope is a `Grant` in every respect the parser knows, plus `max_ttl` and the controls that
-gate opening it. Three things about `authority.py` decide its shape, and each was read rather than
-assumed:
+gate opening it. **An id declared in both `grants:` and `break_glass:` is a load error**, naming
+both, because §5.3.1's rule depends on which mapping a parent came from and an id in two mappings
+makes that undecidable.
+
+Four things about `authority.py` decide the shape, and each was read rather than assumed:
 
 1. **`Authority._candidates` returns every entry of `self._grants`, unconditionally.** So an
-   envelope that lived in `grants:` would decide actions, which is the opposite of what it is for.
-   Envelopes therefore live in a **separate mapping, `Authority.envelopes`**, and `_candidates` is
-   not touched at all. That is what makes T330 true by construction rather than by a filter
-   somebody could delete.
+   envelope in `grants:` would decide actions, which is the opposite of what it is for. Envelopes
+   live in a **separate mapping, `Authority.envelopes`**, and `_candidates` is not touched at all.
+   That is what makes T330 true by construction rather than by a filter somebody could delete.
 2. **`Authority._walk` resolves a delegation's root out of `self._grants` only.** A break-glass
-   delegation names an envelope as its parent, so `_walk` and `_parent_for_creation` must look in
-   `_grants` and then in `envelopes`. This is the one change to the walk, it is two lookups, and
-   §11.1 lists it.
+   delegation names an envelope as its parent, so `_walk` and `_parent_for_creation` look in
+   `_grants` and then in `envelopes`.
 3. **`_parent_for_creation` refuses a parent that is not `delegable`, and `Grant.__post_init__`
    refuses `delegable: true` without `expires_at`.** An envelope carries neither key: the envelope
    branch supplies the meaning, because an envelope exists only to be a parent. The reason behind
    the `delegable` rule, that nothing else bounds the population a delegable grant can reach, is
-   met by `max_ttl`, which bounds every child in time by construction and is **required** on an
-   envelope.
+   met by `max_ttl`, which bounds every child in time by construction and is **required**.
+4. **`_check_chain`'s rule 6 reads `delegable` again, on every evaluation, over every ancestor
+   including the root**, and `delegable` defaults to `False`. Unaddressed, a break-glass grant is
+   created successfully and then authorises nothing, refused `authority_escalation` with no
+   dimension named, which is the least diagnosable refusal in the file. **An envelope ancestor
+   counts as delegable by construction**, in rule 6 as in creation, and T326b asserts an action
+   under a live break-glass grant is allowed at *evaluation* and not only created.
 
 **Why the envelope is in the policy.** It is covered by the policy hash, so the widest authority an
 incident can reach was evidenced *before* the incident by a document somebody reviewed, rather than
 by a command somebody typed at 3am. That requires `canonical_grants` to render envelopes as well as
-grants, including `max_ttl`: today it renders `max_delegation_depth` and `authority.grants`
-through `_canonical_grant`'s closed field list, so an envelope outside it would be outside the hash
-and widening `max_ttl` would move no receipt. §11.1 carries that change.
+grants, including `max_ttl`: today it renders `max_delegation_depth` and `authority.grants` through
+`_canonical_grant`'s closed field list, so an envelope outside it would be outside the hash and
+widening `max_ttl` would move no receipt. §11.1 carries that change.
+
+**A standalone authority document has no control registry.** `Authority.from_yaml(standalone=True)`
+closes its top-level keys at `schema` and `authority`, which is the gateway's shape and
+`verify --authority`'s, so an envelope's `controls:` cannot be checked against a registry there.
+The rule is `v0.6 §7.3`'s for a dangling citation, applied to this case: **a citation that cannot
+be resolved is a load error**, so an envelope citing a control in a standalone document fails to
+load and says why. An envelope that cites none loads and is opened by any verified principal
+(§5.3.1).
 
 Rejected: an unbounded runtime grant, which is a flag with a record attached. Rejected: a flag on
 `Grant` marking it envelope-only, which puts the exclusion inside `_candidates` where a deleted
@@ -849,8 +882,8 @@ inside the parent grant's subject. For an ordinary delegation that is right, bec
 narrowing authority they hold. **For an envelope it is wrong**, and a first draft of this section
 missed it: an envelope's subject names the agents a break-glass grant may be *for*
 (`agent: "oncall-*"`), while the principal opening it is a human the approver identity resolved.
-Under rule 4 as written, either the human is refused `not_the_subject`, or `by` is the `--as`
-assertion and nothing about the opener was verified.
+Under rule 4 as written, either the human is refused `not_the_subject`, or `by` is an assertion and
+nothing about the opener was verified.
 
 So for an envelope, and only for an envelope, **rule 4 is replaced by entitlement**: the opener is
 the principal `ApproverIdentity.provider` resolves, and they must hold the `approver_role` of every
@@ -858,6 +891,18 @@ control the envelope cites (§3.6's rule, on the envelope's controls rather than
 envelope citing no control with a role can be opened by any verified principal, and an envelope in
 a deployment with no approver identity **cannot be opened at all**: `ctrlrun break-glass` refuses,
 naming the missing configuration, because break-glass anyone can open is the flag again.
+
+**The replacement keys off the mapping the parent was resolved from, never off the command.** This
+is the second half of the rule and without it the first half is a hole: `_parent_for_creation`
+resolves `_grants` before `envelopes` and a root grant wins any collision, so
+`ctrlrun break-glass --envelope <an ordinary delegable grant id>` would otherwise reach a path
+where rule 4 is skipped for a grant that has no `controls:` to gate it instead, which is strictly
+weaker than what `ctrlrun delegate` requires beneath the same grant. Therefore:
+
+- `--envelope` resolves **only** in `Authority.envelopes`, and an id that is not one is refused by
+  name, whether or not it names a grant;
+- the entitlement-for-rule-4 substitution applies **only** when the parent came from `envelopes`;
+- an id in both mappings is a load error (§5.2), so "which mapping" is always answerable.
 
 Rule 4 is unchanged everywhere else, and `v0.3 §5.3`'s other rules (unknown parent, expiry,
 containment, depth) apply to an envelope exactly as to a grant.
@@ -893,9 +938,14 @@ it, and a renumber is the maintainer's change and not a build item's (§11.5). I
 
 `jwt_identity.py`'s module docstring: *"There is no revocation channel. A verified token is valid
 until its `exp`, which is why one without an `exp` is refused. Nothing polls, subscribes or
-introspects."* `THREAT_MODEL.md` says the same. v0.8 deletes the first sentence and keeps the
-second half of the third: nothing *subscribes*, because a subscription needs an endpoint this
-project serves, and serving one is not consuming.
+introspects."* `THREAT_MODEL.md` says the same.
+
+Clause by clause, because three of the four move: **"there is no revocation channel"** goes;
+**"valid until its `exp`"** goes, and is what this section exists to end; **"nothing polls"** goes,
+because `PollingRevocationFeed` polls; **"why one without an `exp` is refused"** stays, and so does
+**"nothing subscribes or introspects"**, because a subscription needs an endpoint this project
+serves and an introspection call is a question this project does not ask. Item 6 rewrites the
+docstring to exactly that, and `THREAT_MODEL.md` with it.
 
 ### 6.2 The shape
 
@@ -926,31 +976,6 @@ Two feeds ship (O3, decided here):
 serve it on, which is delivery work, and delivery work is on the do-not-build list beside
 notification delivery. An operator with a push transmitter writes received SETs to the file feed,
 which is a few lines of their code and none of ours.
-
-# ctrlrun.revocation: ctrlrun[identity], lazy, never imported by `import ctrlrun`
-class RevocationFeed(Protocol):
-    def revoked(self, *, issuer: str, subject: str, token_id: str | None) -> bool: ...
-    @property
-    def read_at(self) -> datetime | None: ...
-    @property
-    def issuers(self) -> frozenset[str]: ...
-```
-
-`JWTIdentityProvider(..., revocations: RevocationFeed | None = None)`. Absent means 0.7.0, exactly
-as R1 requires.
-
-Two feeds ship (O3, decided here):
-
-- **`FileRevocationFeed(path, ...)`**: a file of Security Event Tokens, one per line, that the
-  operator's own transmitter writes. Re-read when its mtime moves.
-- **`PollingRevocationFeed(url, ...)`**: RFC 8936 poll delivery, over stdlib `urllib` through the
-  same hardened opener `jwt_identity.py` already uses for JWKS (no redirects, an allow-listed
-  scheme, a bounded body).
-
-**Push (RFC 8935) is not built.** It needs an HTTP endpoint this project serves and a session to
-serve it on, which is delivery work, and delivery work is on the do-not-build list beside
-notification delivery. An operator with a push transmitter writes received SETs to the file feed,
-which is four lines of their code and none of ours.
 
 ### 6.3 What is consumed
 
@@ -1158,10 +1183,17 @@ actions:
 ```
 
 - A document **may** declare it, under `ctrlrun.policy/v6` and not before.
-- Nothing else may use the name: it may not appear as a `resource:`, an `effect:` template's
-  expansion, or an action proposed through `Control.execute` by anything but the policy-change
-  flow. A proposal of that name from ordinary application code is refused, because otherwise any
-  caller could mint the receipt that marks a policy approved.
+- Nothing else may **declare** it as a `resource:` or an `effect:` template's expansion, and the
+  loader refuses a document that does.
+- **A proposal of that name is gated by a marker the flow sets, and the honest statement is
+  §2.5.1's.** `Control.execute(action, executor, effect_key)` takes an `Action` the caller built
+  and carries no channel distinguishing `ctrlrun policy propose` from any other in-process caller,
+  so what gates it is a package-internal context variable the flow sets, listed in §11.1 beside
+  `_granting_principal` and carrying the same residual: **an application that calls the private
+  interface is inside the process trust boundary**, as §2.5.1 already concedes. So the claim is not
+  "nothing else can propose it"; it is **"nothing outside the flow proposes it by accident, and the
+  shipped surfaces are the only ones that set the marker"**. `require_approved_policy`'s property
+  in §8.6 does not rest on this gate, which is why narrowing it costs nothing.
 - **Under `require_approved_policy`, the in-force policy must declare it with
   `decision: approve`.** A policy that declares it `allow`, or omits it, **decides nothing**, with
   the same `policy_unapproved` refusal. This is the rule that closes the hole §8.6 would otherwise
@@ -1184,7 +1216,9 @@ actions:
 
 `Control(..., require_approved_policy: bool = False)`.
 
-- **Where it is false**, nothing changes, and G21 reports its `N/A` reason (§11.6).
+- **Where it is false**, nothing changes, and G21 is graded under a flag verify sets for its own
+  scenario, with the note §11.7 requires rather than an `N/A` about a document that says nothing on
+  the subject.
 - **Where it is true**, a decision is made only if `store.get_effect(f"policy:{self._policy_hash}")`
   is a `COMMITTED` record. Where there is none, **every evaluation is a denial** with reason
   `policy_unapproved`, recorded as `ACTION_DENIED` and a `DENIED` receipt, and raised as
@@ -1208,6 +1242,8 @@ actions:
   name and not by prefix. Without it the first change under a fresh deployment could never be
   approved. The action still passes principal expiry, authority, policy and the approval gate, and
   §8.2.1's rule means the policy must send it to approval or the deployment decides nothing.
+
+**An approval binds a hash, not an ordering**, and §8.6 carries what that costs.
 
 **The bootstrap is recorded as a bootstrap.** Where no policy hash has ever been approved, the
 first `ctrlrun policy propose` records `from: null`, and the receipt says so. An empty store is
@@ -1244,6 +1280,13 @@ against the **proposed** policy, and prints the ones whose decision or reason ch
   > nothing.**
 
   Not "a policy cannot be changed by whoever holds the file", and no page may say the second.
+- **An approval binds a hash and not an ordering, so any hash ever approved stays approved.** The
+  marker is a `COMMITTED` effect at `policy:<to>`, and a committed effect does not become
+  uncommitted. An administrator can therefore restore a superseded policy file, and the deployment
+  decides normally with nothing in the evidence saying a rollback happened. This is a property of
+  keying the approval by content rather than by sequence, which is what makes it cheap and
+  deterministic; ordering would need a notion of "current" that two hosts could disagree about. It
+  is stated here because it is exactly the kind of thing this section exists to state.
 - **An administrator with write access to the store** deletes the effect record that marks the
   approval, at which point every action is refused: a denial of service, fail closed, and the
   receipt chain records the surrounding deletion as a break (`v0.6 §6`).
@@ -1254,14 +1297,23 @@ against the **proposed** policy, and prints the ones whose decision or reason ch
 ## 9. The `v0.3 §4.3.1` columns
 
 `v0.3 §4.3.1` lists every entry point and what each does about principal validity, authority and
-policy. v0.8 adds **two columns** to it and **two rows**, and the rows whose answer is "no" carry
-their reason, because the rule that puts every entry point in one table exists for a hole that was
-a missing enumeration and not a missing check.
+policy. v0.8 adds **two columns**, and the table below is **not** that table with two rows appended:
+it is the amended table, and the differences from `v0.3 §4.3.1` are stated here rather than left
+for a reader to diff.
 
-The two new rows are `ctrlrun policy propose` and `ctrlrun break-glass`, both new callers of
-existing entry points (`Control.execute` and `Control._delegate`), and both are added to
-`v0.3 §4.3.1` itself in item 5 and item 7, with their answers to that table's original columns as
-well as these two.
+- **Two genuinely new rows**, `ctrlrun policy propose` and `ctrlrun break-glass`, both new callers
+  of existing entry points (`Control.execute`, `Control._delegate`). Item 5 and item 7 add them to
+  `v0.3 §4.3.1` itself, with their answers to that table's original columns as well as these two.
+- **`Control.delegate` and `Control.revoke` are split into two rows**, because they now answer
+  differently: delegation creates authority and refuses under an unapproved policy, revocation only
+  narrows it and must not.
+- **Three rows are added that `v0.3 §4.3.1` does not carry**, because these two columns are the
+  first thing that makes them interesting: `ctrlrun approve` / `deny`, the evidence commands, and
+  `ctrlrun.verify.run`.
+- **`@protect` is folded into `Control.execute`**, which is what it calls, and the row says so.
+
+Every row whose answer is "no" carries its reason, because the rule that puts every entry point in
+one table exists for a hole that was a missing enumeration and not a missing check.
 
 | Entry point | Checks the approver at consumption (§2.4) | Refuses under an unapproved policy (§8.4) |
 |---|---|---|
@@ -1349,6 +1401,12 @@ forbids (the third).
   provider anywhere** still reaches the approver checks: the test drives the 0.6-shaped path and
   asserts the refusal. Without this, every check in §2 to §4 is dead on the default path and every
   other test still passes (§2.4).
+- **T291b:** the status gate of §2.4.1. With an `ApproverIdentity` configured and no
+  `VerifiedApprover` on the row, a **denied** approval still raises `ActionDenied(approval_denied)`
+  with `APPROVAL_DENIED` and a `DENIED` receipt; a **consumed** one still reports `consumed` (G2);
+  and a **mutated action** still reports the hash mismatch (G1). Without the gate all three report
+  `approver_unverified`, two shipped guarantees change their reason, and a human's no stops
+  appearing in the evidence as a no.
 - **T292:** the migration, both directions, on SQLite and Postgres, from a database built by
   0.7.0's own code and not a hand-written fixture: rows with no approver columns open, migrate and
   keep every value; an 0.7.0 binary against the migrated database refuses and names both versions.
@@ -1373,6 +1431,11 @@ forbids (the third).
 - **T299:** the claim carries a **tuple of strings** and entitles for each of them, which is the
   case `ClaimValue`'s amendment exists for; a `JWTIdentityProvider` given a token whose `roles`
   claim is a JSON array carries it as a tuple rather than dropping it (§3.4).
+- **T299b:** the round trip the `ClaimValue` amendment needs. An action and a receipt carrying an
+  array claim are written and read back on both backends, the JSON list is normalised to a tuple,
+  `Receipt.from_dict` does not raise on it (`v0.7 §6.11`'s contract), a held continuation resumes,
+  and a receipt chain spanning them verifies. Without this half of the amendment, every stored
+  action and every receipt carrying an array claim raises on read.
 - **T300:** omission A. A principal whose claims lack the role claim entirely is not entitled, and
   a **warning** is emitted naming the claim and the control (§3.4).
 - **T301:** omission B. A control naming no `approver_role` gates nothing, and an approval citing
@@ -1438,6 +1501,10 @@ forbids (the third).
 
 - **T326:** a break-glass grant is created beneath its envelope, recorded, and the action it covers
   is allowed while it lives.
+- **T326b:** an action under a live break-glass grant is **allowed at evaluation**, not only
+  created, on both backends. `_check_chain`'s rule 6 reads `delegable` over every ancestor
+  including the root, and an envelope carries no such key, so without §5.2 point 4 the grant is
+  created and then authorises nothing, refused `authority_escalation` with no dimension named.
 - **T327:** after its expiry the same action is denied on the next proposal, by the existing expiry
   check and with the existing reason.
 - **T328:** a grant with no expiry is refused at creation; one beyond the envelope's `max_ttl` is
@@ -1458,6 +1525,11 @@ forbids (the third).
 - **T334:** §5.3.1's rule: the opener is the resolved principal and an envelope's subject does not
   gate them; an opener who lacks the envelope's control role is refused; and **opening one with no
   `ApproverIdentity` configured is refused**, naming the missing configuration.
+- **T334b:** `--envelope` pointed at an **ordinary delegable grant id** is refused by name, and the
+  rule-4 substitution never applies to a parent resolved from `grants:`. Without this,
+  `ctrlrun break-glass` is a path on which `plan_delegation` rule 4 is skipped for a grant that has
+  no `controls:` to gate it instead, which is weaker than what `ctrlrun delegate` requires beneath
+  the same grant. And an id declared in both mappings is a load error, naming both (§5.2).
 - **T335:** the third `created_via` value is readable: a record carrying it loads, and
   `Authority.evaluate` does not answer `authority_unreadable` for the deployment. This is the test
   for the failure mode a closed `Literal` produces (§5.3).
@@ -1517,9 +1589,10 @@ forbids (the third).
 - **T358:** a policy that does **not** declare the change action, or declares it with any decision
   but `approve`, decides nothing under `require_approved_policy`, and the refusal names the key
   (§8.2.1). This is the test that closes the "write a policy whose change rule is allow" hole.
-- **T359:** `ctrlrun.policy.change` proposed by ordinary application code through
-  `Control.execute` is refused, so nothing but the flow can mint the receipt that marks a policy
-  approved.
+- **T359:** `ctrlrun.policy.change` proposed through `Control.execute` **without the flow's
+  marker** is refused, and the test asserts what the marker is and that the shipped surfaces are
+  its only setters. It does not assert that a caller of the private interface is stopped, because
+  nothing can (§8.2.1, §2.5.1).
 - **T360:** the exemption is exactly one action, matched by name: an action called
   `ctrlrun.policy.changes` or `ctrlrun.policy.change.extra` is refused under an unapproved policy.
 - **T361:** the bootstrap: `from: null` on the first proposal, a receipt distinguishable from an
@@ -1552,6 +1625,11 @@ forbids (the third).
   not exist yet is absent from the catalogue rather than reporting anything (`v0.7 §9.4`).
 - **T374:** every v0.1 to v0.7 acceptance test still passes, and `ctrlrun verify` against the
   shipped examples reports what 0.7.0 reported plus G17 to G21.
+- **T374b:** the documents this milestone promised to rewrite say what is then true.
+  `docs/SPEC-mcp-operator.md` §4.3 and §10 carry both sentences of §3.9, and no page in this
+  repository still says entitlement is unchecked without the qualifier. Asserted by grep over the
+  tracked tree, because `docs/SPEC-mcp-operator.md` lives here and the `ctrlrun-docs` audit does
+  not reach it.
 - **T375:** `ctrlrun verify` does **not** go red because the kernel started checking approvers: its
   own scenarios grant and consume their own approvals, and §2.6's row for them is the one this test
   protects.
@@ -1577,12 +1655,12 @@ the section it cites, and only then is there code.
 | Two CLI options | 1 | `ctrlrun revoke --created-by`, `--under` | The incident operation is a query over rows that already exist, and writing it under pressure is how a script revokes the wrong subtree. `--created-by` and not `--by`, because `--by` already means who performed the revocation (§7.2). |
 | One configuration object | 2 | `ctrlrun.approval.ApproverIdentity(provider, roles_claim=None)`, and `Control(approver_identity=...)` with a read-only `Control.approver_identity` | Opt in, then fail closed, needs one switch. A provider without a roles claim cannot answer §3, so the two travel together or a deployment has a silent half-check (§2.3). |
 | One record type | 2 | `ctrlrun.approval.VerifiedApprover(agent, user, issuer, entitled, granted_at)`, read back on `ApprovalRecord.approvers` | `ApprovalRecord` is rebuilt from columns, so a value the consume-side check reads must be one (`v0.6 §3.7`). |
-| One amendment to `v0.3 §2.1` | 3 | `ClaimValue` gains `tuple[str, ...]`; `JWTIdentityProvider` carries an array-of-strings claim instead of dropping it | A roles claim is a JSON array at every issuer anybody deploys, and `Principal.claims` refuses containers today, so §3 is unbuildable without this. Safe for hashes: `v0.3 §2.2` keeps claims out of an action's canonical form (§3.4). |
+| One amendment to `v0.3 §2.1` | 3 | `ClaimValue` gains `tuple[str, ...]`; `_frozen_claims` accepts a sequence of strings and normalises it to a tuple; `JWTIdentityProvider` carries an array-of-strings claim instead of dropping it | A roles claim is a JSON array at every issuer anybody deploys, and `Principal.claims` refuses containers today, so §3 is unbuildable without this. The normalisation is the half that keeps it readable: JSON has no tuple, so a stored claim returns as a list, and without it every receipt carrying one would raise on read, against `Receipt.from_dict`'s never-raises contract. Safe for hashes: `v0.3 §2.2` keeps claims out of an action's canonical form (§3.4). |
 | One record type | 3 | `ctrlrun.approval.RequiredRole(control, role)` | The refusal must name the control (§3.7), so the pair survives to the refusal; a role alone leaves an operator grepping a registry. |
 | One field | 3 | `PolicyControl.approver_role: str \| None` | A field on a public dataclass, listed for the reason `v0.6 §9.1.1` had to list `PolicyControl` itself after the fact. |
 | One accessor | 4 | `Policy.approvals_required(action_name) -> int` | On the precedent of `Policy.max_attempts`: `Control` needs the threshold and the policy is the only thing that knows it. |
 | Two request fields | 3, 4 | `ApprovalRequest.required_roles`, `ApprovalRequest.approvals_required` | The store has no policy, so the roles and the threshold are pinned where `policy_hash` is pinned and for the same reason (§3.3, §4.2). |
-| Three columns | 2, 3, 4 | `approvals.approvers`, `approvals.required_roles`, `approvals.approvals_required`; migration `0006_verified_approver` | One holds what the grant recorded, two hold what the request pinned. Named for what they hold, beside `policy_hash_at_approval` and `precondition_fingerprint`. |
+| Three columns | 2, 3, 4 | `approvals.approvers` (`COLLATE "C"` on Postgres), `approvals.required_roles`, `approvals.approvals_required`; migration `0006_verified_approver` | One holds what the grant recorded, two hold what the request pinned. Named for what they hold, beside `policy_hash_at_approval` and `precondition_fingerprint`. The collation is not decoration: `approvers` is a compare-and-set column, and a non-deterministic collation makes two distinct blobs compare equal, which fails the unsafe way (§4.3). |
 | One widened return | 4 | `ApprovalStore.grant_approval(...) -> Approval \| None` | M-of-N needs "recorded, still short of N", and a widened return is a change every existing implementation already satisfies, where a new method would be a second transition writing one row (§4.4). |
 | Two policy keys | 3, 4 | `approver_role` on a control entry; `approvals_required` on an action entry | An operator-set rule where there is none. Named for what they are, and `approvals_required` counts the first approval, as `max_attempts` counts the first attempt. |
 | One policy block, and what loading it changes | 5 | `authority.break_glass`, entries with `max_ttl`; `Authority.envelopes`; `canonical_grants` renders envelopes | The envelope must be covered by the policy hash and must never decide an action, and `_candidates` returns every entry of `_grants` unconditionally. A separate mapping is the only shape that gives both without a filter somebody can delete (§5.2). |
@@ -1618,9 +1696,13 @@ type, no new event type, no new approval provider and no new sink.
   at all; a break-glass grant is a `DELEGATION_CREATED` whose `created_via` says what it was.
 - **No new error type.** Four refusals share `ApprovalMismatch` and are told apart by `reason`,
   which is why every test asserts the reason.
-- **`_granting_principal` is deliberately not public.** A public one would be an unauthenticated
-  way to assert a verified approver, which is `trust_approver` spelled as a context manager
-  (§2.5.1). It is not exported, and the residual is stated there rather than hidden.
+- **Two package-internal markers, deliberately not public, each with its residual stated.**
+  `_granting_principal` (§2.5), because a public one would be an unauthenticated way to assert a
+  verified approver, which is `trust_approver` spelled as a context manager; and the policy-change
+  marker (§8.2.1), because `Control.execute` carries no channel distinguishing one in-process
+  caller from another. Neither is exported, and neither is claimed to stop an application that
+  calls a private interface: §2.5.1 states that residual once, and §8.2.1 points at it rather than
+  claiming a refusal it cannot deliver.
 - **No change to the v0.5 adapter contract.** `ApprovalAnswer` keeps its shape (§2.6).
 - **No change to `webhook.handle_inbound`'s signature.** `v0.2 §11` freezes it (§1.4 item 3).
 - **No `--as` on `ctrlrun break-glass`.** An assertion is exactly what break-glass must not accept
@@ -1702,7 +1784,7 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 | Approver provider declines | Refused at the answering surface; no approval granted |
 | Roles claim absent, or carried by a provider that carries no claims | `approver_unentitled`, with a warning naming the claim and the control |
 | Roles claim an int, a bool, or an empty string | `approver_unentitled`; never coerced, never stringified |
-| Roles claim a structure the provider dropped | Absent, as above; the provider's own drop is raised from DEBUG where the roles claim is named |
+| Roles claim an array containing a non-string | The provider does not carry it, so it is absent and unentitled; the drop is logged as a warning where the dropped claim is the one an `ApproverIdentity` names (§3.4) |
 | `roles_claim` unset and a role is required | `approver_unentitled` |
 | Several controls with roles, one unsatisfied | `approver_unentitled`, naming that control |
 | Approver equals requester | `approver_is_requester` |
@@ -1719,7 +1801,7 @@ G16's `PRECONDITION_NOTE` is the precedent for how this was handled last time, a
 | Revocation feed unreachable, malformed, or naming an unknown subject | Consumed, logged, no decision changed; stale from that moment if it could not be read |
 | `require_approved_policy` and no committed `policy:<hash>` effect | Every evaluation denied with `policy_unapproved`, except `ctrlrun.policy.change` |
 | `require_approved_policy` and a policy that does not declare the change action as `approve` | The same refusal, naming the key (§8.2.1) |
-| `ctrlrun.policy.change` proposed by anything but the policy-change flow | Refused: otherwise any caller could mint the receipt that marks a policy approved |
+| `ctrlrun.policy.change` proposed without the flow's marker | Refused. The marker is package-internal, so this stops an accident and not an application calling a private interface, which §2.5.1's residual already covers (§8.2.1) |
 | Policy fails to load | `PolicyError`, and distinct from `policy_unapproved` |
 | Replay cannot rebuild a receipt's action | Named and skipped; never counted as unchanged |
 | Selector matches nothing | Non-zero exit, naming what was searched for |
