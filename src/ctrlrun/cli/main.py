@@ -979,7 +979,7 @@ def break_glass(
     try:
         control = _control_on(store_url)
         grant = grant_from_yaml(grant_file.read_text(encoding="utf-8"), source=str(grant_file))
-        created = control.break_glass(envelope, grant, reason=reason)
+        created = control._break_glass(envelope, grant, reason=reason)
     except AuthorityEscalation as exc:
         raise click.ClickException(f"{exc.reason}: {exc}") from exc
     except CTRLRunError as exc:

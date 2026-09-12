@@ -862,6 +862,15 @@ class Control:
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
+        # SPEC-v0.8 §5.4. **Cleared at the top of the call, not only set at the authority
+        # gate.** §4.3.1 puts `principal_expired` first, so `execute` records a denied receipt
+        # *before* `_authority_result` runs; with only the gate setting this, that receipt
+        # carried the **previous** action's grant id. An independent review demonstrated it: a
+        # committed action under a break-glass grant, then a refusal for a lapsed credential,
+        # and the refusal's receipt named the grant that never decided it. Async tasks inherit
+        # a copy of the context at creation, so a task started after a break-glass action
+        # carried that id into an unrelated refusal too.
+        _AUTHORITY_GRANT_ID.set(None)
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -2950,9 +2959,7 @@ class Control:
         """
         return self._delegate(parent_id, grant, by=by, via="api")
 
-    def break_glass(
-        self, envelope_id: str, grant: Grant, *, by: Principal | None = None, reason: str = ""
-    ) -> Delegation:
+    def _break_glass(self, envelope_id: str, grant: Grant, *, reason: str = "") -> Delegation:
         """Open a break-glass grant beneath a declared envelope (SPEC-v0.8 §5.3).
 
         There is no flag. What this creates is an ordinary delegation: recorded, bounded by the
@@ -2961,17 +2968,25 @@ class Control:
         skipped a check would have none of those five properties, which is the whole argument
         of §5.1.
 
-        **The opener is a verified principal and never an assertion.** `by` defaults to whoever
-        the deployment's `ApproverIdentity` resolves, and a deployment that names none cannot
-        open one at all: there would be nobody to check the envelope's `controls:` against, and
-        an unchecked opener is the flag this section refuses under another name (§5.3.1).
+        **The opener is a verified principal and never an assertion, and there is no parameter
+        that says otherwise.** An earlier build took `by: Principal | None`, which was an
+        unauthenticated way to assert an opener *and the roles it holds*: passing a principal
+        whose claims carried the envelope's role opened it in a deployment whose provider
+        resolved somebody else entirely. `§11.2` keeps `_granting_principal` package-internal
+        for exactly that reason, and a public `by=` was the same hole with a docstring. The
+        opener is whoever the `ApproverIdentity` resolves, and a deployment that names none
+        cannot open one at all.
+
+        **Private, like `_delegate`.** `§11.2` adds no public `Control` method in v0.8; the
+        surface item 5 adds is the CLI command, which calls this the way `ctrlrun delegate`
+        calls `_delegate`.
 
         `reason` is free text on the `DELEGATION_CREATED` event. The kernel does not interpret
         it, exactly as it does not interpret `source:`.
         """
         authority = self._require_authority("break-glass")
         envelope = authority.envelopes.get(envelope_id)
-        opener = self._opener_for(envelope_id, envelope, by)
+        opener = self._opener_for(envelope_id, envelope)
         now = self._clock()
         try:
             planned = authority.plan_break_glass(
@@ -3012,9 +3027,7 @@ class Control:
         )
         return planned
 
-    def _opener_for(
-        self, envelope_id: str, envelope: BreakGlassEnvelope | None, by: Principal | None
-    ) -> Principal:
+    def _opener_for(self, envelope_id: str, envelope: BreakGlassEnvelope | None) -> Principal:
         """Who is opening this envelope, and may they? (SPEC-v0.8 §5.3.1.)
 
         Rule 4 does not apply to an envelope: its subject names the agents a break-glass grant
@@ -3031,14 +3044,11 @@ class Control:
                 "the controls that gate who may open it, and with nobody resolved there is no "
                 "principal to check them against. Build the Control with "
                 "approver_identity=ApproverIdentity(provider, roles_claim=...) "
-                "(SPEC-v0.8 §5.3.1)"
+                "(SPEC-v0.8 §5.3.1). Note that `Control.from_file`, which is what the CLI "
+                "builds, wires none: see SPEC-v0.8 §14.5, which records that as open"
             )
-        opener = (
-            by
-            if by is not None
-            else identity.resolve(
-                IdentityContext(action="ctrlrun.break-glass", environment=self.environment)
-            )
+        opener = identity.resolve(
+            IdentityContext(action="ctrlrun.break-glass", environment=self.environment)
         )
         if opener is None:
             raise IdentityError(
@@ -3047,6 +3057,30 @@ class Control:
             )
         if envelope is None:
             return opener
+        # **Every cited control must resolve and must name a role.** Elsewhere a control that
+        # names no `approver_role` gates nobody (§3.5), and that is right where the citation is
+        # on an *action*: the control is documentation and the approval decides. Here the
+        # citation **is** the gate, so the same rule reads the opposite way -- a typo in an
+        # envelope's `controls:` silently admitted any verified principal, which an independent
+        # review demonstrated with one transposed letter. `Authority.from_yaml` parses the
+        # section without a registry to check against, so it is checked here, where both are.
+        unresolved = [
+            identifier
+            for identifier in envelope.controls
+            if (control := self._policy.controls.get(identifier)) is None
+            or not control.approver_role
+        ]
+        if unresolved:
+            raise InvalidArgument(
+                f"break-glass envelope {envelope_id!r} cites {unresolved}, which "
+                + (
+                    "name no control in this policy's registry"
+                    if any(self._policy.controls.get(name) is None for name in unresolved)
+                    else "declare no 'approver_role'"
+                )
+                + ". An envelope's controls are what gate who may open it, so a citation that "
+                "resolves to nothing would gate nobody (SPEC-v0.8 §5.3.1)"
+            )
         required = tuple(
             RequiredRole(control=identifier, role=control.approver_role)
             for identifier, control in (

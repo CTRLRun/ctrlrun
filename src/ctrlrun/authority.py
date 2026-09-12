@@ -1137,14 +1137,27 @@ class Authority:
         """§5.3 rules 1 to 3, and the walked depth rule 5 needs."""
         # §5.2 — a root grant wins any collision: an id is resolved against the document first
         # and the store second.
-        envelope = self._envelopes.get(parent_id)
-        if envelope is not None:
-            # SPEC-v0.8 §5.2 point 4, first site. An envelope is delegable by what it is: the
-            # rule `delegable` enforces, that something bounds the population a parent can
-            # reach, is met by `max_ttl`, which `Control` checks on the child's expiry.
-            # It carries no `expires_at`, so there is no root expiry to test here; every grant
-            # beneath it carries one, and §4.3's expiry check refuses it when it lapses.
-            return envelope.grant, 0
+        if parent_id in self._envelopes:
+            # **SPEC-v0.8 §5.3.1, the direction an independent review found open.** §5.3.1
+            # guards `break-glass --envelope <a grant id>`; nothing guarded `delegate --parent
+            # <an envelope id>`, which is strictly worse. An earlier build of this method
+            # returned the envelope's grant here, and `plan_delegation` then created authority
+            # beneath it with **no expiry requirement, no `max_ttl`, no entitlement check and
+            # no `created_via` saying what it was** -- a permanent break-glass grant, opened
+            # from a shell by anyone whose `--as` matched the envelope's subject, which is a
+            # pattern over the agents the grant may be *for*.
+            #
+            # `plan_break_glass` resolves envelopes itself and applies §5.3's rules. This path
+            # refuses them by name. The delegable-exemption of §5.2 point 4 lives at the two
+            # read sites that walk an existing chain, where it cannot create anything.
+            raise AuthorityEscalation(
+                f"{parent_id!r} is a break-glass envelope, not a grant. Authority beneath an "
+                "envelope is opened with 'ctrlrun break-glass --envelope', which requires an "
+                "expiry inside its max_ttl and checks the opener against the controls that "
+                "gate it; delegating beneath one directly would skip both (SPEC-v0.8 §5.3.1)",
+                reason=UNKNOWN_PARENT,
+                parent_id=parent_id,
+            )
         root = self._grants.get(parent_id)
         if root is not None:
             if not root.delegable:
@@ -1300,6 +1313,24 @@ class Authority:
             if dimension is not None:
                 return _ChainCheck(
                     depth, AuthorityResult(False, AUTHORITY_ESCALATION, dimension=dimension)
+                )
+        # SPEC-v0.8 §5.2, and `v0.3 §5.6`'s stated purpose: **a narrowed root narrows
+        # everything beneath it.** `max_ttl` was checked once, at creation, and is not a §5.4
+        # containment row, so an operator who narrowed an envelope while an incident was still
+        # running narrowed nothing: a four-hour grant opened under `PT4H` kept running under
+        # `PT15M`. Every other envelope dimension already narrows live grants here, because the
+        # envelope is the chain's root parent; this is the one that did not, and it is the one
+        # bound an operator reaches for first.
+        envelope = None if walk.root_id is None else self._envelopes.get(walk.root_id)
+        if envelope is not None and walk.nodes:
+            opened = walk.nodes[-1]
+            if (
+                opened.grant.expires_at is None
+                or opened.grant.expires_at > opened.created_at + envelope.max_ttl
+            ):
+                return _ChainCheck(
+                    depth,
+                    AuthorityResult(False, AUTHORITY_ESCALATION, dimension="max_ttl"),
                 )
         if walk.cycle_at is not None:
             # A chain that loops is a store somebody has edited by hand, and it belongs with

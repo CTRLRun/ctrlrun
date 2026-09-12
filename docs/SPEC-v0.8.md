@@ -2279,6 +2279,20 @@ does not bound them, so an envelope intended to bound resources must say so. Omi
 unlimited *for the child* — a child may not drop a dimension its parent constrains — and it is
 also not a constraint the parent never expressed.
 
+**Open, and the maintainer's call: `ctrlrun break-glass` cannot succeed in any configuration
+the CLI can load.** `Control.from_file` wires no `ApproverIdentity` -- there is no configuration
+key for one, and §2.6.1 rules out giving the CLI a provider of its own -- so the command §11.1 adds
+for this item always exits 1 saying an approver identity is needed, which is advice the CLI cannot
+act on. It fails closed, and the gated path is the only path: `delegate --parent <an envelope>` is
+refused by name. But it means the shell example in §5.3 does not run today, and break-glass is
+reachable only from an embedding application that built its own `Control`.
+
+Three ways out, none of them a build item's to choose: a configuration key naming an approver
+identity provider, which is surface §11.1 does not list; a credential option on this one command,
+which is the same surface with a narrower blast radius; or striking the shell example and saying
+the command serves deployments that configure one in code. **Asked rather than decided**, on the
+rule that an item which disagrees with its specification stops.
+
 **The absence test had to read code rather than text.** `approval.py` explains in a comment that a
 public `_granting_principal` would be "`trust_approver` spelled as a context manager", which is
 prose arguing the flag away. A grep that cannot tell that from a flag pushes the argument out of

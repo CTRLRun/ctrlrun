@@ -184,7 +184,7 @@ def test_T326_a_break_glass_grant_is_created_beneath_its_envelope(store, clock):
     """§5.3. Recorded, with a parent, a depth and a provenance that says what it was."""
     control = _control(store, clock)
 
-    opened = control.break_glass(
+    opened = control._break_glass(
         "incident-payments", _grant(clock.now + timedelta(hours=2)), reason="INC-4412"
     )
 
@@ -205,7 +205,7 @@ def test_T326b_an_action_under_a_live_break_glass_grant_is_allowed(store, clock)
     is the least diagnosable refusal in `authority.py`.
     """
     control = _control(store, clock)
-    control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
+    control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
     executor = _Executor()
 
     receipt = control.execute(_action(control), executor, KEY)
@@ -222,7 +222,7 @@ def test_T327_after_its_expiry_the_action_is_denied(store, clock):
     from ctrlrun.errors import ActionDenied
 
     control = _control(store, clock)
-    control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
+    control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
     assert control.execute(_action(control), _Executor(), KEY).result
 
     clock.advance(timedelta(hours=3))
@@ -242,7 +242,7 @@ def test_T328_a_grant_with_no_expiry_is_refused(store, clock):
     control = _control(store, clock)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass("incident-payments", _grant(None))
+        control._break_glass("incident-payments", _grant(None))
 
     assert refused.value.reason == "containment"
     assert refused.value.dimension == "expires_at"
@@ -252,11 +252,11 @@ def test_T328_a_grant_beyond_max_ttl_is_refused(store, clock):
     control = _control(store, clock)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=5)))
+        control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=5)))
 
     assert refused.value.reason == "containment"
     assert refused.value.dimension == "expires_at"
-    assert store.delegations() == [] or all(
+    assert list(store.delegations()) == [] or all(
         record.parent_id != "incident-payments" for record in store.delegations()
     )
 
@@ -285,7 +285,7 @@ def test_T329_a_grant_wider_than_its_envelope_is_refused_per_dimension(
     control = _control(store, clock)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass(
+        control._break_glass(
             "incident-payments", _grant(clock.now + timedelta(hours=1), **overrides)
         )
 
@@ -358,7 +358,7 @@ def test_T331_an_unknown_envelope_is_refused_by_name(store, clock):
     control = _control(store, clock)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass("no-such-envelope", _grant(clock.now + timedelta(hours=1)))
+        control._break_glass("no-such-envelope", _grant(clock.now + timedelta(hours=1)))
 
     assert refused.value.reason == "unknown_parent"
     assert "no-such-envelope" in str(refused.value)
@@ -434,7 +434,7 @@ def test_T332b_a_standalone_authority_document_may_not_declare_break_glass():
 
 def test_T333_the_receipt_names_the_break_glass_grant(store, clock):
     control = _control(store, clock)
-    opened = control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
+    opened = control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
 
     receipt = control.execute(_action(control), _Executor(), KEY)
 
@@ -463,7 +463,7 @@ def test_T334_the_opener_is_the_resolved_principal_not_the_envelopes_subject(sto
     the envelope's `controls:`."""
     control = _control(store, clock)
 
-    opened = control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+    opened = control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
 
     assert opened.created_by.agent == "human:ada"
     assert opened.grant.subject.agent == "oncall-agent"
@@ -473,7 +473,7 @@ def test_T334_an_opener_without_the_control_role_is_refused(store, clock):
     control = _control(store, clock, opener=BYSTANDER)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+        control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
 
     assert refused.value.reason == "approver_unentitled"
     assert "incident-response" in str(refused.value)
@@ -486,7 +486,7 @@ def test_T334_with_no_approver_identity_it_cannot_be_opened_at_all(store, clock)
     control = _control(store, clock, opener=False)
 
     with pytest.raises(InvalidArgument) as refused:
-        control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+        control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
 
     assert "approver identity" in str(refused.value)
 
@@ -498,7 +498,7 @@ def test_T334b_an_ordinary_grant_id_is_not_an_envelope(store, clock):
     control = _control(store, clock)
 
     with pytest.raises(AuthorityEscalation) as refused:
-        control.break_glass("everyday", _grant(clock.now + timedelta(hours=1)))
+        control._break_glass("everyday", _grant(clock.now + timedelta(hours=1)))
 
     assert refused.value.reason == "unknown_parent"
     assert "a grant is not an envelope" in str(refused.value)
@@ -512,7 +512,7 @@ def test_T335_a_break_glass_row_does_not_make_the_deployment_unreadable(store, c
     `_candidates` raise and answers `authority_unreadable` for **every action in the
     deployment**. This is the test for that failure mode."""
     control = _control(store, clock)
-    control.break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
+    control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
 
     authority = Authority.from_yaml(POLICY)
     result = authority.evaluate(_action(control), now=clock.now, store=store)
@@ -528,7 +528,7 @@ def test_T336_revoking_it_stops_everything_beneath(store, clock):
     from ctrlrun.errors import ActionDenied
 
     control = _control(store, clock)
-    opened = control.break_glass(
+    opened = control._break_glass(
         "incident-payments", _grant(clock.now + timedelta(hours=2), delegable=True)
     )
     beneath = control.delegate(
@@ -558,7 +558,7 @@ def test_T337_a_delegation_beneath_it_is_created_and_attenuates(store, clock):
     # `delegable: true` on the break-glass grant itself, exactly as on any grant somebody
     # intends to be delegated beneath: §5.2 point 4 exempts the **envelope**, which carries no
     # such key, and changes nothing about the grant opened under it.
-    opened = control.break_glass(
+    opened = control._break_glass(
         "incident-payments", _grant(clock.now + timedelta(hours=2), delegable=True)
     )
 
@@ -585,7 +585,7 @@ def test_T337_a_delegation_beneath_it_is_created_and_attenuates(store, clock):
 
 def test_T337_a_delegation_beneath_it_cannot_outlive_it(store, clock):
     control = _control(store, clock)
-    opened = control.break_glass(
+    opened = control._break_glass(
         "incident-payments", _grant(clock.now + timedelta(hours=1), delegable=True)
     )
 
@@ -596,12 +596,181 @@ def test_T337_a_delegation_beneath_it_cannot_outlive_it(store, clock):
     assert refused.value.dimension == "expires_at"
 
 
+# --- what an independent review found, each with the test that would have caught it ---------
+
+
+def test_T334b_delegate_may_not_name_an_envelope_as_its_parent(store, clock):
+    """**The direction §5.3.1 did not guard, and it is the worse one.**
+
+    §5.3.1 guards `break-glass --envelope <a grant id>`. Nothing guarded `delegate --parent <an
+    envelope id>`: `_parent_for_creation` resolved envelopes unconditionally and handed the
+    envelope's grant to `plan_delegation`, which applies none of §5.3's rules. The result was a
+    break-glass grant with **no expiry at all**, no `max_ttl`, no entitlement check and a
+    `created_via` saying `cli`, openable from a shell by anyone whose `--as` matched the
+    envelope's subject -- which is a pattern over the agents the grant may be *for*.
+    """
+    control = _control(store, clock)
+
+    with pytest.raises(AuthorityEscalation) as refused:
+        control.delegate("incident-payments", _grant(None), by=ONCALL)
+
+    assert refused.value.reason == "unknown_parent"
+    assert "not a grant" in str(refused.value)
+    assert list(store.delegations()) == []
+
+
+def test_T334b_the_cli_delegate_path_is_refused_too(store, clock):
+    """The same, through `_delegate`, which is what `ctrlrun delegate --as` calls."""
+    control = _control(store, clock)
+
+    with pytest.raises(AuthorityEscalation):
+        control._delegate("incident-payments", _grant(None), by=ONCALL, via="cli")
+
+    assert list(store.delegations()) == []
+
+
+def test_T334_an_envelope_citing_an_unknown_control_cannot_be_opened(store, clock):
+    """**A typo gated nobody.** One transposed letter in `controls:` and any verified principal
+    opened the envelope.
+
+    Elsewhere a control naming no `approver_role` gates nobody (§3.5), and that is right where
+    the citation is on an *action*. Here the citation **is** the gate, so the same omission
+    reads the opposite way and must fail closed. `Authority.from_yaml` parses the section with
+    no registry to check against, so it is checked where both are.
+    """
+    control = _control(
+        store,
+        clock,
+        opener=BYSTANDER,
+        policy=POLICY.replace("[incident-response]", "[incident-respones]"),
+    )
+
+    with pytest.raises(InvalidArgument) as refused:
+        control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+
+    assert "incident-respones" in str(refused.value)
+    assert list(store.delegations()) == []
+
+
+def test_T334_an_envelope_citing_a_control_with_no_role_cannot_be_opened(store, clock):
+    """The other half of the same hole: the control resolves and gates nothing."""
+    policy = POLICY.replace("    approver_role: incident-commander\n", "")
+    control = _control(store, clock, opener=BYSTANDER, policy=policy)
+
+    with pytest.raises(InvalidArgument) as refused:
+        control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+
+    assert "approver_role" in str(refused.value)
+
+
+def test_T334_there_is_no_parameter_that_asserts_the_opener():
+    """§5.3.1, §11.2. `by=` was an unauthenticated way to assert an opener **and its roles**.
+
+    Passing a principal whose claims carried the envelope's role opened it in a deployment
+    whose provider resolved somebody else entirely. The signature is the test: a keyword that
+    does not exist cannot be passed.
+    """
+    import inspect
+
+    from ctrlrun.control import Control
+
+    parameters = inspect.signature(Control._break_glass).parameters
+
+    assert "by" not in parameters, (
+        "a caller-supplied opener is an assertion, and the entitlement check reads the roles "
+        "off whatever is asserted (SPEC-v0.8 §5.3.1)"
+    )
+    assert not hasattr(Control, "break_glass"), (
+        "§11.2 adds no public Control method in v0.8; the surface is the CLI command"
+    )
+
+
+def test_T333_a_refusal_before_the_authority_gate_names_no_grant(store, clock):
+    """§5.4. The grant id is per-call state, and it was only ever **set**, never cleared.
+
+    §4.3.1 puts `principal_expired` first, so a denied receipt is recorded before the authority
+    gate runs. After one committed action under a break-glass grant, the next call's refusal
+    carried that grant's id -- naming a grant that never decided it, which is worse than
+    naming none.
+    """
+    from ctrlrun.errors import IdentityError
+
+    control = _control(store, clock)
+    opened = control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=2)))
+    committed = control.execute(_action(control), _Executor(), KEY)
+    assert committed.authority_grant_id == opened.delegation_id
+
+    lapsed = Action(
+        name="payments.refund",
+        arguments={"amount": 100, "payment_id": "EU-42"},
+        principal=Principal(
+            agent="oncall-agent", user="ada", expires_at=clock.now - timedelta(minutes=5)
+        ),
+        resource="payment:EU-42",
+        environment=control.environment,
+    )
+    with pytest.raises(IdentityError):
+        control.execute(lapsed, _Executor(), "refund:EU-99")
+
+    denied = [receipt for receipt in store.receipts() if str(receipt.result) == "denied"]
+    assert denied and denied[-1].authority_grant_id is None, (
+        f"the refusal named {denied[-1].authority_grant_id!r}, a grant that never decided it"
+    )
+
+
+def test_T327_narrowing_max_ttl_cuts_a_grant_already_open(store, clock):
+    """§5.2, and `v0.3 §5.6`'s purpose: a narrowed root narrows everything beneath it.
+
+    `max_ttl` was checked once, at creation, and is not a §5.4 containment row, so an operator
+    who narrowed an envelope while an incident was still running narrowed nothing. Every other
+    envelope dimension already cuts live grants at evaluation, because the envelope is the
+    chain's root parent; this was the one that did not, and it is the bound an operator reaches
+    for first.
+    """
+    from ctrlrun.errors import ActionDenied
+
+    control = _control(store, clock)
+    control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=3)))
+    assert str(control.execute(_action(control), _Executor(), KEY).result) == "committed"
+
+    # The same store, the same open grant, an envelope narrowed to fifteen minutes.
+    narrowed = _control(store, clock, policy=POLICY.replace("PT4H", "PT15M"))
+    clock.advance(timedelta(minutes=30))
+    executor = _Executor()
+
+    with pytest.raises(ActionDenied) as refused:
+        narrowed.execute(_action(narrowed), executor, "refund:EU-43")
+
+    assert refused.value.reason == "authority_escalation"
+    assert executor.calls == 0
+
+
+def test_T327_widening_max_ttl_does_not_extend_a_grant_already_open(store, clock):
+    """The other direction, which must not change anything: the grant's own `expires_at` is
+    what expires it, and an envelope widened afterwards does not hand it more time."""
+    from ctrlrun.errors import ActionDenied
+
+    control = _control(store, clock)
+    control._break_glass("incident-payments", _grant(clock.now + timedelta(hours=1)))
+    clock.advance(timedelta(hours=2))
+
+    widened = _control(store, clock, policy=POLICY.replace("PT4H", "PT8H"))
+    with pytest.raises(ActionDenied) as refused:
+        widened.execute(_action(widened), _Executor(), KEY)
+
+    assert refused.value.reason == "authority_expired"
+
+
 # --- T338: THE absence test -------------------------------------------------------------------
 
 
 #: The names the milestone's plan forbids by name, plus the ones an implementer reaches for
 #: under time pressure. A claim about the environment is a claim until something greps for it.
-FORBIDDEN = (
+#: Names a flag would be spelled as **in code**: an identifier, a keyword argument, an
+#: attribute. Matched with comments and string literals removed, because `approval.py` argues
+#: in prose that a public `_granting_principal` would be "`trust_approver` spelled as a context
+#: manager", and a grep that cannot tell prose from a flag pushes the argument out of the tree.
+FORBIDDEN_IDENTIFIERS = (
     "skip_entitlement",
     "trust_approver",
     "allow_self_approval",
@@ -610,14 +779,54 @@ FORBIDDEN = (
     "ignore_revocations",
     "skip_approver",
     "disable_entitlement",
+)
+
+#: And the names it would be spelled as **in a string**: a `click.option`, an environment
+#: variable, a dict key. An independent review found that seven of the original sixteen
+#: patterns could only ever appear as string literals and the tokenizer dropped exactly those,
+#: so they were unmatchable by construction -- and the control test planted an identifier, so
+#: nothing noticed. These are matched against string tokens only.
+FORBIDDEN_STRINGS = (
     "CTRLRUN_SKIP",
     "CTRLRUN_ALLOW_SELF",
     "CTRLRUN_BREAK_GLASS",
+    "CTRLRUN_TRUST",
     "--skip-entitlement",
     "--allow-self-approval",
     "--break-glass-force",
     "--no-approver",
+    "--trust-approver",
+    "skip_entitlement",
+    "allow_self_approval",
 )
+
+
+def _tokens(path: pathlib.Path) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """This module's code lines and its string literals, separately, each numbered.
+
+    `tokenize`, not a regex: a docstring spans lines and a `#` inside a string is not a
+    comment, and both mistakes go the unsafe way here.
+
+    Two lists rather than one, because the two classes of name need opposite treatment. An
+    identifier must be matched with strings **out**, or prose arguing a flag away reads as the
+    flag. A `--flag` or an environment variable can only ever *be* a string, so matching it
+    with strings out matches nothing at all. Comments are dropped from both: a comment naming
+    `--skip-entitlement` to say it does not exist is the same prose problem one level down.
+    """
+    import io
+    import tokenize
+
+    code: dict[int, list[str]] = {}
+    strings: list[tuple[int, str]] = []
+    with path.open("rb") as handle:
+        for token in tokenize.tokenize(io.BytesIO(handle.read()).readline):
+            if token.type == tokenize.COMMENT:
+                continue
+            if token.type == tokenize.STRING:
+                strings.append((token.start[0], token.string))
+                continue
+            code.setdefault(token.start[0], []).append(token.string)
+    return ([(number, " ".join(parts)) for number, parts in sorted(code.items())], strings)
 
 
 def test_T338_no_flag_environment_variable_or_option_skips_a_check():
@@ -625,22 +834,20 @@ def test_T338_no_flag_environment_variable_or_option_skips_a_check():
 
     A flag leaves no record, expires never, cannot be revoked and cannot be attenuated. The
     whole of §5 rests on there being no such setting anywhere, and that sentence is a claim
-    until something greps for it. This is the grep, in the suite rather than in a PR body,
-    so it runs on every change rather than once when somebody remembered.
+    until something greps for it. This is the grep, in the suite rather than in a PR body, so
+    it runs on every change rather than once when somebody remembered.
 
-    It reads `src/` only, and **code only**: `approval.py` explains that a public
-    `_granting_principal` would be "`trust_approver` spelled as a context manager", which is
-    prose arguing the flag away and is the opposite of a flag. A grep that cannot tell those
-    apart would push the argument out of the tree, so comments and strings are tokenized out
-    rather than the comment being reworded around the test.
+    It reads `src/` only: this file names every pattern while asserting none exists.
     """
     root = pathlib.Path(__file__).resolve().parent.parent / "src" / "ctrlrun"
     found: list[str] = []
     for path in sorted(root.rglob("*.py")):
-        for line, text in _code_lines(path):
-            for name in FORBIDDEN:
-                if name in text:
-                    found.append(f"{path.relative_to(root.parent.parent)}:{line}: {name}")
+        where = path.relative_to(root.parent.parent)
+        code, strings = _tokens(path)
+        for line, text in code:
+            found += [f"{where}:{line}: {name}" for name in FORBIDDEN_IDENTIFIERS if name in text]
+        for line, text in strings:
+            found += [f"{where}:{line}: {name}" for name in FORBIDDEN_STRINGS if name in text]
 
     assert not found, (
         "a setting that relaxes a check exists in the shipped package:\n  "
@@ -649,44 +856,37 @@ def test_T338_no_flag_environment_variable_or_option_skips_a_check():
     )
 
 
-def _code_lines(path: pathlib.Path) -> list[tuple[int, str]]:
-    """This module's lines with comments and string literals removed, numbered.
-
-    `tokenize`, not a regex: a docstring spans lines and a `#` inside a string is not a
-    comment, and both mistakes go the unsafe way here -- one hides a real flag, the other
-    fails on prose that argues against one.
-    """
-    import io
-    import tokenize
-
-    kept: dict[int, list[str]] = {}
-    with path.open("rb") as handle:
-        for token in tokenize.tokenize(io.BytesIO(handle.read()).readline):
-            if token.type in (tokenize.COMMENT, tokenize.STRING):
-                continue
-            kept.setdefault(token.start[0], []).append(token.string)
-    return [(number, " ".join(parts)) for number, parts in sorted(kept.items())]
-
-
-def test_T338_the_grep_would_find_one_if_there_were_one(tmp_path):
+def test_T338_the_grep_would_find_one_in_every_spelling_a_flag_takes(tmp_path):
     """The control for the test above (`v0.4 §1.3`).
 
-    A grep that matches nothing passes whether or not the tree is clean, and a typo in a
-    pattern is indistinguishable from a clean tree. This plants one and finds it.
+    A grep that matches nothing passes whether or not the tree is clean. The first version of
+    this control planted an identifier only, so it never exercised the seven patterns that can
+    appear solely as strings -- which were being discarded, and were therefore dead patterns
+    the control could not see. It now plants one of each spelling, and one in a comment that
+    must not count.
     """
     planted = tmp_path / "ctrlrun" / "planted.py"
     planted.parent.mkdir(parents=True)
-    planted.write_text("ALLOW = dict(skip_entitlement=True)\n", encoding="utf-8")
+    planted.write_text(
+        "import os\n"
+        "import click\n"
+        "\n"
+        "ALLOW = dict(skip_entitlement=True)\n"
+        'OPTION = click.option("--allow-self-approval", is_flag=True)\n'
+        'ENV = os.environ.get("CTRLRUN_BREAK_GLASS")\n'
+        "# --no-approver is named here in a comment and must NOT count\n",
+        encoding="utf-8",
+    )
+    code, strings = _tokens(planted)
 
-    hits = [
-        name
-        for name in FORBIDDEN
-        if any(
-            name in text for path in planted.parent.rglob("*.py") for _, text in _code_lines(path)
-        )
-    ]
+    identifiers = {name for name in FORBIDDEN_IDENTIFIERS for _, text in code if name in text}
+    literals = {name for name in FORBIDDEN_STRINGS for _, text in strings if name in text}
 
-    assert hits == ["skip_entitlement"], (
-        "the patterns above match nothing even when a flag is planted, so the absence test "
-        "proves nothing about the real tree"
+    assert identifiers == {"skip_entitlement"}, identifiers
+    assert literals == {"--allow-self-approval", "CTRLRUN_BREAK_GLASS"}, (
+        "a flag spelled as a click option or an environment variable is invisible to this "
+        f"test, so its absence from the tree is not evidence: found {literals}"
+    )
+    assert not any("--no-approver" in text for _, text in code + strings), (
+        "a name in a comment counted, so prose arguing a flag away reads as the flag"
     )
