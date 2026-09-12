@@ -30,16 +30,19 @@ any change to one appears here.
 
   **Reading the code changed nine things the plan had assumed**, and §1.4 lists them: five from the
   drafting and four from the independent review, which found the first draft unbuildable in four
-  places and is recorded rather than quietly fixed. The ones that matter beyond this document:
+  places and is recorded rather than quietly fixed. Five matter beyond this document.
+
   `Control` never grants an approval, so the check that matters lives at the consumption and not at
-  the grant; `_recheck` returns early on every deployment not using preconditions, so checks added
-  after it would have been dead on the default path; a `Principal` cannot carry a list and every
-  issuer's roles claim is one, so `ClaimValue` gains a tuple of strings; the Postgres grant's
-  compare-and-set is on a status that does not change at N-1, which is a lost update and one
-  principal filling two slots; a reserved action name no document may declare is a name every
-  proposal is denied for, so the policy-change action is reserved *and* declarable; and
-  `ctrlrun revoke --by` already means who performed the revocation, so the new selector is
-  `--created-by` and every script written against 0.7.0 keeps working.
+  the grant. `Control._recheck` returns early on the default path, so a check added after it would
+  have been dead there, green, and invisible to a mutation table. A `Principal` could not carry a
+  list, and every issuer's roles claim is one, so `ClaimValue` gains a tuple of strings. The
+  Postgres grant's compare-and-set was on a status that does not change at N-1, which is a lost
+  update and one principal filling two slots. And a reserved action name no document may declare
+  is a name every proposal is denied for, so the policy-change action is reserved *and* declarable.
+
+  Smaller, and worth knowing before anyone scripts against it: `ctrlrun revoke --by` already means
+  who performed the revocation, so the new selector is `--created-by` and every script written
+  against 0.7.0 keeps working.
 
   **What it does not close is in §1.1, before anything else**: a persuaded approver gives a valid
   approval and the receipt records it as one, and an administrator with write access to the policy
