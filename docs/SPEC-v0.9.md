@@ -439,6 +439,24 @@ the re-read says which. Split them into two transactions and `v0.6 §4.3.2` need
 nobody has written, covering a reservation that landed with a charge that may not have, which is a
 state no operator could reason about and no `resolve` command could fix.
 
+#### 3.3.0 The contingency is discharged: a spike ran it before any item built on it
+
+This section made the amendment **conditional** on a plain column not being enough, and said an item
+finding otherwise should stop. That question was answered by a throwaway spike against Postgres
+before item 1 started, rather than by three merged items later:
+
+- **A column undercounts every ancestor but the leaf.** One effect under a three-level chain charges
+  `root`, `mid` and `leaf` per §2.7. The effects row is 1:1 with the effect and carries one
+  `grant_id`, so the per-grant rolling sum read **0 for `root` and 0 for `mid`** where the ledger
+  read 100 for each. That is precisely the escalation §2.7 exists to prevent, produced by the design
+  that would have avoided the amendment.
+- **A second transaction right after the reservation loses the charge.** A crash between the two left
+  `reserved=1, charged=0`: the effect happens and the budget never sees it. And `v0.6 §4.3.2`'s
+  re-read resolves the reservation while saying nothing about the charge, which is the paragraph
+  above restated as a measurement.
+
+So the amendment stands, and it stands on something that was run.
+
 **The shape: an optional parameter on the two existing methods, not a new method.**
 
 ```python
@@ -660,23 +678,53 @@ requires that a **0.8.0 binary opening a migrated database refuses at open** wit
 naming the migration, and `v0.7`'s T264 is the precedent. A migration that only runs forwards turns
 a rollback into silent corruption.
 
-### 3.6 Both backends, and the lock named in the code
+### 3.6 Both backends, and the lock, now measured rather than left open
 
-**SQLite** takes `BEGIN IMMEDIATE`, a whole-database write lock, and the sum and the insert are
-inside it. Nothing further is required and the reason is written beside the query rather than
-assumed.
+**SQLite** takes `BEGIN IMMEDIATE` (`state.py:1777`), a whole-database write lock taken before the
+first read, and the sum and the insert are inside it. Nothing further is required.
 
-**Postgres runs READ COMMITTED with an explicit `BEGIN`**, and under READ COMMITTED a sum and an
-insert are **not** serialised: two transactions read the same total and both insert. This is the
-`postgres.py:1106` failure exactly.
+**Postgres runs READ COMMITTED with an explicit `BEGIN`** (`postgres.py:782`), and under READ
+COMMITTED a sum and an insert are **not** serialised.
 
-The implementation names, in a comment beside the query, which mechanism makes it safe. The
-specification does not choose between `SELECT ... FOR UPDATE` on a per-grant anchor row, a
-serialisable subtransaction, or an exclusion constraint the insert collides on, because the choice
-depends on what the final query shape is. It requires three things of whichever is chosen: it is
-named in a comment, it is justified in the PR body, and **it is proven by a multi-process test
-against Postgres**, never by threads. A counter that is correct in one process is not a claim about
-anything an operator runs.
+#### 3.6.1 What the spike measured
+
+An earlier draft of this section left the mechanism open between three candidates and asked item 4
+to pick one. **The spike ran all three**, 24 processes racing one budget that permits exactly ten
+spends, each process reserving a distinct effect key so the effects table's own uniqueness does not
+serialise them, four runs:
+
+| Mechanism | Result over four runs | Verdict |
+|---|---|---|
+| sum then insert, no lock | spent 1200, 1000, 1200, 1200 against a limit of 1000 | **overspends, and passes sometimes** |
+| `SELECT ... FOR UPDATE` on a per-grant anchor row, before the sum | 1000, 1000, 1000, 1000 | **correct, and stable** |
+| `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE` | 800, 600, 600, 800, with zero refusals | holds, at a cost that disqualifies it |
+
+**So the mechanism is the anchor-row lock**, named here rather than left to the item: a
+`SELECT grant_id FROM ... WHERE grant_id = ? FOR UPDATE` taken **before** the sum, per grant charged.
+Per grant and not per store, so two budgets on two grants do not serialise against each other.
+
+**Why SERIALIZABLE loses, which was not obvious before it was run.** It holds the limit, so it is not
+*wrong*. But it under-spends by 20 to 40 percent, and its aborts arrive as
+`SerializationFailure` rather than as refusals: in the runs above it produced **zero** clean
+refusals, converting every one into a retryable error. An operator would get a budget that silently
+delivers less authority than it grants and an agent that sees database errors where §4.5 promises a
+denial naming the grant, the metric and the window.
+
+#### 3.6.2 The naive implementation passes sometimes, so the test runs repeatedly
+
+**The finding that changes how G22 is tested.** The unlocked implementation held the limit in one
+run of four. It is not reliably wrong; it is *occasionally* right, which is worse, because a
+concurrency test run once against a broken implementation reports `PASS` about a quarter of the time.
+
+That is `CONTRIBUTING.md`'s fourth mutation pattern exactly, "windows not actually reproduced", and
+it is the shape v0.8 was warned about and v0.9 can now demonstrate. So:
+
+- **G22's multi-process test runs the race repeatedly and asserts the invariant every time**, not
+  once. The spike's ratio is the guide: at four runs a broken implementation escapes roughly one
+  time in 250, and at ten it does not escape.
+- **Item 4's mutation table includes removing the `FOR UPDATE`**, and the row is only green if the
+  test goes red *reliably*. A mutation that produces an intermittent failure is a mutation the
+  table must report as intermittent rather than as caught.
 
 ---
 
@@ -1444,7 +1492,10 @@ defects will be:
 
 - T408 a charge and its reservation are in one transaction: a failure after the charge leaves
   neither.
-- T409 **multi-process, Postgres**: N processes racing one budget spend at most the limit.
+- T409 **multi-process, Postgres**: N processes racing one budget spend at most the limit, **run
+  repeatedly** (§3.6.2), each process taking a distinct effect key so the effects table's own
+  uniqueness does not serialise them and hide the defect.
+- T409a removing the `FOR UPDATE` makes T409 fail, and fail *reliably* across repeats (§3.6.2).
 - T410 the same, SQLite under `BEGIN IMMEDIATE`.
 - T411 the A1 re-insert branch of `v0.6 §4.3.2` does not double-charge (§3.4).
 - T412 a three-level delegation charges all three grants (§2.7).
