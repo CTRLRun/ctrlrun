@@ -64,6 +64,10 @@ milestone about limits attracts more scope than any before it.
 - **Not a defence against a scope provider whose source is wrong.** A scope provider is worth
   exactly what the system behind it is worth. §5.8 states this as the ceiling on every claim §5
   makes, and it is not a caveat on the feature, it is the feature's boundary.
+- **Not scope or task enforcement on the gateway and ACS paths.** Both build an `Action` and call
+  `Control.execute` with no `scope=` and no `task=`, so neither check reaches them in v0.9. §5.2.2
+  and §6.3.2 have the rows; giving those paths a provider is a gateway configuration surface and its
+  own amendment.
 - **Not a detector of a hijacked agent.** Task binding shrinks what a hijacked agent can do. Nothing
   in v0.9 reads anything to notice the hijack, and `ASI01` stays partial.
 
@@ -194,6 +198,19 @@ this document does not add one: a decimal metric would need a canonical represen
 how it hashes, and receipt coverage for both, and that is a `v0.1 §2.3` amendment rather than
 something §2 may decide on its own.
 
+**And it must be non-negative.** A negative value would *reduce* the rolling sum and therefore
+always pass §3.3.1's predicate, so an agent alternating `+100000` and `-100000` spends without
+bound. This is not hypothetical arithmetic: `examples/policies/payments.yaml:29` already carries the
+comment "a refund of a negative amount is a charge", which is why every band in that document binds
+**both** ends. A budget that admitted negatives would be compensation, reachable by an attacker, and
+§12 puts compensation out of scope.
+
+**The §2.6 proof depends on this**, which is the sharper reason. Its step "any interval of length
+`window_p` sits inside some interval of length `window_c`, whose sum is at most `limit_c`" needs the
+sum to be monotonic over nested intervals, and a sum is monotonic only over non-negative terms.
+Permit one negative value and the child's predicate stops implying the parent's, and §2.6.1's whole
+table loses its justification.
+
 **So money is budgeted in minor units**, which is what `examples/authority/payments.yaml` already
 does with `amount_lte: 5000`, and §7's surfaces render it the way the rest of the document renders
 that constraint. A string that looks like a number is a refusal and not a coercion, on the same
@@ -210,27 +227,53 @@ operator's actions.
 
 The grant it is written on, and every grant delegated beneath it, transitively. §2.6 is why.
 
-### 2.4.1 An action with no effect key, under a budgeted grant, is refused
+### 2.4.1 A budget on a grant that cannot be charged is a load error
 
 **The gap R1 opens, closed here rather than discovered by an implementer.** Consumption happens on
 reserve (R1), and `effect_key` is optional: `v0.1 §5.1` makes it the deliberate escape hatch for an
 action with no effect worth deduplicating, and `Control._secure` reserves nothing for one
-(`control.py:2045-2062`), as does `_take`'s third branch (`control.py:3117-3118`).
+(the guard at `control.py:2031`, returning at `control.py:2043`), as does `_take`'s second branch
+(`control.py:3117-3118`) and its fourth (`control.py:3121`).
 
 Left alone, that is a hole the size of the feature: an agent holding a budgeted grant proposes
 actions with no `effect:` template and spends **zero** against every budget on the chain, forever.
 §2.1's sharp case is four hundred refunds; four hundred refunds under a `@protect` carrying no
 `effect=` would be four hundred free ones.
 
-**So a budgeted grant refuses an action that carries no effect key**, naming the grant and the
-budget. It is the same answer §2.3 gives for a missing metric argument, for the same reason: the
-absence of a field must not become the absence of a limit, which is what `v0.3 §5.4` refuses on the
-constraint side. It is also the R5 answer, because it changes nothing for a grant carrying no
-budget: an unbudgeted grant keeps the escape hatch exactly as 0.8.0 left it.
+**The refusal is at LOAD, not at execute**, and the second review is why: a refusal at execute has
+nowhere to live and breaks a shipped example.
+
+**A budget on a grant none of whose actions carries an `effect:` template is a load error**, naming
+the grant, the budget and the actions, and saying that a budget cannot be enforced on an action with
+no effect key. An operator learns at load, from the document, in the place they can fix it.
+
+**Why not at execute, which is where an earlier draft put it.** Two reasons, each fatal on its own:
+
+1. **There is no site.** `Authority.evaluate` (`authority.py:884`, called at `control.py:819`) takes
+   no effect key and cannot make the check. Putting it in `Control.execute` instead splits the
+   answer: `Control.evaluate` never resolves an effect key at all (`v0.3 §4.3.1`: it "resolves
+   earlier still, before `Control.execute` is entered"), so `Control.evaluate` and therefore
+   `ctrlrun.adapter.needs_approval` would report `ALLOW` for an action `execute` then refuses. An
+   adapter that asks whether approval is needed would be told the wrong thing.
+2. **It makes a shipped configuration authorise nothing.** `examples/authority/payments.yaml`'s
+   `reconciliation` grant covers `stripe.charge.read` and `stripe.refund.read`, and those actions
+   carry no `effect:` template on purpose, with a comment in the document saying "Reads get no
+   `effect:` template, and that is correct for a read." A `count` budget on that grant, which is
+   exactly what an operator puts on a read-heavy service account and exactly what §2.3 calls the
+   budget an operator reaches for first, would refuse 100% of its actions forever. At load that is
+   a message. At execute it is a grant that silently authorises nothing.
+
+**What §7.4's shipped example therefore carries.** The budget goes on a grant whose actions have
+effect templates, which in that document is a refund grant and not the reconciliation one. Item 6
+names which, and item 7 checks it.
 
 Rejected: charging such an action against the budget anyway, with a synthesised key. Two attempts of
 one logical action would charge twice, because what makes a charge idempotent is the effect key
 (§3.4), and inventing one would be inventing the identity the caller declined to give.
+
+Rejected: refusing at execute and accepting the two consequences above. The load error is strictly
+more informative, arrives strictly earlier, and costs an operator nothing they cannot fix in the
+document.
 
 ### 2.5 The window is rolling
 
@@ -265,8 +308,9 @@ parent's rate: **narrower, and contained.** A child of `limit: 100000, window: P
 rule must refuse it. Push the child's window to `PT1S` and it is effectively unlimited.
 
 The proof, because a containment rule deserves one. §2.5 makes a budget the predicate *the sum over
-every interval of length `window` is at most `limit`*. Given `limit_c <= limit_p` and
-`window_c >= window_p`, take any interval of length `window_p`: it sits inside some interval of
+every interval of length `window` is at most `limit`*. Given `limit_c <= limit_p`,
+`window_c >= window_p`, **and §2.3's non-negative values, without which the sum is not monotonic
+over nested intervals and none of this holds**, take any interval of length `window_p`: it sits inside some interval of
 length `window_c`, whose sum is at most `limit_c`, which is at most `limit_p`. So every spend
 pattern the child permits, the parent permits. That is exactly `child ⊆ parent`.
 
@@ -446,25 +490,42 @@ class Charge:
 ```
 
 `limit` and `window` are on the `Charge` rather than looked up by the store, because a store that
-resolved a grant's budgets would be reading the policy, and `v0.3 §4.3.1`'s layering has the store
-reading no document. The store evaluates one arithmetic predicate it was handed, over rows it owns.
+resolved a grant's budgets would be reading the policy, and `ARCHITECTURE.md` §6's module map has
+`state.py` not knowing about `policy.py`. The store evaluates one arithmetic predicate it was handed, over rows it owns.
 
 **The evaluation order inside the transaction**, which is the whole of the amendment's value: sum
-the un-released rows for `(grant_id, metric)` over `[now - window, now]`, compare `sum + amount`
-against `limit`, and either insert the rows and the reservation together or write neither.
+the un-released rows for `(grant_id, metric)` over `[now - window, now]`, compare `sum + amount <= limit`
+(**inclusive**, matching §2.2's "what the sum may reach"; a `limit: 0` grant therefore permits an
+action only if its metric value is 0, which is how a budget of zero stops a grant), and either insert the rows and the reservation together or write neither.
 
-**What the store raises, given the closed error set.** `errors.py` is closed and §10 adds nothing to
-it, so the store raises a **package-internal** exception carrying which grant, metric and window
-failed, and `Control` converts it to §4.5's `ActionDenied` with its events and its receipt.
-`SPEC-v0.8.md` §2.5 set the precedent for a package-internal carrier across this boundary, and that
-spec's §2.5.1 argued why it is internal. The reason it is not the public error directly: `ActionDenied` is
-`Control`'s to raise, with a receipt and an `ACTION_DENIED` event beside it, and a store that raised
-it would be minting evidence, which is `control.py`'s job and no store's.
+**What the store raises, and the direction a store that ignores it fails in.** `errors.py` is
+closed and §10 adds nothing to it, so the store raises a **package-internal** exception naming the
+grant, the metric and the window, and `Control` converts it to §4.5's `ActionDenied` with its events
+and its receipt. `ActionDenied` is `Control`'s to raise, with a receipt and an `ACTION_DENIED` event
+beside it; a store that raised it would be minting evidence, which is `control.py`'s job.
 
-**Rejected: evaluating at the authority gate.** `Control.execute` runs
-`self._authority.evaluate(...)` at `control.py:819`, whose own ordering comment places it at
-*principal_expired, authority, policy, approval, reservation*, so it runs **before** the
-transaction. Two processes would read the same total, both pass, and `charges=` would faithfully
+**`SPEC-v0.8.md` §2.5 is NOT the precedent for this, and an earlier draft cited it as one.** That
+section's carrier is safe because of its direction, which it states: *"A third-party store that
+ignores it records nothing, and §2.7's consume-side check then refuses every approval it grants,
+which is the fail-closed direction."* This carrier has the **opposite** direction. `StateStore` is a
+structural `Protocol` (`state.py:511`), so a third-party store that implements `charges=` as "write
+the rows" and never evaluates the predicate **silently disables every budget on the deployment**,
+and nothing detects it. §3.3.3 spots this shape for the read; an earlier draft missed it for the refusal, which
+is the authorization-relevant half.
+
+**So the predicate is part of the declared contract, and the conformance kit enforces it.**
+
+- `charges=`'s contract is a **MUST**: a store that accepts charges MUST evaluate §3.3.1's predicate
+  inside the same transaction and MUST refuse when it fails. A store that cannot is not a conforming
+  store, and says so by not accepting charges rather than by accepting and ignoring them.
+- **`ctrlrun.conformance`'s store suite gains the case**, which turns the MUST into something a
+  third-party backend discovers at its own test time rather than in an operator's production. The
+  kit exists for exactly this (`v0.5 §9`), and a MUST no suite checks is the
+  documentation-rather-than-defence shape the mutation-pattern list calls out.
+
+**Rejected: evaluating at the authority gate.** `Control.execute` evaluates authority at `control.py:819`, and
+`control.py:1094-1095`'s ordering comment places that at *principal_expired, authority, policy,
+approval, reservation*, so it runs **before** the transaction. Two processes would read the same total, both pass, and `charges=` would faithfully
 record both spends. It reads like the natural home, because every other authority question is
 decided there, and it is the one place the check cannot work.
 
@@ -473,7 +534,27 @@ storing rows, which is a genuine widening of what a `StateStore` does. It is the
 that closes the race: one comparison, no document, no policy, no principal, over rows the store
 already owns.
 
-### 3.3.2 The read the surfaces need, which is the second half of the amendment
+### 3.3.2 Where `Control` catches it, because an unhandled refusal escapes with no receipt
+
+`_secure`'s loop catches `AmbiguousEffect` (`control.py:2057`), `ActionDenied` (`control.py:2079`)
+and `ApprovalMismatch` (`control.py:2104`). **A new exception type escapes all three**: no receipt,
+no event, and a package-internal exception in the caller's hands.
+
+That is not hypothetical, and this repository has already met it once.
+`control.py:1748-1751` records it in the source: *"A record a human resolved while this attempt was
+still running answers `InvalidArgument`, which escaped: no receipt, no event, and the caller handed
+a store error about its own effect key. Found by review, round 2."*
+
+**And routing it through the existing `ActionDenied` handler is also wrong**: that handler appends
+`APPROVAL_DENIED` (`control.py:2083-2089`) unconditionally, so a budget refusal would fabricate an
+approval denial for an action no human ever saw.
+
+**So `_secure`'s loop gains its own handler**, converting the carrier into `ActionDenied` with
+reason `budget_exhausted`, appending `ACTION_DENIED` and no approval event, and writing a `denied`
+receipt. §9.5 asserts all three: a receipt exists, `ACTION_DENIED` is appended, and
+`APPROVAL_DENIED` is **not**.
+
+### 3.3.3 The read the surfaces need, which is the third part of the amendment
 
 §7 shows an operator what a budget consumed and what it is holding, and G22 checks it. Neither can
 be done through any method `StateStore` declares, and `charges=` is write-only.
@@ -482,9 +563,24 @@ So the amendment is **one parameter and one read method**:
 
 ```python
 def consumptions(
-    self, *, grant_id: str, metric: str | None = None, since: datetime | None = None
+    self,
+    *,
+    grant_id: str | None = None,
+    metric: str | None = None,
+    since: datetime | None = None,
 ) -> tuple[Consumption, ...]: ...
 ```
+
+**`grant_id` is optional**, because §7.3 has `stats` report the ledger's row count so growth is
+observable, and a required `grant_id` would make that require enumerating every grant id that ever
+existed, runtime delegations and revoked grants included, one call each. `Consumption`'s fields are
+frozen in §10.
+
+**And the "why" of §7.2 is a join, not a column.** `get_effect(effect_key)` is already declared
+(`state.py:563`), so an un-released row's holding state is read by joining its `effect_key` through
+it. Said explicitly because the alternative an implementer reaches for is putting the effect's state
+on the ledger row, which would denormalise the state machine §4.1 deliberately does not give the
+ledger.
 
 This clears `v0.6 §9.2`'s bar in the plainest way, and in exactly the way that section's own example
 did: **a second backend implementing `charges=` and nothing else would satisfy every declared method
@@ -501,8 +597,14 @@ the case where an operator's network was already misbehaving.
 
 So the ledger carries a unique constraint on `(effect_key, attempt, grant_id, metric)`, and the
 insert is written so that a replay of the same transaction produces the same rows rather than twice
-as many. Table A1 row 1's identity check then covers the charges without a third table, because they
-are part of the row set the identity check is over.
+as many. Table A1 row 1 then covers the charges without a third table, **and the reason is the
+transaction and not the identity check**: `_resolve_lost_insert` re-reads one effect record
+(`postgres.py:909`) and compares it with `_is_our_own_write` (`postgres.py:926`), over the effects
+row alone. Ledger rows are not in that comparison and could not be, because a ledger row carries a
+store-assigned `consumed_at` that will not compare byte for byte. What makes the charge resolved is
+that it rode the same transaction, so the effects row's presence *is* proof the charge committed.
+An earlier draft said the identity check was over the charges too, which would send an implementer
+to widen `_is_our_own_write` over the ledger, where it fails.
 
 ### 3.5 What bounds the query
 
@@ -592,8 +694,19 @@ reason, and four rows below were added by that review rather than by the draftin
 | **observe mode reserves** (`control.py:1528`, `control.py:1530`, outside `_take`) | `RESERVED` | **nothing is charged.** `v0.3 §6.2` makes observe mode record rather than enforce, and a budget that consumed there would enforce: the run would refuse at the limit while claiming to be observing, and the counterfactual an operator adopts observe mode to get would be wrong. §4.2.1 |
 | **a suspension holds the effect** (`hold_continuation` extends the lease, `state.py:1099-1112`) | `RESERVED`, lease extended | **held**, for as long as the continuation is held. §4.6 says this is not bounded by the kernel |
 | `begin_execution` succeeds | `EXECUTING` | **held.** No ledger movement; listed because the table claims completeness |
+| **`fail_effect` is REFUSED** after the executor raised `NotExecuted` (`control.py:1740-1763`, `_unrecorded`) | the record moved on: this attempt's lease lapsed and another declared it `AMBIGUOUS` | **held, NOT released.** **The one path where the executor proved nothing happened and the charge stays**, because somebody may have committed the effect. See the warning below |
+| `commit_effect` is refused (`control.py:1851-1869`, `_unrecorded`) | the record moved on | **held** |
+| `mark_ambiguous` is refused (`control.py:1800-1822`) | the record moved on | **held** |
 | renewal after `FAILED` (`renews=True`, `attempt+1`) | `RESERVED` again | **a new charge**, per §4.3 |
 | retry refused (`COMMITTED`, `AMBIGUOUS`, live lease) | unchanged | **nothing.** No reservation, no charge |
+
+**The `fail_effect`-refused row is the one to read twice.** The rule is "released exactly on
+`FAILED`", and the row above it says `fail_effect` releases because the executor proved nothing
+happened. An implementer who turns that into *release when the executor raises `NotExecuted`*, or
+*release in the `fail_effect` code path*, gets this row exactly backwards and hands back authority
+for an effect somebody may have committed. **The release is keyed on the record reaching `FAILED`,
+never on the call that tried to put it there.** The second review of this spec added this row;
+§9.5's test for it drives the lapse concurrently rather than asserting the happy path.
 
 ### 4.2.1 Observe mode charges nothing, and says so in the report
 
@@ -706,7 +819,9 @@ configuring both does.
 `v0.7 §6.9` decided this question in advance, in these words:
 
 > v0.9's scope providers are *"a resource-ownership precondition through v0.7's fingerprint
-> mechanism"*, and they **configure this hook** rather than adding a second one.
+> mechanism"*, and they configure this hook rather than adding a second one.
+
+(Verbatim; an earlier draft bolded "configure this hook", which the source does not.)
 
 `ROADMAP.md`'s v0.9 bullet says the same. **§5.2 concludes the opposite, so this document amends
 that sentence rather than quietly departing from it.** This document opens by saying all eight prior
@@ -732,17 +847,30 @@ would not exist if they were one mechanism. It is the price of the three differe
 
 ### 5.2.2 Where a scope provider binds, and where it does not
 
-`v0.7 §6.8` spends a subsection on this and §5 owes the same, because "every protected action" is
-not an answer for the paths that are not a straightforward execute.
+This is the **first of the two columns** the milestone's plan requires on `v0.3 §4.3.1`'s entry-point
+table, and §6.3.2 is the second. The plan's wording is the standard: *"The rows that say no are
+written down as deliberately as the rows that say yes."* `v0.3 §4.3.1` has thirteen rows and an
+earlier draft of this section covered six, which is the missing-enumeration failure that table exists to
+prevent, and the one that let an expired credential mint permanent authority in v0.3.
 
-| Path | Scope provider | Why |
+| Entry point | Scope provider | Why |
 |---|---|---|
 | `Control.execute`, `ALLOW` | **runs** | the main case, and the one `v0.7 §6.8` does not cover |
-| `Control.execute`, `APPROVE`, presenting pass | **runs**, before the precondition recheck (§5.7) | |
-| `Control.execute`, `DENY` | **not called** | the action is refused already; calling a provider would make an unreachable source into a second failure for an action nobody was going to run. `v0.7 §6.6`'s rule |
-| `Control.evaluate` | **not called** | it decides without reserving and without executing, and a provider call there would be a network fetch on a path documented as a pure decision |
-| `Control.resume` | **not called** | `v0.7 §6.8` refuses to run a provider here precisely because a refusal strands a reservation the remote may already be acting on, and a scope provider has the identical problem. **Stated rather than inherited**, because a reader would otherwise assume "every protected action" includes it |
+| `Control.execute`, `APPROVE`, **requesting** pass | **not called** | the action is not being taken yet. A human is therefore asked to approve an action that may be refused `out_of_scope` at consumption, which is fail-closed and wastes a human's attention; stated rather than left to be discovered |
+| `Control.execute`, `APPROVE`, **presenting** pass | **runs**, before the precondition recheck (§5.7) | this is where the action is taken |
+| `Control.execute`, `DENY` | **not called** | already refused; a provider call would turn an unreachable source into a second failure for an action nobody was going to run. `v0.7 §6.6`'s rule |
+| `Control.evaluate` | **not called** | it writes nothing and consumes nothing (`v0.3 §4.3.1`'s own cell); a network fetch on a path documented as a pure decision would change what that path is |
+| `Control.resume` | **not called** | `v0.7 §6.8` refuses a provider here because a refusal strands a reservation the remote may already be acting on, and a scope provider has the identical problem |
+| `Control.delegate`, `Control.revoke` | **not called** | no action, no resource to place |
+| **the MCP gateway's `tools/call`** | **not called**, and this is the gap worth naming | it builds an `Action` and calls `Control.execute`, and has no `scope=` to pass. So an operator who configures a scope provider on `@protect` and exposes the same action through the gateway **gets no scope check on the gateway path**. `v0.3 §4.3.1`'s gateway row answers the v0.7 recheck question explicitly ("no provider, and it refuses a presented approval that carries a fingerprint") and this row answers v0.9's the same way |
+| **the ACS request hook** | **not called**, same reason and same shape | |
+| both adapters | **not called**: they answer approvals, they do not originate actions | |
 | observe mode | **runs, and refuses nothing**: the report says the action would have been refused out of scope (§4.2.1) | |
+| the evidence commands (`receipts`, `inspect`, `stats`, `verify`) | **not called**: they take no action | |
+
+**The gateway and ACS rows are a real limitation and not an oversight**, so they are stated as one:
+a deployment that wants scope enforcement on those paths does not get it in v0.9, and §1.1 carries
+the sentence. Giving them a provider is a gateway configuration surface, which is its own amendment.
 
 A test counts the provider's calls on each row, on `v0.7 §6.8`'s pattern.
 
@@ -904,6 +1032,14 @@ hash is **silent about the task**. So an approval does not bind a task: an appro
 the agent was on `invoice-run-7` can be consumed on `payroll-3` as far as the *approval* is
 concerned.
 
+**And the residual is larger than "a different task", which is worth stating precisely.** Containment
+catches a task the grant's pattern does not match. Under the natural configuration, the one §6.1
+ships as its example (`tasks: ["invoice-run-*"]`), **an approval is fungible across every concrete
+run**: a human approves a refund while the agent is on `invoice-run-7`, the agent consumes it on
+`invoice-run-9`, containment passes because both match the pattern, and nothing catches it. That is
+the real cost, and a section headed "what that costs, stated plainly" owes it rather than the
+easier version.
+
 **What stands in for it**: authority is evaluated on the execute path, against the grant, with the
 task in hand, every time. So the `payroll-3` consumption is refused by §6.2's containment check
 rather than by the approval machinery. The refusal happens; it is a different guard than a reader
@@ -913,6 +1049,36 @@ quantitative cousin: the approval attributes, the grant decides.
 
 Binding the task into the action hash is a `v0.1 §2.3` amendment with a migration story, and it
 belongs to whatever milestone is willing to pay for one. This one is not, and §12 carries it.
+
+### 6.3.2 Where the task binds: `Control.resume` is the row that would otherwise break
+
+The **second** of the two columns the milestone's plan requires on `v0.3 §4.3.1`.
+
+| Entry point | Task | Why |
+|---|---|---|
+| `Control.execute` | from `task=`, and §6.4 refuses a task-bound grant with none | the main case |
+| `Control.evaluate` | from `task=`, same rule | it must agree with `execute` or an adapter is told the wrong thing |
+| **`Control.resume`** | **evaluated and recorded, never re-decided** | see below |
+| `Control.delegate` | the child's `tasks` are contained in the parent's (§6.2) | delegation-time, not action-time |
+| the gateway, the ACS hook, both adapters | **no task**, so a task-bound grant refuses them | the same limitation §5.2.2 records for the scope provider, and the same amendment would fix both |
+
+**Why `resume` cannot re-decide it, and what happens if it does.** `Control.resume` evaluates
+authority at `control.py:1578`, and it takes no `task=`. The action is rehydrated from the store
+(`control.py:1557`), and §6.3.1 deliberately keeps the task off `Action`, so the rehydrated action
+carries none. Under a grant naming `tasks`, §6.4 would then fire on **every resumed leg**.
+
+That does not raise: `control.py:1586-1590` records `Decision.DENY` and an `AUTHORITY_DENIED` event
+**into the receipt**. And `control.py:1575-1577` says what that costs, in the source: this is *"the
+only receipt an MCP multi round-trip or ACS action ever gets"*. So the naive reading makes every
+such receipt say the action was denied by authority, for every task-bound deployment.
+
+**So `resume` evaluates and records the task dimension and does not re-decide on it**, which is
+exactly `v0.3 §5.6.1`'s treatment of authority on that path and the reason that section exists.
+§9.1 has the test.
+
+The mirror case is worse and is why this is not left implicit: a resuming process that happens to
+sit inside some *other* `task=` context would evaluate the resumed leg against an unrelated task.
+Not re-deciding forecloses that too.
 
 ### 6.4 A grant that names a task refuses an action that names none
 
@@ -926,7 +1092,8 @@ decline to supply is decoration.
 was decided in the direction that does not.**
 
 **`v0.3 §5.4` already settled this in writing, and the settling paragraph is the citation that
-matters**, so this is a confirmation rather than a judgement call. Its closing paragraph:
+matters**, so this is a confirmation rather than a judgement call. Its penultimate paragraph
+(§5.4 closes with "Where containment cannot be decided, it fails"):
 
 > The asymmetry with §4.2 — where a *root* grant that omits `resources` is unconstrained on
 > resources — is deliberate and worth saying out loud. A root grant is written by an operator, in a
@@ -1012,6 +1179,12 @@ paragraph above.
 
 `stats` reports the row count so growth is observable before it is a problem.
 
+**One caveat on archiving, because the invariant above is about decisions and not about evidence.**
+An `AMBIGUOUS` effect older than the longest window still **holds** a charge that §7.2 must display.
+Archiving its row is decision-safe and release-safe (§4.4's compare-and-set is a no-op on a row that
+is gone) and it drops that charge from the operator's view. An operator archiving a live ledger
+excludes un-released rows, and this sentence is why.
+
 ### 7.4 What `verify` reports
 
 G22, G23 and G24, each graded or `N/A` (§8). **At least one shipped example exercises a budget, a
@@ -1049,6 +1222,27 @@ and the refusal names that dimension (§6.2).
 **Every `N/A` reason is a statement about the operator's document**, per `verify/guarantees.py`'s own
 module docstring. `N/A` is excluded from the denominator, so a false `N/A` is a false green, and a
 guarantee that could not have failed is not a pass.
+
+### 8.0 Adding two containment dimensions changes G9, and G9 breaks if it is not told
+
+`DIMENSIONS` (`authority.py:126`) is a six-element tuple, exported, and `verify/scenarios.py`
+iterates it to build G9's widened children (`scenarios.py:2091`) and reports
+`f"{len(exercised)} of {len(DIMENSIONS)} dimensions"` (`scenarios.py:2118`).
+
+**Two ways this goes wrong, and both are silent.**
+
+- Add `budgets` and `tasks` to `contained_dimension`'s ordered checks **and** to `DIMENSIONS`, but
+  leave G9's `_narrowed` helper copying only the six fields it copies today
+  (`scenarios.py:4050-4059`): every widening then returns `"budgets"` as the first violated row,
+  `offending != dimension`, and G9 raises `VerifyInternalError` on any document carrying a budget.
+  Which §7.4 requires a shipped document to carry.
+- Add them to `contained_dimension` and **not** to `DIMENSIONS`: G9 reports "6 of 6 dimensions",
+  stays green, and never exercises either new dimension. That is the false green §9's rule 3 exists
+  to refuse, and it is the more likely mistake because it is the one nothing turns red.
+
+**So `DIMENSIONS` grows to eight, `_narrowed` and `_widen` carry `budgets` and `tasks`, and §9.6
+asserts G9 exercises eight of eight.** Item 1 lands `tasks` and item 3 lands `budgets`, so each
+moves the count by one and neither may leave the helper behind.
 
 ### 8.1 G23's `N/A` is the one that is not a statement about the document
 
@@ -1110,6 +1304,9 @@ defects will be:
 - T384 a child omitting `tasks` under a parent naming them is rejected (`v0.3 §5.4`).
 - T385 a task changed in the document moves the policy hash (§6.7).
 - T386 a break-glass delegation is attenuated on `tasks`, at the second level, on T337's pattern.
+- T386a `Control.resume` under a task-bound grant **evaluates and records** the task dimension and
+  does not re-decide on it (§6.3.2): the resumed leg is not denied, and the receipt, which is the
+  only one an MCP multi round-trip ever gets, does not say `AUTHORITY_DENIED`.
 - T387 a `ctrlrun.policy/v7` `tasks` key in a `v6` document is refused, in `policy.py`'s existing
   older-reader shape.
 
@@ -1148,6 +1345,9 @@ defects will be:
   and the test is written with the parent at `PT24H` and the child at `PT1H` so the 24x figure is on
   the page next to the assertion.
 - T402 a child window **longer** than its parent's is accepted, same limit.
+- T401a a budget on a grant none of whose actions carries an `effect:` template is a **load error**
+  naming the grant, the budget and the actions (§2.4.1). The case is
+  `examples/authority/payments.yaml`'s `reconciliation` grant, whose actions are reads.
 - T402a the matching rule of §2.6.1, over the two-budget parent §2.2 exists for: each of the four
   rows of that section's worked table is a case.
 - T403 a child omitting a budget its parent carries is rejected.
@@ -1177,42 +1377,54 @@ defects will be:
 
 ### 9.5 Item 5: consumption, reconciliation and release (§4)
 
-- T415 to T430: **one test per row of §4.2's table**, sixteen rows, sixteen tests. Four of those rows
-  were added by the review of this spec rather than by its drafting, and they are the four worth
-  naming here because they are the ones an implementer would not derive: the attempt ceiling
-  releasing after a won reservation, `begin_execution` being refused after a won reservation, observe
-  mode reserving outside `_take`, and a suspension holding a charge for as long as a continuation is
-  held.
-- T431 a renewal after `FAILED` charges again, and the two rows are distinct by `attempt` (§4.3).
-- T432 an A2 re-issue of `fail_effect` releases once, not twice (§4.4). **Written as a mutation of
+- T415 to T433: **one test per row of §4.2's table**, nineteen rows, nineteen tests. Seven of those
+  rows were added by this spec's two review rounds rather than by its drafting, and they are the
+  ones an implementer would not derive: the attempt ceiling releasing after a won reservation,
+  `begin_execution` refused after a won reservation, observe mode reserving outside `_take`, a
+  suspension holding a charge, and the three `_unrecorded` paths where `fail_effect`, `commit_effect`
+  or `mark_ambiguous` is itself refused.
+- **The `fail_effect`-refused test drives the lapse concurrently**, because the whole row is that the
+  executor proved nothing happened and the charge is nonetheless held. A test that calls
+  `fail_effect` on a record still in `EXECUTING` asserts the row above it instead and passes.
+- T434 a renewal after `FAILED` charges again, and the two rows are distinct by `attempt` (§4.3).
+- T435 an A2 re-issue of `fail_effect` releases once, not twice (§4.4). **Written as a mutation of
   the release into a decrement**, which is the implementation this row exists to forbid; a test that
-  only calls `fail_effect` once cannot tell the two apart.
-- T433 an exhausted budget refuses, reason distinct, naming grant, metric and window, **and not the
+  calls `fail_effect` once cannot tell the two apart.
+- T436 an exhausted budget refuses, reason distinct, naming grant, metric and window, **and not the
   remaining amount** (§4.5), asserted by word.
-- T434 the refusal names the **ancestor** that refused, where a child is within its own budget
+- T437 the refusal produces a **receipt** and an `ACTION_DENIED`, and **no `APPROVAL_DENIED`**
+  (§3.3.2). The last clause is the assertion: the existing `ActionDenied` handler appends one
+  unconditionally, so a budget refusal routed through it would fabricate an approval denial.
+- T438 the refusal names the **ancestor** that refused, where a child is within its own budget
   (§2.7).
-- T435 observe mode charges nothing and reports what would have been refused (§4.2.1).
-- T436 **G22, multi-process against Postgres**: a budget exhausted by an ambiguous effect refuses the
+- T439 observe mode charges nothing and reports what would have been refused (§4.2.1).
+- T440 a **negative** metric value is refused (§2.3), and the test that proves it matters alternates
+  `+n` and `-n` and asserts the budget is not thereby reset.
+- T441 **G22, multi-process against Postgres**: a budget exhausted by an ambiguous effect refuses the
   next reserve until reconciled, and releases on `FAILED`.
-- T437 G22's positive control: a budget not exhausted permits.
+- T442 G22's positive control: a budget not exhausted permits.
+- T443 the **conformance** case: a store that accepts `charges=` and does not evaluate the predicate
+  fails the store suite (§3.3). Without this, a third-party backend disables every budget silently.
 
 ### 9.6 Item 6: the operator surfaces (§7)
 
-- T438 `inspect` shows consumed, held, and **why** the held part is held, naming the `effect_key`
-  and its state (§7.2).
-- T439 `verify` reports G22 to G24 against the shipped examples, none of them `N/A`.
-- T440 each `N/A` reason, where one is produced, is a true statement about the document under test.
-  **G23 is excluded by name**, because §8.1 makes its `N/A` unreachable: it is graded against a
-  scenario `verify` constructs, so an `N/A` from G23 is a defect rather than a case to validate.
-- T441 the `--json` shapes are additive: a 0.8.0 consumer of the same command does not break.
-- T442 no new CLI command appeared (§7.1), asserted against the command list the way the docs audit
-  asserts it.
+- T444 `inspect` shows consumed, held, and **why** the held part is held, naming the `effect_key`
+  and its state (§7.2), assembled by joining through `get_effect` rather than from a ledger column.
+- T445 `stats` reports the ledger row count without being given a grant id (§7.3, §3.3.3).
+- T446 `verify` reports G22 to G24 against the shipped examples, none of them `N/A`.
+- T447 each `N/A` reason, where one is produced, is a true statement about the document under test.
+  **G23 is excluded by name**, because §8.1 makes its `N/A` unreachable.
+- T448 **G9 exercises eight of eight dimensions** (§8.0). The test asserts the count and that
+  `budgets` and `tasks` are each the offending dimension for their own widening, which is what a
+  "6 of 6" false green would hide.
+- T449 the `--json` shapes are additive: a 0.8.0 consumer of the same command does not break.
+- T450 no new CLI command appeared (§7.1), asserted against the command list.
 
 ### 9.7 Item 7: release
 
-- T443 `ctrlrun.receipt/v6`, `ctrlrun.policy/v7` and `ctrlrun.guarantees/v5` each complete, with
+- T451 `ctrlrun.receipt/v6`, `ctrlrun.policy/v7` and `ctrlrun.guarantees/v5` each complete, with
   every frozen field written by something.
-- T444 `import ctrlrun` still imports nothing from an extra, and `ctrlrun demo` still runs under 60
+- T452 `import ctrlrun` still imports nothing from an extra, and `ctrlrun demo` still runs under 60
   seconds with no network.
 
 ---
@@ -1226,11 +1438,14 @@ One justification per row. Anything not here is a spec amendment before it is co
 | `Budget` (`metric: str`, `limit: int`, `window: timedelta`) | nothing in `authority.py` carries a quantity over a period. **`window` is a `timedelta` in Python and an ISO-8601 duration in the document and in `_canonical_grant`**, because a `timedelta` is not a `PlainValue` (`action.py:19`) and so cannot render through `canonical_bytes`; the document's own spelling is the canonical one, which is what §2.8's hash covers |
 | `Grant.budgets` | `constraints` decides one action and cannot count |
 | `Grant.tasks` | no dimension names a unit of work |
+| `DIMENSIONS` grows from six entries to eight | **an exported public name whose value changes** (`authority.py:126`, `__all__` at `authority.py:1787`). `verify/scenarios.py` iterates it for G9 and prints `len(DIMENSIONS)`, so this is not a private constant. §9.6 has the test |
 | `Charge` | the store needs a value object for what a reservation spends, carrying the whole predicate (§3.3.1) |
 | `charges=` on `reserve_effect` and `consume_approval_and_reserve` | §3.3, half of the milestone's amendment to a frozen protocol |
 | `scope=` on `@protect` and `Control.execute` | `preconditions=` answers a different question (§5.2), and §5.2.1 amends `v0.7 §6.9` to add it |
 | `task=` on `@protect` and `Control.execute` | nothing carries a unit of work today, and it cannot go on `Action` without moving every action hash in existence (§6.3.1) |
-| `consumptions()` on `StateStore` | §3.3.2: the surfaces and G22 need a read, and `charges=` is write-only |
+| `task=` on `Authority.evaluate` | **the name §6.3.1 was missing.** `Authority.evaluate` is public (`authority.py:884`) and takes `action, now, store`; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision. A keyword, defaulting to `None`, so an existing caller is unchanged |
+| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only |
+| `Consumption` | what `consumptions()` returns: `grant_id`, `metric`, `amount`, `effect_key`, `attempt`, `consumed_at`, `released_at`. Frozen here because §3.3.3 returns it and §7.2 renders it, and a return type specified nowhere is a spec amendment waiting to happen |
 
 ### 10.1 Schemas
 
@@ -1266,7 +1481,7 @@ No new module. Budgets and tasks are `authority.py`; the ledger is `state.py`, `
 | Situation | Outcome |
 |---|---|
 | A budget's metric names an argument the action does not carry | **refused** (§2.3). Never zero |
-| An action carries no effect key under a budgeted grant | **refused** (§2.4.1). Never free |
+| A budget sits on a grant none of whose actions carries an `effect:` template | **load error** (§2.4.1), naming the grant, the budget and the actions |
 | A budget limit is a float, a `Decimal`, a decimal string, negative, or not a number | **load error**, at the loader and at the constructor (§2.2, §2.3) |
 | A child grant's budget exceeds its parent's limit, **or shortens its window** | **rejected at delegation** (§2.6): a shorter window over the same limit is a higher rate |
 | A parent budget is matched by no child budget on that metric | **rejected at delegation** (§2.6.1) |
