@@ -26,6 +26,7 @@ from .action import Principal, canonical_bytes
 # `approval.py` imports `action`, `errors` and `identity` and nothing else, so this is
 # downward (ARCHITECTURE §6): a receipt records what an approval verified, and the record
 # type it records is that module's.
+from .approval import APPROVAL_DENIED as APPROVAL_DENIED_REASON
 from .approval import VerifiedApprover
 from .errors import CTRLRunError, InvalidArgument
 from .policy import Decision
@@ -111,7 +112,8 @@ BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"
 
 #: SPEC-v0.8 §4.1 — observe mode records a mismatch's **own** reason now, where it recorded
 #: `BLOCKED_APPROVAL_MISMATCH` for every one of them, so the closed vocabulary above grows by the
-#: reasons an `ApprovalMismatch` actually carries. They are the values `check_consumable` and
+#: reasons an approval refusal actually carries, whether it is raised as an `ApprovalMismatch`
+#: or, for a human's no, as an `ActionDenied`. They are the values `check_consumable` and
 #: `Control` already raise, listed here because §6.4 buckets counts on this set.
 #:
 #: **Widening the set is not decoration: without it the change would have been a silent
@@ -120,14 +122,22 @@ BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"
 #: `would_have_been_blocked` went from 1 to 0 and `ctrlrun stats` under-reported exactly what it
 #: exists to report. The comment above says a bucketed count over a string nobody constrained is a
 #: report that quietly stops adding up; this is that, and the fix is to constrain the string.
+#: **`approval_denied` and not `denied`, and the difference is a report that was already wrong.**
+#: `check_consumable` catches a denied record one branch before the generic status branch and
+#: raises `ActionDenied(reason=APPROVAL_DENIED)`, so `"denied"`, which is `str(ApprovalStatus.
+#: DENIED)`, is a value nothing on this path can carry, while `"approval_denied"` is recorded by
+#: observe mode's `ActionDenied` handler and was in no bucket at all. An observe-mode run where a
+#: **human said no** was therefore counted nowhere, which is close to the most important thing
+#: such a report can say. That predates v0.8 and is fixed here, because this is the commit that
+#: writes the set and argues for closing it.
 BLOCKED_APPROVAL_REASONS: Final = frozenset(
     {
         "mismatch",
         "consumed",
         "expired",
         "pending",
-        "denied",
         "unknown",
+        APPROVAL_DENIED_REASON,
         "precondition_changed",
         "precondition_missing",
         "precondition_unavailable",

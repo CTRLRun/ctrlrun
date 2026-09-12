@@ -484,6 +484,25 @@ def test_T291b_a_lapsed_grant_with_a_bad_approver_reports_the_approver(store, cl
     assert str(store.get_approval(request_id).status) == "granted"
 
 
+def test_T291b_a_pending_or_unknown_approval_keeps_its_own_reason(store, clock):
+    """§2.4.1's fourth row, which had no test until an independent review said so.
+
+    `pending` is the reason §2.7's fifth row and all of item 4's M-of-N depend on, so a gate
+    narrowed to exclude it would go unnoticed and take M-of-N's refusal with it.
+    """
+    control = _control(store, clock, approver_identity=ApproverIdentity(_Recording(APPROVER)))
+    action = _action(control)
+    request_id = _requested(control, action)
+
+    with pytest.raises(ApprovalMismatch) as pending:
+        _present(control, action, request_id)
+    assert pending.value.reason == "pending"
+
+    with pytest.raises(ApprovalMismatch) as unknown:
+        _present(control, action, "apr_" + "0" * 32)
+    assert unknown.value.reason == "unknown"
+
+
 # --- T291c: the skew that turned the gate into a skip ------------------------------------------
 
 
@@ -649,6 +668,31 @@ def test_T296b_an_observed_approval_refusal_is_still_counted_by_stats(store, clo
 
     assert document["would_have_been_blocked"] == 1
     assert document["blocked_by_reason"] == {"mismatch": 1}
+
+
+def test_T296b_an_observed_denial_by_a_human_is_counted_too(store, clock):
+    """The half of the bucket that was wrong before v0.8 touched it (§4.1, `v0.3 §6.4`).
+
+    `check_consumable` catches a denied record one branch before the generic status branch and
+    raises `ActionDenied(reason="approval_denied")`, so the set carried `"denied"`, which nothing
+    on this path can produce, and missed `"approval_denied"`, which observe mode records. An
+    observe-mode run where a **human said no** was counted nowhere. An independent review found
+    it while checking the set this item introduced.
+    """
+    from ctrlrun.reporting import stats_document
+
+    enforcing = _control(store, clock)
+    action = _action(enforcing)
+    request_id = _requested(enforcing, action)
+    store.deny_approval(request_id, "cli:local")
+
+    with with_approval(request_id):
+        _observing(store, clock, None).execute(action, _Executor(), KEY)
+
+    document = stats_document(list(store.receipts()), mode="observe", boundary=None)
+
+    assert document["would_have_been_blocked"] == 1
+    assert document["blocked_by_reason"] == {"approval_denied": 1}
 
 
 # --- T297: the resumed leg is the only receipt some actions get ------------------------------

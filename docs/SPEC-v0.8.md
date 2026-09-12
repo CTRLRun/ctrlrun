@@ -269,9 +269,11 @@ for, and §2.4.2 is the argument for the one row where that distinction is load-
 which stays granted, on `v0.6 §7.2`'s precedent: the action is refused, the human's yes is not
 spent on a question it did not answer, and the approval still expires. Not the effect, because
 nothing is reserved. The refusal produces an `APPROVAL_INVALIDATED` event and a `BLOCKED` receipt,
-exactly as a precondition refusal does. **Every refusal in §2 and §4 is raised before `_take` for
-exactly this reason**: a check that refuses after the store call cannot say this, and the design
-that tried was rejected for it.
+exactly as a precondition refusal does. **Every refusal the approver checks make is raised before
+`_take` for exactly this reason**: a check that refuses after the store call cannot say this, and
+the design that tried was rejected for it (§2.4.2). Not every refusal in §2 and §4 is one of
+theirs: §2.7's fifth row, fewer than `approvals_required` distinct approvers, is the store's own
+`pending`, raised inside `_take`, which is where it belongs.
 
 **Observe mode reaches these checks through a different path**, `_observe_take`, which does not
 call `_recheck`, so §4.1's row is implemented there too. Two consequences, both stated because
@@ -2047,6 +2049,44 @@ observe-mode approval refusal landed in no bucket, `would_have_been_blocked` wen
 the command whose whole job is "what changes if you turn enforcement on" under-reported it. The set
 grew with the change, T296b asserts the count, and the receipt that stopped counting was a plain
 hash mismatch with nothing to do with v0.8.
+
+**The early return was exactly as dangerous as §2.4 said.** M6 restores it, every approver test in
+the file goes green, and only T291 fails: a check placed after that return is dead on the path
+every 0.6-shaped deployment takes, and nothing else in the suite notices.
+
+**One test file covering one store is one store covered.** The first draft of `test_approver.py`
+used the in-memory store alone, and the mutation table caught it: blanking the verified approver in
+the **SQLite** write path left every test green, because none of them had ever executed that path.
+The fixture now runs every test on in-memory, SQLite and Postgres, which is `v0.6 §2`'s argument
+for the store conformance suite applied to a test file, and M7a and M7b are two rows rather than
+one.
+
+**G18's title is 28 characters because the report table is 32 wide**, which v0.7 had to discover
+for G12 as well. It is "the requester cannot approve" and not "self-approval is refused", because
+what is compared is the resolved principal on each side and "self" invites the reading that two
+different approver strings are two different people, which is the reading §4.1 exists to refuse.
+
+**What the two version bumps moved in the suite, listed rather than absorbed.** Twelve test files
+outside this item's own changed, and every edit in them was a count, a name or a key set that was
+true of 0.7.0 and is not now: the receipt's exact JSON key set, which `v5` widens by two; the
+verify counts, because G18 is graded wherever a document sends an action to approval, so the
+shipped examples move from 14/14 to 15/15 and from 8/8 to 9/9 and the catalogue pins move from `v3`
+to `v4`; the last migration, pinned by name and now asserted as `HEAD`; and the receipt schema
+label this binary writes. **The verify counts are also pinned in `.github/workflows/ci.yml`**,
+which would have turned the `verify` job red on a branch whose suite was entirely green, and which
+nothing in the local gate would have caught.
+
+**`_granting_principal` stayed package-internal and the operator server is its first caller.** That
+server has resolved a principal for every request since it shipped and then discarded it into
+`mcp-operator:<user>`; item 2 is, on that surface, four lines that stop discarding it.
+
+**And the bucket this item widened was already missing a human's no.** `check_consumable` catches a
+denied record one branch before the generic status branch, so the reason recorded for it is
+`approval_denied` and not `denied`: the set as first written carried a value nothing can produce
+and missed the one that is, and an observe-mode run where a human refused was counted nowhere.
+That predates v0.8. It is fixed here because this is the commit that writes the set and argues at
+length for closing exactly this, and shipping it wrong would have made the argument false on its
+own terms.
 
 **Observe mode had to be implemented, not asserted.** §4.1's row said observe mode records
 `approver_is_requester`, and `_observe_take` never called `_recheck`, so it recorded nothing: the
