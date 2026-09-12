@@ -975,7 +975,6 @@ def policy() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="The policy being proposed. It is not installed; approving its hash is what this does.",
 )
-@click.option("--as", "as_who", default=None, help="The proposing principal: AGENT or AGENT/USER.")
 @click.option(
     "--approval", "approval_id", default=None, help="Present an approval already granted."
 )
@@ -983,7 +982,6 @@ def policy() -> None:
 @STORE_URL_OPTION
 def policy_propose(
     candidate_file: Path,
-    as_who: str | None,
     approval_id: str | None,
     as_json: bool,
     store_url: str | None,
@@ -998,26 +996,21 @@ def policy_propose(
     This does not install the file. Installing it is the operator's act; what needs approving
     is the hash, and the two are deliberately separate so that approving cannot be the thing
     that changes what is running.
+
+    **There is no `--as`**, for the reason `ctrlrun break-glass` has none (SPEC-v0.8 §5.3.1).
+    The property this whole flow buys is that a **second, verified** person answered, and a
+    proposer typed at a shell defeats it in one line: propose as somebody else, approve with
+    your own verified credential, and the requester-is-not-approver check sees two principals.
+    The proposer is whoever the deployment resolves, or `ctrlrun.context(...)`.
     """
-    from ..control import _CONTEXT, _Invocation
     from ..policy import Policy
 
     try:
         control = _control_on(store_url)
         candidate = Policy.from_file(candidate_file)
-        token = None
-        if as_who:
-            agent, _, user = as_who.partition("/")
-            if not agent:
-                raise click.UsageError("--as needs an agent name: AGENT or AGENT/USER")
-            token = _CONTEXT.set(_Invocation(Principal(agent=agent, user=user or None)))
-        try:
-            receipt = control._propose_policy(
-                candidate, authority=control.authority, approval_id=approval_id
-            )
-        finally:
-            if token is not None:
-                _CONTEXT.reset(token)
+        receipt = control._propose_policy(
+            candidate, authority=control.authority, approval_id=approval_id
+        )
     except ApprovalRequired as pending:
         click.echo(f"proposed {pending.request_id}")
         click.echo(f"approve it with: ctrlrun approve {pending.request_id}")

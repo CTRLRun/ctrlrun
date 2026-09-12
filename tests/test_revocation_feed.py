@@ -389,6 +389,91 @@ def provider_resolves(provider, private, clock) -> bool:
     return provider.resolve(_context(_sign(private, clock))) is not None
 
 
+# --- T349b: a stale feed recovers, and a poll feed polls at all -------------------------------
+
+
+def test_T349_a_feed_past_its_bound_recovers_when_the_file_comes_back(keypair, clock, tmp_path):
+    """§6.5 promises an operator learns why everything stopped, which implies it starts again.
+
+    An independent review found it never did: `refresh()` was reachable only from `revoked()`,
+    and the provider raised on `stale()` before ever calling it. After one staleness episode
+    the file could come back and the feed stayed dead for the life of the process.
+    """
+    private, public = keypair
+    path = tmp_path / "revocations.jsonl"
+    path.write_text(_set("somebody-else") + "\n", encoding="utf-8")
+    feed = FileRevocationFeed(
+        path, issuers=[ISSUER], clock=clock, max_staleness=timedelta(minutes=5)
+    )
+    provider = _provider(public, clock, revocations=feed)
+    token = _sign(private, clock, exp=int((clock.now + timedelta(days=2)).timestamp()))
+
+    assert provider.resolve(_context(token)) is not None
+
+    clock.advance(timedelta(minutes=6))
+    with pytest.raises(IdentityError):
+        provider.resolve(_context(token))
+
+    # The transmitter catches up. The feed must read it and start answering again.
+    import os
+
+    path.write_text(_set("somebody-else") + "\n", encoding="utf-8")
+    os.utime(path, (clock.now.timestamp(), clock.now.timestamp()))
+
+    assert provider.resolve(_context(token)) is not None, (
+        "the feed never refreshed again, so one outage refused every credential for the life "
+        "of the process"
+    )
+
+
+class _CountingPoll(PollingRevocationFeed):
+    polls = 0
+
+    def _fetch(self):
+        type(self).polls += 1
+        return {"sets": {}}
+
+
+def test_T349_a_polling_feed_with_a_bound_actually_polls(keypair, clock):
+    """The sharper half of the same defect: a poll feed starts with `read_at is None`, so with
+    any bound set it was stale on the **first** resolution, refused every credential for ever,
+    and made **zero** HTTP polls. A feed that never fetches is not a feed."""
+    private, public = keypair
+    _CountingPoll.polls = 0
+    feed = _CountingPoll(
+        "https://issuer.example/poll",
+        issuers=[ISSUER],
+        clock=clock,
+        max_staleness=timedelta(minutes=5),
+    )
+    provider = _provider(public, clock, revocations=feed)
+
+    principal = provider.resolve(_context(_sign(private, clock)))
+
+    assert _CountingPoll.polls >= 1, "the feed refused everything without ever polling"
+    assert principal is not None
+
+
+def test_T347_a_staleness_episode_warns_once_and_not_once_per_action(
+    keypair, clock, tmp_path, caplog
+):
+    """§6.5. During an outage every agent action resolves a principal, so the per-resolution
+    spelling emitted one identical line per action."""
+    private, public = keypair
+    feed = _feed(tmp_path, _set("x"), clock=clock, max_staleness=timedelta(minutes=5))
+    provider = _provider(public, clock, revocations=feed)
+    token = _sign(private, clock, exp=int((clock.now + timedelta(days=2)).timestamp()))
+    clock.advance(timedelta(minutes=6))
+
+    with caplog.at_level(logging.WARNING, logger="ctrlrun"):
+        for _ in range(5):
+            with pytest.raises(IdentityError):
+                provider.resolve(_context(token))
+
+    warnings = [r for r in caplog.records if FEED_STALE in r.message]
+    assert len(warnings) == 1, f"{len(warnings)} lines for one staleness episode"
+
+
 # --- T350: both feeds, and the poll feed's opener ---------------------------------------------
 
 

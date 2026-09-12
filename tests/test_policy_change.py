@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,6 +17,7 @@ import pytest
 from ctrlrun.action import Action, Principal
 from ctrlrun.approval import ApproverIdentity, _granting_principal
 from ctrlrun.control import Control
+from ctrlrun.control import _action_from_receipt as _from_receipt
 from ctrlrun.errors import (
     ActionDenied,
     ApprovalMismatch,
@@ -389,25 +391,27 @@ def test_T358_a_change_rule_that_only_sometimes_approves_decides_nothing(store, 
     )
     control = _control(store, clock, policy=policy)
 
-    # **The proposal needs no human at all**, which is the hole itself: the change action's own
-    # arguments carry no `amount`, so the `amount_gte` rule is ignored and the `allow` rule
-    # decides. It commits, and the effect that marks the hash approved is minted with nobody
-    # having answered anything.
-    receipt = control._propose_policy(Policy.from_yaml(policy), authority=control.authority)
-    assert str(receipt.result) == "committed", "the proposal was expected to bypass approval"
-    assert store.get_effect(f"policy:{control._policy_hash}") is not None
+    # **The proposal itself is refused**, and an independent review is why this test says so.
+    # An earlier build exempted the policy change from the declaration check as well as from
+    # the marker check, so a change rule of `[approve above 1000, allow otherwise]` -- ignored
+    # on the change action's own arguments, which carry no `amount` -- let the proposal commit
+    # with nobody answering anything, minting the marker for a **different** policy that then
+    # decided normally, approved by nobody. The exemption now covers the marker only.
+    with pytest.raises(ActionDenied) as proposing:
+        control._propose_policy(Policy.from_yaml(policy), authority=control.authority)
 
-    # And the deployment still decides nothing, because the declaration rule is what refuses.
-    # Without this half the test passes whether `approving_actions` is all-of or any-of, which
-    # is what the mutation table reported when it was first written.
+    assert proposing.value.reason == "policy_unapproved"
+    assert "decision: approve" in str(proposing.value)
+    assert store.get_effect(f"policy:{control._policy_hash}") is None, (
+        "a policy that does not always send its own change to a human minted the marker"
+    )
+
+    # And every other action is refused for the same reason.
     with pytest.raises(ActionDenied) as refused:
         control.execute(_action(control), _Executor(), KEY)
 
     assert refused.value.reason == "policy_unapproved"
-    assert "decision: approve" in str(refused.value), (
-        "it was refused for the missing effect, not for the change rule that only sometimes "
-        "sends a change to a human"
-    )
+    assert "decision: approve" in str(refused.value)
 
 
 def test_T358_a_change_rule_that_always_approves_is_accepted(store, clock):
@@ -447,8 +451,17 @@ def test_T359_the_reserved_action_cannot_be_proposed_without_the_flows_marker(st
     with pytest.raises(InvalidArgument) as refused:
         control.execute(forged, _Executor(), "policy:sha256:whatever")
 
-    assert "reserved for the policy-change flow" in str(refused.value)
+    # Either guard is a refusal and both are checked below; this one names the effect key,
+    # because the reserved **key** is checked before the reserved **name** and is the guard
+    # that closes the three vectors a review found (T360b).
+    assert "reserved" in str(refused.value)
     assert store.get_effect("policy:sha256:whatever") is None
+
+    # And with an ordinary key, the reserved name is refused on its own.
+    with pytest.raises(InvalidArgument) as by_name:
+        control.execute(forged, _Executor(), "refund:EU-1")
+
+    assert "reserved for the policy-change flow" in str(by_name.value)
 
 
 def test_T359_the_marker_is_named_and_the_shipped_surfaces_are_its_only_setters():
@@ -480,6 +493,122 @@ def test_T360_the_exemption_is_exactly_one_action_matched_by_name(store, clock, 
         control.execute(_action(control, name=name), _Executor(), KEY)
 
     assert refused.value.reason == "policy_unapproved"
+
+
+# --- T360c: the three ways the marker was mintable, all found by an independent review --------
+
+
+MINTABLE = """
+schema: ctrlrun.policy/v6
+environment: production
+controls:
+  change-management:
+    title: t
+    approver_role: change-owner
+actions:
+  payments.refund:
+    decision: allow
+    effect: "{scheme}:{ref}"
+  ctrlrun.policy.change:
+    decision: approve
+    controls: [change-management]
+"""
+
+
+def test_T360_an_agent_cannot_expand_an_ordinary_template_into_the_reserved_key(store, clock):
+    """**Vector (a): an ordinary-looking policy.**
+
+    `effect: "{scheme}:{ref}"` loads fine, and the agent calls with `scheme="policy"` and
+    `ref=<the hash of the policy it wants approved>`. A reviewer reading that document has no
+    way to see that it hands every agent the power to approve arbitrary successors.
+
+    The loader tests the **raw template**; the key that reaches `commit_effect` is expanded
+    from arguments an agent supplies, and was never re-checked.
+    """
+    control = _control(store, clock, policy=MINTABLE, require=False)
+    forged = Action(
+        name="payments.refund",
+        arguments={"scheme": "policy", "ref": "sha256:attacker"},
+        principal=AGENT,
+        environment=control.environment,
+    )
+
+    # Exactly what `@protect` does: resolve the policy's template, then execute with the key
+    # it produced. The resolution itself is not the defect -- the template is legal -- so the
+    # guard has to be on what comes out of it.
+    resolved = control._resolve_effect(forged, control.policy.effect_template("payments.refund"))
+    assert resolved == "policy:sha256:attacker", f"the template resolved to {resolved!r}"
+
+    with pytest.raises(InvalidArgument) as refused:
+        control.execute(forged, _Executor(), resolved)
+
+    assert "reserved" in str(refused.value)
+    assert store.get_effect("policy:sha256:attacker") is None
+
+
+def test_T360_the_literal_prefix_check_is_evaded_by_one_placeholder(store, clock):
+    """**Vector (b): deliberate evasion.** `effect: "{p}olicy:{ref}"` loads, because the
+    template does not begin with the prefix. The resolved key does."""
+    policy = MINTABLE.replace('effect: "{scheme}:{ref}"', 'effect: "{p}olicy:{ref}"')
+    control = _control(store, clock, policy=policy, require=False)
+    forged = Action(
+        name="payments.refund",
+        arguments={"p": "p", "ref": "sha256:attacker"},
+        principal=AGENT,
+        environment=control.environment,
+    )
+
+    resolved = control._resolve_effect(forged, control.policy.effect_template("payments.refund"))
+    assert resolved == "policy:sha256:attacker"
+
+    with pytest.raises(InvalidArgument):
+        control.execute(forged, _Executor(), resolved)
+
+    assert store.get_effect("policy:sha256:attacker") is None
+
+
+def test_T360_no_template_is_needed_at_all(store, clock):
+    """**Vector (c): `effect_key` is a public parameter**, so no policy is involved."""
+    control = _control(store, clock, require=False)
+
+    with pytest.raises(InvalidArgument):
+        control.execute(_action(control), _Executor(), "policy:sha256:attacker")
+
+    assert store.get_effect("policy:sha256:attacker") is None
+
+
+def test_T358_a_change_rule_of_allow_cannot_approve_a_different_policy(store, clock):
+    """**The bypass §8.2.1 claims to close, in the shape that was actually open.**
+
+    An earlier build took the policy change's exemption **before** the declaration check, so
+    the rule "the policy in force must declare its own change with `decision: approve`" was
+    enforced on every action except the policy change itself. From a cold store: P1 declares
+    `ctrlrun.policy.change: {decision: allow}`; proposing a *different* policy P2 committed
+    with no approval and no approver; P2 declared the change as an approval and allowed
+    everything else, so the deployment under P2 found a committed marker and decided normally.
+    Nobody approved P2 at all.
+
+    The test covering this before only proposed the policy already in force, where the
+    declaration branch happens to catch it. Proposing a different one is the attack.
+    """
+    permissive = POLICY.replace(
+        "  ctrlrun.policy.change:\n    decision: approve\n    controls: [change-management]",
+        "  ctrlrun.policy.change:\n    decision: allow",
+    )
+    successor = POLICY.replace(
+        "  payments.refund:\n    decision: allow",
+        "  payments.refund:\n    decision: allow\n    max_attempts: 3",
+    )
+    control = _control(store, clock, policy=permissive)
+
+    with pytest.raises(ActionDenied) as refused:
+        control._propose_policy(Policy.from_yaml(successor), authority=control.authority)
+
+    assert refused.value.reason == "policy_unapproved"
+    approved = hash_with_authority(Policy.from_yaml(successor), None, "production")
+    assert store.get_effect(f"policy:{approved}") is None, (
+        "a policy whose change rule is 'allow' approved a different policy with no human"
+    )
 
 
 # --- T361: the bootstrap ----------------------------------------------------------------------
@@ -716,12 +845,64 @@ def test_T367_the_replays_output_carries_no_verdict_vocabulary(store, clock):
 
 
 def test_T368_a_receipt_the_replay_cannot_rebuild_is_named_and_skipped(store, clock):
-    """§8.5, on `v0.6 §3.2`'s distinction: skipped is not the same as unchanged."""
+    """§8.5, on `v0.6 §3.2`'s distinction: **skipped is not the same as unchanged**.
+
+    The first version of this test asserted `limit=0` returns `[]`, which exercised none of
+    the skip branch and none of the rule. §8.5 names the case explicitly -- "a schema the
+    binary does not know" -- and `Receipt.from_dict` does not raise on one, so such a receipt
+    rebuilt fine and was silently **graded**, on fields this binary may be reading wrongly.
+    """
+    from dataclasses import replace as replace_dataclass
+
+    control = _with_history(store, clock)
+    future = replace_dataclass(next(iter(store.receipts())), schema="ctrlrun.receipt/v99")
+
+    assert _from_receipt(future, control.environment) is None, (
+        "a receipt from a later version rebuilt, so the replay graded it"
+    )
+
+    rows = control._replay_policy(Policy.from_yaml(POLICY), limit=100)
+    assert all("skipped" not in row for row in rows), "nothing in this store is unreadable"
+
+
+def test_T368_the_skip_is_reported_and_never_counted_as_unchanged(store, clock):
+    """The other half: a skipped receipt is **named**, so an operator reading the replay knows
+    the answer is about fewer receipts than they asked for."""
     control = _with_history(store, clock)
 
-    rows = control._replay_policy(Policy.from_yaml(POLICY), limit=0)
+    class _OneUnreadable(type(store)):  # type: ignore[misc]
+        pass
 
-    assert rows == [], "limit=0 reads nothing and must report nothing"
+    original = list(store.receipts())
+    unreadable = replace(original[0], schema="ctrlrun.receipt/v99")
+    control._store = _Replaying([*original[1:], unreadable])
+
+    rows = control._replay_policy(Policy.from_yaml(POLICY), limit=100)
+
+    skipped = [row for row in rows if "skipped" in row]
+    assert len(skipped) == 1
+    assert "v99" in skipped[0]["skipped"]
+    assert skipped[0]["receipt_id"] == unreadable.receipt_id
+
+
+class _Replaying:
+    """A store that answers `receipts()` and nothing else: the replay reads only that."""
+
+    def __init__(self, receipts) -> None:
+        self._receipts = tuple(receipts)
+
+    def receipts(self):
+        return self._receipts
+
+
+def test_T367_the_replay_refuses_a_last_that_reads_nothing(store, clock):
+    """`--last 0` printed "no recorded decision changes", which reads as a verdict about the
+    policy for an input that read nothing. Refuse the unparseable rather than answer it."""
+    control = _with_history(store, clock)
+
+    for limit in (0, -1):
+        with pytest.raises(InvalidArgument):
+            control._replay_policy(Policy.from_yaml(POLICY), limit=limit)
 
 
 # --- T369: a load failure is not an unapproved policy -------------------------------------------

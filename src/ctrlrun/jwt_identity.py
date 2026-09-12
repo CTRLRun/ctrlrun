@@ -79,6 +79,11 @@ DEFAULT_HTTP_TIMEOUT: Final = timedelta(seconds=5)
 _REFUSED: Final = "the credential was rejected"
 
 
+#: A value no `read_at` can equal, so the first staleness episode always warns. `None` cannot
+#: serve: a feed that has never been read reports exactly that.
+_SENTINEL_NEVER: Final[Any] = object()
+
+
 def _stale(feed: RevocationFeed, now: datetime) -> bool:
     """§6.5 for a third-party feed that exposes the protocol and no `stale()` helper."""
     bound = feed.max_staleness
@@ -165,6 +170,9 @@ class JWTIdentityProvider:
         # SPEC-v0.8 §6.2. Absent means 0.7.0 exactly, which is R1: a deployment that names no
         # feed behaves as it did, and there is no partial mode between the two.
         self._revocations = revocations
+        #: Which `read_at` this provider has already warned about, so a staleness episode logs
+        #: once rather than once per resolution (§6.5).
+        self._stale_since: datetime | None = _SENTINEL_NEVER
         self._clock = clock
         self._keys: dict[str, _Key] = {}
         self._fetched_at: datetime | None = None
@@ -276,18 +284,35 @@ class JWTIdentityProvider:
             # §6.5: a principal from an issuer this feed does not cover is unaffected by it,
             # including by its staleness. A feed covering one issuer must not decide for another.
             return
+        # **Refresh first, then ask whether it is stale**, and an independent review found the
+        # other order fatal. `refresh()` was reachable only from `revoked()`, and this raised
+        # on `stale()` before ever calling it: `PollingRevocationFeed` starts with
+        # `read_at is None`, so with any bound set it was stale on the first resolution,
+        # refused every credential for ever, and **made zero HTTP polls**. The file feed was
+        # the same one step later: after a single staleness episode the file could come back
+        # and the feed stayed dead. §6.5 promises an operator learns why everything stopped,
+        # which implies it starts again.
+        refresh = getattr(feed, "refresh", None)
+        if callable(refresh):
+            refresh()
         if feed.stale() if hasattr(feed, "stale") else _stale(feed, self._clock()):
             # §6.5. A security check whose answer is unavailable is fail closed: "has this been
             # revoked" is exactly the question a stale feed cannot answer, and admitting on
             # silence would make the bound decoration.
-            _LOG.warning(
-                "refused a token from %s: the revocation feed's last read was %s, past its "
-                "max_staleness of %s (SPEC-v0.8 §6.5, reason %s)",
-                issuer,
-                feed.read_at,
-                feed.max_staleness,
-                FEED_STALE,
-            )
+            if self._stale_since != feed.read_at:
+                # §6.5: one warning per staleness **episode**, not per resolution. During an
+                # outage every agent action resolves a principal, so the per-resolution
+                # spelling emitted one identical line per action.
+                self._stale_since = feed.read_at
+                _LOG.warning(
+                    "refused a token from %s: the revocation feed's last read was %s, past its "
+                    "max_staleness of %s. Every principal of this issuer is refused until it "
+                    "is read again (SPEC-v0.8 §6.5, reason %s)",
+                    issuer,
+                    feed.read_at,
+                    feed.max_staleness,
+                    FEED_STALE,
+                )
             raise IdentityError(_REFUSED)
         if not isinstance(subject, str) or not subject:
             # Nothing to match, so nothing is revoked by subject; a `jti` may still be.

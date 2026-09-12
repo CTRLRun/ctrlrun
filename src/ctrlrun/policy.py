@@ -831,6 +831,45 @@ class Policy:
             _canonical=_canonical_policy(document, str(schema), mode, environment, source),
         )
 
+    def with_action(self, name: str, entry: Mapping[str, Any]) -> Policy:
+        """This policy plus one action entry, reparsed (SPEC-v0.8 §8.4, for `verify`).
+
+        Reparsed rather than mutated, because a `Policy` carries its own canonical form and a
+        mutated one would hash as the document it is not. Verify uses it to give G21 a
+        document that declares its own change: without that the enforcement's effect branch is
+        never reached, and the guarantee passes with the enforcement deleted.
+
+        **Verify's, and nothing else's.** A rule's conditions are dropped, which widens that
+        rule, and that is acceptable only because the result is a scratch document graded in a
+        scratch store and never anything an operator deploys.
+        """
+        import yaml
+
+        def rendered(policy: _ActionPolicy) -> dict[str, Any]:
+            """One entry, **including a `rules:` one**.
+
+            An earlier build emitted only `decision:` entries, so every rules-based action
+            disappeared from the rebuilt document and `evaluate` answered `unknown_action` for
+            it -- which G21 then reported as its failure, hiding what it was actually grading.
+            Conditions are not re-rendered: a rule keeps its decision and loses its `when`,
+            which is a **widening** of that rule and is why this is verify's only caller and
+            says so.
+            """
+            if policy.decision is not None:
+                return {"decision": str(policy.decision)}
+            return {"rules": [{"decision": str(rule.decision)} for rule in policy.rules]}
+
+        document: dict[str, Any] = {
+            "schema": POLICY_SCHEMA_V6,
+            "actions": {
+                **{action: rendered(policy) for action, policy in self.actions.items()},
+                name: dict(entry),
+            },
+        }
+        if self.environment is not None:
+            document["environment"] = self.environment
+        return Policy.from_yaml(yaml.safe_dump(document), source=f"{self.source} +{name}")
+
     def approving_actions(self) -> frozenset[str]:
         """The action names whose entry sends them to a human under every rule (§8.2.1).
 

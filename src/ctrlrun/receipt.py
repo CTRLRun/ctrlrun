@@ -34,7 +34,7 @@ from .approval import (
     VerifiedApprover,
 )
 from .errors import CTRLRunError, InvalidArgument
-from .policy import Decision
+from .policy import POLICY_UNAPPROVED, Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
 #: field appeared — the principal's claims, issuer and expiry. `execution` and `would_have`
@@ -53,6 +53,12 @@ _V2: Final = "ctrlrun.receipt/v2"
 _V3: Final = "ctrlrun.receipt/v3"
 _V4: Final = "ctrlrun.receipt/v4"
 _V5: Final = "ctrlrun.receipt/v5"
+
+#: SPEC-v0.8 §8.5 — every receipt schema this binary reads. The policy replay checks it before
+#: rebuilding an action: `from_dict` does not raise on an unknown one, so a receipt written by a
+#: later version rebuilt fine and was silently **graded**, on fields this binary may be reading
+#: wrongly. `v0.6 §3.2` draws the same line for a store row.
+KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5})
 
 #: SPEC-v0.7 §6.11: each schema's top-level key set, exactly its released writers': `v1`, 19
 #: keys, by 0.1.0 and 0.2.0; `v2`, 21, by 0.3.0rc1 to 0.5.0; `v3`, 26, by 0.6.0 and 0.6.1;
@@ -159,6 +165,11 @@ BLOCKED_APPROVAL_REASONS: Final = frozenset(
         APPROVER_UNENTITLED,
         APPROVALS_UNVERIFIABLE,
         APPROVAL_UNRECORDED,
+        # SPEC-v0.8 §8.4: observe mode records it as a `would_have.blocked_reason`, so it needs
+        # a bucket like every other refusal. This set has been missed twice already, which is
+        # why `test_every_approval_refusal_reason_is_counted_by_stats` enumerates the reasons
+        # from source rather than trusting this list.
+        POLICY_UNAPPROVED,
     }
 )
 

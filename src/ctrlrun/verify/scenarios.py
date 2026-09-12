@@ -85,7 +85,15 @@ from ..errors import (
     PolicyError,
 )
 from ..identity import IdentityContext
-from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
+from ..policy import (
+    POLICY_CHANGE_ACTION,
+    Condition,
+    Decision,
+    Policy,
+    _ActionPolicy,
+    _Rule,
+    discover_policy_path,
+)
 from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
     Event,
@@ -914,12 +922,20 @@ class Engine:
         clock: _Clock | None = None,
         approver_identity: ApproverIdentity | None = None,
         require_approved_policy: bool = False,
+        declares_change: bool = False,
     ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
+        # SPEC-v0.8 §8.4, for G21. **The document must declare its own change as an approval**,
+        # or `_policy_approval_state` short-circuits on the declaration branch and the effect
+        # branch -- which is what G21's title is about -- is never exercised. An independent
+        # review demonstrated it: with the effect check deleted, G21 still passed.
+        policy = self.policy
+        if declares_change and POLICY_CHANGE_ACTION not in policy.actions:
+            policy = policy.with_action(POLICY_CHANGE_ACTION, {"decision": "approve"})
         control = Control(
-            self.policy,
+            policy,
             store,
             LocalApprovalProvider(store, clock=moving),
             clock=moving,
@@ -3483,7 +3499,7 @@ class Engine:
             detail["require_approved_policy"] = "set by verify (SPEC-v0.8 §11.7)"
             action = selection.build()
             guarded, guarded_store, _, _ = self._control_for(
-                "G21-guarded", selection, require_approved_policy=True
+                "G21-guarded", selection, require_approved_policy=True, declares_change=True
             )
             # Its own scratch store, closed when the scenario ends: the guarded `Control` must
             # find **no** committed `policy:<hash>` effect, and sharing the store with the
