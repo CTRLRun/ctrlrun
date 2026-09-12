@@ -186,10 +186,19 @@ treated as zero. Treating a missing field as zero turns the absence of a value i
 authority, which is the sentence `v0.3 §5.4` exists to refuse on the constraint side, and the
 argument is not weaker here because the dimension is quantitative.
 
-**The value must be a number the canonicalizer accepts.** `v0.1 §2.3`'s float rejection applies,
-and `action.py:18` carries it in the source as "Note the absence of float": a budget summed over
-floats would drift, and a drifting authority limit is worse than none. Integers and decimals, and a
-string that looks like a number is a refusal and not a coercion.
+**The value must be an integer.** `v0.1 §2.3`'s `PlainValue` is
+`str | int | bool | list | dict | None`, and `action.py:18` carries the reason in the source as
+"Note the absence of float": a budget summed over floats would drift, and a drifting authority limit
+is worse than none. `Decimal` is not in that set either, so it is not an accepted metric value and
+this document does not add one: a decimal metric would need a canonical representation, a rule for
+how it hashes, and receipt coverage for both, and that is a `v0.1 §2.3` amendment rather than
+something §2 may decide on its own.
+
+**So money is budgeted in minor units**, which is what `examples/authority/payments.yaml` already
+does with `amount_lte: 5000`, and §7's surfaces render it the way the rest of the document renders
+that constraint. A string that looks like a number is a refusal and not a coercion, on the same
+rule: `"100.50"` is a decimal wearing a string's clothes, and coercing it would put the drift back
+through the door the float rejection closed.
 
 **The kernel does not know what any metric means.** There is no branch anywhere on a metric name,
 no ranking of two metrics, no default limit for a metric the kernel recognises. `amount` is not
@@ -789,8 +798,11 @@ defects will be:
 - T405 a budget changed in the document moves the policy hash; a budget in a break-glass envelope
   does too (§2.8).
 - T406 two budgets on one metric over two windows both load and both are kept in document order.
-- T407 a float limit, a negative limit, a zero window and a non-numeric limit are each refused at the
-  loader **and** at `Grant.__post_init__`.
+- T407 a float limit, a `Decimal` limit, a decimal **string** limit (`"100.50"`), a negative limit,
+  a zero window and a non-numeric limit are each refused at the loader **and** at
+  `Grant.__post_init__`, each with its own message. The string case is the one worth writing first:
+  YAML hands a quoted number back as a `str`, so it is the shape an operator actually produces, and
+  a coercion here would put the drift back through the door `v0.1 §2.3` closed (§2.3).
 
 ### 8.4 Item 4: the ledger and the store amendment (§3)
 
@@ -881,7 +893,7 @@ No new module. Budgets and tasks are `authority.py`; the ledger is `state.py`, `
 | Situation | Outcome |
 |---|---|
 | A budget's metric names an argument the action does not carry | **refused** (§2.3). Never zero |
-| A budget limit is a float, negative, or not a number | **load error**, at the loader and at the constructor (§2.2) |
+| A budget limit is a float, a `Decimal`, a decimal string, negative, or not a number | **load error**, at the loader and at the constructor (§2.2, §2.3) |
 | A child grant's budget exceeds its parent's on either axis | **rejected at delegation** (§2.6) |
 | A child omits a budget its parent carries | **rejected** (§2.6, `v0.3 §5.4`) |
 | Any ancestor's budget is exhausted | **refused**, naming that ancestor (§2.7, §4.5) |
