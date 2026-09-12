@@ -265,10 +265,12 @@ write a lapse: a lapsed grant whose approver is fine falls through to `_take` un
 `v0.1 §4.2 A3`'s answer. What this clock is used for is knowing which rows the gate stands aside
 for, and §2.4.2 is the argument for the one row where that distinction is load-bearing.
 
-**Nothing is written by a refusal, and §2.4.2 is why that sentence survived.** Not the approval,
-which stays granted, on `v0.6 §7.2`'s precedent: the action is refused, the human's yes is not
-spent on a question it did not answer, and the approval still expires. Not the effect, because
-nothing is reserved. The refusal produces an `APPROVAL_INVALIDATED` event and a `BLOCKED` receipt,
+**A refusal mutates no approval and reserves no effect, and §2.4.2 is why that sentence
+survived.** Not the approval, which stays granted, on `v0.6 §7.2`'s precedent: the action is
+refused, the human's yes is not spent on a question it did not answer, and the approval still
+expires. Not the effect, because nothing is reserved. **Evidence is written**, and the distinction
+is the point: a refusal appends `APPROVAL_INVALIDATED` and writes a `BLOCKED` receipt, because a
+refusal nobody can find afterwards is not a refusal this project ships. The refusal produces an `APPROVAL_INVALIDATED` event and a `BLOCKED` receipt,
 exactly as a precondition refusal does. **Every refusal the approver checks make is raised before
 `_take` for exactly this reason**: a check that refuses after the store call cannot say this, and
 the design that tried was rejected for it (§2.4.2). Not every refusal in §2 and §4 is one of
@@ -295,7 +297,8 @@ only inside `_take`:
 | A human **denied** it | `ActionDenied(approval_denied)`, with `APPROVAL_DENIED`, `ACTION_DENIED` and a `DENIED` receipt | `ApprovalMismatch(approver_unverified)`, with `APPROVAL_INVALIDATED` and a `BLOCKED` receipt: a human's no stops appearing in the evidence as a no |
 | Already **consumed** (a replayed approval, G2) | `consumed` | `approver_unverified` |
 | The action **hash moved** (G1) | `mismatch`, which is `HASH_MISMATCH`'s value | `approver_unverified` |
-| **Pending**, or no such approval | its own status | `approver_unverified` |
+| **Pending** | `pending` | `approver_unverified` |
+| **No such approval** | `unknown` | `approver_unverified` |
 
 So the gate stands aside for all four, the store's reason wins, and two shipped guarantees keep
 theirs.
@@ -2022,8 +2025,10 @@ text editor, which is the point `v0.3 §5.5` makes about evaluation.
 
 **The check is at the consumption because `Control` never grants**, which §1.4 recorded and which
 building it confirmed: the only code that calls `grant_approval` outside a test is the CLI, the
-operator server, `handle_inbound`, the scripted provider, the adapters, verify's own scenarios and
-`Control._withdraw`. None of them is `Control` deciding anything.
+operator server, `handle_inbound`, the scripted provider, the adapters and verify's own scenarios.
+`Control._withdraw` calls `deny_approval`, which is the kernel closing a request it created rather
+than a human answering one, and §2.6's table gives it its own row. None of them is `Control`
+deciding anything.
 
 **The gate took three attempts and §2.4.2 records all three**, because the next reader will reach
 for one of the two that were wrong. Skipping the lapsed row is fail-open under clock skew: a

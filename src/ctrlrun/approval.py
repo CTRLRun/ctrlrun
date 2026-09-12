@@ -109,7 +109,26 @@ class VerifiedApprover:
         if not self.agent:
             raise InvalidArgument("a verified approver must carry a non-empty agent")
         _require_aware(self.granted_at, "verified approver granted_at")
-        object.__setattr__(self, "entitled", tuple(self.entitled))
+        # **`str` is a `Sequence`, and that is the whole of this check.** `tuple("abc")` is
+        # `("a", "b", "c")`, so a corrupted column holding a bare string became three control
+        # ids that entitle nothing and refuse nothing, and `_approvers_from_json`'s promise to
+        # raise on a corrupted row was quietly false. Same hazard §3.4 states for the roles
+        # claim, in a second place.
+        # Read as `object`, because the declared type is what a *caller* promises and this value
+        # arrives from a JSON column: mypy is right that a `tuple[str, ...]` cannot be a `str`,
+        # and a corrupted row is exactly the case where the declaration is not true.
+        given: object = self.entitled
+        if isinstance(given, str | bytes) or not isinstance(given, Iterable):
+            raise InvalidArgument(
+                f"a verified approver's 'entitled' must be a list of control ids, got "
+                f"{type(given).__name__}"
+            )
+        entitled = tuple(given)
+        if not all(isinstance(item, str) and item for item in entitled):
+            raise InvalidArgument(
+                "a verified approver's 'entitled' must hold non-empty control ids"
+            )
+        object.__setattr__(self, "entitled", entitled)
 
     @property
     def principal(self) -> tuple[str, str | None]:

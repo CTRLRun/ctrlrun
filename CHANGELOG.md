@@ -25,7 +25,7 @@ any change to one appears here.
   before the provider was configured**, including one granted through a surface that cannot
   resolve, and including one held by a store that ignores the column.
 
-  **`ctrlrun verify` grades sixteen guarantees now**, G18 among them under
+  **`ctrlrun verify` grades seventeen guarantees now**, G18 among them under
   `ctrlrun.guarantees/v4`: an approval granted by the principal that requested the action is
   refused, compared on the resolved principal and never on the string. Verify supplies the approver
   identity it grades against, so what it reports is the kernel's refusal and never whether an

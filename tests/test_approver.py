@@ -695,6 +695,38 @@ def test_T296b_an_observed_denial_by_a_human_is_counted_too(store, clock):
     assert document["blocked_by_reason"] == {"approval_denied": 1}
 
 
+def test_T283b_a_corrupted_entitled_column_is_refused_and_not_exploded(store, clock):
+    """`str` is a `Sequence`, so a corrupted row became three control ids rather than a refusal.
+
+    `tuple("abc")` is `("a", "b", "c")`. A column holding a bare string was therefore accepted,
+    silently, as an approver entitled for three controls that do not exist, and
+    `_approvers_from_json`'s promise to raise on a corrupted row was false for exactly the shape
+    a corruption most easily takes. CodeRabbit found it; §3.4 states the same hazard for the
+    roles claim, which is where it was expected and not where it landed.
+    """
+    from ctrlrun.approval import VerifiedApprover
+    from ctrlrun.errors import CTRLRunError
+
+    for bad in ("abc", 5, [1], [""]):
+        with pytest.raises(CTRLRunError):
+            VerifiedApprover(
+                agent="human:bob",
+                user=None,
+                issuer=None,
+                granted_at=datetime.now(UTC),
+                entitled=bad,
+            )
+
+    fine = VerifiedApprover(
+        agent="human:bob",
+        user=None,
+        issuer=None,
+        granted_at=datetime.now(UTC),
+        entitled=["card-data-handling"],
+    )
+    assert fine.entitled == ("card-data-handling",)
+
+
 # --- T297: the resumed leg is the only receipt some actions get ------------------------------
 
 
