@@ -7,6 +7,27 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+### Added
+
+- `docs/SPEC-v0.9.md`, the v0.9 "Envelope" contract: consequence budgets, scope providers and
+  task-bound authority, as a delta over v0.1 to v0.8. Documentation only. It specifies the
+  quantitative half of authority, which `VISION.md` §5 has had no code under it: a grant says
+  `amount_lte: 5000` and is silent about the thousand actions that each pass it.
+
+  Four rules the milestone is measured against, recorded here because each one is a decision that
+  could have gone the other way. A budget is **consumed on reserve, inside the reservation's
+  transaction**, because a check on one line and a consumption on another is a race two processes
+  win together. **Ambiguity is not a refund**: an `AMBIGUOUS` effect holds its consumption until a
+  human or a hook resolves it, because otherwise an agent that can generate ambiguity can generate
+  authority. **A budget names a metric, not a consequence**, so nothing here ranks, scores or
+  classifies an operator's actions. And **a scope provider answers a question rather than detecting
+  a change**, which is what separates it from the precondition fingerprint of `SPEC-v0.7.md` §6.
+
+  The specification amends one frozen surface: `StateStore`, frozen since `SPEC-v0.6.md` §9.2, gains
+  `charges=` on the two methods that reserve. §3.3 argues it against that section's stated bar.
+
 ## [0.8.0] - 2026-09-12 - Oversight
 
 Every guarantee shipped before this one verifies the principal that **acts**. G7 refuses an action
