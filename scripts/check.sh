@@ -30,6 +30,12 @@ run mypy --strict src
 # way, and an ordering assumption inside a file still holds. PYTEST_ARGS overrides for a single
 # test or a serial reproduction.
 # shellcheck disable=SC2086
-run pytest -n auto --dist loadfile ${PYTEST_ARGS:-}
+run pytest -n auto --dist loadfile -m "not serial" ${PYTEST_ARGS:-}
+# The windows, on their own. `tests/failure_injection.py`'s proxy holds one statement, kills one
+# COMMIT or partitions one connection, and the assertion is about what a store did inside that
+# window. Seven other workers on the same box turn that into a race, which is how T155b came to
+# report "the window never opened" on one Python version and pass on three.
+# shellcheck disable=SC2086
+run pytest -m serial ${PYTEST_ARGS:-}
 
 printf '\nall checks passed\n'

@@ -19,7 +19,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
+from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
@@ -46,7 +46,14 @@ from .approval import (
     policy_in_force,
     unsatisfied,
 )
-from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
+from .authority import (
+    Authority,
+    AuthorityResult,
+    CreatedVia,
+    Delegation,
+    Grant,
+    _optional_from_yaml,
+)
 from .effect import (
     _EXECUTOR_RUN,
     COMMITTED_EFFECT,
@@ -2946,7 +2953,7 @@ class Control:
         )
 
     def _delegate(
-        self, parent_id: str, grant: Grant, *, by: Principal, via: Literal["api", "cli"]
+        self, parent_id: str, grant: Grant, *, by: Principal, via: CreatedVia
     ) -> Delegation:
         """The one implementation behind `Control.delegate` and `ctrlrun delegate`.
 

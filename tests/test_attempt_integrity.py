@@ -45,6 +45,12 @@ from ctrlrun.effect import EffectState
 from ctrlrun.errors import CTRLRunError
 from failure_injection import Proxy, statement_of, upstream_of
 
+#: Every window in this file is opened by the proxy -- the armed hold -- and measured against
+#: what a store did inside it. Sharing a machine with seven other pytest workers turns
+#: those into races the test loses: T155b reported "the window never opened", which was
+#: true. `scripts/check.sh` runs these on their own.
+pytestmark = pytest.mark.serial
+
 URL = os.environ.get("CTRLRUN_TEST_POSTGRES")
 
 postgres = pytest.mark.skipif(
