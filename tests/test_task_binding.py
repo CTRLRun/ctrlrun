@@ -265,3 +265,34 @@ def test_T386a_resume_does_not_evaluate_the_task_dimension(store, clock) -> None
     # test passes against a kernel that never checks tasks at all.
     checked = authority.evaluate(action, now=clock(), store=store, task=None)
     assert not checked.passed and checked.reason == "authority_task"
+
+
+def test_T387a_an_unresolvable_task_template_is_recorded_before_it_raises(store, clock) -> None:
+    """An independent review found this: it raised past every recording path.
+
+    `@protect(task="{run_id}")` with no such argument must deny and record like an unresolvable
+    `effect` template does. Without it a caller is handed an `EffectKeyError` about an action
+    with no `ACTION_PROPOSED`, no `ACTION_DENIED` and no receipt, which is the same escape
+    `control.py`'s own round-two comment records finding once before on a store refusal.
+    """
+    from ctrlrun.control import context, protect
+    from ctrlrun.errors import EffectKeyError
+
+    control = _control(UNBOUND, store, clock)
+
+    @protect("payments.refund", control=control, task="{run_id}")
+    def refund(amount: int) -> dict[str, bool]:
+        return {"ok": True}
+
+    with context(agent="payer", user="ada"), pytest.raises(EffectKeyError):
+        refund(amount=1)
+
+    assert [event.type.value for event in store.events()] == [
+        "ACTION_PROPOSED",
+        "ACTION_DENIED",
+    ]
+    receipts = store.receipts()
+    assert len(receipts) == 1
+    assert receipts[0].result is ReceiptResult.DENIED
+    # The reason is the template's, not a rule's: the policy never rendered a decision.
+    assert receipts[0].decision_reason == "effect_key_error"

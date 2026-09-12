@@ -2012,6 +2012,20 @@ class Control:
         would have said about it — and unlike a call outside `context()` (§2.1) there is a
         principal here, so the refusal belongs in the evidence log.
         """
+        return self._resolve_template(action, template, "effect")
+
+    def _resolve_template(self, action: Action, template: str | None, what: str) -> str | None:
+        """`_resolve_effect`'s body, over either template `@protect` resolves.
+
+        **SPEC-v0.9 §6.3.1's task template goes through here, and an independent review is why.**
+        `@protect(task="{run_id}")` with no such argument raised `EffectKeyError` past every
+        recording path: no `ACTION_PROPOSED`, no `ACTION_DENIED`, no denied receipt, and a caller
+        handed a template error about an action nothing recorded. That is the shape
+        `control.py`'s own round-two comment records finding once before, on a store refusal.
+
+        One function rather than two, so the effect template and the task template cannot drift
+        into recording different things for the same class of mistake.
+        """
         if template is None:
             return None
         started_at = self._clock()
@@ -2022,7 +2036,7 @@ class Control:
             self._append(
                 EventType.ACTION_DENIED,
                 action,
-                {"reason": UNRESOLVED_EFFECT, "effect": template, "error": str(exc)},
+                {"reason": UNRESOLVED_EFFECT, what: template, "error": str(exc)},
             )
             # SPEC: §6.1 — a receipt needs a decision and the policy never rendered one, so
             # the fail-closed value is recorded: denied, for a reason that is not a rule.
@@ -3989,7 +4003,7 @@ def protect(
                 environment=resolved.environment,
             )
             effect_key = resolved._resolve_effect(action, effect_template)
-            bound_task = None if task is None else resolve_effect_key(task, action)
+            bound_task = resolved._resolve_template(action, task, "task")
             if reconcile is not None and effect_key is None and not dangling:
                 # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
                 # may come from the policy and that is not loaded yet. A hook with no key to
