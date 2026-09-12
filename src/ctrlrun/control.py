@@ -23,13 +23,17 @@ from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal
 from .approval import (
+    APPROVER_IS_REQUESTER,
+    APPROVER_UNVERIFIED,
     DEFAULT_APPROVAL_TTL,
     Approval,
     ApprovalProvider,
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    ApproverIdentity,
     LocalApprovalProvider,
+    VerifiedApprover,
     _precondition_at_request,
     _precondition_fingerprint,
     check_consumable,
@@ -363,19 +367,25 @@ class _Compared:
     failure by its type name, never its message: a provider that put the balance it read into
     its exception would otherwise carry raw state into the evidence through the one field
     nobody thought to check (§6.5).
+
+    SPEC-v0.8 §2.5 adds `approvers` to it, because it is already the per-call scratch the
+    presenting pass fills and the receipt reads: the alternative was a second `get_approval`
+    per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
+        self.approvers: tuple[VerifiedApprover, ...] = ()
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
+        self.approvers = ()
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -479,6 +489,7 @@ class Control:
         identity: IdentityProvider | None = None,
         authority: Authority | None = None,
         environment: str | None = None,
+        approver_identity: ApproverIdentity | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -492,6 +503,11 @@ class Control:
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
         self._identity = identity
         self._authority = authority
+        #: SPEC-v0.8 §2.3: opt in, then fail closed. `None` is 0.7.0 exactly; anything else
+        #: makes an approval consumable only where the row carries a verified approver (§2.7).
+        #: `Control` never *resolves* one: it never grants an approval, so what it does with
+        #: this is check what the granting surface recorded (§1.4 item 1).
+        self._approver_identity = approver_identity
         #: SPEC-v0.6 §7.1's *"both are folded into the one canonical structure before hashing"*.
         #: `Policy` cannot see a separately-loaded `Authority` and this can, so the hash every
         #: receipt and every approval request carries is composed here. Where the authority came
@@ -568,6 +584,11 @@ class Control:
     def identity(self) -> IdentityProvider | None:
         """The provider this Control resolves principals from, if any (SPEC-v0.3 §3.1)."""
         return self._identity
+
+    @property
+    def approver_identity(self) -> ApproverIdentity | None:
+        """How this deployment verifies who answered an approval, or `None` (SPEC-v0.8 §2.3)."""
+        return self._approver_identity
 
     @property
     def authority(self) -> Authority | None:
@@ -2526,14 +2547,70 @@ class Control:
         compared.reset()
         record = self._store.get_approval(approval_id)
         stored = None if record is None else record.request.precondition_fingerprint
+        compared.at_request = stored
+        # SPEC-v0.8 §2.4: **the early return is gone.** It returned here whenever no provider
+        # was named and the record carried no fingerprint, which is every deployment that does
+        # not use `v0.7 §6`, and an approver check added after it would have been dead on that
+        # path, green, and invisible to a mutation table.
+        self._check_approver(action, approval_id, record, compared)
         if preconditions is None and stored is None:
             return
-        compared.at_request = stored
         verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.refusal is not None:
             raise verdict.refusal
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)
+
+    def _check_approver(
+        self,
+        action: Action,
+        approval_id: str,
+        record: ApprovalRecord | None,
+        compared: _Compared,
+    ) -> None:
+        """Who answered, and whether they may have (SPEC-v0.8 §2.7, §4.1).
+
+        **Gated on a record that is `granted` and that this clock does not consider lapsed**
+        (§2.4.1). Everything else is left to the store, unchanged, and the reason is four rows
+        long: a denied approval carries no verified approver, so an ungated check would refuse
+        it `approver_unverified` and a human's no would stop appearing in the evidence as a no;
+        a consumed one is `G2`'s replayed approval and a moved hash is `G1`, both of which would
+        lose their reason; and a lapsed grant would lose `APPROVAL_EXPIRED` **and the store's
+        own lapse write**, because that write happens inside `_take` and a refusal raised here
+        never reaches it.
+
+        The gate is `check_consumable`, the pure function `v0.1 §4.2` froze, with its `record`
+        tested and its `refusal` and `expire` discarded: no second implementation of a frozen
+        rule, no new clock read, and the store still decides expiry and may disagree.
+        """
+        if record is not None:
+            # Recorded whatever this deployment checks, so a receipt says who answered even
+            # where no approver identity is configured and nothing was refused.
+            compared.approvers = record.approvers
+        if self._approver_identity is None:
+            return
+        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
+        if verdict.record is None:
+            return
+        approvers = verdict.record.approvers
+        if not approvers:
+            raise ApprovalMismatch(
+                f"approval {approval_id} carries no verified approver, and this deployment "
+                "names an approver identity; the approval is left granted",
+                reason=APPROVER_UNVERIFIED,
+                approval_id=approval_id,
+            )
+        requester = (action.principal.agent, action.principal.user)
+        for approver in approvers:
+            if approver.principal == requester:
+                # §4.1: on the resolved principal and never on the string, which is why two
+                # grants whose `approver` strings differ are still one principal here.
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by {approver.agent!r}, which is the "
+                    "principal that requested the action; the approval is left granted",
+                    reason=APPROVER_IS_REQUESTER,
+                    approval_id=approval_id,
+                )
 
     def _compare(
         self,
@@ -2859,6 +2936,7 @@ class Control:
         attempt: int = 1,
         observation: _Observation | None = None,
         compared: _Compared | None = None,
+        approvers: tuple[VerifiedApprover, ...] = (),
     ) -> Receipt:
         # SPEC-v0.3 §6.3 — one place turns a terminal outcome into an observed receipt, so
         # `result`, `execution` and `would_have` cannot disagree about the same action. The
@@ -2896,6 +2974,10 @@ class Control:
             # there was none.
             precondition_at_request=None if compared is None else compared.at_request,
             precondition_at_recheck=None if compared is None else compared.at_recheck,
+            # SPEC-v0.8 §2.5: what §2 verified reaches the evidence, or the milestone records
+            # nothing. Read from the row rather than from the `Approval`, which carries only the
+            # string `v0.1 §4.1` froze.
+            approvers=approvers or (() if compared is None else compared.approvers),
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained

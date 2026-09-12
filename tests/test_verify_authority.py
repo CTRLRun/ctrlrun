@@ -94,8 +94,10 @@ def test_T108_the_authority_example_exercises_G7_G8_and_G9():
     assert report.exit_code == 0
     # Graded on SQLite, where the one N/A is G13: SQLite has no clock of its own to diverge
     # from (SPEC-v0.7 §8.9). A Postgres --store-url grades that one too.
-    assert report.passed == 14
-    assert report.applicable == 14
+    # Fifteen since v0.8 item 2: G18 is graded wherever a document sends an action to
+    # approval, and verify supplies the approver identity it grades against (§11.7).
+    assert report.passed == 15
+    assert report.applicable == 15
 
 
 def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypatch):

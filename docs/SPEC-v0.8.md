@@ -1974,6 +1974,47 @@ text editor, which is the point `v0.3 §5.5` makes about evaluation.
 
 ### 14.2 Item 2: the approver is a principal
 
+**The check is at the consumption because `Control` never grants**, which §1.4 recorded and which
+building it confirmed: the only code that calls `grant_approval` outside a test is the CLI, the
+operator server, `handle_inbound`, the scripted provider, the adapters, verify's own scenarios and
+`Control._withdraw`. None of them is `Control` deciding anything.
+
+**The gate of §2.4.1 is `check_consumable` with its verdict's `record` tested and its `refusal` and
+`expire` discarded.** It needed no new expiry logic, no second implementation of a frozen rule and
+no new clock read: `control.py` already imports that function and already calls it twice. The
+mutation table's M3 removes the gate and T291b's four rows go red together, which is what a gate
+protecting four shipped reasons should do.
+
+**The early return was exactly as dangerous as §2.4 said.** M6 restores it, every approver test in
+the file goes green, and only T291 fails: a check placed after that return is dead on the path
+every 0.6-shaped deployment takes, and nothing else in the suite notices.
+
+**One test file covering one store is one store covered.** The first draft of `test_approver.py`
+used the in-memory store alone, and the mutation table caught it: blanking the verified approver in
+the **SQLite** write path left all twenty tests green, because none of them had ever executed that
+path. The fixture now runs every test on in-memory, SQLite and Postgres, which is `v0.6 §2`'s
+argument for the store conformance suite applied to a test file, and M7a and M7b are two rows
+rather than one.
+
+**G18's title is 28 characters because the report table is 32 wide**, which v0.7 had to discover
+for G12 as well. It is "the requester cannot approve" and not "self-approval is refused", because
+what is compared is the resolved principal on each side and "self" invites the reading that two
+different approver strings are two different people, which is the reading §4.1 exists to refuse.
+
+**What the two version bumps moved in the suite, listed rather than absorbed.** Eighteen tests
+outside this item's own file changed, and every one of them was a count or a key set that was true
+of 0.7.0 and is not true now: four pin the receipt's exact JSON key set, which `v5` widens by two;
+eleven pin verify counts, because G18 is graded wherever a document sends an action to approval, so
+the shipped examples move from 14/14 to 15/15 and from 8/8 to 9/9; one pins the last migration by
+name, and now asserts `HEAD`; and the remaining two pin the receipt schema label this binary
+writes. **The verify counts are also pinned in `.github/workflows/ci.yml`**, which would have
+turned the `verify` job red on a branch whose suite was entirely green, and which nothing in the
+local gate would have caught.
+
+**`_granting_principal` stayed package-internal and the operator server is its first caller.** That
+server has resolved a principal for every request since it shipped and then discarded it into
+`mcp-operator:<user>`; item 2 is, on that surface, four lines that stop discarding it.
+
 ### 14.3 Item 3: entitlement from the control registry
 
 ### 14.4 Item 4: M-of-N

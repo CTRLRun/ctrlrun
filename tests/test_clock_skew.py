@@ -582,7 +582,7 @@ def test_T219_G13_is_not_applicable_on_sqlite_with_its_sentence(tmp_path):
 
 
 def test_T219_the_catalogue_is_v3_and_G13_is_in_it():
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
     assert "G13" in reg.BY_ID
     assert "v0.1 §5.3 E3" in reg.BY_ID["G13"].descends_from
 

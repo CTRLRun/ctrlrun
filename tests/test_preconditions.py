@@ -55,6 +55,7 @@ from ctrlrun import (
 )
 from ctrlrun.action import canonical_bytes
 from ctrlrun.approval import ApprovalStatus
+from ctrlrun.migrations import HEAD
 from ctrlrun.receipt import RECEIPT_SCHEMA, EventType, ReceiptResult
 
 POLICY = """
@@ -304,11 +305,11 @@ def test_a_committed_receipt_records_that_the_world_was_checked(control, state_s
 
     receipt = present(control, action, request_id, world)
 
-    assert receipt.schema == RECEIPT_SCHEMA == "ctrlrun.receipt/v4"
+    assert receipt.schema == RECEIPT_SCHEMA == "ctrlrun.receipt/v5"
     assert receipt.precondition_at_request == fingerprint(AT_REQUEST)
     assert receipt.precondition_at_recheck == fingerprint(AT_REQUEST)
     document = receipt.to_dict()
-    assert document["schema"] == "ctrlrun.receipt/v4"
+    assert document["schema"] == "ctrlrun.receipt/v5"
     assert document["precondition_at_request"] == fingerprint(AT_REQUEST)
     assert document["precondition_at_recheck"] == fingerprint(AT_REQUEST)
     stored = state_store.get_approval(request_id)
@@ -1411,12 +1412,15 @@ def test_T264_a_database_built_by_061_migrates_and_keeps_every_row(built_by_061)
     fake_clock = after_the_build
     facts = built.facts
     assert "0005_precondition_fingerprint" not in _applied(built), "0.6.1 knows 0005?"
+    assert "0006_verified_approver" not in _applied(built), "0.6.1 knows 0006?"
     columns_before = built.sql("SELECT * FROM approvals WHERE approval_id = ?", (facts["granted"],))
     assert columns_before, "0.6.1 did not write the approval"
 
     store = built.open(fake_clock)
 
-    assert _applied(built)[-1] == "0005_precondition_fingerprint"
+    # HEAD, whatever it is: v0.8 item 2 adds `0006_verified_approver`, and what this test is
+    # about is that a database 0.6.1 built reaches HEAD with every row intact.
+    assert _applied(built)[-1] == HEAD
     for approval_id, status in (
         (facts["consumed"], ApprovalStatus.CONSUMED),
         (facts["granted"], ApprovalStatus.GRANTED),
@@ -1554,14 +1558,17 @@ def test_T265_a_chain_written_by_061_and_continued_by_07_verifies_end_to_end(
     store = _chain_continued_by_07(built, fake_clock)
     receipts = store.receipts()
     old = [receipt for receipt in receipts if receipt.schema == "ctrlrun.receipt/v3"]
-    new = [receipt for receipt in receipts if receipt.schema == "ctrlrun.receipt/v4"]
+    # The label this binary writes, which is `v5` since v0.8 item 2. What the test is about is
+    # unchanged: a chain written by 0.6.1 and continued by this binary verifies end to end,
+    # each receipt hashed by the rule its own version wrote.
+    new = [receipt for receipt in receipts if receipt.schema == "ctrlrun.receipt/v5"]
     assert len(old) == len(built.facts["receipts"]) >= 4
     assert len(new) == 2 and len(receipts) == len(old) + len(new)
     for receipt in old:
         assert receipt.chain_hash() == receipt.hash, f"v3 seq {receipt.seq} rehashes differently"
     for receipt in new:
         document = json.loads(_stored_json(built, receipt.seq))
-        assert document["schema"] == "ctrlrun.receipt/v4"
+        assert document["schema"] == "ctrlrun.receipt/v5"
         assert document["precondition_at_recheck"] == fingerprint(AT_REQUEST)
 
     report = verify_chain(store)
@@ -2073,7 +2080,7 @@ def _g16(path, **kwargs):
 def test_T269_G16_is_in_the_v3_catalogue():
     from ctrlrun.verify import guarantees as reg
 
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
     assert "G16" in reg.BY_ID
     assert reg.BY_ID["G16"].descends_from
 
@@ -2323,6 +2330,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         "ctrlrun.receipt/v2": 21,
         "ctrlrun.receipt/v3": 26,
         "ctrlrun.receipt/v4": 28,
+        "ctrlrun.receipt/v5": 30,
         "ctrlrun.receipt/v9": 26,
         "": 25,
     }
@@ -2330,7 +2338,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         document = replace(base, schema=label).to_dict()
         assert len(document) == count, (label, sorted(document))
         assert document.get("schema") == (label or None)
-        if label != "ctrlrun.receipt/v4":
+        if label not in ("ctrlrun.receipt/v4", "ctrlrun.receipt/v5"):
             assert FABRICATED not in json.dumps(document), label
     assert replace(base, schema="ctrlrun.receipt/v1").to_dict()["principal"] == {
         "agent": "ops-agent",

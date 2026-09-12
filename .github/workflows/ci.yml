@@ -120,12 +120,15 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 14/14"
+          test "$AUTHORITY" = "verified 15/15"
           # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
           # to diverge from; G15 is N/A because neither document declares `max_attempts`.
           # G16 is graded on both: verify brings its own precondition provider (SPEC-v0.7 §8.9).
+          # G18 likewise since v0.8 item 2, which supplies its own approver identity: whether
+          # an operator configured one is a fact about their application and never an N/A
+          # reason here (SPEC-v0.8 §11.7). Both counts moved by one when it landed.
           test "$AUTHORITY_NA" = "2"
-          test "$TEMPLATES" = "verified 8/8"
+          test "$TEMPLATES" = "verified 9/9"
           test "$TEMPLATES_NA" = "8"
           test -s verify-badge.json
           test -s verify-report.json

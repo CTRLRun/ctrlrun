@@ -163,24 +163,27 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
 
     # G16 is N/A for G1's reason: a precondition binds only where an approval is consumed
     # (SPEC-v0.7 §8.9), and nothing here requires one.
-    for gid in ("G1", "G2", "G16"):
+    # G18 joins them for the same reason, and it is a statement about this document: verify
+    # supplies the approver identity itself (SPEC-v0.8 §11.7), so what makes G18 inapplicable
+    # here is that nothing requires approval, never that nobody configured one.
+    for gid in ("G1", "G2", "G16", "G18"):
         assert results[gid].status is Status.NOT_APPLICABLE, gid
         assert results[gid].reason == reg.NO_APPROVE_RULE
         # The `else` branch: either one reported `pass` is the defect this test exists for.
         assert results[gid].status is not Status.PASS
     assert report.applicable == report.passed + report.failed
-    # G1, G2 and G16 for the missing approve band, G8 and G9 for the missing authority
+    # G1, G2, G16 and G18 for the missing approve band, G8 and G9 for the missing authority
     # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
     assert report.applicable == 9
-    assert report.not_applicable == 7
+    assert report.not_applicable == 8
     text = report.to_text()
-    # The fraction is passes over applicable and never the catalogue size: with five N/As a
-    # thirteen-guarantee catalogue must not report thirteen over thirteen.
+    # The fraction is passes over applicable and never the catalogue size: with eight N/As a
+    # seventeen-guarantee catalogue must not report seventeen over seventeen.
     assert f"{len(reg.GUARANTEES)}/{len(reg.GUARANTEES)}" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
-    assert "7 not applicable: G1, G2, G8, G9, G13, G15, G16." in text
+    assert "8 not applicable: G1, G2, G8, G9, G13, G15, G16, G18." in text
 
 
 def test_T101b_zero_applicable_guarantees_is_not_a_pass(tmp_path):
@@ -767,16 +770,21 @@ def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
 
 
 def test_the_catalogue_is_closed_and_ordered():
-    """SPEC-v0.7 §9.4: `v3` is G1 to G16, and each id lands with its item. Ordered by number,
+    """SPEC-v0.8 §11.4: `v4` is G1 to G21, and each id lands with its item. Ordered by number,
     so an id that arrives before a lower one still sits where a reader looks for it, and
-    unreleased `main` carries a partial `v3` until item 6 asserts all sixteen."""
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    unreleased `main` carries a partial `v4` until item 8 asserts all five.
+
+    **No stub rows.** The upper bound is what v0.8 may reach; what is asserted about the middle
+    is that every id present is one of them and that none is missing from the order. A catalogue
+    holding an id whose check does not exist yet would report something before it could, which
+    is a false green (`v0.7 §9.4`'s D27)."""
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v4"
     ids = [guarantee.id for guarantee in reg.GUARANTEES]
     assert ids[:11] == [f"G{n}" for n in range(1, 12)]
-    assert "G13" in ids and "G16" in ids
+    assert "G13" in ids and "G16" in ids and "G18" in ids
     assert ids == sorted(ids, key=lambda gid: int(gid[1:])), ids
     assert len(ids) == len(set(ids))
-    assert set(ids) <= {f"G{n}" for n in range(1, 17)}, ids
+    assert set(ids) <= {f"G{n}" for n in range(1, 22)}, ids
     for guarantee in reg.GUARANTEES:
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
@@ -844,17 +852,22 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_eight_over_eight():
-    """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1)."""
+def test_the_v1_payments_template_reports_nine_over_nine():
+    """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1).
+
+    Nine and not eight since v0.8 item 2: G18 is graded here, because this document sends an
+    action to approval and verify supplies the approver identity it grades against (§11.7).
+    """
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (8, 8, 8)
+    assert (report.passed, report.applicable, report.not_applicable) == (9, 9, 8)
     text = report.to_text()
-    assert "8/8 declared guarantees pass." in text
+    assert "9/9 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
-    # document names no `max_attempts`. G16 is graded: verify brings its own provider (§8.9).
+    # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider
+    # for the first and its own approver identity for the second (§8.9, §11.7).
     assert "8 not applicable: G3, G4, G5, G8, G9, G13, G14, G15." in text
     assert "10/10" not in text
 

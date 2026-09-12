@@ -157,6 +157,45 @@ def _call(server, tool, arguments=None, *, credential=None, request_id=1):
     return json.loads(response.body), response.status
 
 
+def test_T288_the_operator_server_records_the_principal_it_verified(server, control):
+    """SPEC-v0.8 §2.6 — the one shipped surface that can produce a verified approver.
+
+    It has resolved a principal for every request since `SPEC-mcp-operator.md` shipped, and
+    then discarded it into the string `mcp-operator:<user>`. What item 2 changed is that the
+    principal is recorded beside the string, so an approval granted here is consumable in a
+    deployment that checks (§2.7).
+    """
+    from ctrlrun.approval import DEFAULT_APPROVAL_TTL
+
+    action = _action(control)
+    request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+
+    document, status = _call(
+        server, "approve", {"request_id": request.request_id}, credential="alice"
+    )
+
+    assert status == 200, document
+    record = control.store.get_approval(request.request_id)
+    assert [(who.agent, who.user, who.issuer) for who in record.approvers] == [
+        ("approver-app", "alice", "https://proxy.example/")
+    ]
+    assert record.approver == "mcp-operator:alice", "the string still says what it said"
+
+
+def test_T288_a_denial_records_the_principal_too(server, control):
+    """§2.7's row for `deny_approval`: a denial is an act the evidence attributes."""
+    from ctrlrun.approval import DEFAULT_APPROVAL_TTL
+
+    action = _action(control)
+    request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+
+    document, status = _call(server, "deny", {"request_id": request.request_id}, credential="alice")
+
+    assert status == 200, document
+    record = control.store.get_approval(request.request_id)
+    assert [who.agent for who in record.approvers] == ["approver-app"]
+
+
 def _rpc(server, method, params=None, *, request_id=1):
     body = {"jsonrpc": "2.0", "id": request_id, "method": method}
     if params is not None:
