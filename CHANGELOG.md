@@ -7,7 +7,32 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
-## [Unreleased]
+## [0.8.0] - 2026-09-12 - Oversight
+
+Every guarantee shipped before this one verifies the principal that **acts**. G7 refuses an action
+whose requester cannot be resolved; nothing whatever was asked of the principal that **permits** it.
+`approver` was a non-empty string, `ctrlrun delegate --as` was an assertion typed at a shell, and
+the operator MCP server authenticated who answered without checking they were entitled to. v0.8
+asks the question all seven put only to the acting side: **who may say yes, and can the kernel
+tell?**
+
+Five guarantees answer it — G17 an unentitled approver, G18 the requester cannot approve, G19 one
+principal counts once, G20 a credential revoked before its `exp`, G21 an unapproved policy decides
+nothing — and one thing that is not a guarantee: break-glass, which is a grant and not a flag.
+
+**Opt in, then fail closed.** A deployment that names no approver identity behaves exactly as
+0.7.0 did, and a test drives the whole approve-and-execute path to prove it. One that names one has
+no partial mode, no "resolve if you can", and no setting that puts the string back. There is no
+`skip_entitlement`, no `trust_approver`, no `allow_self_approval`, no `break_glass=True`, no
+`ignore_revocations` — and that sentence is a test, not a claim: the shipped package is grepped for
+sixteen spellings a flag would take, and the control plants one and finds it.
+
+**What v0.8 does not close, in one place.** A persuaded approver gives a valid approval and the
+receipt records it as one. An entitlement check is against what the granting surface **recorded**,
+not a re-derivation from a credential that no longer exists. A revoked credential leaves a log line
+and no receipt. A feed is worth what its source is worth. And a policy change that no verified
+principal other than the proposer approved decides nothing — which is not the same as saying a
+policy cannot be changed by whoever holds the file.
 
 ### Added
 
