@@ -198,7 +198,14 @@ this document does not add one: a decimal metric would need a canonical represen
 how it hashes, and receipt coverage for both, and that is a `v0.1 §2.3` amendment rather than
 something §2 may decide on its own.
 
-**And it must be non-negative.** A negative value would *reduce* the rolling sum and therefore
+**And it must be a non-negative `int` that is not a `bool`.** `PlainValue` admits `bool`, and in
+Python `isinstance(True, int)` is `True`, so `amount: false` would be a "non-negative integer" whose
+value is zero. That is §2.3's own sentence about absence-as-zero wearing a bool's clothes. This
+repository already guards the trap in two places: `authority.py:1491`
+(`not isinstance(depth, int) or isinstance(depth, bool)`) and `verify/scenarios.py:378-379`'s
+`_is_int`. The budget loader uses the same predicate.
+
+**And non-negative, for two reasons.** A negative value would *reduce* the rolling sum and therefore
 always pass §3.3.1's predicate, so an agent alternating `+100000` and `-100000` spends without
 bound. This is not hypothetical arithmetic: `examples/policies/payments.yaml:29` already carries the
 comment "a refund of a negative amount is a charge", which is why every band in that document binds
@@ -227,53 +234,49 @@ operator's actions.
 
 The grant it is written on, and every grant delegated beneath it, transitively. §2.6 is why.
 
-### 2.4.1 A budget on a grant that cannot be charged is a load error
+### 2.4.1 A budgeted grant refuses an action whose effect key did not resolve
 
-**The gap R1 opens, closed here rather than discovered by an implementer.** Consumption happens on
-reserve (R1), and `effect_key` is optional: `v0.1 §5.1` makes it the deliberate escape hatch for an
-action with no effect worth deduplicating, and `Control._secure` reserves nothing for one
-(the guard at `control.py:2031`, returning at `control.py:2043`), as does `_take`'s second branch
-(`control.py:3117-3118`) and its fourth (`control.py:3121`).
+**Three drafts of this section were wrong, and a probe settled it.** The rule matters because
+consumption happens on reserve (R1) and `effect_key` is optional (`v0.1 §5.1`), so without a rule an
+agent proposes actions with no effect and spends nothing, forever.
 
-Left alone, that is a hole the size of the feature: an agent holding a budgeted grant proposes
-actions with no `effect:` template and spends **zero** against every budget on the chain, forever.
-§2.1's sharp case is four hundred refunds; four hundred refunds under a `@protect` carrying no
-`effect=` would be four hundred free ones.
+**What the probes printed**, because this section is now written from them rather than from
+reasoning about the code:
 
-**The refusal is at LOAD, not at execute**, and the second review is why: a refusal at execute has
-nowhere to live and breaks a shipped example.
+1. **A loader cannot see the effect template.** `control.py:4017-4026` resolves it as
+   `effect if effect is not None else from_policy_effect`: the **decorator's `effect=` wins**, and
+   `_warn_template_mismatch` is deliberately a warning so decorator-based deployments are not broken
+   by the document. `examples/agent-race/`, `examples/double-refund/` and `examples/approval-replay/`
+   each declare **no** `effect:` key in `ctrlrun.yaml` and supply it from `@protect` in `main.py`. A
+   load error would refuse to start three shipped examples whose budgets are perfectly enforceable.
+2. **On the standalone-authority path there is nothing to check against.**
+   `_STANDALONE_KEYS = {"schema", "authority"}` (`authority.py:165`), so a standalone document
+   **cannot carry `actions:`**, and `ctrlrun verify --authority` and `ctrlrun gateway --authority`
+   both load that way. A load-time rule is not merely unhelpful there, it is unrunnable.
 
-**A budget on a grant none of whose actions carries an `effect:` template is a load error**, naming
-the grant, the budget and the actions, and saying that a budget cannot be enforced on an action with
-no effect key. An operator learns at load, from the document, in the place they can fix it.
+**So the check is where the effect key is resolved, and not before.** After
+`resolved._resolve_effect(...)` has run and **strictly before `_secure`**: if a budgeted grant
+decided this action and the effect key resolved to `None`, the action is **refused**, naming the
+grant and the budget. This is the same placement rule §5.3 applies to the scope provider: as late as
+the fact is available, as early as it is before the reservation.
 
-**Why not at execute, which is where an earlier draft put it.** Two reasons, each fatal on its own:
+**And it is an existential rule, not a universal one.** An earlier draft said "a grant **none** of
+whose actions carries a template", which left the hole it was written to close: a grant covering
+`payments.*` where `payments.refund` has a template and `payments.sweep` does not would load clean,
+and the agent spends nothing on `sweep` forever. A grant's `actions` are patterns, so which entries
+they cover is not decidable at load anyway. At execute it is not a question: the key resolved or it
+did not.
 
-1. **There is no site.** `Authority.evaluate` (`authority.py:884`, called at `control.py:819`) takes
-   no effect key and cannot make the check. Putting it in `Control.execute` instead splits the
-   answer: `Control.evaluate` never resolves an effect key at all (`v0.3 §4.3.1`: it "resolves
-   earlier still, before `Control.execute` is entered"), so `Control.evaluate` and therefore
-   `ctrlrun.adapter.needs_approval` would report `ALLOW` for an action `execute` then refuses. An
-   adapter that asks whether approval is needed would be told the wrong thing.
-2. **It makes a shipped configuration authorise nothing.** `examples/authority/payments.yaml`'s
-   `reconciliation` grant covers `stripe.charge.read` and `stripe.refund.read`, and those actions
-   carry no `effect:` template on purpose, with a comment in the document saying "Reads get no
-   `effect:` template, and that is correct for a read." A `count` budget on that grant, which is
-   exactly what an operator puts on a read-heavy service account and exactly what §2.3 calls the
-   budget an operator reaches for first, would refuse 100% of its actions forever. At load that is
-   a message. At execute it is a grant that silently authorises nothing.
+**What `Control.evaluate` reports, stated because it diverges.** `Control.evaluate` never resolves an
+effect key (`v0.3 §4.3.1`: it "resolves earlier still, before `Control.execute` is entered"), so it
+cannot make this check and does not: it reports what authority and policy say. An action that
+`evaluate` calls `ALLOW` may therefore be refused by `execute` on this rule. That is the same
+divergence `evaluate` already has about preconditions and reservations, it is fail-closed in the
+direction that matters, and `ctrlrun.adapter.needs_approval` is the caller that sees it.
 
-**What §7.4's shipped example therefore carries.** The budget goes on a grant whose actions have
-effect templates, which in that document is a refund grant and not the reconciliation one. Item 6
-names which, and item 7 checks it.
-
-Rejected: charging such an action against the budget anyway, with a synthesised key. Two attempts of
-one logical action would charge twice, because what makes a charge idempotent is the effect key
-(§3.4), and inventing one would be inventing the identity the caller declined to give.
-
-Rejected: refusing at execute and accepting the two consequences above. The load error is strictly
-more informative, arrives strictly earlier, and costs an operator nothing they cannot fix in the
-document.
+Rejected: charging such an action with a synthesised key. Two attempts of one logical action would
+charge twice, because what makes a charge idempotent is the effect key (§3.4), and inventing one
+would be inventing the identity the caller declined to give.
 
 ### 2.5 The window is rolling
 
@@ -495,8 +498,7 @@ resolved a grant's budgets would be reading the policy, and `ARCHITECTURE.md` §
 
 **The evaluation order inside the transaction**, which is the whole of the amendment's value: sum
 the un-released rows for `(grant_id, metric)` over `[now - window, now]`, compare `sum + amount <= limit`
-(**inclusive**, matching §2.2's "what the sum may reach"; a `limit: 0` grant therefore permits an
-action only if its metric value is 0, which is how a budget of zero stops a grant), and either insert the rows and the reservation together or write neither.
+(**inclusive**, matching §2.2's "what the sum may reach"), and either insert the rows and the reservation together or write neither.
 
 **What the store raises, and the direction a store that ignores it fails in.** `errors.py` is
 closed and §10 adds nothing to it, so the store raises a **package-internal** exception naming the
@@ -522,12 +524,29 @@ is the authorization-relevant half.
   third-party backend discovers at its own test time rather than in an operator's production. The
   kit exists for exactly this (`v0.5 §9`), and a MUST no suite checks is the
   documentation-rather-than-defence shape the mutation-pattern list calls out.
+- **And the suite is opt-in, so it detects rather than enforces.** A store that never runs it still
+  disables every budget silently. So `Control`, **at construction, when any grant carries a budget**,
+  issues one probe reservation against a synthetic grant with `limit: 0` and a nonzero charge and
+  **refuses to start unless the store refuses it**. In-band, one round trip, needs nothing the
+  amendment does not already add, and it is the difference between detecting the fail-open and
+  foreclosing it. A store that cannot evaluate the predicate is then a store an operator cannot
+  accidentally deploy with budgets configured.
+- **The suite's case races the sum and the insert, not merely the predicate's presence.** A store
+  that evaluates the predicate in a *separate statement* from the insert passes a naive "does it
+  refuse" test and fails open under concurrency, which is `postgres.py:1106`'s bug exactly. The kit
+  already has the harness (`conformance/store/worker.py`), and T443 uses it.
 
 **Rejected: evaluating at the authority gate.** `Control.execute` evaluates authority at `control.py:819`, and
 `control.py:1094-1095`'s ordering comment places that at *principal_expired, authority, policy,
 approval, reservation*, so it runs **before** the transaction. Two processes would read the same total, both pass, and `charges=` would faithfully
 record both spends. It reads like the natural home, because every other authority question is
 decided there, and it is the one place the check cannot work.
+
+**`limit: 0` does not stop a grant, and an earlier draft said it did.** A zero limit refuses every
+action with a nonzero metric value and permits **unboundedly many zero-valued ones**, each producing
+a reservation, an effect record and a valid receipt. A zero-valued action never moves the sum, so
+nothing ever refuses it. An operator who wants a grant that may not act expresses that by not
+granting it, and §7's surfaces do not pretend otherwise.
 
 **What this costs, stated.** The store now evaluates an arithmetic predicate rather than only
 storing rows, which is a genuine widening of what a `StateStore` does. It is the narrowest widening
@@ -536,8 +555,9 @@ already owns.
 
 ### 3.3.2 Where `Control` catches it, because an unhandled refusal escapes with no receipt
 
-`_secure`'s loop catches `AmbiguousEffect` (`control.py:2057`), `ActionDenied` (`control.py:2079`)
-and `ApprovalMismatch` (`control.py:2104`). **A new exception type escapes all three**: no receipt,
+`_secure`'s loop catches `AmbiguousEffect` (`control.py:2057`), `ActionDenied` (`control.py:2079`),
+`ApprovalMismatch` (`control.py:2104`) and `DuplicateEffect` (`control.py:2132`). **A new exception
+type escapes all four**: no receipt,
 no event, and a package-internal exception in the caller's hands.
 
 That is not hypothetical, and this repository has already met it once.
@@ -548,6 +568,11 @@ a store error about its own effect key. Found by review, round 2."*
 **And routing it through the existing `ActionDenied` handler is also wrong**: that handler appends
 `APPROVAL_DENIED` (`control.py:2083-2089`) unconditionally, so a budget refusal would fabricate an
 approval denial for an action no human ever saw.
+
+**The carrier is not an `ActionDenied` subclass, and its handler precedes the `ActionDenied`
+clause.** Subclassing is the obvious implementation, since the handler converts to one, and it would
+put `except ActionDenied` at `control.py:2079` first, fabricating the very `APPROVAL_DENIED` this
+section exists to prevent, with T437 passing or failing on clause order alone.
 
 **So `_secure`'s loop gains its own handler**, converting the carrier into `ActionDenied` with
 reason `budget_exhausted`, appending `ACTION_DENIED` and no approval event, and writing a `denied`
@@ -694,19 +719,25 @@ reason, and four rows below were added by that review rather than by the draftin
 | **observe mode reserves** (`control.py:1528`, `control.py:1530`, outside `_take`) | `RESERVED` | **nothing is charged.** `v0.3 §6.2` makes observe mode record rather than enforce, and a budget that consumed there would enforce: the run would refuse at the limit while claiming to be observing, and the counterfactual an operator adopts observe mode to get would be wrong. §4.2.1 |
 | **a suspension holds the effect** (`hold_continuation` extends the lease, `state.py:1099-1112`) | `RESERVED`, lease extended | **held**, for as long as the continuation is held. §4.6 says this is not bounded by the kernel |
 | `begin_execution` succeeds | `EXECUTING` | **held.** No ledger movement; listed because the table claims completeness |
-| **`fail_effect` is REFUSED** after the executor raised `NotExecuted` (`control.py:1740-1763`, `_unrecorded`) | the record moved on: this attempt's lease lapsed and another declared it `AMBIGUOUS` | **held, NOT released.** **The one path where the executor proved nothing happened and the charge stays**, because somebody may have committed the effect. See the warning below |
-| `commit_effect` is refused (`control.py:1851-1869`, `_unrecorded`) | the record moved on | **held** |
-| `mark_ambiguous` is refused (`control.py:1800-1822`) | the record moved on | **held** |
+| **`fail_effect` is REFUSED** after the executor raised `NotExecuted` (`control.py:1740-1763`, `_unrecorded`) | the record moved on while the executor ran: the lease lapsed and another declared it `AMBIGUOUS`, **or a human resolved it** to `COMMITTED` or `FAILED` | **§4.1 over the state the record actually reached**: held if `AMBIGUOUS` or `COMMITTED`, and **already released** if a human resolved it `FAILED`. **This call releases nothing itself.** See the warning below |
+| `commit_effect` is refused (`control.py:1851-1869`, `_unrecorded`) | the record moved on, same set | **§4.1 over the state reached**, same as the row above |
+| `mark_ambiguous` is refused (`control.py:1800-1822`; it logs and folds the refusal into the error text rather than calling `_unrecorded`) | the record moved on, same set | **§4.1 over the state reached** |
 | renewal after `FAILED` (`renews=True`, `attempt+1`) | `RESERVED` again | **a new charge**, per §4.3 |
 | retry refused (`COMMITTED`, `AMBIGUOUS`, live lease) | unchanged | **nothing.** No reservation, no charge |
 
-**The `fail_effect`-refused row is the one to read twice.** The rule is "released exactly on
-`FAILED`", and the row above it says `fail_effect` releases because the executor proved nothing
-happened. An implementer who turns that into *release when the executor raises `NotExecuted`*, or
-*release in the `fail_effect` code path*, gets this row exactly backwards and hands back authority
-for an effect somebody may have committed. **The release is keyed on the record reaching `FAILED`,
-never on the call that tried to put it there.** The second review of this spec added this row;
-§9.5's test for it drives the lapse concurrently rather than asserting the happy path.
+**The `fail_effect`-refused row is the one to read twice, and it took two rounds to state.** The rule
+is "released exactly on `FAILED`", and the row above it says `fail_effect` releases because the
+executor proved nothing happened. An implementer who turns that into *release when the executor
+raises `NotExecuted`*, or *release in the `fail_effect` code path*, gets this row backwards and hands
+back authority for an effect somebody may have committed.
+
+**The release is keyed on the record reaching `FAILED`, never on the call that tried to put it
+there.** That is why these three rows defer to §4.1 rather than asserting "held": a human may have
+resolved the record `FAILED` while the attempt ran (`resolve_effect`'s `RESOLUTIONS`, `state.py:83`),
+in which case the charge is already released and *nothing further happens* rather than being held.
+A round-two draft of these rows said "held, NOT released" flatly, which is false for exactly that
+sub-case, and the source comment those rows cite (`control.py:1748-1751`) is about a human resolving
+the record. §9.5's test drives the lapse concurrently rather than asserting the happy path.
 
 ### 4.2.1 Observe mode charges nothing, and says so in the report
 
@@ -853,22 +884,27 @@ written down as deliberately as the rows that say yes."* `v0.3 §4.3.1` has thir
 earlier draft of this section covered six, which is the missing-enumeration failure that table exists to
 prevent, and the one that let an expired credential mint permanent authority in v0.3.
 
-| Entry point | Scope provider | Why |
+| Entry point (all thirteen of `v0.3 §4.3.1`'s rows) | Scope provider | Why |
 |---|---|---|
-| `Control.execute`, `ALLOW` | **runs** | the main case, and the one `v0.7 §6.8` does not cover |
-| `Control.execute`, `APPROVE`, **requesting** pass | **not called** | the action is not being taken yet. A human is therefore asked to approve an action that may be refused `out_of_scope` at consumption, which is fail-closed and wastes a human's attention; stated rather than left to be discovered |
-| `Control.execute`, `APPROVE`, **presenting** pass | **runs**, before the precondition recheck (§5.7) | this is where the action is taken |
-| `Control.execute`, `DENY` | **not called** | already refused; a provider call would turn an unreachable source into a second failure for an action nobody was going to run. `v0.7 §6.6`'s rule |
+| `@protect` to `Control.execute`, `ALLOW` | **runs** | the main case, and the one `v0.7 §6.8` does not cover |
+| `@protect` to `Control.execute`, `APPROVE`, **requesting** pass | **not called** | the action is not being taken yet. A human is therefore asked to approve an action that may be refused `out_of_scope` at consumption: fail-closed, wasteful of a human's attention, and stated rather than discovered |
+| `@protect` to `Control.execute`, `APPROVE`, **presenting** pass | **runs**, before the precondition recheck (§5.7) | this is where the action is taken |
+| `@protect` to `Control.execute`, `DENY` | **not called** | already refused; a provider call would turn an unreachable source into a second failure for an action nobody was going to run (`v0.7 §6.6`) |
+| `Control.execute` called directly | **runs**, identically | the caller built the action; the provider is the caller's too |
 | `Control.evaluate` | **not called** | it writes nothing and consumes nothing (`v0.3 §4.3.1`'s own cell); a network fetch on a path documented as a pure decision would change what that path is |
 | `Control.resume` | **not called** | `v0.7 §6.8` refuses a provider here because a refusal strands a reservation the remote may already be acting on, and a scope provider has the identical problem |
-| `Control.delegate`, `Control.revoke` | **not called** | no action, no resource to place |
-| **the MCP gateway's `tools/call`** | **not called**, and this is the gap worth naming | it builds an `Action` and calls `Control.execute`, and has no `scope=` to pass. So an operator who configures a scope provider on `@protect` and exposes the same action through the gateway **gets no scope check on the gateway path**. `v0.3 §4.3.1`'s gateway row answers the v0.7 recheck question explicitly ("no provider, and it refuses a presented approval that carries a fingerprint") and this row answers v0.9's the same way |
-| **the ACS request hook** | **not called**, same reason and same shape | |
-| both adapters | **not called**: they answer approvals, they do not originate actions | |
+| `Control.delegate` / `Control.revoke` | **not called** | no action and no resource to place |
+| The gateway's `tools/call` | **not called** | it builds an `Action` and calls `Control.execute`, and has no `scope=` to pass. See the limitation below |
+| `ctrlrun.acs`'s request hook | **not called** | same shape, same limitation |
+| **`ctrlrun.verify.run`** | **it CONSTRUCTS one** | `v0.3 §4.3.1` says verify "drives the rows above" with its own provider for G16, and §8.1 has it build a raising provider to grade G23. An earlier draft folded this into "the evidence commands take no action", which contradicted §8.1 by nine pages |
+| **An adapter's protected tool** to `@protect` to `Control.execute` | **runs** | `v0.3 §4.3.1` row 9 is "yes, `@protect` does, from the bound call": it reaches `Control.execute` like any other protected call. An earlier draft said adapters "answer approvals, they do not originate actions", which is true of `InterruptApprovalProvider.wait` and **false of this row**, which is the safety-relevant one |
+| `ctrlrun.adapter.needs_approval` to `Control.evaluate` | **not called** | it is `Control.evaluate`, above |
+| `ctrlrun.adapter.InterruptApprovalProvider.wait` | **not called** | it records an answer; it originates no action |
+| `ctrlrun mcp-operator`'s read tools | **not called** | they are consulted for nothing and take no action |
+| `ctrlrun mcp-operator`'s write tools | **not called** | they grant, deny and resolve; none originates an action |
 | observe mode | **runs, and refuses nothing**: the report says the action would have been refused out of scope (§4.2.1) | |
-| the evidence commands (`receipts`, `inspect`, `stats`, `verify`) | **not called**: they take no action | |
 
-**The gateway and ACS rows are a real limitation and not an oversight**, so they are stated as one:
+**The gateway, ACS and adapter-without-a-task rows are a real limitation and not an oversight**, so they are stated as one:
 a deployment that wants scope enforcement on those paths does not get it in v0.9, and §1.1 carries
 the sentence. Giving them a provider is a gateway configuration surface, which is its own amendment.
 
@@ -1054,31 +1090,58 @@ belongs to whatever milestone is willing to pay for one. This one is not, and §
 
 The **second** of the two columns the milestone's plan requires on `v0.3 §4.3.1`.
 
-| Entry point | Task | Why |
+| Entry point (all thirteen of `v0.3 §4.3.1`'s rows) | Task | Why |
 |---|---|---|
-| `Control.execute` | from `task=`, and §6.4 refuses a task-bound grant with none | the main case |
-| `Control.evaluate` | from `task=`, same rule | it must agree with `execute` or an adapter is told the wrong thing |
-| **`Control.resume`** | **evaluated and recorded, never re-decided** | see below |
-| `Control.delegate` | the child's `tasks` are contained in the parent's (§6.2) | delegation-time, not action-time |
-| the gateway, the ACS hook, both adapters | **no task**, so a task-bound grant refuses them | the same limitation §5.2.2 records for the scope provider, and the same amendment would fix both |
+| `@protect` to `Control.execute` | from `task=`, and §6.4 refuses a task-bound grant with none | the main case |
+| `Control.execute` called directly | from `task=`, same rule | |
+| `Control.evaluate` | from `task=`, same rule | it must agree with `execute` or `needs_approval` is told the wrong thing, which is why §10 freezes `task=` on it too |
+| **`Control.resume`** | **not evaluated on this dimension** | see below. NOT `v0.3 §5.6.1`'s evaluated-and-recorded, which would put `AUTHORITY_DENIED` on the only receipt the action gets |
+| `Control.delegate` / `Control.revoke` | the child's `tasks` are contained in the parent's (§6.2) | delegation-time, not action-time |
+| The gateway's `tools/call` | **no task**, so a task-bound grant refuses it | the limitation below |
+| `ctrlrun.acs`'s request hook | **no task**, same | the limitation below |
+| `ctrlrun.verify.run` | it supplies one when it builds a task-bound scenario | G24 is graded, so it must |
+| An adapter's protected tool to `@protect` | from `task=` if the adapter's caller passed one, else none | it reaches `@protect` like any protected call, so a task-bound grant refuses it unless the caller supplies one |
+| `ctrlrun.adapter.needs_approval` to `Control.evaluate` | as `Control.evaluate` | |
+| `InterruptApprovalProvider.wait`, the `mcp-operator` read tools, the `mcp-operator` write tools | **no task, and none needed** | none originates an action |
 
-**Why `resume` cannot re-decide it, and what happens if it does.** `Control.resume` evaluates
-authority at `control.py:1578`, and it takes no `task=`. The action is rehydrated from the store
-(`control.py:1557`), and §6.3.1 deliberately keeps the task off `Action`, so the rehydrated action
-carries none. Under a grant naming `tasks`, §6.4 would then fire on **every resumed leg**.
+**Why `resume` is the row that would otherwise break.** `Control.resume` evaluates authority at
+`control.py:1578` and takes no `task=`. The action is rehydrated from the store
+(`control.py:1557`), and §6.3.1 keeps the task off `Action`, so the rehydrated action carries none.
+Under a grant naming `tasks`, §6.4 would fire on **every resumed leg**.
 
-That does not raise: `control.py:1586-1590` records `Decision.DENY` and an `AUTHORITY_DENIED` event
-**into the receipt**. And `control.py:1575-1577` says what that costs, in the source: this is *"the
-only receipt an MCP multi round-trip or ACS action ever gets"*. So the naive reading makes every
-such receipt say the action was denied by authority, for every task-bound deployment.
+**And `v0.3 §5.6.1`'s "evaluated and recorded, not re-decided" does NOT fix this. An earlier draft
+claimed it did, and the probe says otherwise.** That section's own following sentence:
 
-**So `resume` evaluates and records the task dimension and does not re-decide on it**, which is
-exactly `v0.3 §5.6.1`'s treatment of authority on that path and the reason that section exists.
-§9.1 has the test.
+> The resumed leg therefore appends `AUTHORITY_RESOLVED` or `AUTHORITY_DENIED` and records the
+> combined §4.6 decision on its receipt — which, for an MCP multi round-trip or ACS action, is the
+> only receipt that action ever gets (§8.3).
 
-The mirror case is worse and is why this is not left implicit: a resuming process that happens to
-sit inside some *other* `task=` context would evaluate the resumed leg against an unrelated task.
-Not re-deciding forecloses that too.
+"Not re-decided" means the denial does not **block** execution; the code confirms it
+(`control.py:1590` sets `Decision.DENY` and `control.py:1606` proceeds). It does **not** keep the
+denial off the receipt. So citing `v0.3 §5.6.1` here would have specified precisely the outcome this
+section exists to prevent: every resumed leg's only receipt saying the action was denied by
+authority, in every task-bound deployment.
+
+**What v0.9 does instead: the task dimension is not evaluated on the resumed leg at all.**
+`_authority_result` is told the leg is a resumption and skips that one dimension, evaluating every
+other exactly as today. The receipt is what 0.8.0 wrote.
+
+**This is a third mode, and it is named rather than borrowed.** `v0.3 §5.6.1` has two, evaluated-and-
+decided and evaluated-and-recorded; this is *not evaluated*, on one dimension, on one path. It gets
+its own sentence because an implementer reaching for `v0.3 §5.6.1` gets the wrong one, as this document did.
+
+**What it costs, and it is the real residual of §6.** A resumed leg is **unbound by task**. An agent
+that suspends on a task it holds and resumes is not re-checked on that dimension, so task binding
+constrains the first leg of a multi round-trip and not the continuations. Task binding limits blast
+radius rather than detecting a hijack (§1.1), and this is one of the places that sentence is doing
+work. Recovering the first leg's task would mean stamping it onto `EXECUTION_STARTED` so
+`_resumed_context` (`control.py:1621-1666`) could read it back, which is a receipt-and-event change
+v0.9 does not make and v0.10 will want anyway, since a task crossing a hop is exactly its subject.
+
+**And the ambient-context hazard is closed by the same rule.** `_authority_result` is reached from
+`control.py:711`, `:1096`, `:1578` and `:1923`. Were the task read from a context variable at
+`:1578`, a resuming process sitting inside some *other* `task=` would evaluate the resumed leg
+against an unrelated task. Not evaluating the dimension there forecloses that too.
 
 ### 6.4 A grant that names a task refuses an action that names none
 
@@ -1240,9 +1303,24 @@ iterates it to build G9's widened children (`scenarios.py:2091`) and reports
   stays green, and never exercises either new dimension. That is the false green §9's rule 3 exists
   to refuse, and it is the more likely mistake because it is the one nothing turns red.
 
-**So `DIMENSIONS` grows to eight, `_narrowed` and `_widen` carry `budgets` and `tasks`, and §9.6
-asserts G9 exercises eight of eight.** Item 1 lands `tasks` and item 3 lands `budgets`, so each
-moves the count by one and neither may leave the helper behind.
+**And a third way, which is loud rather than silent, and which `grep -rn DIMENSIONS src/ tests/`
+finds in ten seconds.** Two existing acceptance tests consume the name and an earlier draft of this
+section named neither:
+
+- `tests/test_verify_authority.py:92` asserts **exact list equality**:
+  `results["G9"].detail["dimensions_exercised"] == list(DIMENSIONS)`, with
+  `dimensions_unconstrained == []`. That is a `SPEC-v0.4 §8` acceptance test, so the definition of
+  done requires it to keep passing. It goes red unless the G9-selected grant in
+  `examples/authority/payments.yaml` carries **both** a budget and a `tasks` key.
+- `tests/test_verify_authority.py:153` parametrizes over `DIMENSIONS`, so it silently gains two
+  cases, which the inline fixture must satisfy.
+
+**So `DIMENSIONS` grows to eight, `_narrowed` and `_widen` carry `budgets` and `tasks`, the
+G9-selected shipped grant carries both, and §9.6 asserts G9 exercises eight of eight.** Item 1 lands
+`tasks` and item 3 lands `budgets`, so each moves the count by one, each must update the shipped
+example in the same PR, and neither may leave the helper behind. **This couples §8.0 to §2.4.1**: a
+budget may only sit on a grant whose actions resolve an effect key, so the grant G9 selects must be
+one of those.
 
 ### 8.1 G23's `N/A` is the one that is not a statement about the document
 
@@ -1304,9 +1382,10 @@ defects will be:
 - T384 a child omitting `tasks` under a parent naming them is rejected (`v0.3 §5.4`).
 - T385 a task changed in the document moves the policy hash (§6.7).
 - T386 a break-glass delegation is attenuated on `tasks`, at the second level, on T337's pattern.
-- T386a `Control.resume` under a task-bound grant **evaluates and records** the task dimension and
-  does not re-decide on it (§6.3.2): the resumed leg is not denied, and the receipt, which is the
-  only one an MCP multi round-trip ever gets, does not say `AUTHORITY_DENIED`.
+- T386a `Control.resume` under a task-bound grant does **not evaluate** the task dimension (§6.3.2):
+  the resumed leg is not denied, the receipt is what 0.8.0 wrote, and it does not say
+  `AUTHORITY_DENIED`. The test that proves the rule is real is the one where the resuming process
+  sits inside an unrelated `task=` context and the leg still is not evaluated against it.
 - T387 a `ctrlrun.policy/v7` `tasks` key in a `v6` document is refused, in `policy.py`'s existing
   older-reader shape.
 
@@ -1381,8 +1460,10 @@ defects will be:
   rows were added by this spec's two review rounds rather than by its drafting, and they are the
   ones an implementer would not derive: the attempt ceiling releasing after a won reservation,
   `begin_execution` refused after a won reservation, observe mode reserving outside `_take`, a
-  suspension holding a charge, and the three `_unrecorded` paths where `fail_effect`, `commit_effect`
-  or `mark_ambiguous` is itself refused.
+  suspension holding a charge, and the three paths where `fail_effect`, `commit_effect` or
+  `mark_ambiguous` is itself refused (the first two through `_unrecorded`; `mark_ambiguous` logs and
+  folds the refusal into the error text instead, which is why §4.2's row cites the range without
+  claiming the call).
 - **The `fail_effect`-refused test drives the lapse concurrently**, because the whole row is that the
   executor proved nothing happened and the charge is nonetheless held. A test that calls
   `fail_effect` on a record still in `EXECUTING` asserts the row above it instead and passes.
@@ -1403,8 +1484,13 @@ defects will be:
 - T441 **G22, multi-process against Postgres**: a budget exhausted by an ambiguous effect refuses the
   next reserve until reconciled, and releases on `FAILED`.
 - T442 G22's positive control: a budget not exhausted permits.
-- T443 the **conformance** case: a store that accepts `charges=` and does not evaluate the predicate
-  fails the store suite (§3.3). Without this, a third-party backend disables every budget silently.
+- T443 the **conformance** case, in two parts (§3.3): a store that accepts `charges=` and does not
+  evaluate the predicate fails the store suite; **and so does one that evaluates it in a statement
+  separate from the insert**, raced multi-process through `conformance/store/worker.py`. The second
+  part is the one that matters, because the first is the failure nobody ships and the second is
+  `postgres.py:1106`.
+- T443a `Control` refuses to construct against a store that does not refuse the `limit: 0` probe,
+  when any grant carries a budget (§3.3).
 
 ### 9.6 Item 6: the operator surfaces (§7)
 
@@ -1443,7 +1529,8 @@ One justification per row. Anything not here is a spec amendment before it is co
 | `charges=` on `reserve_effect` and `consume_approval_and_reserve` | §3.3, half of the milestone's amendment to a frozen protocol |
 | `scope=` on `@protect` and `Control.execute` | `preconditions=` answers a different question (§5.2), and §5.2.1 amends `v0.7 §6.9` to add it |
 | `task=` on `@protect` and `Control.execute` | nothing carries a unit of work today, and it cannot go on `Action` without moving every action hash in existence (§6.3.1) |
-| `task=` on `Authority.evaluate` | **the name §6.3.1 was missing.** `Authority.evaluate` is public (`authority.py:884`) and takes `action, now, store`; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision. A keyword, defaulting to `None`, so an existing caller is unchanged |
+| `task=` on `Authority.evaluate` | **amends a signature frozen in `SPEC-v0.3.md` §11**, and §10.3 records the amendment rather than slipping it in. `Authority.evaluate(action, *, now, store)` is frozen there; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision |
+| `task=` on `Control.evaluate` | **also amends a frozen signature** (`SPEC-v0.3.md` §11: "its signature and `Evaluation`'s two fields are unchanged"). Required by §6.3.2: without it `Control.evaluate` and `Control.execute` disagree about a task-bound grant, and `ctrlrun.adapter.needs_approval` routes through `evaluate` |
 | `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only |
 | `Consumption` | what `consumptions()` returns: `grant_id`, `metric`, `amount`, `effect_key`, `attempt`, `consumed_at`, `released_at`. Frozen here because §3.3.3 returns it and §7.2 renders it, and a return type specified nowhere is a spec amendment waiting to happen |
 
@@ -1467,6 +1554,19 @@ Item 7 asserts every one of them is written by something before the release PR o
 `SPEC-v0.7.md` §12's D27 rule, which v0.8 ran for three items without incident.
 
 **`ctrlrun.guarantees/v5`** is G1 to G24, moved once by item 1 with G24 (§8).
+
+### 10.3 Two frozen signatures amended, recorded as `v0.3 §11` requires
+
+`SPEC-v0.3.md` §11 freezes `Authority.evaluate(action, *, now, store)` and says of `Control.evaluate`
+that "its signature and `Evaluation`'s two fields are unchanged". v0.9 adds `task=` to both, and
+`v0.3 §11`'s own rule for changing a frozen name is that the signature is amended in the same item
+that changes it. §5.2.1 follows that rule for `v0.7 §6.9`; these two rows follow it here.
+
+Both take `task: str | None = None`. **"An existing caller is unchanged" is nearly true and not
+quite**, which is the kind of claim this document has been wrong about before, so it is checked
+rather than asserted: `tests/test_verify_authority.py:112-120` monkeypatches `Authority.evaluate`
+with `def wrong_reason(self, action, *, now, store)`, and once `_authority_result` passes `task=`
+that patch raises `TypeError`. Item 1 updates it in the same PR.
 
 ### 10.2 The module map
 
