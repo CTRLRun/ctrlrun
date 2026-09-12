@@ -1591,6 +1591,9 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         # a v0.6 feature than that one: §9.4's claim is about the surface *this milestone* grew,
         # and a subcommand landing before the tag does not retroactively make it one.
         "scan",
+        # SPEC-v0.8 §5.3, §11.1. Opening a break-glass envelope is an act, and acts get
+        # commands. It is a v0.8 addition on the v0.8 line, not a v0.6 one.
+        "break-glass",
     ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)

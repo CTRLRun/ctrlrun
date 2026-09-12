@@ -43,12 +43,15 @@ from .approval import (
     _precondition_fingerprint,
     _required_roles,
     check_consumable,
+    entitled_controls,
     policy_in_force,
+    roles_held,
     unsatisfied,
 )
 from .authority import (
     Authority,
     AuthorityResult,
+    BreakGlassEnvelope,
     CreatedVia,
     Delegation,
     Grant,
@@ -197,6 +200,12 @@ class _Invocation:
 
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
+#: SPEC-v0.8 §5.4 — the grant that decided the action being recorded, for the receipt. A
+#: context variable rather than an argument threaded through `_record`'s dozen call sites,
+#: on the precedent of `_PRESENTED_APPROVAL` beneath it: `Control` is shared across calls and
+#: holds no per-call state, and a context variable is per-call by construction.
+_AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_grant_id")
+
 _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
 #: SPEC-v0.7 §4.3. The token of the attempt whose executor is running, and nothing else. Set
@@ -658,10 +667,22 @@ class Control:
         return self._policy.evaluate(action)
 
     def _authority_result(self, action: Action) -> AuthorityResult | None:
-        """The authority axis for this action, or `None` where there is no section (§4.1)."""
+        """The authority axis for this action, or `None` where there is no section (§4.1).
+
+        SPEC-v0.8 §5.4: it also remembers which grant decided, for the receipt. Here rather
+        than at the four call sites, because a site that forgot would produce a receipt whose
+        `authority_grant_id` was the **previous** action's, and a stale id on the evidence is
+        worse than none. Set on every call, including to `None`, for the same reason.
+        """
         if self._authority is None:
+            _AUTHORITY_GRANT_ID.set(None)
             return None
-        return self._authority.evaluate(action, now=self._clock(), store=self._store)
+        result = self._authority.evaluate(action, now=self._clock(), store=self._store)
+        # Only where one passed: `grant_id` is also set on a refusal, and a committed receipt
+        # is the only thing this field is read on. §4.6's `min` already picked which grant of
+        # several decided, so this is that decision and not a guess about it.
+        _AUTHORITY_GRANT_ID.set(result.grant_id if result.passed else None)
+        return result
 
     def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
         """SPEC-v0.3 §7 — the ids travel here, and never in `decision_reason`.
@@ -2929,6 +2950,132 @@ class Control:
         """
         return self._delegate(parent_id, grant, by=by, via="api")
 
+    def break_glass(
+        self, envelope_id: str, grant: Grant, *, by: Principal | None = None, reason: str = ""
+    ) -> Delegation:
+        """Open a break-glass grant beneath a declared envelope (SPEC-v0.8 §5.3).
+
+        There is no flag. What this creates is an ordinary delegation: recorded, bounded by the
+        envelope on every dimension `contained_dimension` knows, expiring, revocable and
+        attenuable, and named on the receipt of every action taken under it. A setting that
+        skipped a check would have none of those five properties, which is the whole argument
+        of §5.1.
+
+        **The opener is a verified principal and never an assertion.** `by` defaults to whoever
+        the deployment's `ApproverIdentity` resolves, and a deployment that names none cannot
+        open one at all: there would be nobody to check the envelope's `controls:` against, and
+        an unchecked opener is the flag this section refuses under another name (§5.3.1).
+
+        `reason` is free text on the `DELEGATION_CREATED` event. The kernel does not interpret
+        it, exactly as it does not interpret `source:`.
+        """
+        authority = self._require_authority("break-glass")
+        envelope = authority.envelopes.get(envelope_id)
+        opener = self._opener_for(envelope_id, envelope, by)
+        now = self._clock()
+        try:
+            planned = authority.plan_break_glass(
+                envelope_id, grant, by=opener, store=self._store, now=now
+            )
+        except IdentityError:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {"reason": PRINCIPAL_EXPIRED, "parent_id": envelope_id},
+            )
+            raise
+        except AuthorityEscalation as escalation:
+            data: dict[str, Any] = {"reason": escalation.reason, "parent_id": envelope_id}
+            if escalation.dimension is not None:
+                data["dimension"] = escalation.dimension
+            self._append_delegation(EventType.DELEGATION_REJECTED, data)
+            raise
+        self._store.put_delegation(planned.to_record())
+        self._append_delegation(
+            EventType.DELEGATION_CREATED,
+            {
+                "delegation_id": planned.delegation_id,
+                "parent_id": planned.parent_id,
+                "depth": planned.depth,
+                "created_by_agent": opener.agent,
+                "created_by_user": opener.user,
+                "created_via": "break-glass",
+                "reason": reason,
+            },
+        )
+        _LOG.warning(
+            "break-glass %s opened beneath %s by %s until %s: %s",
+            planned.delegation_id,
+            envelope_id,
+            opener.agent,
+            planned.grant.expires_at,
+            reason or "no reason given",
+        )
+        return planned
+
+    def _opener_for(
+        self, envelope_id: str, envelope: BreakGlassEnvelope | None, by: Principal | None
+    ) -> Principal:
+        """Who is opening this envelope, and may they? (SPEC-v0.8 §5.3.1.)
+
+        Rule 4 does not apply to an envelope: its subject names the agents a break-glass grant
+        may be **for**, and the opener is a human. What gates the opener is the envelope's
+        `controls:`, whose `approver_role` this checks against the roles the opener holds.
+
+        An unknown envelope is left to `plan_break_glass` to refuse, so `--envelope` naming an
+        ordinary grant gets §5.3.1's message rather than one about a missing configuration.
+        """
+        identity = self._approver_identity
+        if identity is None:
+            raise InvalidArgument(
+                "opening a break-glass envelope needs an approver identity: the envelope names "
+                "the controls that gate who may open it, and with nobody resolved there is no "
+                "principal to check them against. Build the Control with "
+                "approver_identity=ApproverIdentity(provider, roles_claim=...) "
+                "(SPEC-v0.8 §5.3.1)"
+            )
+        opener = (
+            by
+            if by is not None
+            else identity.resolve(
+                IdentityContext(action="ctrlrun.break-glass", environment=self.environment)
+            )
+        )
+        if opener is None:
+            raise IdentityError(
+                "the approver identity resolved nobody, so this break-glass envelope has no "
+                "opener to check against its controls (SPEC-v0.8 §5.3.1)"
+            )
+        if envelope is None:
+            return opener
+        required = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in envelope.controls
+            )
+            if control is not None and control.approver_role
+        )
+        held = roles_held(opener, identity.roles_claim)
+        missing = unsatisfied(required, entitled_controls(required, held))
+        if missing is not None:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {
+                    "reason": APPROVER_UNENTITLED,
+                    "parent_id": envelope_id,
+                    "control": missing.control,
+                    "role": missing.role,
+                },
+            )
+            raise AuthorityEscalation(
+                f"{opener.agent!r} does not hold the role {missing.role!r} required by control "
+                f"{missing.control!r}, which gates who may open {envelope_id!r} "
+                "(SPEC-v0.8 §5.3.1)",
+                reason=APPROVER_UNENTITLED,
+                parent_id=envelope_id,
+            )
+        return opener
+
     def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
         """Revoke one delegation (SPEC-v0.3 §5.7).
 
@@ -3156,6 +3303,13 @@ class Control:
         # both new fields null, which is what makes "would_have present on every observed run
         # and absent on every refused one" true in both directions.
         receipt = Receipt(
+            # SPEC-v0.8 §5.4 — which grant let this through, on **every** action decided by
+            # authority and not only under break-glass. `AuthorityResult.grant_id` already
+            # reaches the events; what nothing did was put it on the receipt, so answering
+            # "what did this grant let through" meant joining events by hand. A field that
+            # existed only under break-glass would be one nothing exercises on the ordinary
+            # path, and so one nobody would notice breaking.
+            authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,

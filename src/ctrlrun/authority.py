@@ -952,6 +952,105 @@ class Authority:
 
     # --- delegation (SPEC-v0.3 §5) -----------------------------------------------------
 
+    def plan_break_glass(
+        self,
+        envelope_id: str,
+        grant: Grant,
+        *,
+        by: Principal,
+        store: StateStore,
+        now: datetime,
+    ) -> Delegation:
+        """The delegation `Control.break_glass` would write, or a refusal (SPEC-v0.8 §5.3).
+
+        `plan_delegation` with two differences, and both are §5.3.1's:
+
+        - **`envelope_id` resolves only in `envelopes`.** An id naming an ordinary grant is
+          refused by name, whether or not it also names nothing here. Without that,
+          `--envelope <a delegable grant id>` would reach a path where rule 4 is skipped for a
+          grant that has no `controls:` to gate it instead, which is strictly weaker than what
+          `ctrlrun delegate` requires beneath the same grant (T334b).
+        - **Rule 4 does not apply.** An envelope's subject names the agents a break-glass grant
+          may be *for*; the principal opening one is a human. What gates the opener is the
+          envelope's `controls:`, checked by `Control` where the approver identity is.
+
+        Every other rule of `v0.3 §5.3` applies unchanged: unknown parent, expiry, containment,
+        depth. And one this adds: a grant beneath an envelope **must** carry an expiry, and one
+        beyond `max_ttl` is refused.
+        """
+        envelope = self._envelopes.get(envelope_id)
+        if envelope is None:
+            named = (
+                " it names a grant, and a grant is not an envelope: opening one beneath it "
+                "would skip the subject check that 'ctrlrun delegate' applies there, and a "
+                "grant has no 'controls:' to gate the opener instead"
+                if envelope_id in self._grants
+                else " no envelope of that name is declared"
+            )
+            raise AuthorityEscalation(
+                f"no break-glass envelope {envelope_id!r};{named}. An envelope is declared "
+                "under 'authority: break_glass:' and names the controls that gate who may open "
+                "it (SPEC-v0.8 §5.2, §5.3.1)",
+                reason=UNKNOWN_PARENT,
+                parent_id=envelope_id,
+            )
+        if by.expires_at is not None and now > by.expires_at:
+            raise IdentityError(
+                f"the opening principal's credential expired at {by.expires_at}; an expired "
+                "credential may not create authority (SPEC-v0.3 §5.3 rule 0)"
+            )
+        if grant.id:
+            raise InvalidArgument(
+                f"the grant passed to break_glass() carries id {grant.id!r}; a delegation's id "
+                "is assigned, not chosen (SPEC-v0.3 §5.2)"
+            )
+        if grant.expires_at is None:
+            # §5.3's one added rule. An ordinary delegation may carry no expiry; a break-glass
+            # grant that outlives the incident is the thing this section exists to prevent.
+            raise AuthorityEscalation(
+                f"a grant opened beneath {envelope_id!r} must carry 'expires_at'; break-glass "
+                "authority that outlives the incident is what an envelope exists to prevent "
+                "(SPEC-v0.8 §5.3)",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension="expires_at",
+            )
+        if grant.expires_at > now + envelope.max_ttl:
+            raise AuthorityEscalation(
+                f"a grant opened beneath {envelope_id!r} expires at {grant.expires_at}, beyond "
+                f"its max_ttl of {envelope.max_ttl} from now ({now + envelope.max_ttl})",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension="expires_at",
+            )
+        depth = 1
+        if depth > self._max_delegation_depth:
+            raise AuthorityEscalation(
+                f"a delegation of {envelope_id!r} would be at depth {depth}, beyond "
+                f"max_delegation_depth {self._max_delegation_depth}",
+                reason=MAX_DEPTH,
+                parent_id=envelope_id,
+            )
+        dimension = contained_dimension(envelope.grant, grant)
+        if dimension is not None:
+            raise AuthorityEscalation(
+                f"the break-glass grant is not contained in {envelope_id!r} on {dimension!r}; "
+                "omission never means unlimited (SPEC-v0.3 §5.4)",
+                reason=CONTAINMENT,
+                parent_id=envelope_id,
+                dimension=dimension,
+            )
+        delegation_id = new_delegation_id()
+        return Delegation(
+            delegation_id=delegation_id,
+            parent_id=envelope_id,
+            depth=depth,
+            grant=replace(grant, id=delegation_id),
+            created_by=by,
+            created_via="break-glass",
+            created_at=now,
+        )
+
     def plan_delegation(
         self, parent_id: str, grant: Grant, *, by: Principal, store: StateStore, now: datetime
     ) -> Delegation:
