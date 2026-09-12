@@ -195,6 +195,20 @@ def test_T311_a_second_grant_from_the_same_principal_counts_once(store, clock):
     assert record.approvers[0].granted_at == clock.now, "the entry moves, the count does not"
 
 
+# --- T313 lives elsewhere -------------------------------------------------------------------
+#
+# SPEC-v0.8 §4.3's concurrency case needs the TCP proxy, the spawned child processes and the
+# armed hold that open the window between the count's read and its write, and all three live in
+# `tests/test_attempt_integrity.py`. It is
+# `test_T313_two_processes_granting_in_the_window_produce_two_approvers`, and it fails against a
+# compare-and-set on `status` alone, which is the shape this store had.
+#
+# Nothing in this file reproduces that window, and the fourth mutation shape in
+# `CONTRIBUTING.md` is why
+# that is written down rather than left to be noticed: every test here passes against a store
+# with no compare-and-set whatever.
+
+
 # --- T312: after N, a further grant is refused as it always was -------------------------------
 
 

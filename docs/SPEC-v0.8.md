@@ -1602,7 +1602,9 @@ forbids (the third).
   `granted_at` moves.
 - **T312:** a grant arriving after the record reached `granted` is refused exactly as at 0.7.0, by
   `check_answerable` (§4.2).
-- **T313:** the concurrency case, deterministic, and it is aimed at the defect §4.3 names. Separate
+- **T313:** the concurrency case, deterministic, and it is aimed at the defect §4.3 names. It
+  lives in `tests/test_attempt_integrity.py` with the proxy and the child-process harness the
+  window needs, and `tests/test_m_of_n.py` names it where a reader of the item's tests looks. Separate
   OS processes against Postgres, with the window opened **between the read of `approvers` and the
   update**; N grants never become N+1 and one principal never fills two slots. The test is written
   so that it **fails against a compare-and-set on `status`**, because that is the shape the store

@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 
+from ctrlrun.action import Action, Principal
 from ctrlrun.effect import EffectState
 from ctrlrun.errors import CTRLRunError
 from failure_injection import Proxy, statement_of, upstream_of
@@ -93,7 +94,7 @@ CHILD = textwrap.dedent("""
     log.addHandler(Branches())
     log.setLevel(logging.WARNING)
 
-    OPS = ("reserve", "begin", "fail", "commit", "ambiguous", "resolve")
+    OPS = ("reserve", "begin", "fail", "commit", "ambiguous", "resolve", "grant")
     for step in job["steps"]:
         if step["op"] not in OPS:
             raise SystemExit("unknown step %r" % step["op"])
@@ -133,6 +134,18 @@ CHILD = textwrap.dedent("""
                     store.commit_effect(key, actor, {"refund": "re_1"})
                 elif op == "ambiguous":
                     store.mark_ambiguous(key, actor, "the outcome was lost")
+                elif op == "grant":
+                    # SPEC-v0.8 §4.3, T313. The principal is the step's, because the whole
+                    # question is whether two *distinct* ones both survive the window.
+                    from ctrlrun.action import Principal
+                    from ctrlrun.approval import _granting_principal
+
+                    who = Principal(agent=step["agent"], user=step["user"])
+                    with _granting_principal(who, entitled=step.get("entitled") or ()):
+                        approval = store.grant_approval(step["approval_id"], step["who"])
+                    done["state"] = "granted" if approval is not None else "pending"
+                    record = store.get_approval(step["approval_id"])
+                    done["attempt"] = None if record is None else len(record.approvers)
                 else:
                     resolved = store.resolve_effect(key, EffectState(step["to"]), step["resolver"])
                     done["attempt"] = resolved.attempt
@@ -976,6 +989,115 @@ def stale_write(proxy, home, schema: str, key: str, held_steps, rival_steps):
         held.kill()
     assert proxy.holds == 1
     return outcome, rival, read
+
+
+# --- T313: the M-of-N count, in the window between its read and its write ---------------------
+
+
+@postgres
+def test_T313_two_processes_granting_in_the_window_produce_two_approvers(proxy, schema, home):
+    """SPEC-v0.8 §4.3. The window is between the read of `approvers` and the update of it.
+
+    Two OS processes, two distinct verified principals, one request needing two yeses. The proxy
+    holds ALICE's `UPDATE` after her connection has already read the row — an empty approver
+    list — and BOB's grant lands in that window. When ALICE's update is released it must not
+    write the list she read over the one BOB wrote.
+
+    **It fails against a compare-and-set on `status`,** which is the shape the store had and the
+    shape a reviewer found: `status` is still `pending` when ALICE's held update lands, so the
+    condition holds, her write succeeds, and the row ends with one approver and a threshold of
+    two that a third yes would have to fill. Nobody would ever know: two humans answered and the
+    record says one did.
+
+    `CONTRIBUTING.md`'s fourth mutation shape is the reason this test exists at all. Item 4's serial
+    tests pass against a store with no compare-and-set whatever, because a read and a write with
+    nothing in between is correct right up until something *is* in between.
+    """
+    from ctrlrun.approval import RequiredRole, _required_roles, build_request
+
+    request_id = None
+    setup = direct(schema)
+    try:
+        action = Action(
+            name="payments.refund",
+            arguments={"amount": 100, "payment_id": "EU-42"},
+            principal=Principal(agent="ops-agent", user="ada"),
+            environment="production",
+        )
+        with _required_roles((RequiredRole(control="c1", role="payments-owner"),), 2):
+            request = build_request(action, timedelta(minutes=15), T0)
+        setup.put_approval_request(request)
+        request_id = request.request_id
+    finally:
+        setup.close()
+
+    def grant(name: str, agent: str, at: datetime) -> dict:
+        return step(
+            "grant",
+            "",
+            "",
+            at,
+            approval_id=request_id,
+            who=f"mcp-operator:{name}",
+            agent=agent,
+            user=f"{name}@example.com",
+            entitled=["c1"],
+        )
+
+    held = Child(
+        home,
+        "alice",
+        url=proxy.url(URL),
+        schema=schema,
+        gated=True,
+        steps=[grant("alice", "human:alice", T0 + timedelta(seconds=1))],
+    )
+    try:
+        held.wait_ready()
+        proxy.reset_counters()
+        proxy.arm(approvals_statement(b"UPDATE", schema))
+        held.go()
+        assert proxy.holding.wait(BOUND), (
+            "alice's UPDATE never reached the proxy, so the window between the count's read and "
+            "its write was never opened and this test has proved nothing"
+        )
+        rival = Child(
+            home,
+            "bob",
+            url=URL,
+            schema=schema,
+            gated=False,
+            steps=[grant("bob", "human:bob", T0 + timedelta(seconds=2))],
+        ).result()
+        assert rival["error"] is None, f"bob did not complete: {rival}"
+        assert rival["results"][0]["attempt"] == 1, (
+            f"bob's grant recorded {rival['results'][0]['attempt']} approvers, not 1: the window "
+            "was opened somewhere other than where this test believes"
+        )
+        assert held.running(), "alice finished while her UPDATE was being held"
+        proxy.release()
+        outcome = held.result()
+    finally:
+        proxy.release()
+        held.kill()
+
+    assert proxy.holds == 1
+    assert outcome["error"] is None, f"alice's grant was refused: {outcome}"
+
+    after = direct(schema)
+    try:
+        record = after.get_approval(request_id)
+    finally:
+        after.close()
+    assert record is not None
+    agents = sorted(approver.agent for approver in record.approvers)
+    assert agents == ["human:alice", "human:bob"], (
+        f"the row ended with {agents}: one human's yes was written over the other's inside the "
+        "window, and the request still needs a third answer that two people already gave"
+    )
+    assert str(record.status) == "granted", (
+        f"two distinct principals answered and the request is {record.status}"
+    )
 
 
 REUSED = "act_reused"
