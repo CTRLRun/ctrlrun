@@ -29,6 +29,23 @@ any change to one appears here.
   The task reaches the authority decision and the receipt, and **never the action hash**: a field
   on `Action` would move every hash in existence and invalidate every stored approval.
 
+- **Consequence budgets, in the document** (SPEC-v0.9 §2). A grant may carry `budgets:`, each a
+  `metric`, a `limit` and a `window`. They load, validate, render into the policy hash, and
+  attenuate down a delegation chain. **Nothing counts yet**: the ledger and the spending are
+  separate items, so this release note describes a contract and not an enforcement.
+
+  **The window axis reads backwards, and it is worth stating plainly.** Over the same limit a
+  *shorter* window is a *higher rate*: a child of 100,000 per hour under a parent of 100,000 per
+  day is 24 times the parent's authority, and is rejected. A child of 100,000 per week is one
+  seventh the rate, and is accepted. Containment is existential: for every parent budget there
+  must exist a child budget on the same metric with `limit <=` and `window >=`, so one child
+  budget may discharge several of its parent's.
+
+  A metric names an action argument, or `count`. Its value must be a **non-negative integer that
+  is not a `bool`**, so money is budgeted in minor units, as `examples/authority/payments.yaml`
+  already does for every constraint. The kernel does not know what any metric means: there is no
+  branch on a metric name anywhere.
+
 - **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
   a callable that answers what the calling principal's assigned scope is; **the kernel matches**
   this action's resource into it, with the relation a grant's `resources:` already uses. It runs
