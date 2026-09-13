@@ -1035,3 +1035,23 @@ def test_T413s_G22_grades_the_same_alone_as_it_does_in_a_full_run(tmp_path):
         f"alone: {alone.status} ({alone.reason}); in a full run: {together.status}"
     )
     assert alone.status is not Status.FAIL, alone.reason
+
+
+@pytest.mark.parametrize("gid", ["G22", "G23", "G24"])
+def test_T413t_a_v09_guarantee_grades_the_same_alone_as_in_a_full_run(gid, tmp_path):
+    """The invariant G22 broke, over all three guarantees this milestone added.
+
+    A guarantee that grades differently on its own is reading state an earlier scenario left
+    behind, and the report cannot be trusted either way round: whichever answer is right, one of
+    them is being produced for the wrong reason. Checked against the same fixture the rest of
+    this file uses, so it stays cheap enough to keep.
+    """
+    path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
+
+    alone = _by_id(run(path, only=(gid,)))[gid]
+    together = _by_id(run(path))[gid]
+
+    assert alone.status is together.status, (
+        f"{gid} alone: {alone.status} ({alone.reason}); in a full run: {together.status} "
+        f"({together.reason})"
+    )
