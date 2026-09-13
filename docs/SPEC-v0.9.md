@@ -637,6 +637,7 @@ def consumptions(
     grant_id: str | None = None,
     metric: str | None = None,
     since: datetime | None = None,
+    effect_key: str | None = None,
 ) -> tuple[Consumption, ...]: ...
 ```
 
@@ -644,6 +645,14 @@ def consumptions(
 observable, and a required `grant_id` would make that require enumerating every grant id that ever
 existed, runtime delegations and revoked grants included, one call each. `Consumption`'s fields are
 frozen in §10.
+
+**`effect_key` was added by item 5 and is recorded here rather than slipped in**, on §10's rule that
+anything not in that section is a spec amendment before it is code. §8.3 makes the resumed leg's
+receipt the only receipt an MCP multi round-trip or ACS action ever gets, so it has to report what
+that action spent; a gateway that restarted mid-round has nothing in memory to report it from, and
+the ledger is the record. Without the filter that read is a scan of the whole ledger per
+resumption. The other three filters could not serve: the question is "what did *this effect* spend",
+and a resumption knows its effect key and not which grants a chain of ancestors charged.
 
 **And the "why" of §7.2 is a join, not a column.** `get_effect(effect_key)` is already declared
 (`state.py:563`), so an un-released row's holding state is read by joining its `effect_key` through
@@ -1642,7 +1651,7 @@ third-party backend already imports `StateStore` from that module.
 | `task=` on `@protect` and `Control.execute` | nothing carries a unit of work today, and it cannot go on `Action` without moving every action hash in existence (§6.3.1) |
 | `task=` on `Authority.evaluate` | **amends a signature frozen in `SPEC-v0.3.md` §11**, and §10.3 records the amendment rather than slipping it in. `Authority.evaluate(action, *, now, store)` is frozen there; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision |
 | `task=` on `Control.evaluate` | **also amends a frozen signature** (`SPEC-v0.3.md` §11: "its signature and `Evaluation`'s two fields are unchanged"). Required by §6.3.2: without it `Control.evaluate` and `Control.execute` disagree about a task-bound grant, and `ctrlrun.adapter.needs_approval` routes through `evaluate` |
-| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only. Rows come back **in insertion order**, which is deterministic and identical across the three backends and is *not* a time ordering: host clock skew, which `v0.7 §3` models, inverts `consumed_at` against the id |
+| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only. Rows come back **in insertion order**, which is deterministic and identical across the three backends and is *not* a time ordering: host clock skew, which `v0.7 §3` models, inverts `consumed_at` against the id. Its `effect_key` filter was added by item 5 for §8.3's resumed receipt, and §3.3.3 records why the other three could not serve |
 | `check_charges` | §3.3.1's predicate in one place, so three backends cannot drift on the arithmetic. Public for the same reason `plan_reservation` is: a third-party store decides with it rather than reimplementing it |
 | `Consumption` | what `consumptions()` returns: `grant_id`, `metric`, `amount`, `effect_key`, `attempt`, `consumed_at`, `released_at`. Frozen here because §3.3.3 returns it and §7.2 renders it, and a return type specified nowhere is a spec amendment waiting to happen |
 
@@ -1666,6 +1675,26 @@ Item 7 asserts every one of them is written by something before the release PR o
 `SPEC-v0.7.md` §12's D27 rule, which v0.8 ran for three items without incident.
 
 **`ctrlrun.guarantees/v5`** is G1 to G24, moved once by item 1 with G24 (§8).
+
+**`ctrlrun.budget/v1`**, added by **item 6** for §7.2, and recorded here rather than slipped in.
+Its own document rather than a key inside `ctrlrun.inspection/v2`, because that one answers about an
+**action** and this answers about a **grant**: a reader handed one would have to know which of two
+shapes it got before it could read either. §7.1's "no new command" is the surface question and a
+separate one, and `ctrlrun inspect --grant` keeps it.
+
+| Key | Holds |
+|---|---|
+| `grant_id` | the grant asked about, document grant or runtime delegation alike |
+| `at` | the instant the three numbers were read, because every one of them is a rolling-window answer and stale without it |
+| `budgets[].metric`, `.limit`, `.window_seconds` | the budget as declared. Seconds, for `_canonical_grant`'s reason in §10 |
+| `budgets[].consumed` | the un-released sum over the window: **the number that decides** (§3.3.1) |
+| `budgets[].held` | the part of it whose effects have not reached `COMMITTED` (§7.2) |
+| `budgets[].holding[]` | `effect_key`, `state`, `amount`, `attempt`, `consumed_at`: §7.2's "why", one entry per held charge. `state` is `null` where the effect record is gone, which §7.3's archiving paragraph permits |
+
+`ctrlrun.stats/v1` gains `ledger_rows` **additively** and does not move, per §7.3. It is omitted
+rather than reported as `0` on a store with no ledger: "no rows" and "this store predates budgets"
+are different facts, and a diagnostic that conflates them sends an operator looking for spend that
+was never possible.
 
 ### 10.3 Two frozen signatures amended, recorded as `v0.3 §11` requires
 
