@@ -527,11 +527,29 @@ back where it already reads that event (`control.py:1943`), and the resumed leg 
 **This retires `v0.9 §6.3.2`'s third mode rather than extending it.** That section named "not
 evaluated, on one dimension, on one path" as a third mode beside `v0.3 §5.6.1`'s two, and said it
 got its own sentence because an implementer reaching for `v0.3 §5.6.1` gets the wrong one. With the
-task recoverable from the event, the mode has nothing left to cover: `evaluate_task=False` stays in
-the signature for a lease extension, which genuinely has no task, and `Control.resume` stops using
-it. **The item that lands this updates `SPEC-v0.9.md` §6.3.2's table row in the same PR**, because a
-spec that still says the dimension is not evaluated there would be describing code that evaluates
+task recoverable from the event, the mode has nothing left to cover **on a leg this build
+suspended**. `evaluate_task=False` stays in the signature, and `Control.resume` keeps using it in
+exactly two places: a lease extension, which genuinely has no task, and **a leg suspended by 0.9.0**.
+**The item that lands this updates `SPEC-v0.9.md` §6.3.2's table row in the same PR**, because a
+spec that still says the dimension is never evaluated there would be describing code that evaluates
 it.
+
+**The upgrade case is the one to get right, and an earlier draft of this section got it wrong by
+saying `resume` stops using `evaluate_task=False` outright.** An action suspended by 0.9.0 and
+resumed by this build has an `EXECUTION_STARTED` whose `data` is `{}`, because 0.9.0 wrote it that
+way. Evaluating the task dimension against a value that is absent would hit `v0.9 §6.4`, a grant
+naming a task refuses an action naming none, and **every in-flight action across the upgrade would
+be denied on the only receipt an MCP multi round-trip ever gets**. So:
+
+| What `EXECUTION_STARTED` carries | Resumed leg |
+|---|---|
+| both values, written by this build | evaluated on **both** dimensions, and the hop selects the grant |
+| neither, written by 0.9.0 | evaluated as 0.9.0 evaluated it: `evaluate_task=False`, and no hop selection |
+
+**A missing value is absence, not a refusal**, and the distinction is load-bearing exactly once, at
+the upgrade. It is not a widening the other way round: a leg this build suspended always carries
+both, so the absent case cannot be manufactured by a caller, only by having been suspended before
+the upgrade. T487 is the test, and §10 carries the row.
 
 **And the ambient-context hazard stays closed, which is the reason to read the value from the event
 and not from a context variable.** `v0.9 §6.3.2`'s closing paragraph works out that a task read from
@@ -540,6 +558,34 @@ evaluate the resumed leg against an unrelated task. The event is durable, is bou
 `action_id`, and was written by the leg that actually held the authority. **Nothing on this path
 reads either value from an ambient context**, and a test asserts it by resuming inside an unrelated
 `task=` and `hop=` and requiring the event's values to win.
+
+#### 3.4.3 A relay agent is both sides at once, and the field is single-valued
+
+The table above has two rows and a chain of two hops has a **middle**: an agent that presents one
+hop and creates another during the same action. §2.6's own worked example contains one, so this is
+the ordinary case rather than an edge.
+
+`Receipt.hop` is one string, so the precedence is stated rather than left to an implementation.
+
+**The receipt's `hop` names the hop the action ran UNDER, never the hop it created.** A receipt is
+evidence about a decision, and the decision was made against the presented hop (§2.3). The created
+hop authorised nothing on this action; it authorises somebody else's later one, and it is that
+action's receipt that will name it.
+
+**So the issuer row of the table above is the case where those two coincide**, and it is worth
+saying which way round: an agent acting under no hop and creating one writes the created id, because
+there is no presented one to displace it. An agent acting under a hop writes the presented one
+whether or not it also created something.
+
+**What finds the created hop instead**: `DELEGATION_CREATED` with `data.created_via = "hop"` and
+`data.delegation_id`, which `v0.3 §7` already appends and which §6.2's surface already reads. The
+evidence exists; it is an event rather than a receipt field, on §3.4.1's rule that a receipt carries
+what decided this action and nothing derivable elsewhere.
+
+**Rejected: two fields**, `hop_in` and `hop_out`. It would put a value on the hot path that is
+`null` on every receipt except a relay's, and it would make "which hop" answerable two ways on the
+one shape where an implementation is most likely to fill the wrong one. The two-hop chain in §2.6
+is then reconstructed by the walk, which is what `chain[]` renders (§6.2).
 
 ### 3.5 `ctrlrun.receipt/v7`
 
@@ -561,6 +607,8 @@ read from a store is hashed as the document it was read from.
 | T484 | A `ctrlrun.receipt/v6` receipt and a `v7` receipt in one chain both parse and the chain verifies across the boundary |
 | T485 | A suspended action resumed under a task-bound, hop-selected grant is evaluated on both dimensions and is **not** denied, with `EXECUTION_STARTED` carrying both values. `v0.9 §6.3.2`'s cost, paid |
 | T486 | The resume runs inside an unrelated `task=` and `hop=`: the event's values decide and the ambient ones reach nothing. `v0.9 §6.3.2`'s ambient-context hazard, still closed |
+| T487 | A leg suspended by **0.9.0** and resumed by this build: `EXECUTION_STARTED` carries neither value, the leg is evaluated as 0.9.0 evaluated it, and a task-bound grant does **not** deny it. The upgrade case (§3.4.2, §10) |
+| T488 | A relay agent presents one hop and creates another in the same action: its receipt's `hop` names the one it **acted under**, and the created hop is found from `DELEGATION_CREATED`. §3.4.3's precedence |
 
 ---
 
@@ -696,15 +744,15 @@ consequence sentence is written in the same voice.
 
 | | Test |
 |---|---|
-| T487 | A pinned certificate that matches admits the action; the negative control |
-| T488 | A swapped server behind the same name is refused at check 2 with `upstream_mismatch` and `-41013`, and the upstream is never called, asserted by a listener that records connections |
-| T489 | The same swap at check 3: the handshake fails, `NotExecuted` is raised before any request byte, and the effect is recorded `FAILED` and not `AMBIGUOUS` |
-| T490 | A tool whose advertised schema moved under an approved action name is refused; the identical schema is admitted. Both hashes computed through `canonical_bytes` |
-| T491 | An entry pinning an upstream that nothing has observed is refused `upstream_unverified`, not admitted |
-| T492 | Rotation: two hashes in `tls_cert_sha256`, either certificate admitted, a third refused |
-| T493 | The gateway refuses to start on a mismatch, printing observed beside pinned, exiting non-zero with nothing on stdout |
-| T494 | `upstream:` in a `ctrlrun.policy/v7` document is a load error naming the key and its consequence |
-| T495 | `upstream:` on an action that reaches the kernel through the ACS hook, or in-process, is a load error naming the surface |
+| T489 | A pinned certificate that matches admits the action; the negative control |
+| T490 | A swapped server behind the same name is refused at check 2 with `upstream_mismatch` and `-41013`, and the upstream is never called, asserted by a listener that records connections |
+| T491 | The same swap at check 3: the handshake fails, `NotExecuted` is raised before any request byte, and the effect is recorded `FAILED` and not `AMBIGUOUS` |
+| T492 | A tool whose advertised schema moved under an approved action name is refused; the identical schema is admitted. Both hashes computed through `canonical_bytes` |
+| T493 | An entry pinning an upstream that nothing has observed is refused `upstream_unverified`, not admitted |
+| T494 | Rotation: two hashes in `tls_cert_sha256`, either certificate admitted, a third refused |
+| T495 | The gateway refuses to start on a mismatch, printing observed beside pinned, exiting non-zero with nothing on stdout |
+| T496 | `upstream:` in a `ctrlrun.policy/v7` document is a load error naming the key and its consequence |
+| T497 | `upstream:` on an action that reaches the kernel through the ACS hook, or in-process, is a load error naming the surface |
 
 ---
 
@@ -779,13 +827,13 @@ budget from an observed run is untouched.
 
 | | Test |
 |---|---|
-| T496 | The generated property: over every constructible pair of refusals, enforce's raised reason equals observe's `blocked_reason`. The pair set is asserted non-empty and its size is reported |
-| T497 | `v0.9 §4.2.1b`'s first named case: out of scope and awaiting approval, both modes name the same reason |
-| T498 | Its second: `policy_unapproved` against a later refusal, both modes name the same reason |
-| T499 | Every pair the generator could not construct is named in the test's own output, and the list is asserted against the declared order so a shrinking pair set fails red |
-| T500 | The four v0.9 regressions as regression tests: the resumed observed receipt's spend, the doubled `_Observation` event, the `effect_key` on the budget-refusal event, and the picklability of every `InvalidArgument` subclass across `verify`'s JSON-over-stdin children |
+| T498 | The generated property: over every constructible pair of refusals, enforce's raised reason equals observe's `blocked_reason`. The pair set is asserted non-empty and its size is reported |
+| T499 | `v0.9 §4.2.1b`'s first named case: out of scope and awaiting approval, both modes name the same reason |
+| T500 | Its second: `policy_unapproved` against a later refusal, both modes name the same reason |
+| T501 | Every pair the generator could not construct is named in the test's own output, and the list is asserted against the declared order so a shrinking pair set fails red |
+| T502 | The four v0.9 regressions as regression tests: the resumed observed receipt's spend, the doubled `_Observation` event, the `effect_key` on the budget-refusal event, and the picklability of every `InvalidArgument` subclass across `verify`'s JSON-over-stdin children |
 
-T500's last row is the one nothing in this repository would otherwise catch, which is why §13.8
+T502's last row is the one nothing in this repository would otherwise catch, which is why §13.8
 named it, and it belongs to this item because this item rewrites the code that broke it.
 
 ---
@@ -854,11 +902,11 @@ grades an operator's document holds here, so `scan` reports and does not score.
 
 | | Test |
 |---|---|
-| T501 | `inspect --hop` over a two-hop chain renders every ancestor, each with the dimension it narrowed on, and `depth` derived by walking rather than read from the column |
-| T502 | An unknown hop id exits non-zero with nothing on stdout, as `inspect` does for an unknown action |
-| T503 | Each of the three refusals prints its command with the real id substituted; asserted by running the printed command and requiring exit 0 |
-| T504 | `--json` emits `ctrlrun.hop/v1` with exactly the keys §6.2 names |
-| T505 | `ctrlrun scan` names every principal holding a root grant, and omits one holding only hops |
+| T503 | `inspect --hop` over a two-hop chain renders every ancestor, each with the dimension it narrowed on, and `depth` derived by walking rather than read from the column |
+| T504 | An unknown hop id exits non-zero with nothing on stdout, as `inspect` does for an unknown action |
+| T505 | Each of the three refusals prints its command with the real id substituted; asserted by running the printed command and requiring exit 0 |
+| T506 | `--json` emits `ctrlrun.hop/v1` with exactly the keys §6.2 names |
+| T507 | `ctrlrun scan` names every principal holding a root grant, and omits one holding only hops |
 
 ---
 
@@ -881,6 +929,18 @@ over a generated pair set (§5.3) and item 5's is a rendering.
 | G25 | `a hop narrows or it is refused` | 30 | a hop that narrows correctly admits the action | no grant in the document is delegable |
 | G26 | `both receipts name one hop` | 26 | the two ids compared and equal | no grant in the document is delegable |
 | G27 | `a swapped upstream is denied` | 28 | the pinned upstream admits the action | no action entry pins an upstream |
+
+**G27 grades §4.3's check 2 and only check 2**, and the scope is written here because the title
+would fit either. Check 2 is the one that produces a `DENY`, which is what the guarantee's own words
+say; check 3 refuses at the handshake and produces `NotExecuted` with the effect `FAILED`, which is
+a different outcome under a different name. A scenario that graded the handshake would report `PASS`
+for a guarantee whose title promises a denial that never happened, and a scenario allowed to grade
+either would report `PASS` without anybody knowing which.
+
+It is also the only one `verify` can grade without a network: the comparison at check 2 is a pure
+function over two strings, so `verify` seeds an observation and asserts the refusal, with no TLS
+listener and no certificate to generate. Check 3's coverage is T491's, which is an acceptance test
+rather than a guarantee, and §4.3's table says which is which.
 
 Titles are counted against `report._TITLE_WIDTH`'s 32 (`verify/report.py:37`) rather than estimated,
 because v0.7 had to shorten one and v0.8 three.
@@ -1076,7 +1136,8 @@ effect of item 4 rewriting two methods inside it.
 | A hop's chain is revoked, expired, or no longer contained | **refused**, each under its own existing reason, never under `authority_hop` (§2.3.2 rule 3) |
 | A chain of hops and delegations exceeds `max_delegation_depth` | **refused**, `max_depth` (§2.5) |
 | A hop is presented with no resolvable receiving identity | **refused before an action exists** (§3.3), `-41007` at the gateway, no receipt and no events |
-| A resumed leg whose `EXECUTION_STARTED` carries no hop or task, written by 0.9.0 | **evaluated as 0.9.0 evaluated it**, on the dimensions it can recover. A missing value is absence, not a refusal, or every in-flight action across an upgrade would fail (§3.4.2) |
+| A resumed leg whose `EXECUTION_STARTED` carries no hop or task, written by 0.9.0 | **evaluated as 0.9.0 evaluated it**: `evaluate_task=False`, no hop selection. A missing value is absence, not a refusal, or every in-flight action across the upgrade would be denied on the only receipt it gets (§3.4.2's table, T487) |
+| A relay agent presents one hop and creates another in the same action | its receipt's `hop` names the hop it **acted under**; the created one is evidence as `DELEGATION_CREATED` (§3.4.3) |
 | An action entry pins an upstream and nothing has observed one | **refused**, `upstream_unverified` (§4.5). Never admitted |
 | An observed certificate hash is in no pinned list | **refused**, `upstream_mismatch`, `-41013`, upstream never called (§4.5) |
 | A swapped upstream at handshake time | **`NotExecuted` before the first request byte**, effect `FAILED`, not `AMBIGUOUS` (§4.3) |
