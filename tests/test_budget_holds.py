@@ -1324,3 +1324,43 @@ def test_T462_the_unmeasurable_refusal_survives_a_pickle_as_InvalidArgument_did(
     assert isinstance(back, InvalidArgument)
     assert back.reason == "budget_unkeyed"
     assert str(back) == "nope"
+
+
+def test_T463_observe_reports_one_refusal_and_not_every_check_that_would_have_failed(
+    store, clock
+) -> None:
+    """Enforce mode raises at the first refusal and never reaches the budget. Observe mode runs
+    every check, so it wrote a `budget_exhausted` event for an action enforce mode refuses out of
+    scope, and an operator reading the log saw a refusal that would never have happened.
+
+    `_observe_spend`'s own docstring used to claim the earlier clauses had returned by then. The
+    scope block and the approval gate do not return; they record and carry on.
+    """
+    document = DOC.replace(
+        '    effect: "refund:{id}"', '    effect: "refund:{id}"\n    resource: "payment:{id}"'
+    )
+    enforcing, observing, watcher = _both_modes(store, clock, document)
+    # Fill the budget in both stores, so the budget really would refuse if it were reached.
+    for control in (enforcing, observing):
+        control.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    somebody_else = lambda _action: {"resources": ["payment:999"]}  # noqa: E731
+    later = Action(
+        name="payments.refund",
+        arguments={"amount": 250, "id": "2"},
+        principal=AGENT,
+        resource="payment:2",
+        environment="prod",
+    )
+    with pytest.raises(ActionDenied) as refused:
+        enforcing.execute(later, lambda: {"ok": True}, "refund:2", scope=somebody_else)
+    assert refused.value.reason == "out_of_scope"
+
+    observing.execute(later, lambda: {"ok": True}, "refund:2", scope=somebody_else)
+
+    reasons = [
+        event.data.get("reason") for event in watcher.events() if str(event.type) == "ACTION_DENIED"
+    ]
+    assert reasons == ["out_of_scope"], (
+        f"the pilot recorded a refusal enforce mode never reached: {reasons}"
+    )

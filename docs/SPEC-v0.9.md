@@ -835,8 +835,37 @@ entire purpose is to hit nothing.
 **What it does instead**: the observe report says the action *would have been* refused on a budget,
 naming the grant and the metric, exactly as it reports what a policy would have decided. The
 predicate is `check_charges`, the same function all three stores enforce with, so the report and the
-enforcement cannot drift: a pilot that says "this would have been fine" about an action enforce mode
-refuses is worse than no pilot.
+enforcement cannot drift **on the arithmetic**: a pilot that says "this would have been fine" about
+an action enforce mode refuses is worse than no pilot.
+
+### 4.2.1b What observe mode does not promise about *which* refusal
+
+**The arithmetic is shared; the ordering is not**, and that limit is stated here rather than
+discovered. `_secure` and `_observe_secure` are separate implementations, for the reason
+`_observe_secure`'s docstring gives: they differ in almost every branch, and one writes no receipt
+and raises nothing. What they do not share is the order their checks run in, and `_Observation`
+keeps the **first** reason it is given.
+
+So for an action that trips more than one refusal, observe mode names the one *it* reached first,
+which is not always the one enforce mode would raise. Three cases were found and aligned, each with
+a test: the approval gate (T451), the reservation (T452), and the scope provider (T458). Two more
+are known and **not** aligned in v0.9:
+
+- **Scope against the approval gate.** `_secure` presents the approval above `_in_scope`;
+  `_observe_secure` checks scope first. An action both out of scope and awaiting approval is
+  reported `out_of_scope` by the pilot while enforce mode pages a human.
+- **`policy_unapproved` against anything decided after it.** Enforce refuses it above authority and
+  policy; observe records it below both, so it is lost whenever something later blocks first.
+
+Neither is an enforcement difference: observe mode refuses nothing either way, and the action runs
+in both. What an operator loses is the **category** of a refusal that would have happened, on an
+action that would have been refused regardless. **The rule to rely on is that observe mode reports
+a refusal exactly when enforce mode would refuse, and not that it always names the same one.**
+
+Aligning the rest means one ordered list of checks both modes walk, which is a refactor of
+`_secure` and `_observe_secure` together rather than a fourth reordering. Three reorderings in this
+milestone produced four regressions between them, and this section is the honest statement of where
+that stopped.
 
 §2.3's and §2.4.1's refusals are reported the same way, under their own reasons. Enforce mode
 refuses those actions, so saying so is what observe mode is for, and an operator needs to know

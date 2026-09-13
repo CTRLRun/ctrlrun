@@ -1713,8 +1713,11 @@ class Control:
         # `plan_reservation` runs before `check_charges` (§3.3), so an effect that is already
         # committed raises `DuplicateEffect` and the budget is never consulted. Reporting the
         # budget first told an operator to raise a limit when the real answer was that the effect
-        # had already happened. The clauses above have returned by now on every refusal enforce
-        # mode would have hit first, so what reaches here is what the budget would decide. T452.
+        # had already happened. T452.
+        #
+        # Not every earlier refusal returns before this: the scope block and the approval gate
+        # record and carry on. `_observe_spend` skips itself once anything has blocked, which is
+        # what keeps the report to the one refusal enforce mode would have raised.
         self._observe_spend(action, charges, observation, effect_key)
         return approval, reservation
 
@@ -3400,7 +3403,8 @@ class Control:
         """§4.2.1's second half: whether the budget would have refused, writing nothing.
 
         The predicate is `check_charges`, the same function all three stores decide with, so the
-        report and the enforcement cannot drift: a pilot that said "this would have been fine"
+        report and the enforcement cannot drift **on the arithmetic** (§4.2.1b states what is not
+        promised about *which* refusal is named): a pilot that said "this would have been fine"
         about an action enforce mode refuses is worse than no pilot.
 
         **The sum is a lock-free read** off the public `consumptions()` rather than a store's
@@ -3408,12 +3412,19 @@ class Control:
         write nothing. It is therefore stale under concurrency, which is correct for a
         counterfactual and would not be for a decision.
 
+        **Skipped once something else has blocked.** Enforce mode raises at the first refusal and
+        never reaches the budget; observe mode runs every check, so without this it wrote a
+        `budget_exhausted` event for an action enforce mode refuses out of scope, and an operator
+        reading the log saw a refusal that would never have happened. An earlier version of this
+        docstring claimed the clauses above had already returned by then, which was not true of
+        the scope block or the approval gate.
+
         `check_charges` can also raise `InvalidArgument` for two charges on one grant and metric
         carrying different amounts (§3.3.1). Nothing reachable produces that shape -- §2.7's
         ancestors are distinct grants, and one grant's two budgets on one metric always agree --
         and observe mode is not the place to raise about it if something ever does.
         """
-        if not charges:
+        if not charges or observation.blocked_reason is not None:
             return
         now = self._clock()
 
