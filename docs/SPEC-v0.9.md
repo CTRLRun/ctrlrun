@@ -1991,3 +1991,51 @@ document whose patterns matched perfectly. A budget smaller than any single acti
 that band unreachable, which is worth saying in those words. §7.4's shipped example keeps a budget
 large enough that its own approve band is reachable, because a daily budget smaller than one
 permitted action is legal and almost always a mistake.
+
+### 13.8 The two review rounds, and the guarantee that was not graded
+
+**Written after the milestone merged**, because both rounds ran against code that was already
+pushed and called done, and what they found is the part of this milestone most worth carrying
+forward.
+
+**The headline guarantee was passing for a reason that had nothing to do with it.** G22 proves that
+a budget holds a charge, and it resolved the charges it fills the budget with through
+`Control._charges_for`, which answers from a context variable only `execute` sets. G22 runs it
+*before* its own control leg, so it returned `()` whenever nothing had executed in that context yet.
+The synthetic hold reserved nothing, the budget was never filled, and the next action ran.
+`ctrlrun verify --only G22` therefore reported **FAIL** on `examples/authority/payments.yaml` -- the
+status that means the kernel is broken -- while a full run reported `PASS`, because an earlier
+scenario's `execute` had left its result in that variable.
+
+Two things make this the most instructive finding here. The first is that **the milestone's own
+evidence that budgets work was partly an accident of ordering**, and every green run said otherwise.
+The second is how it was found: not by either review, but by a document written to test one of the
+review's *mutation survivors*. Neither adversarial pass looked at whether a guarantee grades the
+same alone as in a full run, and that question turned out to be the one that mattered. It is now a
+test, and all twenty-four guarantees were checked by hand against both shipped examples: G22 was the
+only one.
+
+**Fixing a review's findings introduced four more defects**, all in the same two files, and the
+second round found them. An observed resumed receipt reported another action's spend, because the
+call that was also the contextvar's reset got skipped on the observe path -- T448's defect, on the
+one receipt §8.3 makes the whole evidence for an MCP multi round-trip. A throwaway `_Observation()`
+discarded a block and wrote its event twice, so a receipt said `ALLOW` while the log beside it said
+the action was denied. Splitting a method dropped an `effect_key` from the one event that names
+which effect a budget refused. And an `InvalidArgument` subclass with a keyword-only field stopped
+being picklable, which nothing in this repository would ever have caught, because verify's children
+speak JSON over stdin.
+
+**The rate is the lesson, not any one of them.** Across both rounds roughly seventeen defects were
+found, about half of them introduced by fixing the other half. Three reorderings of the observe path
+produced four regressions between them, which is why §4.2.1b states a limit rather than attempting a
+fourth: the fix is one ordered list of checks both modes walk, and that is a refactor of `_secure`
+and `_observe_secure` together rather than another patch.
+
+**What did not move in either round: enforcement.** Not one of the seventeen was an action running
+that should have been refused. Every one was reporting, tooling, or observe mode, which enforces
+nothing. The decision path -- consumed inside the reservation, ambiguity holding, every ancestor
+charged, containment on both axes -- was probed adversarially twice, including sixteen enforcing and
+sixteen observing threads against Postgres, and did not move. That asymmetry is worth recording
+because it is what made the release defensible: a defect in `verify` or in observe mode ships as a
+patch release, and a defect in the decision path would have shipped inside a one-way store
+migration.
