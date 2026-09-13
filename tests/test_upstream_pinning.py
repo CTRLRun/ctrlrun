@@ -12,6 +12,7 @@ check 3's mechanism against a real TLS listener. Check 1 is the gateway's startu
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import socket
 import ssl
@@ -525,4 +526,52 @@ def test_T494c_the_two_pin_halves_must_agree_at_load(tmp_path):
         )
     assert "could not be read" in str(missing.value), (
         "a pin whose certificate is missing builds an empty trust store and refuses everything"
+    )
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_T495d_the_probes_own_default_context_will_not_negotiate_below_tls_1_2(tmp_path):
+    """`observe_upstream` called with no `verify` builds its own context, and **it states the
+    floor rather than inheriting it**.
+
+    The first version of this test asserted the floor on the context as built and passed with the
+    line under test deleted, because `create_default_context` already sets TLS 1.2 on this
+    interpreter. That is mutation pattern 3 exactly: the environment already prevented what the
+    test forbade. So the double here hands back a context whose floor has been **lowered**, the
+    way a system-wide OpenSSL configuration or a future default could, and the assertion is that
+    the function raised it again. Deleting the line turns this red.
+
+    It is structural rather than a handshake against a TLS 1.1 listener for a second reason from
+    the same list: such a listener needs a certificate the default context does not trust, so it
+    would be refused for the certificate and the version would never be reached.
+    """
+    import ssl as ssl_module
+
+    from ctrlrun import upstream as pinning
+
+    key, crt = _ca_signed(tmp_path, "localhost")
+    port = _serve(key, crt)
+    built: list[ssl_module.SSLContext] = []
+    real = ssl_module.create_default_context
+
+    def capture(*args: object, **kwargs: object) -> ssl_module.SSLContext:
+        context = real(*args, **kwargs)  # type: ignore[arg-type]
+        context.minimum_version = ssl_module.TLSVersion.TLSv1  # a permissive system default
+        built.append(context)
+        return context
+
+    ssl_module.create_default_context = capture  # type: ignore[assignment]
+    try:
+        # Self-signed against a CA this context does not trust, so the handshake is refused; what
+        # is under test is the context built to attempt it, not the attempt's outcome.
+        with contextlib.suppress(Exception):
+            pinning.observe_upstream(f"https://localhost:{port}")
+    finally:
+        ssl_module.create_default_context = real  # type: ignore[assignment]
+
+    assert built, "observe_upstream built no default context, so nothing here was exercised"
+    assert built[-1].minimum_version is ssl_module.TLSVersion.TLSv1_2, (
+        "the probe's own context must not negotiate a protocol the product would refuse, and "
+        "must not depend on the default to say so; SPEC-v0.10 §4.3's check 3 decides whether "
+        "the gateway starts on this handshake"
     )
