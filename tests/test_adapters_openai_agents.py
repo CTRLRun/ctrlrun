@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The OpenAI Agents SDK reference adapter. SPEC-v0.5 §3.5, §6, §7; T135, T135b, T137.
 
 Every test here drives a **real `Runner`** with a real `function_tool`, a real

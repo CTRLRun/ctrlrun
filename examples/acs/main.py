@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The double-refund scenario, through ACS hooks, with CTRLRun behind them.
 
 ACS is advisory: a Guardian returns a decision and the *platform* runs the tool. So one tool

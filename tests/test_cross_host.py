@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Concurrency and failure injection against a real Postgres. Item 4; SPEC-v0.6 §4.5, §8.
 
 **What was run, stated first, because §4.5 requires the PR to say so.** These are separate OS

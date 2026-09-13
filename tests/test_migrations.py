@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Schema version and forward-only migrations. Build-list item 2; SPEC-v0.6 §3, §8 T147-T152b.
 
 Six places across v0.2, v0.3, v0.4 and v0.5 say *"there is still no migration story -- that is

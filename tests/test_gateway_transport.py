@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Regression coverage for the September user-impact audit, through real HTTP sockets."""
 
 import json

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T408 to T414: the ledger and the store amendment (SPEC-v0.9 §3).
 
 The charge lands **inside the transaction that writes the reservation**, or it is a check-then-act

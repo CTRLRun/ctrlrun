@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The provider idempotency token. Build-list item 3 of v0.7; SPEC-v0.7 §4, §8.3 T232-T239.
 
 **The token is derived from `(effect_key, attempt)`, never from the effect key alone** (§4.1).

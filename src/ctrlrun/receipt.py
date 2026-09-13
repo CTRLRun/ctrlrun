@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Receipts and the event log. Build-list item 8; SPEC-v0.1 §6.
 
 `Control` produces a `Receipt` for every action that reaches a terminal state, and an `Event`

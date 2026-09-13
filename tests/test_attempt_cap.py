@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The attempt ceiling, `max_attempts`. Build-list item 4; SPEC-v0.7 §5, §8.4 (T240 to T252).
 
 `v0.1 §5.4`'s `FAILED` row permits a renewal and bounds nothing. An executor that raises

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`PostgresStateStore`. Build-list item 3; SPEC-v0.6 §4.
 
 The same frozen protocol of `v0.1 §5.3`, extended by nothing, with a different mechanism

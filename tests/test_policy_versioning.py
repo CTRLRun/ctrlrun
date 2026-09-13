@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Policy versioning and the control registry. Item 7; SPEC-v0.6 §7, §8 T171-T177d.
 
 Two things in one item because both answer *"what decided this, and can I still tell?"* — the

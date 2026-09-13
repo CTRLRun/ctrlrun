@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Adapters broken in one named way each, and one that is not. SPEC-v0.5 §5.4.
 
 **A kit that only ever passes is a kit nothing exercises.** These exist so the kit's own tests

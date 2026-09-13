@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """A delegated grant cannot be wider than the one it came from, and it is re-checked.
 
 Three links: a human who holds €100,000 and may delegate, a finance agent given €25,000, a

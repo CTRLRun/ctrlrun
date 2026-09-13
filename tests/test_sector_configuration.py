@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The throwaway sector configuration. Item 7; SPEC-v0.6 §7.5, §8 T177b.
 
 **The artefact is disposable; what it finds is the deliverable.** §7.5 asks item 7 to write one

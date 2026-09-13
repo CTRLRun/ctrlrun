@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """An approval authorizes one exact action, not a category of action.
 
 A human sees "refund €2,000 on txn_2" and says yes. The agent then executes €5,000 with

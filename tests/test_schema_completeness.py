@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The release pass's D27 rule: a schema is complete when something actually writes every field.
 
 `SPEC-v0.7.md` §12 D27, run by v0.8 for three items without incident and by SPEC-v0.9 §10.1 here:
