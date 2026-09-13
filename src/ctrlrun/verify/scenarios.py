@@ -4278,6 +4278,9 @@ def _narrow(parent: Grant, selection: _Selection) -> tuple[Grant, Principal, dic
         # SPEC-v0.9 §8.0 — carried, or `_narrowed`'s own guard below raises
         # `VerifyInternalError` on any document that names tasks, before a single widening runs.
         tasks=None if parent.tasks is None else parent.tasks,
+        # SPEC-v0.9 §8.0, the same coupling `tasks` has: carried, or `_narrowed`'s own guard
+        # raises `VerifyInternalError` on any document that budgets, before a widening runs.
+        budgets=None if parent.budgets is None else parent.budgets,
     )
     offending = contained_dimension(parent, child)
     if offending is not None:
@@ -4325,6 +4328,15 @@ def _widen(parent: Grant, narrowed: Grant, dimension: str) -> Grant | None:
         if parent.tasks is None:
             return None
         return replace(narrowed, tasks=(DEEP_WILDCARD,))
+    if dimension == "budgets":
+        # SPEC-v0.9 §2.6. Widened on the **limit**, which is the axis that reads forwards; the
+        # window axis reads backwards and a widening there would be a *shorter* window, which is
+        # the case a draft of the rule got wrong. One axis is enough to exercise the dimension,
+        # and the loud one is the one an operator would recognise in a counterexample.
+        if not parent.budgets:
+            return None
+        widened = tuple(replace(budget, limit=budget.limit + 1) for budget in parent.budgets)
+        return replace(narrowed, budgets=widened)
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")
 
 
@@ -4351,4 +4363,6 @@ def _omit(narrowed: Grant, parent: Grant, dimension: str) -> Grant | None:
         return None if parent.expires_at is None else replace(narrowed, expires_at=None)
     if dimension == "tasks":
         return None if parent.tasks is None else replace(narrowed, tasks=None)
+    if dimension == "budgets":
+        return None if parent.budgets is None else replace(narrowed, budgets=None)
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")

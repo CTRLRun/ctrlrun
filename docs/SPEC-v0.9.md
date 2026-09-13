@@ -182,6 +182,19 @@ checked.
 `count` is always available and always means one per action. It is the budget an operator reaches
 for first and the only one whose meaning does not depend on the document.
 
+**Which makes it the one metric the kernel does branch on, and §12's do-not-build line has to say
+so rather than be contradicted by it.** The line forbids a branch that *ranks* or *classifies*
+metrics: a taxonomy, a default limit for a name the kernel thinks it recognises, an opinion about
+which of two is more serious. `count` is none of those. It is a second **source** for the number,
+the way a metric naming an argument is a source, and item 5 resolves it in one place with no
+ordering over names.
+
+**An action argument literally named `count` does not win**, and it is worth saying which does: the
+kernel-supplied meaning takes it, because an operator writing `metric: count` means "how many", and
+a document that could silently retarget it at an argument would make the one metric whose meaning
+does not depend on the document depend on it. An operator who wants to sum an argument called
+`count` renames the argument.
+
 Every other metric names an **action argument**, by name, and its value is summed. `metric: amount`
 sums `action.arguments["amount"]`.
 
@@ -377,8 +390,21 @@ hash does not move, and every approval bound to that hash by `v0.6 §7.1` stays 
 document that now permits a thousand times more. `SPEC-v0.8.md` §5.2 gives this reason for `max_ttl`
 and it is the same defect in the same field list.
 
-Rendered in sorted order, like `constraints`, so two documents differing only in list order hash
-alike.
+**Rendered in document order, not sorted, and this amends an earlier draft of this sentence.** The
+draft said sorted "like `constraints`, so two documents differing only in list order hash alike",
+and `constraints` really does behave that way. Budgets do not, for two reasons. §2.2 gives the list
+order meaning, because the first budget to refuse is the one named in the refusal, so two documents
+differing in list order differ in what an operator is told. And the hash's job is to move when the
+document changes: sorting makes two different documents hash alike, which is the direction that
+loses evidence rather than the direction that creates it.
+
+**The window renders as integer seconds, not as the document's ISO-8601 spelling**, which amends
+§10's `Budget` row as originally written. That row said the document's own spelling was the
+canonical one; it is not implementable, because `canonical_grants` renders parsed grants and
+`Budget` keeps a `timedelta` rather than the source text. Seconds is also what
+`_canonical_envelope` already renders `max_ttl` as. The consequence is stated rather than hidden:
+`PT24H` and `P1D` hash alike, which is correct, since they are the same window and a hash that
+distinguished them would move for a document that changed nothing.
 
 ---
 
@@ -1472,9 +1498,12 @@ defects will be:
   and the test is written with the parent at `PT24H` and the child at `PT1H` so the 24x figure is on
   the page next to the assertion.
 - T402 a child window **longer** than its parent's is accepted, same limit.
-- T401a a budget on a grant none of whose actions carries an `effect:` template is a **load error**
-  naming the grant, the budget and the actions (§2.4.1). The case is
-  `examples/authority/payments.yaml`'s `reconciliation` grant, whose actions are reads.
+- T401a **belongs to the item that owns §2.4.1's check, and that is not item 3.** §2.4.1 was a load
+  error in a draft and is not one now: the probes in that section show a loader cannot see a
+  decorator-supplied `effect=` and cannot run at all on the standalone-authority path. The check is
+  at execute time, after the effect key resolves and before `_secure`, so it is **item 5's**, beside
+  the charge it protects. Listed here rather than deleted, because a test id that vanished would
+  look like an oversight.
 - T402a the matching rule of §2.6.1, over the two-budget parent §2.2 exists for: each of the four
   rows of that section's worked table is a case.
 - T403 a child omitting a budget its parent carries is rejected.
@@ -1572,8 +1601,8 @@ One justification per row. Anything not here is a spec amendment before it is co
 
 | Addition | Why an existing name does not serve |
 |---|---|
-| `Budget` (`metric: str`, `limit: int`, `window: timedelta`) | nothing in `authority.py` carries a quantity over a period. **`window` is a `timedelta` in Python and an ISO-8601 duration in the document and in `_canonical_grant`**, because a `timedelta` is not a `PlainValue` (`action.py:19`) and so cannot render through `canonical_bytes`; the document's own spelling is the canonical one, which is what §2.8's hash covers |
-| `Grant.budgets` | `constraints` decides one action and cannot count |
+| `Budget` (`metric: str`, `limit: int`, `window: timedelta`) | nothing in `authority.py` carries a quantity over a period. `window` is a `timedelta` in Python, an ISO-8601 duration in the document, and **integer seconds in `_canonical_grant`**, because a `timedelta` is not a `PlainValue` (`action.py:19`) and cannot render through `canonical_bytes`. An earlier draft of this row said the document's spelling was canonical; it is not implementable, since `canonical_grants` renders parsed grants and a `Budget` keeps no source text. §2.8 carries the consequence |
+| `Grant.budgets` | `constraints` decides one action and cannot count. A `Budget`'s window is a **whole number of seconds**, bounded, because it is stored and hashed as integer seconds: a sub-second window would round to `0` on the way into a delegation row and read back unreadable, dead for ever |
 | `Grant.tasks` | no dimension names a unit of work |
 | `DIMENSIONS` grows from six entries to eight | **an exported public name whose value changes** (`authority.py:126`, `__all__` at `authority.py:1787`). `verify/scenarios.py` iterates it for G9 and prints `len(DIMENSIONS)`, so this is not a private constant. §9.6 has the test |
 | `Charge` | the store needs a value object for what a reservation spends, carrying the whole predicate (§3.3.1) |
@@ -1632,7 +1661,7 @@ No new module. Budgets and tasks are `authority.py`; the ledger is `state.py`, `
 | Situation | Outcome |
 |---|---|
 | A budget's metric names an argument the action does not carry | **refused** (§2.3). Never zero |
-| A budget sits on a grant none of whose actions carries an `effect:` template | **load error** (§2.4.1), naming the grant, the budget and the actions |
+| An action whose effect key resolved to `None`, under a grant that budgets | **refused at execute** (§2.4.1), after the key resolves and before the reservation. **Not a load error**: §2.4.1's probes show a loader cannot see a decorator-supplied `effect=`, and cannot run at all on the standalone-authority path |
 | A budget limit is a float, a `Decimal`, a decimal string, negative, or not a number | **load error**, at the loader and at the constructor (§2.2, §2.3) |
 | A child grant's budget exceeds its parent's limit, **or shortens its window** | **rejected at delegation** (§2.6): a shorter window over the same limit is a higher rate |
 | A parent budget is matched by no child budget on that metric | **rejected at delegation** (§2.6.1) |

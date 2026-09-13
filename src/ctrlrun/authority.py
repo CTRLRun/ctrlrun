@@ -32,7 +32,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from .action import Action, PlainValue, Principal
 from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
@@ -153,6 +153,7 @@ DIMENSIONS: Final = (
     # `_narrowed` carrying the field raises `VerifyInternalError`; adding the containment row
     # without growing it reports "6 of 6" and exercises neither, which is the silent failure.
     "tasks",
+    "budgets",
 )
 
 #: §5.4 — how a child operand must compare with its parent's, per operator. `neq` is equality
@@ -189,6 +190,9 @@ _GRANT_KEYS: Final = frozenset(
         # the action on every task, so `policy.py` refuses it in a `v6` document rather than
         # ignoring it (§10.1).
         "tasks",
+        # SPEC-v0.9 §2.2, the other `v7` key, gated for the same reason: an older reader would
+        # ignore the limit and spend without bound.
+        "budgets",
     }
 )
 _SUBJECT_KEYS: Final = frozenset({"agent", "user"})
@@ -348,6 +352,67 @@ class Subject:
         return True
 
 
+def _is_int(value: object) -> bool:
+    """A real integer: `bool` is an `int` in Python and is not one here (SPEC-v0.9 §2.3).
+
+    `verify/scenarios.py` and `_parse_max_delegation_depth` already guard this trap; the budget
+    loader uses the same predicate rather than a third spelling of it. `amount: false` would
+    otherwise be a "non-negative integer" whose value is zero, which is §2.3's own sentence about
+    absence-as-zero wearing a bool's clothes.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+@dataclass(frozen=True)
+class Budget:
+    """How much, over what, in how long (SPEC-v0.9 §2.2).
+
+    A metric names where the number comes from, a limit is what the sum may reach, and a window
+    is what the sum is taken over. The kernel **does not know what any metric means**: there is no
+    branch on a metric name anywhere, no ranking of two metrics, and no default limit for one the
+    kernel thinks it recognises (§2.3, and §12 carries it as a do-not-build line).
+
+    Validated here as well as in the loader, on `Grant.__post_init__`'s rule: `Control.delegate`
+    takes a `Grant` built in Python, and §2.6's containment relation is undefined on a budget
+    whose window is negative or whose limit is a string.
+    """
+
+    metric: str
+    limit: int
+    window: timedelta
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metric, str) or not self.metric.strip():
+            raise InvalidArgument(
+                f"a budget metric must be a non-empty string, got {self.metric!r}"
+            )
+        if not _is_int(self.limit) or self.limit < 0:
+            # §2.3: a float would drift, a bool is an int wearing a costume, and a string that
+            # looks like a number is a decimal in disguise. None of the three is coerced.
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'limit' must be a non-negative integer, got "
+                f"{self.limit!r}. Money is budgeted in minor units (SPEC-v0.9 §2.3)"
+            )
+        if not isinstance(self.window, timedelta) or self.window <= timedelta(0):
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'window' must be a positive duration, got {self.window!r}"
+            )
+        # **Whole seconds, because a `Budget` that cannot round-trip is not a legal one.**
+        # `grant_to_json` renders integer seconds, so `timedelta(milliseconds=500)` would store as
+        # `0` and read back as an unreadable delegation, dead for ever. `Control.delegate` takes a
+        # `Grant` built in Python, which is §2.2's whole reason for validating here as well as in
+        # the loader, and the loader's grammar is integer-only anyway.
+        if self.window.microseconds:
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'window' must be a whole number of seconds, got "
+                f"{self.window!r}; it is stored and hashed as integer seconds (SPEC-v0.9 §2.8)"
+            )
+        if self.window.total_seconds() > _MAX_WINDOW_SECONDS:
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'window' may not exceed {_MAX_WINDOW_SECONDS} seconds"
+            )
+
+
 @dataclass(frozen=True)
 class Grant:
     """One permission: this subject may propose these actions, under these limits (§4.2).
@@ -371,6 +436,11 @@ class Grant:
     #: is `v0.3 §4.2`'s rule for `resources` and the reason every existing grant upgrades
     #: untouched. A child that omits it under a parent that names it is rejected (§6.2).
     tasks: tuple[str, ...] | None = None
+    #: SPEC-v0.9 §2.2 — how much this grant may spend, over which metric, in how long. A list and
+    #: not a mapping: two budgets on one metric over two windows is the first thing an operator
+    #: asks for, and a mapping keyed by metric cannot express it. `None` budgets nothing, which is
+    #: every grant written before v0.9 and why they all upgrade untouched.
+    budgets: tuple[Budget, ...] | None = None
 
     def __post_init__(self) -> None:
         # An empty id is legal only on the `Control.delegate` path and only until the call
@@ -415,6 +485,19 @@ class Grant:
                 )
             for pattern in self.tasks:
                 validate_pattern(pattern, separator=TASK_SEPARATOR, where=f"grant {self.id!r} task")
+        if self.budgets is not None:
+            object.__setattr__(self, "budgets", tuple(self.budgets))
+            if not self.budgets:
+                raise InvalidArgument(
+                    f"grant {self.id!r}: 'budgets' must be a non-empty list, or absent — "
+                    "an absent 'budgets' is what budgets nothing (SPEC-v0.9 §2.2)"
+                )
+            for budget in self.budgets:
+                if not isinstance(budget, Budget):
+                    raise InvalidArgument(
+                        f"grant {self.id!r}: a budget must be an authority.Budget, "
+                        f"got {_type_name(budget)}"
+                    )
         for key, condition in self.constraints.items():
             if not isinstance(condition, Condition):
                 raise InvalidArgument(
@@ -601,6 +684,23 @@ def grant_to_json(grant: Grant) -> str:
         # §5.6's re-check would then refuse it `authority_escalation` on `tasks` forever. The
         # round trip is the containment, not a convenience.
         "tasks": None if grant.tasks is None else list(grant.tasks),
+        # SPEC-v0.9 §2.7, and item 1's lesson repeated: a delegation is stored as this JSON and
+        # read back on **every** evaluation (`v0.3 §5.6`), so a dimension missing here reads back
+        # as `None`. The child would be unbudgeted while its parent carried a limit, and §5.6's
+        # re-check would refuse it `authority_escalation` on `budgets` forever. The round trip is
+        # the containment, not a convenience.
+        "budgets": (
+            None
+            if grant.budgets is None
+            else [
+                {
+                    "metric": budget.metric,
+                    "limit": budget.limit,
+                    "window": int(budget.window.total_seconds()),
+                }
+                for budget in grant.budgets
+            ]
+        ),
     }
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -645,9 +745,71 @@ def grant_from_json(text: str, *, delegation_id: str) -> Grant:
             expires_at=None if expires_at is None else datetime.fromisoformat(str(expires_at)),
             delegable=bool(document.get("delegable", False)),
             tasks=_optional_tuple(document.get("tasks"), delegation_id),
+            budgets=_budgets_from_json(document.get("budgets"), delegation_id),
         )
-    except (InvalidArgument, PolicyError, TypeError, ValueError) as exc:
+    except (ArithmeticError, InvalidArgument, PolicyError, TypeError, ValueError) as exc:
         raise _UnreadableError(delegation_id, str(exc)) from exc
+
+
+#: SPEC-v0.9 §2.2 — the widest window a budget may carry, in seconds: a hundred years, which is
+#: past any rolling window an operator means and well inside what `timedelta` can hold. It exists
+#: so a stored row cannot raise `OverflowError` out of `Authority.evaluate`, which `_candidates`
+#: would turn into a deployment-wide outage rather than one unreadable delegation.
+_MAX_WINDOW_SECONDS: Final = 100 * 365 * 24 * 60 * 60
+
+
+def _budgets_from_json(value: object, delegation_id: str) -> tuple[Budget, ...] | None:
+    """Read a delegation's budgets back, validating exactly what the loader validated.
+
+    `grant_from_json`'s rule for every other dimension: a row read back is re-validated, because
+    a store is a place an attacker with write access reaches and `v0.3 §5.2` requires reading a
+    grant back to check what loading one from YAML checks.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise _UnreadableError(delegation_id, "grant_json 'budgets' is not a non-empty list")
+    parsed: list[Budget] = []
+    for entry in value:
+        if not isinstance(entry, Mapping):
+            raise _UnreadableError(delegation_id, "grant_json has a budget that is not an object")
+        # The loader's key set is closed (`_BUDGET_KEYS`) and this docstring claims to validate
+        # exactly what the loader validates, so it is closed here too. An independent review found
+        # the two disagreeing: a stored row could carry a key the document could not.
+        unknown = set(entry) - _BUDGET_KEYS
+        if unknown:
+            raise _UnreadableError(
+                delegation_id, f"grant_json budget has unknown keys {sorted(unknown)}"
+            )
+        window = entry.get("window")
+        # **The bool trap, one field over from where `limit` closes it**, and an independent
+        # review found it: `timedelta(seconds=True)` is a ONE-SECOND window, and a shorter window
+        # is a higher rate, so the failure grants authority. `0.5` is a sub-second window the
+        # loader's integer-only grammar cannot express. Same predicate as `limit`, not a second
+        # spelling of it. The bound is what keeps `timedelta` from raising `OverflowError` out of
+        # `Authority.evaluate`, which `_candidates` makes a deployment-wide outage: it reads every
+        # delegation row on every evaluation, so one corrupt row would deny nothing and crash
+        # everything, for every principal and every action.
+        if not _is_int(window) or not 0 < cast("int", window) <= _MAX_WINDOW_SECONDS:
+            raise _UnreadableError(
+                delegation_id,
+                f"grant_json budget 'window' must be a positive whole number of seconds up to "
+                f"{_MAX_WINDOW_SECONDS}, got {window!r}",
+            )
+        try:
+            # `cast` and not a check: `Budget.__post_init__` validates all three, and a second
+            # copy of that grammar here is the drift §2.2 forbids. The types are the store's
+            # word, which is exactly what re-validating exists to distrust.
+            parsed.append(
+                Budget(
+                    metric=cast("str", entry.get("metric")),
+                    limit=cast("int", entry.get("limit")),
+                    window=timedelta(seconds=cast("int", window)),
+                )
+            )
+        except (ArithmeticError, InvalidArgument, TypeError, ValueError) as exc:
+            raise _UnreadableError(delegation_id, f"grant_json budget: {exc}") from exc
+    return tuple(parsed)
 
 
 def _optional_tuple(value: object, delegation_id: str) -> tuple[str, ...] | None:
@@ -723,7 +885,47 @@ def contained_dimension(parent: Grant, child: Grant) -> str | None:
         or not _patterns_contained(parent.tasks, child.tasks, separator=TASK_SEPARATOR)
     ):
         return "tasks"
+    if not _budgets_contained(parent.budgets, child.budgets):
+        return "budgets"
     return None
+
+
+def _budgets_contained(parent: tuple[Budget, ...] | None, child: tuple[Budget, ...] | None) -> bool:
+    """§2.6.1: for every parent budget there must exist a child budget that discharges it.
+
+    **The window axis reads backwards on first encounter, and the backwards reading is the
+    dangerous one**, so it is spelled out rather than left to the comparison. Over the same limit
+    a *shorter* window is a *higher rate*, and therefore more authority: a parent of 100,000 per
+    rolling day is widened, not narrowed, by a child of 100,000 per rolling hour, which is
+    2,400,000 a day. A draft of this rule compared `<=` on the window and would have accepted that
+    child at 24x while rejecting the child of 100,000 per week, which is one seventh the rate.
+
+    The proof, given §2.3's non-negative values: take any interval of length `window_p`; it sits
+    inside some interval of length `window_c`, whose sum is at most `limit_c`, which is at most
+    `limit_p`. So every spend pattern the child permits, the parent permits. Non-negativity is
+    what makes the sum monotonic over nested intervals, and without it none of this holds.
+
+    **Existential, not positional**: one child budget may discharge several parent budgets, and a
+    child may add budgets on metrics the parent does not budget. Matching by metric alone is
+    undecidable the moment a parent carries two budgets on `amount`, which is the case §2.2 exists
+    for; matching by `(metric, window)` would make the window axis vacuous.
+    """
+    if parent is None:
+        # A parent that budgets nothing constrains nothing here, and a child may add its own.
+        return True
+    for outer in parent:
+        if not any(
+            inner.metric == outer.metric
+            and inner.limit <= outer.limit
+            and inner.window >= outer.window
+            for inner in (child or ())
+        ):
+            # `v0.3 §5.4`: omission never means unlimited. A child that drops the parent's budget
+            # is rejected rather than inheriting it, for that section's reason: a child that
+            # silently inherited would look, in the file and in the receipt, like one authorized
+            # for what it says.
+            return False
+    return True
 
 
 def _subject_contained(parent: Subject, child: Subject) -> bool:
@@ -1529,6 +1731,25 @@ def _canonical_grant(grant: Grant) -> PlainValue:
         # SPEC-v0.9 §6.7 — a dimension outside the hash is one an operator widens without the
         # hash moving, which is `SPEC-v0.8 §5.2`'s reason for `max_ttl` in this same field list.
         "tasks": None if grant.tasks is None else list(grant.tasks),
+        # SPEC-v0.9 §2.8, the same reason and the sharper case: an operator widens a budget from
+        # 10,000 to 10,000,000, the hash does not move, and every approval bound to it by
+        # `v0.6 §7.1` stays valid against a document that now permits a thousand times more.
+        # Rendered in document order, which §2.2 makes meaningful.
+        "budgets": (
+            None
+            if grant.budgets is None
+            else [
+                {
+                    "metric": budget.metric,
+                    "limit": budget.limit,
+                    # Integer seconds, exactly as `_canonical_envelope` renders `max_ttl`: a
+                    # `timedelta` is not a `PlainValue` (`action.py:19`) and so cannot go through
+                    # `canonical_bytes`, and seconds is the spelling this file already uses.
+                    "window": int(budget.window.total_seconds()),
+                }
+                for budget in grant.budgets
+            ]
+        ),
     }
 
 
@@ -1776,11 +1997,47 @@ def _parse_grant(entry: object, where: str, *, unassigned: bool = False) -> Gran
             expires_at=_parse_expires_at(entry, where),
             delegable=delegable,
             tasks=(_parse_patterns(entry["tasks"], "tasks", where) if "tasks" in entry else None),
+            budgets=(_parse_budgets(entry["budgets"], where) if "budgets" in entry else None),
         )
     except InvalidArgument as exc:
         # The model refuses what the loader refuses (§4.8), so the loader delegates the
         # grammar to it rather than keeping a second copy that can drift.
         raise PolicyError(f"{where}: {exc}") from exc
+
+
+_BUDGET_KEYS: Final = frozenset({"metric", "limit", "window"})
+
+
+def _parse_budgets(value: object, where: str) -> tuple[Budget, ...]:
+    """SPEC-v0.9 §2.2. A list of `{metric, limit, window}`, and nothing else.
+
+    The grammar is closed for `v0.1 §3.1`'s reason: a key this loader silently dropped would be a
+    limit an operator wrote and nothing enforced. Errors carry the index, because a document with
+    two budgets on one metric is the case §2.2 exists for and "one of them is wrong" is not an
+    error message somebody can act on.
+    """
+    if not isinstance(value, list) or not value:
+        raise PolicyError(
+            f"{where}: 'budgets' must be a non-empty list of "
+            "{metric, limit, window} mappings, or absent"
+        )
+    parsed: list[Budget] = []
+    for index, entry in enumerate(value):
+        spot = f"{where}: budgets[{index}]"
+        if not isinstance(entry, Mapping):
+            raise PolicyError(f"{spot}: must be a mapping, got {_type_name(entry)}")
+        _reject_unknown_keys(entry, _BUDGET_KEYS, spot)
+        for key in sorted(_BUDGET_KEYS):
+            if key not in entry:
+                raise PolicyError(f"{spot}: {key!r} is required")
+        window = _parse_duration(entry["window"], f"{spot}: window")
+        try:
+            parsed.append(Budget(metric=entry["metric"], limit=entry["limit"], window=window))
+        except InvalidArgument as exc:
+            # §2.2 — the model refuses what the loader refuses, so the loader delegates the
+            # grammar to it rather than keeping a second copy that can drift.
+            raise PolicyError(f"{spot}: {exc}") from exc
+    return tuple(parsed)
 
 
 def _parse_subject(value: object, where: str) -> Subject:
