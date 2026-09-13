@@ -508,16 +508,145 @@ def _explained_by_alignment(measured: ClockSkew, alignment: timedelta) -> bool:
     return measured.bound < past <= measured.bound + alignment
 
 
+@dataclass(frozen=True)
+class Charge:
+    """What one reservation spends against one grant's budget (SPEC-v0.9 §3.3.1).
+
+    **It carries the whole predicate**, not just the amount, and that is the decision §3.3.1
+    argues: `limit` and `window` travel with the charge rather than being looked up, because a
+    store that resolved a grant's budgets would be reading the policy, and `ARCHITECTURE.md` §6
+    has `state.py` not knowing about `policy.py`. The store evaluates one arithmetic predicate it
+    was handed, over rows it owns.
+    """
+
+    grant_id: str
+    metric: str
+    amount: int
+    limit: int
+    window: timedelta
+
+    def __post_init__(self) -> None:
+        """Refuse what the loader refuses, on `Budget.__post_init__`'s rule (§2.2).
+
+        **A negative `amount` refunds the budget**: it unwinds the sum and the grant spends again,
+        which is the compensation §12 puts out of scope, reachable by anyone who can call the
+        store. §2.3 assigns the loader-side refusal to the metric value, and this is the
+        defence in depth that rule cannot give a third-party caller reaching the `StateStore`
+        directly. An independent review found the value object validating nothing while `Budget`
+        beside it validates everything.
+        """
+        for name, value in (("amount", self.amount), ("limit", self.limit)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise InvalidArgument(
+                    f"charge {self.metric!r} on {self.grant_id!r}: {name!r} must be a "
+                    f"non-negative integer, got {value!r} (SPEC-v0.9 §2.3)"
+                )
+        if not isinstance(self.window, timedelta) or self.window <= timedelta(0):
+            raise InvalidArgument(
+                f"charge {self.metric!r} on {self.grant_id!r}: 'window' must be positive, "
+                f"got {self.window!r}"
+            )
+
+
+@dataclass(frozen=True)
+class Consumption:
+    """One ledger row, as `consumptions()` hands it back (SPEC-v0.9 §3.3.3, §10).
+
+    `released_at` is `None` while the charge is held. Whether it is held **and why** is §7.2's
+    question, and the answer is a join through `get_effect` on `effect_key` rather than a column
+    here: the ledger deliberately has no state machine of its own (§4.1).
+    """
+
+    grant_id: str
+    metric: str
+    amount: int
+    effect_key: str
+    attempt: int
+    consumed_at: datetime
+    released_at: datetime | None = None
+
+
+def check_charges(
+    charges: tuple[Charge, ...],
+    spent: Callable[[Charge], int],
+) -> None:
+    """SPEC-v0.9 §3.3.1's predicate, in one place so three backends cannot drift on it.
+
+    `spent` is the store's own sum of un-released rows for this charge's `(grant_id, metric)`
+    over `[now - window, now]`. The comparison is **inclusive**, matching §2.2's "what the sum may
+    reach": a `limit: 0` grant therefore permits an action only if its metric value is 0, and
+    §3.3.1 records that a zero limit does not stop a grant, since it permits unboundedly many
+    zero-valued actions.
+
+    Pure, like `plan_reservation` and for the same reason: every store decides here rather than
+    each deciding for itself, so the arithmetic is one function a test can reach directly.
+
+    **Two charges on the same `(grant_id, metric)` in one tuple are refused**, and an independent
+    review is why. Each charge is evaluated against the *stored* sum, so a sibling in the same
+    tuple is invisible to the predicate; and the idempotence key of §3.4 carries no window, so
+    `ON CONFLICT DO NOTHING` then silently drops all but the first row. Together that is a spend
+    the ledger never records. It happened to be harmless for the one shape §2.2 creates, a grant
+    with two budgets on one metric over two windows, because those carry equal amounts and want
+    exactly one row. Refusing the general case makes that a property rather than a coincidence,
+    and §2.7's per-ancestor charges are distinct grants, so nothing legitimate is refused.
+    """
+    seen: set[tuple[str, str]] = set()
+    for charge in charges:
+        key = (charge.grant_id, charge.metric)
+        if key in seen:
+            raise InvalidArgument(
+                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation: the "
+                "predicate cannot see a sibling's amount and §3.4's key would drop the second row"
+            )
+        seen.add(key)
+    for charge in charges:
+        if spent(charge) + charge.amount > charge.limit:
+            raise BudgetExhaustedError(charge.grant_id, charge.metric, charge.window)
+
+
+class BudgetExhaustedError(Exception):
+    """The store's refusal when §3.3.1's predicate fails. Package-internal, never public.
+
+    **Not a `CTRLRunError`, and §3.3.2 is why.** `Control` converts it to `ActionDenied` with the
+    events and the receipt that refusal owes; a store raising `ActionDenied` itself would be
+    minting evidence, which is `control.py`'s job. And it must not be an `ActionDenied` subclass:
+    `_secure`'s handler for that type appends `APPROVAL_DENIED` unconditionally, which would
+    fabricate an approval denial for an action no human ever saw. Item 2 met that hazard first
+    with the scope refusal; this is the same handler.
+    """
+
+    def __init__(self, grant_id: str, metric: str, window: timedelta) -> None:
+        super().__init__(f"budget {metric!r} on grant {grant_id!r} over {window} is exhausted")
+        self.grant_id = grant_id
+        self.metric = metric
+        self.window = window
+
+
 class StateStore(ApprovalStore, Protocol):
     """Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence."""
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """Claim an effect key for one attempt. At most one caller wins (§5.3 E1).
 
         Refuses per the retry table of §5.4: `DuplicateEffect` for a committed effect or a
         live reservation, `AmbiguousEffect` for an unresolved or lease-expired one.
+
+        **`charges` is SPEC-v0.9's amendment to this frozen protocol** (§3.3), and it is a MUST
+        rather than a courtesy: a store that accepts charges **MUST** evaluate §3.3.1's predicate
+        inside this same transaction and **MUST** raise `BudgetExhaustedError` when it fails.
+        A store that cannot says so by refusing charges, never by accepting and ignoring them.
+
+        The direction matters and is the reason this is a contract and not a convention. A store
+        that wrote the rows and skipped the predicate would **silently disable every budget on the
+        deployment**, and nothing downstream could tell. `ctrlrun.conformance`'s store suite has
+        the case, and `Control` probes it at construction (§3.3): a store that does not refuse a
+        `limit: 0` charge is one an operator cannot accidentally deploy with budgets configured.
         """
         ...
 
@@ -528,11 +657,39 @@ class StateStore(ApprovalStore, Protocol):
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         """Consume the approval and reserve the effect in one transaction (§4.2 A4).
 
         The approval is checked first, so its refusal is the one raised when both would
         apply (acceptance test T4). If the reservation is refused, nothing is consumed.
+
+        `charges` carries the same MUST as `reserve_effect`'s, and the same transaction.
+        """
+        ...
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+    ) -> tuple[Consumption, ...]:
+        """Ledger rows, **in insertion order** (SPEC-v0.9 §3.3.3).
+
+        Not "newest last": both durable backends order by the autoincrement id, and two hosts
+        with ordinary clock skew, which `v0.7 §3` models and this store warns about at open,
+        invert `consumed_at` against it. Deterministic and identical across the three backends,
+        which is what a reader needs; it is simply not a time ordering.
+
+        The **read half** of §3.3's amendment, and it clears `v0.6 §9.2`'s bar the way that
+        section's own example did: a second backend implementing `charges=` and nothing else would
+        satisfy every declared method and break `ctrlrun inspect` and `ctrlrun verify`. `v0.6
+        §2.7.2` records exactly that finding for `events()` and `receipts()`.
+
+        **`grant_id` is optional**, because §7.3 has `stats` report the ledger's row count, and a
+        required one would make that enumerate every grant id that ever existed, runtime
+        delegations and revoked grants included, one call each.
         """
         ...
 
@@ -806,6 +963,9 @@ class InMemoryStateStore:
     def __init__(self, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self._lock = threading.Lock()
         self._clock = clock
+        #: SPEC-v0.9 §3.2's table, in a list. Append-only until a release sets `released_at`,
+        #: which is a replacement here and a compare-and-set on the durable stores (§4.4).
+        self._ledger: list[Consumption] = []
         self._events: list[Event] = []
         self._receipts: list[Receipt] = []
         #: The chain head (§6.3), starting where `0002_receipt_chain` starts it: seq 0
@@ -993,9 +1153,15 @@ class InMemoryStateStore:
     # --- effects (SPEC-v0.1 §5.3) -----------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -1005,9 +1171,10 @@ class InMemoryStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -1018,6 +1185,7 @@ class InMemoryStateStore:
         effect_key: str | None,
         action_id: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both together (SPEC-v0.1 §4.2 A4).
 
@@ -1033,10 +1201,18 @@ class InMemoryStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1 — **decided before anything is written, inside the same lock**.
+            # `check_charges` raises `BudgetExhaustedError` and nothing above has been written,
+            # so a refused budget leaves the approval granted and the effect unreserved, which is
+            # the same shape §4.2 A4 already gives a refused reservation.
+            if charges:
+                check_charges(charges, lambda charge: self._spent(charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(charges, effect_key, plan.reservation.attempt, now)
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
     def _consumable(self, approval_id: str, action_hash: str, now: datetime) -> ApprovalRecord:
@@ -1062,6 +1238,64 @@ class InMemoryStateStore:
     def _reserve_locked(self, reservation: Reservation, renews: bool, now: datetime) -> None:
         previous = self._effects.get(reservation.effect_key)
         self._effects[reservation.effect_key] = _reserved(reservation, previous, now)
+
+    def _spent(self, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge's grant and metric, over its rolling window."""
+        floor = now - charge.window
+        return sum(
+            row.amount
+            for row in self._ledger
+            if row.grant_id == charge.grant_id
+            and row.metric == charge.metric
+            and row.released_at is None
+            # SPEC-v0.9 §2.5 — `[now - window, now]`, **closed at the floor**. An independent
+            # review found all three backends half-open here while `consumptions(since=)` was
+            # closed, so `inspect --since` would have shown a row the predicate excluded.
+            and row.consumed_at >= floor
+        )
+
+    def _charge_locked(
+        self, charges: tuple[Charge, ...], effect_key: str | None, attempt: int, now: datetime
+    ) -> None:
+        """Write one row per charge. Idempotent on `(effect_key, attempt, grant_id, metric)`.
+
+        SPEC-v0.9 §3.4: `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once, and an
+        unconstrained append would double-charge there. The in-memory store has no unique index,
+        so it enforces the same key by hand rather than being the one backend that does not.
+        """
+        for charge in charges:
+            key = (effect_key, attempt, charge.grant_id, charge.metric)
+            if any(
+                (row.effect_key, row.attempt, row.grant_id, row.metric) == key
+                for row in self._ledger
+            ):
+                continue
+            self._ledger.append(
+                Consumption(
+                    grant_id=charge.grant_id,
+                    metric=charge.metric,
+                    amount=charge.amount,
+                    effect_key=str(effect_key),
+                    attempt=attempt,
+                    consumed_at=now,
+                )
+            )
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+    ) -> tuple[Consumption, ...]:
+        with self._lock:
+            return tuple(
+                row
+                for row in self._ledger
+                if (grant_id is None or row.grant_id == grant_id)
+                and (metric is None or row.metric == metric)
+                and (since is None or row.consumed_at >= since)
+            )
 
     def begin_execution(self, effect_key: str, action_id: str) -> None:
         self._transition(effect_key, action_id, EffectState.EXECUTING, _RESERVED)
@@ -1739,9 +1973,15 @@ class SQLiteStateStore:
     # --- effects (SPEC-v0.1 §5.3) -----------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -1751,9 +1991,10 @@ class SQLiteStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -1764,6 +2005,7 @@ class SQLiteStateStore:
         effect_key: str | None,
         action_id: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both, in one transaction (§4.2 A4).
 
@@ -1784,15 +2026,110 @@ class SQLiteStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(connection, effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1, **inside the `BEGIN IMMEDIATE` this method already holds**. That
+            # is the whole of the amendment's value on this backend: the write lock was taken
+            # before the first read, so the sum and the insert are serialised against every other
+            # process on this file (§3.6), and nothing further is required.
+            if charges:
+                check_charges(charges, lambda charge: self._spent(connection, charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(connection, plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(connection, approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(
+                    connection, charges, str(effect_key), plan.reservation.attempt, now
+                )
         except BaseException:
             self._unwind(connection)
             raise
         connection.commit()
         return (approved.as_approval() if approved is not None else None), plan.reservation
+
+    def _spent(self, connection: sqlite3.Connection, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
+        row = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM budget_ledger
+             WHERE grant_id = ? AND metric = ? AND released_at IS NULL AND consumed_at >= ?
+            """,
+            (charge.grant_id, charge.metric, _iso(now - charge.window)),
+        ).fetchone()
+        return int(row[0])
+
+    def _charge_locked(
+        self,
+        connection: sqlite3.Connection,
+        charges: tuple[Charge, ...],
+        effect_key: str,
+        attempt: int,
+        now: datetime,
+    ) -> None:
+        """One row per charge, idempotent on the unique key (SPEC-v0.9 §3.4).
+
+        `INSERT OR IGNORE` against `UNIQUE (effect_key, attempt, grant_id, metric)`, because
+        `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once and an unconstrained append would
+        double-charge exactly when an operator's network is already misbehaving.
+        """
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO budget_ledger
+                (grant_id, metric, amount, effect_key, attempt, consumed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    charge.grant_id,
+                    charge.metric,
+                    charge.amount,
+                    effect_key,
+                    attempt,
+                    _iso(now),
+                )
+                for charge in charges
+            ],
+        )
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+    ) -> tuple[Consumption, ...]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if grant_id is not None:
+            clauses.append("grant_id = ?")
+            values.append(grant_id)
+        if metric is not None:
+            clauses.append("metric = ?")
+            values.append(metric)
+        if since is not None:
+            clauses.append("consumed_at >= ?")
+            values.append(_iso(since))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT grant_id, metric, amount, effect_key, attempt, consumed_at, released_at"
+                f" FROM budget_ledger{where} ORDER BY id",
+                values,
+            )
+            .fetchall()
+        )
+        return tuple(
+            Consumption(
+                grant_id=row[0],
+                metric=row[1],
+                amount=int(row[2]),
+                effect_key=row[3],
+                attempt=int(row[4]),
+                consumed_at=datetime.fromisoformat(row[5]),
+                released_at=_at(row[6]),
+            )
+            for row in rows
+        )
 
     def _consumable(
         self, connection: sqlite3.Connection, approval_id: str, action_hash: str, now: datetime

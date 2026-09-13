@@ -29,6 +29,20 @@ any change to one appears here.
   The task reaches the authority decision and the receipt, and **never the action hash**: a field
   on `Action` would move every hash in existence and invalidate every stored approval.
 
+- **The budget ledger, and one amendment to a frozen protocol** (SPEC-v0.9 §3). `StateStore` has
+  been frozen since v0.6 and gains exactly two things: `charges=` on `reserve_effect` and
+  `consume_approval_and_reserve`, and `consumptions()` to read the ledger back. Migration
+  `0007_budget_ledger`, additive and forward-only.
+
+  **The charge lands inside the transaction that writes the reservation**, on all three backends.
+  Anything else is a check-then-act race: two processes read the same remaining amount and both
+  spend. On Postgres that needs a `SELECT ... FOR UPDATE` on a per-grant anchor row before the sum,
+  because READ COMMITTED does not serialise a sum and an insert. Measured, not chosen: without it,
+  twenty-four processes racing a budget that permits ten spent **2400 against a limit of 1000**,
+  with zero refusals.
+
+  Nothing spends this yet. The consumption, the holds and the releases are the next item.
+
 - **Consequence budgets, in the document** (SPEC-v0.9 §2). A grant may carry `budgets:`, each a
   `metric`, a `limit` and a `window`. They load, validate, render into the policy hash, and
   attenuate down a delegation chain. **Nothing counts yet**: the ledger and the spending are

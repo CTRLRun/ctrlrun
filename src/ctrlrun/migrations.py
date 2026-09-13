@@ -332,6 +332,65 @@ _VERIFIED_APPROVER_PG: Final = (
     "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approvals_required INTEGER",
 )
 
+#: SPEC-v0.9 §3.2, §3.5.1: the budget ledger. One row per consumption, per ancestor charged.
+#:
+#: **The unique constraint is `v0.6 §4.3.2` Table A1 row 2's doing, not tidiness.** A lost
+#: `COMMIT` with no record found retries the insert *once*, and the retried transaction re-inserts
+#: the reservation and its charges together. An unconstrained append would double-charge there,
+#: precisely when an operator's network is already misbehaving.
+#:
+#: **`released_at` is nullable and release is a compare-and-set on it, never a decrement**
+#: (§4.4). Table A2 row 2 re-issues a lost `UPDATE` once, and a decrement is not idempotent under
+#: a re-issue: the second one subtracts again and the operator's budget quietly grows.
+#:
+#: The index is what makes §2.5's rolling sum a range scan. Named here because a ledger without
+#: it is correct and unusable, and "correct and unusable" is how a governance control gets
+#: turned off (§3.5).
+_BUDGET_LEDGER: Final = (
+    """
+    CREATE TABLE budget_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        grant_id TEXT NOT NULL,
+        metric TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        effect_key TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        consumed_at TEXT NOT NULL,
+        released_at TEXT,
+        UNIQUE (effect_key, attempt, grant_id, metric)
+    )
+    """,
+    "CREATE INDEX ix_budget_ledger_window ON budget_ledger (grant_id, metric, consumed_at)",
+)
+_BUDGET_LEDGER_PG: Final = (
+    """
+    CREATE TABLE IF NOT EXISTS budget_ledger (
+        id BIGSERIAL PRIMARY KEY,
+        grant_id TEXT NOT NULL COLLATE "C",
+        metric TEXT NOT NULL COLLATE "C",
+        amount BIGINT NOT NULL,
+        effect_key TEXT NOT NULL COLLATE "C",
+        attempt INTEGER NOT NULL,
+        consumed_at TIMESTAMPTZ NOT NULL,
+        released_at TIMESTAMPTZ,
+        UNIQUE (effect_key, attempt, grant_id, metric)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS ix_budget_ledger_window
+        ON budget_ledger (grant_id, metric, consumed_at)
+    """,
+    # SPEC-v0.9 §3.6, measured rather than chosen: READ COMMITTED does not serialise a sum and an
+    # insert, and the spike overspent 1200 against a limit of 1000 in three runs of four. The
+    # anchor row is what `SELECT ... FOR UPDATE` takes before the sum. **Per grant and not per
+    # store**, so two budgets on two grants do not serialise against each other.
+    """
+    CREATE TABLE IF NOT EXISTS budget_anchor (
+        grant_id TEXT PRIMARY KEY COLLATE "C"
+    )
+    """,
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -349,6 +408,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _VERIFIED_APPROVER,
         postgres=_VERIFIED_APPROVER_PG,
     ),
+    Migration("0007_budget_ledger", _BUDGET_LEDGER, postgres=_BUDGET_LEDGER_PG),
 )
 
 HEAD: Final = MIGRATIONS[-1].id

@@ -693,7 +693,10 @@ governance control gets turned off.
 ### 3.5.1 The migration is named here, as v0.6's and v0.7's were
 
 `migrations.py` currently ends at `0006_verified_approver`. v0.9 adds **`0007_budget_ledger`**: the
-table of §3.2, the unique constraint of §3.4, and the index of §3.5.
+table of §3.2, the unique constraint of §3.4, the index of §3.5, and **on Postgres only, the
+`budget_anchor` table §3.6.1's lock takes** (one row per grant id ever charged, created on demand).
+The anchor is named here because §3.5's growth discussion otherwise misses it: it accumulates a
+permanent row per grant, runtime delegations included, and the kernel deletes none of them.
 
 It is named in the specification rather than left to the item because `v0.6 §3.7` and `v0.7 §6.11`
 both named theirs, with their DDL and their collation, and a migration discovered in a diff is a
@@ -1605,13 +1608,18 @@ One justification per row. Anything not here is a spec amendment before it is co
 | `Grant.budgets` | `constraints` decides one action and cannot count. A `Budget`'s window is a **whole number of seconds**, bounded, because it is stored and hashed as integer seconds: a sub-second window would round to `0` on the way into a delegation row and read back unreadable, dead for ever |
 | `Grant.tasks` | no dimension names a unit of work |
 | `DIMENSIONS` grows from six entries to eight | **an exported public name whose value changes** (`authority.py:126`, `__all__` at `authority.py:1787`). `verify/scenarios.py` iterates it for G9 and prints `len(DIMENSIONS)`, so this is not a private constant. §9.6 has the test |
-| `Charge` | the store needs a value object for what a reservation spends, carrying the whole predicate (§3.3.1) |
+| `Charge` | the store needs a value object for what a reservation spends, carrying the whole predicate (§3.3.1). It refuses a negative or non-integer `amount` or `limit` the way `Budget` does: a negative amount **refunds** the budget, which is the compensation §12 forbids, reachable by anyone calling the store directly |
 | `charges=` on `reserve_effect` and `consume_approval_and_reserve` | §3.3, half of the milestone's amendment to a frozen protocol |
+
+**All four new names live in `ctrlrun.state`**, beside `StateStore` itself, and are imported from
+there rather than from the package root: they are the vocabulary of the store protocol, and a
+third-party backend already imports `StateStore` from that module.
 | `scope=` on `@protect` and `Control.execute` | `preconditions=` answers a different question (§5.2), and §5.2.1 amends `v0.7 §6.9` to add it |
 | `task=` on `@protect` and `Control.execute` | nothing carries a unit of work today, and it cannot go on `Action` without moving every action hash in existence (§6.3.1) |
 | `task=` on `Authority.evaluate` | **amends a signature frozen in `SPEC-v0.3.md` §11**, and §10.3 records the amendment rather than slipping it in. `Authority.evaluate(action, *, now, store)` is frozen there; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision |
 | `task=` on `Control.evaluate` | **also amends a frozen signature** (`SPEC-v0.3.md` §11: "its signature and `Evaluation`'s two fields are unchanged"). Required by §6.3.2: without it `Control.evaluate` and `Control.execute` disagree about a task-bound grant, and `ctrlrun.adapter.needs_approval` routes through `evaluate` |
-| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only |
+| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only. Rows come back **in insertion order**, which is deterministic and identical across the three backends and is *not* a time ordering: host clock skew, which `v0.7 §3` models, inverts `consumed_at` against the id |
+| `check_charges` | §3.3.1's predicate in one place, so three backends cannot drift on the arithmetic. Public for the same reason `plan_reservation` is: a third-party store decides with it rather than reimplementing it |
 | `Consumption` | what `consumptions()` returns: `grant_id`, `metric`, `amount`, `effect_key`, `attempt`, `consumed_at`, `released_at`. Frozen here because §3.3.3 returns it and §7.2 renders it, and a return type specified nowhere is a spec amendment waiting to happen |
 
 ### 10.1 Schemas
