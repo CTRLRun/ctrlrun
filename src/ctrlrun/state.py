@@ -1281,6 +1281,31 @@ class InMemoryStateStore:
                 )
             )
 
+    def _release_locked(self, effect_key: str, state: EffectState, now: datetime) -> None:
+        """SPEC-v0.9 §4.1: **released exactly when the effect reaches `FAILED`**, held otherwise.
+
+        The ledger has no state machine of its own. `effect.py`'s `plan_reservation` is already
+        the complete table of exits from a reservation, and this one rule covers every row of
+        §4.2's nineteen: `COMMITTED` holds permanently, `AMBIGUOUS` holds until a human or a hook
+        moves it, a lapsed lease holds because no transition has occurred, and only `FAILED`
+        releases, because that is the one state in which the executor proved nothing happened.
+
+        **Keyed on the state reached, never on the call that reached it** (§4.2's warning): a
+        `fail_effect` that is *refused* because the record moved on releases nothing, and a
+        `resolve_effect(FAILED)` by a human releases even though no `fail_effect` ran.
+
+        A compare-and-set on `released_at`, never a decrement (§4.4): `v0.6 §4.3.2` Table A2 row 2
+        re-issues a lost `UPDATE` once, and a decrement would subtract twice.
+        """
+        if state is not EffectState.FAILED:
+            return
+        self._ledger = [
+            replace(row, released_at=now)
+            if row.effect_key == effect_key and row.released_at is None
+            else row
+            for row in self._ledger
+        ]
+
     def consumptions(
         self,
         *,
@@ -1389,6 +1414,7 @@ class InMemoryStateStore:
             self._effects[effect_key] = _transitioned(
                 record, state, now, result=result, error=error
             )
+            self._release_locked(effect_key, state, now)
 
 
 class _HeldConnection:
@@ -2046,6 +2072,21 @@ class SQLiteStateStore:
         connection.commit()
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
+    def _release_locked(
+        self, connection: sqlite3.Connection, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so a re-issued `UPDATE` (`v0.6 §4.3.2`
+        Table A2 row 2) is a no-op rather than a second subtraction.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            "UPDATE budget_ledger SET released_at = ? WHERE effect_key = ? AND released_at IS NULL",
+            (_iso(now), effect_key),
+        )
+
     def _spent(self, connection: sqlite3.Connection, charge: Charge, now: datetime) -> int:
         """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
         row = connection.execute(
@@ -2313,6 +2354,10 @@ class SQLiteStateStore:
             self._write_effect(
                 connection, _transitioned(record, state, now, result=result, error=error)
             )
+            # SPEC-v0.9 §4.1, inside the same `BEGIN IMMEDIATE`: the ledger moves with the record
+            # or neither moves. A release in a second transaction could leave a `FAILED` effect
+            # holding its charge for ever if the process died between them.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise

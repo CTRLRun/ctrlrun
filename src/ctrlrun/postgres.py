@@ -1070,6 +1070,23 @@ class PostgresStateStore:
             with contextlib.suppress(Exception):
                 connection.close()
 
+    def _release_locked(
+        self, connection: Any, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so the re-issue of a lost `UPDATE`
+        (`v0.6 §4.3.2` Table A2 row 2) is a no-op rather than a second subtraction. A decrement
+        would not survive that branch, which is why §3.2's column is a nullable timestamp.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            f"UPDATE {self._q}.budget_ledger SET released_at = %s "
+            "WHERE effect_key = %s AND released_at IS NULL",
+            (now, effect_key),
+        )
+
     def _lock_budget_anchors(self, connection: Any, charges: tuple[Charge, ...]) -> None:
         """`SELECT ... FOR UPDATE` on one row per grant charged, **before** the sum (§3.6).
 
@@ -1439,6 +1456,11 @@ class PostgresStateStore:
                     ),
                 )
                 updated = cursor.rowcount
+            if updated == 1:
+                # SPEC-v0.9 §4.1, inside the same `BEGIN`: the ledger moves with the record or
+                # neither moves. Only where the compare-and-set actually took, so a transition
+                # that is about to be refused releases nothing.
+                self._release_locked(connection, effect_key, state, now)
             if updated != 1:
                 # The record changed between the read and the write. Re-plan through the same
                 # predicate rather than guessing.

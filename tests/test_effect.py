@@ -76,7 +76,9 @@ class _ReservationSpy(InMemoryStateStore):
         super().__init__()
         self.reservations: list[tuple[str, str]] = []
 
-    def reserve_effect(self, effect_key: str, action_id: str, lease: Any = None) -> Any:
+    def reserve_effect(
+        self, effect_key: str, action_id: str, lease: Any = None, charges: Any = ()
+    ) -> Any:
         self.reservations.append((effect_key, action_id))
         raise NotImplementedError("effect reservation is build-list item 6")
 

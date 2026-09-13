@@ -46,7 +46,7 @@ from .policy import (
     strict_load,
 )
 from .policy import _equal as _type_strict_equal
-from .state import DelegationRecord, StateStore
+from .state import Charge, DelegationRecord, StateStore
 
 #: SPEC-v0.3 §4.4 — an action name is dotted (`v0.1 §2.1`) and a resource is `type:id`.
 ACTION_SEPARATOR: Final = "."
@@ -849,6 +849,43 @@ def _delegation_from_record(record: DelegationRecord) -> Delegation:
     )
 
 
+#: SPEC-v0.9 §2.3 — the one metric the kernel supplies, and the only one whose meaning does not
+#: depend on the document. An action argument literally named `count` does not win it: an operator
+#: writing `metric: count` means "how many", and a document that could retarget it would make the
+#: one metric independent of the document depend on it.
+COUNT_METRIC: Final = "count"
+
+
+def _metric_value(action: Action, metric: str, grant_id: str) -> int:
+    """What this action spends on this metric (SPEC-v0.9 §2.3).
+
+    `count` is one per action. Every other metric names an **action argument**, by name, and its
+    value is summed. **An action that does not carry the argument is refused, not treated as
+    zero**: treating a missing field as zero turns the absence of a value into unlimited
+    authority, which is the sentence `v0.3 §5.4` exists to refuse on the constraint side.
+
+    The kernel does not know what any metric means. There is no branch here on a metric name
+    beyond `count`'s own source, no ranking of two metrics, and no default limit for a name the
+    kernel thinks it recognises (§12).
+    """
+    if metric == COUNT_METRIC:
+        return 1
+    value = action.canonical_arguments.get(metric)
+    if value is None:
+        raise InvalidArgument(
+            f"{action.name}: grant {grant_id!r} budgets {metric!r} and the action carries no "
+            f"{metric!r} argument. A missing value is refused, never counted as zero "
+            "(SPEC-v0.9 §2.3)"
+        )
+    if not _is_int(value) or value < 0:
+        raise InvalidArgument(
+            f"{action.name}: grant {grant_id!r} budgets {metric!r} and the action's value is "
+            f"{value!r}; a metric value is a non-negative integer, so money is budgeted in minor "
+            "units (SPEC-v0.9 §2.3)"
+        )
+    return int(value)
+
+
 def contained_dimension(parent: Grant, child: Grant) -> str | None:
     """The first §5.4 row `child` violates, or `None` where it is contained on every one.
 
@@ -1244,6 +1281,50 @@ class Authority:
             if reason in failed:
                 return min(failed[reason], key=_by_grant_id)
         return AuthorityResult(False, NO_AUTHORITY)
+
+    def _charges_for(
+        self, action: Action, result: AuthorityResult, *, store: StateStore
+    ) -> tuple[Charge, ...]:
+        """Every budget this action spends against, one `Charge` per ancestor (SPEC-v0.9 §2.7).
+
+        **Package-internal**: §10 freezes `Charge` and `charges=`, not a way to obtain them, and
+        a public method here would be a surface nothing asked for.
+
+        §2.7 is the rule that makes the feature mean anything. Without charging every ancestor, a
+        holder of a 100,000-a-day grant delegates ten correctly-contained children and spends
+        1,000,000: every link individually valid, the total ten times what anybody granted.
+
+        Returns `()` where the deciding grant and its chain budget nothing, which is every grant
+        written before v0.9 and why they all upgrade untouched (R5).
+        """
+        if not result.passed or result.grant_id is None:
+            return ()
+        charged: list[tuple[str, Grant]] = []
+        delegation = None
+        if result.delegation_id is not None:
+            record = store.get_delegation(result.delegation_id)
+            delegation = None if record is None else _delegation_from_record(record)
+        if delegation is None:
+            grant = self._grants.get(result.grant_id)
+            if grant is not None:
+                charged.append((result.grant_id, grant))
+        else:
+            walk = self._walk(delegation, store=store)
+            charged.append((delegation.delegation_id, delegation.grant))
+            charged.extend(zip(walk.ancestor_ids, walk.ancestors, strict=True))
+        made: list[Charge] = []
+        for grant_id, grant in charged:
+            for budget in grant.budgets or ():
+                made.append(
+                    Charge(
+                        grant_id=grant_id,
+                        metric=budget.metric,
+                        amount=_metric_value(action, budget.metric, grant_id),
+                        limit=budget.limit,
+                        window=budget.window,
+                    )
+                )
+        return tuple(made)
 
     # --- delegation (SPEC-v0.3 §5) -----------------------------------------------------
 

@@ -124,7 +124,7 @@ from .receipt import (
     iso_timestamp,
     new_receipt_id,
 )
-from .state import ClockSkew, SQLiteStateStore, StateStore
+from .state import BudgetExhaustedError, Charge, ClockSkew, SQLiteStateStore, StateStore
 
 _LOG = logging.getLogger(__name__)
 
@@ -219,6 +219,10 @@ _TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
 #: beside it: a refusal whose receipt carried the previous action's scope would be the same
 #: stale-evidence defect on a new field.
 _SCOPE_HASH: ContextVar[str | None] = ContextVar("ctrlrun_scope_hash")
+#: SPEC-v0.9 §2.7 — the authority decision this action was allowed by, so `_secure` can assemble
+#: the charges without re-walking the chain. Set beside `_AUTHORITY_GRANT_ID` and reset with it,
+#: for the stale-evidence reason that field's own comment gives.
+_AUTHORITY_RESULT: ContextVar[AuthorityResult | None] = ContextVar("ctrlrun_authority_result")
 
 #: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
 #: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
@@ -554,6 +558,9 @@ class _ObservedRefusalError(Exception):
 #: SPEC-v0.9 §5.6 — the two refusal reasons, distinct because a test asserting only the exception
 #: type cannot tell which guard fired. `scope_unavailable` is "the provider could not answer";
 #: `out_of_scope` is "it answered, and the record is not this principal's". G23 is the first.
+#: SPEC-v0.9 §4.5 — its own reason, because an exhausted budget, an out-of-scope record and a
+#: failing scope provider all deny the same action with the same exception type.
+BUDGET_EXHAUSTED: Final = "budget_exhausted"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
 
@@ -912,6 +919,7 @@ class Control:
         _TASK.set(task)
         if self._authority is None:
             _AUTHORITY_GRANT_ID.set(None)
+            _AUTHORITY_RESULT.set(None)
             return None
         result = self._authority.evaluate(
             action,
@@ -924,6 +932,7 @@ class Control:
         # is the only thing this field is read on. §4.6's `min` already picked which grant of
         # several decided, so this is that decision and not a guess about it.
         _AUTHORITY_GRANT_ID.set(result.grant_id if result.passed else None)
+        _AUTHORITY_RESULT.set(result if result.passed else None)
         return result
 
     def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
@@ -1165,6 +1174,7 @@ class Control:
         # a copy of the context at creation, so a task started after a break-glass action
         # carried that id into an unrelated refusal too.
         _AUTHORITY_GRANT_ID.set(None)
+        _AUTHORITY_RESULT.set(None)
         # SPEC-v0.9 §6.3.1 — reset beside it, for the reason the comment above gives about a
         # stale grant id: a refusal whose receipt carried the previous action's task would be the
         # same defect on a new field.
@@ -2226,6 +2236,9 @@ class Control:
             # TTL, which is the precise hazard §7.2 exists to close.
             return self._spend_unneeded_approval(action, None), None
 
+        # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
+        # reconcile between them cannot change what this action spends.
+        charges = self._charges_for(action, effect_key)
         # At most two passes: an `AMBIGUOUS` refusal may be reconciled once (SPEC-v0.2 §2.3),
         # and whatever the second attempt meets is final.
         for reconciled in (False, True):
@@ -2242,8 +2255,15 @@ class Control:
                     # inserted here widens it, and a later item adding a check on this path
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
-                approval, reservation = self._take(action, approval_id, effect_key, lease)
+                approval, reservation = self._take(action, approval_id, effect_key, lease, charges)
                 break
+            except BudgetExhaustedError as exhausted:
+                # SPEC-v0.9 §3.3.2 — **its own clause, before the `ActionDenied` one**, for the
+                # reason item 2 met first with the scope refusal: that handler appends
+                # `APPROVAL_DENIED` unconditionally, which would fabricate an approval denial for
+                # an action no human ever saw. An exception raised inside an `except` clause
+                # leaves the whole `try` rather than meeting its siblings.
+                raise self._refuse_budget(action, exhausted) from None
             except _ScopeRefusedError as refused:
                 # SPEC-v0.9 §5.6. Its own clause, **before** the `ActionDenied` one:
                 # `_refuse_scope` has already written the events and the receipt, and an
@@ -3143,6 +3163,68 @@ class Control:
         ):
             raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
 
+    def _charges_for(self, action: Action, effect_key: str | None) -> tuple[Charge, ...]:
+        """What this action spends, one `Charge` per ancestor (SPEC-v0.9 §2.7).
+
+        **And §2.4.1's refusal, here, because this is where the effect key is finally known.**
+        A budgeted grant that reaches an action whose key resolved to `None` is refused: without
+        it an agent proposes actions carrying no `effect:` template and spends nothing against
+        every budget on the chain, for ever, which is the feature's own sharp case answered by
+        declining to play. §2.4.1 records the two probes that moved this out of the loader: a
+        loader cannot see a decorator-supplied `effect=`, and cannot run at all on the
+        standalone-authority path.
+        """
+        if self._authority is None:
+            return ()
+        result = _AUTHORITY_RESULT.get(None)
+        if result is None:
+            return ()
+        charges = self._authority._charges_for(action, result, store=self._store)
+        if charges and effect_key is None:
+            raise InvalidArgument(
+                f"{action.name}: grant {charges[0].grant_id!r} carries a budget and this action "
+                "resolved no effect key, so nothing could be charged against it. Declare an "
+                "`effect:` template for the action, or take the budget off the grant "
+                "(SPEC-v0.9 §2.4.1)"
+            )
+        return charges
+
+    def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
+        """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.
+
+        A refusal that reported how much was left would be an oracle: refused actions cost
+        nothing, so an attacker binary-searches the exact limit in a few dozen refusals and then
+        knows precisely how much authority to use without tripping it. An operator debugging at
+        3am gets the number from `inspect`, which needs the store rather than the ability to be
+        refused.
+
+        The grant named is **the one that refused**, which under §2.7 may be an ancestor rather
+        than the grant that decided: an operator whose child grant is well within its own budget
+        needs to be told the parent is not.
+        """
+        error = (
+            f"budget {exhausted.metric!r} on grant {exhausted.grant_id!r} over "
+            f"{exhausted.window} is exhausted"
+        )
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {
+                "reason": BUDGET_EXHAUSTED,
+                "grant_id": exhausted.grant_id,
+                "metric": exhausted.metric,
+                "window": int(exhausted.window.total_seconds()),
+            },
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, BUDGET_EXHAUSTED),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=error,
+        )
+        return ActionDenied(f"{action.name} denied: {error}", reason=BUDGET_EXHAUSTED)
+
     def _refuse_scope(self, action: Action, reason: str, error: str) -> _ScopeRefusedError:
         """The refusal, with its events and its receipt. Returns it for the caller to raise.
 
@@ -3401,17 +3483,27 @@ class Control:
         return data
 
     def _take(
-        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
+        self,
+        action: Action,
+        approval_id: str | None,
+        effect_key: str | None,
+        lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
-        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4)."""
+        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4).
+
+        SPEC-v0.9 §3.3: the charges ride the reservation's own transaction, which is the whole of
+        why `StateStore` was amended. The branch with no effect key passes none, because there is
+        no reservation to ride and §2.4.1 has already refused a budgeted grant that reaches it.
+        """
         if approval_id is not None and effect_key is not None:
             return self._store.consume_approval_and_reserve(
-                approval_id, action.action_hash, effect_key, action.action_id, lease
+                approval_id, action.action_hash, effect_key, action.action_id, lease, charges
             )
         if approval_id is not None:
             return self._store.consume_approval(approval_id, action.action_hash), None
         if effect_key is not None:
-            return None, self._store.reserve_effect(effect_key, action.action_id, lease)
+            return None, self._store.reserve_effect(effect_key, action.action_id, lease, charges)
         return None, None
 
     def _approver_of(self, approval_id: str | None) -> str | None:
