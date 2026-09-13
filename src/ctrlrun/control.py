@@ -573,6 +573,22 @@ class _UnmeasurableError(InvalidArgument):
         super().__init__(message)
         self.reason = reason
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Keep this picklable, because `InvalidArgument` is.
+
+        The default reconstruction is `(cls, self.args)`, and this `__init__` takes `reason`
+        keyword-only, so unpickling raised `TypeError` and a caller fanning `Control.execute`
+        across a `ProcessPoolExecutor` lost the pool instead of catching the refusal. Nothing
+        in this repository pickles it -- verify's children speak JSON over stdin -- so an
+        independent review found it by probing the type rather than by a failing run.
+        """
+        return (_rebuild_unmeasurable, (str(self), self.reason))
+
+
+def _rebuild_unmeasurable(message: str, reason: str) -> _UnmeasurableError:
+    """Module-level so `pickle` can find it by name."""
+    return _UnmeasurableError(message, reason=reason)
+
 
 class _ObservedRefusalError(Exception):
     """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
@@ -1697,9 +1713,12 @@ class Control:
         # `plan_reservation` runs before `check_charges` (§3.3), so an effect that is already
         # committed raises `DuplicateEffect` and the budget is never consulted. Reporting the
         # budget first told an operator to raise a limit when the real answer was that the effect
-        # had already happened. The clauses above have returned by now on every refusal enforce
-        # mode would have hit first, so what reaches here is what the budget would decide. T452.
-        self._observe_spend(action, charges, observation)
+        # had already happened. T452.
+        #
+        # Not every earlier refusal returns before this: the scope block and the approval gate
+        # record and carry on. `_observe_spend` skips itself once anything has blocked, which is
+        # what keeps the report to the one refusal enforce mode would have raised.
+        self._observe_spend(action, charges, observation, effect_key)
         return approval, reservation
 
     def _observe_take(
@@ -1804,10 +1823,16 @@ class Control:
         # for an action that spent, and a gateway that ran another action in this context since
         # the suspension would report *that* action's spend. The ledger is the record; the first
         # leg wrote it inside the reservation's own transaction. T447, T448.
-        # In observe mode the ledger is empty by design, so it is recomputed below, after the
-        # authority result this needs exists. §4.2.1a, T457.
-        if not self._observing:
-            self._resumed_charges(held.effect_key, held.record.attempt)
+        # **Unconditional, because this call is also the reset.** `execute` clears
+        # `_BUDGET_CHARGES` at its own top (§6.3.1's reason: a refusal carrying the previous
+        # action's numbers); `resume` has no such line, so skipping this in observe mode left the
+        # contextvar holding whatever the last action in this context had put there. An
+        # independent review demonstrated the consequence: a resumed `observed` receipt for an
+        # action whose own metric could not be measured reported a charge of 700 belonging to a
+        # different effect. That is T448's defect on the observe path, on the one receipt §8.3
+        # makes the whole evidence for an MCP multi round-trip. In observe mode the ledger is
+        # empty by design, so this sets `()` and §4.2.1a's counterfactual is computed below.
+        self._resumed_charges(held.effect_key, held.record.attempt)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -1849,7 +1874,12 @@ class Control:
             #
             # Enforce mode keeps the ledger read: there the row is evidence of a spend that
             # happened, and a recomputed number would be a claim about it instead.
-            self._observe_charges(action, held.effect_key, _Observation())
+            #
+            # Computed below, once the **real** observation exists. It used to be handed a
+            # throwaway `_Observation()`, which swallowed the block: the resumed receipt then
+            # said `decision=ALLOW, blocked_reason=None` for an action enforce mode refuses,
+            # while the two `ACTION_DENIED` events beside it said otherwise.
+            pass
         # SPEC-v0.3 §6.3 — a resumption in observe mode gets the same `observed` receipt its
         # first leg did. It is the *only* receipt an MCP multi round-trip ever gets (§8.3), so
         # a resumed leg reporting `committed` under a mode that enforces nothing would put the
@@ -1861,6 +1891,9 @@ class Control:
             observation.decided(evaluation)
             if evaluation.decision is Decision.DENY:
                 observation.block(evaluation.reason)
+            # §4.2.1a's counterfactual, on the real observation and announcing nothing: the
+            # first leg already wrote this action's `ACTION_DENIED`.
+            self._observe_charges(action, held.effect_key, observation, announce=False)
         # SPEC-v0.7 §6.8: **no recheck on a resumed leg**, for `v0.6 §7.2.3`'s reason. The
         # approval was consumed on the first leg, after that leg's recheck, and refusing here
         # would strand a reservation the remote may already be acting on. The receipt says so:
@@ -3279,6 +3312,7 @@ class Control:
         action: Action,
         effect_key: str | None,
         observation: _Observation | None = None,
+        announce: bool = True,
     ) -> tuple[Charge, ...]:
         """What this action spends, one `Charge` per ancestor (SPEC-v0.9 §2.7).
 
@@ -3301,7 +3335,7 @@ class Control:
             # §2.3. The kernel cannot measure what this action spends, so it cannot hold the
             # grant to its budget, so it declines to run it. Recorded before it is re-raised.
             raise self._refuse_unmeasurable(
-                action, BUDGET_UNMEASURABLE, unmeasurable, observation
+                action, BUDGET_UNMEASURABLE, unmeasurable, observation, announce
             ) from None
         if charges and effect_key is None:
             raise self._refuse_unmeasurable(
@@ -3314,11 +3348,16 @@ class Control:
                     "grant (SPEC-v0.9 §2.4.1)"
                 ),
                 observation,
+                announce,
             ) from None
         return charges
 
     def _observe_charges(
-        self, action: Action, effect_key: str | None, observation: _Observation
+        self,
+        action: Action,
+        effect_key: str | None,
+        observation: _Observation,
+        announce: bool = True,
     ) -> tuple[Charge, ...]:
         """§4.2.1's first half: what this action *would have* been charged, charging nothing.
 
@@ -3331,8 +3370,11 @@ class Control:
         Called above the approval gate, where `_secure` computes the same thing, so the two modes
         agree about which refusal comes first (T451).
         """
+        # **Cleared first, on every path.** Returning early without touching it left the
+        # previous action's charges on this action's receipt, which is the defect above.
+        _BUDGET_CHARGES.set(())
         try:
-            charges = self._charges_for(action, effect_key, observation)
+            charges = self._charges_for(action, effect_key, observation, announce)
         except InvalidArgument:
             # Already reported by `_refuse_unmeasurable`, which blocked rather than denying.
             return ()
@@ -3352,12 +3394,17 @@ class Control:
         return charges
 
     def _observe_spend(
-        self, action: Action, charges: tuple[Charge, ...], observation: _Observation
+        self,
+        action: Action,
+        charges: tuple[Charge, ...],
+        observation: _Observation,
+        effect_key: str | None = None,
     ) -> None:
         """§4.2.1's second half: whether the budget would have refused, writing nothing.
 
         The predicate is `check_charges`, the same function all three stores decide with, so the
-        report and the enforcement cannot drift: a pilot that said "this would have been fine"
+        report and the enforcement cannot drift **on the arithmetic** (§4.2.1b states what is not
+        promised about *which* refusal is named): a pilot that said "this would have been fine"
         about an action enforce mode refuses is worse than no pilot.
 
         **The sum is a lock-free read** off the public `consumptions()` rather than a store's
@@ -3365,12 +3412,19 @@ class Control:
         write nothing. It is therefore stale under concurrency, which is correct for a
         counterfactual and would not be for a decision.
 
+        **Skipped once something else has blocked.** Enforce mode raises at the first refusal and
+        never reaches the budget; observe mode runs every check, so without this it wrote a
+        `budget_exhausted` event for an action enforce mode refuses out of scope, and an operator
+        reading the log saw a refusal that would never have happened. An earlier version of this
+        docstring claimed the clauses above had already returned by then, which was not true of
+        the scope block or the approval gate.
+
         `check_charges` can also raise `InvalidArgument` for two charges on one grant and metric
         carrying different amounts (§3.3.1). Nothing reachable produces that shape -- §2.7's
         ancestors are distinct grants, and one grant's two budgets on one metric always agree --
         and observe mode is not the place to raise about it if something ever does.
         """
-        if not charges:
+        if not charges or observation.blocked_reason is not None:
             return
         now = self._clock()
 
@@ -3399,6 +3453,9 @@ class Control:
                     "window": int(exhausted.window.total_seconds()),
                     "observed": True,
                 },
+                # Splitting this method dropped the key, so the one event that names which
+                # effect the budget refused stopped naming it. Nothing noticed.
+                effect_key,
             )
         except InvalidArgument:
             return
@@ -3427,6 +3484,7 @@ class Control:
         reason: str,
         error: InvalidArgument,
         observation: _Observation | None = None,
+        announce: bool = True,
     ) -> InvalidArgument:
         """§2.3 and §2.4.1's refusals, with the events and the receipt they were missing.
 
@@ -3441,11 +3499,16 @@ class Control:
             # the store, alongside the `observed` receipt for the run that went ahead: two
             # receipts for one action, disagreeing. T439c.
             observation.block(reason)
-            self._append(
-                EventType.ACTION_DENIED,
-                action,
-                {"reason": reason, "error": str(error), "observed": True},
-            )
+            if announce:
+                # **Not on a resumed leg**: its first leg already wrote this event for this
+                # action, and a second one made the evidence say the action was denied twice
+                # while the receipt beside it said `ALLOW`. An independent review found the two
+                # disagreeing, which is what `acs.py`'s clause forbids one boundary lower.
+                self._append(
+                    EventType.ACTION_DENIED,
+                    action,
+                    {"reason": reason, "error": str(error), "observed": True},
+                )
             return _UnmeasurableError(str(error), reason=reason)
         self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
         self._record(
