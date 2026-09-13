@@ -1,0 +1,6 @@
+# The PEP 517 build backend, in every lock. `--require-hashes` constrains what pip installs and
+# says nothing about the isolated environment pip and `build` create to run the backend, which
+# fetches setuptools from PyPI unpinned. So every editable install passes `--no-build-isolation`
+# and every `python -m build` passes `--no-isolation`, and the backend they then find is this
+# one. The floor is pyproject.toml's.
+setuptools>=77

@@ -9,6 +9,22 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI installs from hashed locks.** Every `pip install` in a workflow now reads a
+  `requirements/*.txt` that `scripts/lock.sh` writes with `uv pip compile --universal
+  --generate-hashes`, under `--require-hashes`, and then installs the checkout itself with
+  `--no-deps --no-build-isolation` against the setuptools the same lock carries; `python -m build`
+  runs with `--no-isolation` for the same reason. What a job resolves, the build backend included,
+  is what somebody generated and reviewed, not what PyPI served that morning. The version floors
+  in `pyproject.toml` are unchanged: they are what a user may install against, and the locks are
+  what CI does. Dependabot moves the locks weekly, grouped.
+- **A Scorecard gate on every pull request.** `scorecard-gate.yml` runs OpenSSF Scorecard's
+  file-based checks against the pull request's tree and fails it if any would come back below
+  what `main` publishes, so an unpinned install, a widened token or a vulnerable pin is red
+  before the merge rather than a lower badge after it. `tests/test_repository_signals.py`
+  asserts the same rule for `pip install`, so the suite catches it first.
+
 ## [0.9.0] - Envelope
 
 *Undated until the tag.*

@@ -1,0 +1,7 @@
+# The fuzzing campaign in fuzz.yml. Installed after the seed-corpus gate, on purpose: the gate
+# must not depend on a toolchain that can fail to install.
+#
+# `<3.1`: 3.1.0 publishes wheels for CPython 3.12 to 3.14 only and no sdist, and the job runs
+# 3.11. A universal resolution cannot see that, so the bound says it. Lift it with the job's
+# Python version.
+atheris<3.1

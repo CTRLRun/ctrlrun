@@ -1,0 +1,3 @@
+# CI's `docs` job: what `ctrlrun-docs/tools/docs_audit` needs beyond the kernel's extras.
+griffe
+pyyaml

@@ -1,0 +1,4 @@
+# Building and checking a distribution: CI's `package` job, publish.yml and release.yml.
+build
+twine
+packaging
