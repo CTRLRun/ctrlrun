@@ -81,8 +81,12 @@ Four, stated here as MUST sentences and measured in §7 and §10.
 2. **The issuing agent's budget is what a hop spends.** `v0.9 §2.7` already charges every ancestor,
    and a hop MUST NOT create a second root. §2.3 is where this is enforced, and §2.3.1 shows what
    happens without it.
-3. **A hop is evidence, not a side channel.** Whatever crosses is on the receipt of both sides, and
-   the two receipts name the same hop (§3.4).
+3. **A hop is evidence, not a side channel.** Every hop is named on both of its ends: by the
+   receipt of each action run **under** it, and by the `DELEGATION_CREATED` event that **created**
+   it, which names the action that created it where there was one (§3.4). An earlier draft said
+   "the two receipts name the same hop", which is false of a relay: the middle agent of a two-hop
+   chain acts under one hop and creates another, and a single-valued `Receipt.hop` cannot hold
+   both (§3.4.4).
 4. **Nothing infers who the peer is.** The receiving agent's identity is resolved by `v0.3 §3`'s
    `IdentityProvider` and never read off the payload, exactly as `v0.3 §8.4` settled for the ACS
    hook (§3.3).
@@ -147,9 +151,17 @@ A hop is a `v0.3 §5` delegation whose `created_via` is `"hop"`. The record is
 (`authority.py:889`), unchanged, over all eight of `DIMENSIONS` (`authority.py:144`). The identifier
 is the `delegation_id` the creation mints, unchanged.
 
-**`contained_dimension` gets a third caller, not a fourth relation.** Its callers today are
-break-glass (`authority.py:1410`), `plan_delegation` (`authority.py:1478`) and the evaluation-time
-chain walk (`authority.py:1688`). A hop is the same call. An implementation that wrote a second
+**`contained_dimension` gains no caller at all, and certainly no second relation.** Counted rather
+than estimated: **seven** call sites at `22c9948`, three in `authority.py` (break-glass at `:1410`,
+`plan_delegation` at `:1478`, the evaluation-time chain walk at `:1688`) and four in
+`verify/scenarios.py` (`:2360`, `:2363`, `:4632`, `:4651`). **A hop is created through
+`plan_delegation`**, which is already one of them, so the count does not move.
+
+An earlier draft said "a third caller", wrong twice: three already existed, and a hop adds none. The
+correction earns its place because the four it omitted are in `verify`, which is the module a fourth
+relation would most plausibly be written in: a scenario needing "did this step narrow?" and finding
+no helper is how a second implementation starts. §6.2 is where that pressure actually appears, and
+it is answered there rather than by a copy. An implementation that wrote a second
 containment check for hops, agreeing with the first today, is refused by this sentence: `v0.9`'s
 `_budgets_contained` and `v0.3`'s `_patterns_contained` are one implementation each for exactly this
 reason, and a boundary is the last place to keep a copy.
@@ -180,25 +192,30 @@ permissions is never worse than holding one and that the grant named is a proper
 than of the document. That rule is correct for a principal's own authority and it is exactly wrong
 for a hop.
 
-**P1, run against the tree at `22c9948`.** One document, two grants: `mmm-issuer` for the planner,
-carrying a budget of 10,000 a day and `delegable: true`, and `aaa-receiver-own` for the worker,
+**P1, run against the tree at `22c9948`.** One document, two grants: an issuer grant for the
+planner carrying a budget of 10,000 a day and `delegable: true`, and a grant of the worker's own
 carrying no budget. The planner delegates a correctly narrowed envelope to the worker: one resource,
-100 a day. The worker then proposes a 5,000 refund on a resource the hop does not name, and the
-evaluation is asked what it decided.
+100 a day. The worker proposes a 5,000 refund **on the resource the hop does name**, so the hop
+genuinely admits the action, and the only question is which grant decides it. The two runs differ in
+nothing but the codepoint order of the two grant ids.
 
 ```
-delegation created: dlg_41ad765577… depth 1
-passed:             True
-grant_id named:     aaa-receiver-own
-delegation_id:      None
-charges:            []
+worker's own grant sorts AFTER  dlg_ :  named dlg_aa59ede0…   charges [(dlg_aa59ede0…, amount, 5000),
+                                                                      (issuer,        amount, 5000)]
+worker's own grant sorts BEFORE dlg_ :  named aaa-receiver-own charges []
 ```
 
-The hop was never consulted. The action was authorised by the worker's own grant, the resource
-restriction the planner attached did not apply, and `charges` is empty, so the planner's 10,000
-budget paid nothing. **Rename the worker's grant so it sorts after `dlg_` and the same document
-decides the other way**, which is the second finding: with the grants otherwise identical the
-outcome turns on the codepoint order of two identifiers.
+**One document, one action, and whether the issuer is charged 5,000 or nobody is charged at all
+turns on how two identifiers sort.** In the second run the hop was never consulted, the resource
+restriction the planner attached decided nothing, and the planner's 10,000 budget paid nothing.
+
+**Two corrections to an earlier draft of this paragraph, because they are the kind this milestone
+keeps finding.** It said the worker proposed "a refund on a resource the hop does not name", which
+is false of the probe printed above: the action is *inside* the envelope, and that is what makes the
+finding sharp rather than weaker. An action *outside* the envelope is worse and arrives by a
+different route, since the hop then fails `matches_shape` and never competes at all, so the worker's
+own grant authorises it outright with nothing to compare. And the draft said the rename "decides the
+other way" without saying which way; the direction is above, measured.
 
 `_by_grant_id`'s docstring says ties break on codepoint order so that reordering the file changes
 neither the decision nor the id. That is true and it is a statement about a *set of the principal's
@@ -209,18 +226,76 @@ own grants*. It was never a statement about a set that contains somebody else's 
 `Authority.evaluate` takes a `hop: str | None = None`. Where it is `None`, everything is exactly as
 0.9.0, which is why every existing deployment upgrades untouched. Where it is not:
 
-1. The candidate set is **exactly** the delegation that id names, plus its chain. No other grant of
-   the principal is a candidate, passing or failing.
-2. That delegation MUST exist, MUST be live, and its grant's `subject` MUST match the action's
-   principal by `v0.3 §4.2`'s matching. Otherwise `authority_hop`, with `data.hop` naming what was
-   presented and nothing else in it (§3.3 says why the id is safe to echo and the rest is not).
-3. Every other refusal keeps the reason it already has. A revoked chain is `authority_revoked`, an
-   expired ancestor is `authority_escalation` with `expired_parent_id`, a step that no longer
-   contains is `authority_escalation` with `dimension`. **`authority_hop` is not a bucket for them**,
-   and §7's G25 grades the containment refusal specifically so that a hop refused for the wrong
-   reason cannot pass for a hop refused for the right one.
+1. **The delegation that id names is the only candidate.** Its chain is **walked**, by
+   `v0.3 §5.6`'s existing rules, and is **not offered**: an ancestor is never itself a candidate.
+   No other grant of the principal is a candidate either, passing or failing.
+
+   The distinction is not pedantry. An earlier draft said "exactly the delegation that id names,
+   plus its chain", and read as "the ancestors are candidates too" an implementer gets a set in
+   which a root addressed to `agent: "*"`, or one whose `user` pattern admits the receiver,
+   authorises the action **at its own width**. That is §2.3.1's hole with one extra step, reached
+   by an ambiguity rather than by a decision.
+
+2. **`authority_hop` means the presented hop does not reach this action**, and it covers exactly
+   the two things that are true of the hop rather than of the chain:
+   - the id names no delegation at all, in which case `data.hop` is the presented id and there is
+     nothing else to say;
+   - the delegation exists but its grant does not `matches_shape` the action, in which case
+     `data.hop` names it and **`data.dimension`** names which of `subject`, `actions`, `resources`
+     or `environments` failed.
+
+3. **Every refusal the chain produces keeps the reason it already has**: `authority_revoked` for a
+   revoked link, `authority_expired` for an expired hop, `authority_escalation` with
+   `expired_parent_id`, `missing_parent_id` or `dimension` for the chain-walk rules,
+   `authority_constraint` and `authority_task` for the grant's own dimensions. **`authority_hop` is
+   not a bucket for any of them.**
+
 4. `_charges_for` is unchanged and therefore charges that delegation and every ancestor to the root
    (`authority.py:1285`), which is rule 2 satisfied by machinery that already exists.
+
+#### 2.3.3 Why rules 2 and 3 are shaped that way, measured
+
+An earlier draft wrote rule 2 as "MUST exist, **MUST be live**, and its grant's `subject` MUST
+match ... Otherwise `authority_hop`", and rule 3 as "every other refusal keeps the reason it already
+has". **Those two contradicted each other on the same input**, and the review round found it: a
+revoked hop is not live, so rule 2 demanded `authority_hop` while rule 3 forbade it. An *expired*
+hop was named by neither, rule 3 having listed only an expired ancestor.
+
+Liveness is therefore struck from rule 2. Existence and shape are the two things the hop itself
+owns; everything about whether a live hop is still good is the chain's, and the chain already
+answers it. P9, the only grant the principal holds being the hop:
+
+```
+case                       reason                   grant_id
+inside the envelope        authority_grant          'dlg_30448e1d…'
+action not covered         no_authority             None
+resource not covered       no_authority             None
+environment not covered    no_authority             None
+constraint fails           authority_constraint     'dlg_30448e1d…'
+subject is someone else    no_authority             None
+```
+
+**Three of the six report `no_authority` with no id, and that is the milestone's headline refusal.**
+`matches_shape` (`authority.py:536`) filters on subject, action, resource and environment before any
+outcome is collected, so a hop that does not cover those falls out of the loop entirely and
+`evaluate` returns `AuthorityResult(False, NO_AUTHORITY)` with `grant_id=None`. An operator whose
+peer was handed a narrow envelope and proposed something outside it is told **"you hold no authority
+at all"**, with nothing to hand `ctrlrun inspect --hop`.
+
+Two things make that unacceptable rather than untidy. `v0.9 §8`'s G24 already set the precedent, in
+`verify/guarantees.py`'s own words: the refusal reports `authority_task` "rather than a bare
+no_authority so an operator can tell this from having no grant at all". And §6.3 promises that every
+refusal naming a delegation prints a command with its argument filled in, which is unkeepable when
+the refusal carries no id.
+
+So rule 2's second clause exists: **a hop that is presented and does not match the action's shape is
+`authority_hop` with `data.dimension`**, not `no_authority`. A principal that presented no hop is
+unaffected, and `no_authority` keeps its meaning there.
+
+**`authority_constraint` is deliberately left alone**, and the row above is why it is worth saying:
+it already names the grant, so an operator already has the id, and folding it into `authority_hop`
+would lose which of the grant's own conditions failed. The line between the two reasons is whether
+the hop reached the action at all.
 
 **What it does not promise, and this is the residual of the whole milestone.** CTRLRun cannot make a
 receiving agent present the hop it was given. An agent that holds a grant of its own can simply not
@@ -277,8 +352,8 @@ unchanged: where containment cannot be decided, it fails.
 ### 2.5 Depth across hops, which is O3
 
 **`max_delegation_depth`, unchanged, counting hops and ordinary delegations alike.** A hop is a link
-in the same chain, so a root grant with `max_delegation_depth: 3` permits at most three links
-whatever the mix, and depth is derived by walking to the root rather than read from the stored column
+in the same chain, so a chain under a document declaring `max_delegation_depth: 3` holds at most
+three links whatever the mix, and depth is derived by walking to the root rather than read from the stored column
 (`v0.3 §5.5`), so a hop cannot assert its way to a shorter chain.
 
 **Rejected: a separate hop counter.** Two bounds over one chain means an operator must reason about
@@ -287,10 +362,19 @@ configuration. It also breaks `v0.9 §2.7`'s cost statement, which says a consum
 one row per ancestor and points at `max_delegation_depth` as the thing that bounds it. One chain, one
 bound, one cost.
 
+**It is a property of the `authority:` section, not of a grant**, and an earlier draft said "a root
+grant with `max_delegation_depth: 3`", which is wrong in the direction that makes the trade below
+look cheaper than it is. `_AUTHORITY_KEYS` is `{"max_delegation_depth", "grants", "break_glass"}`
+(`authority.py:171`); the value is held once on the `Authority` (`authority.py:1145`) and compared at
+`:1403` and `:1471`. **One number governs every chain in the deployment.**
+
 **What that costs, stated plainly.** The default is 3, so a deployment with a two-hop pipeline has
 one link left for ordinary delegation beneath it, and a three-hop pipeline has none. An operator who
 wants a longer pipeline raises the number in the document, which is a reviewed file, and raises the
-per-consumption cost with it. That is the trade and it is theirs to make.
+per-consumption cost **for every chain in the deployment**, not for the pipeline that needed it.
+There is no per-grant override and this document does not add one: a second bound over one chain
+means reasoning about which binds, which §2.5 has already refused once above. That is the trade and
+it is theirs to make.
 
 ### 2.6 Two hops hold no more than the root granted
 
@@ -383,6 +467,30 @@ residual reappearing one level up: the action hash is silent about the task, so 
 envelope to the work it was issued for except the grant's own `tasks` pattern. An issuer that wants
 the tighter property issues a hop whose `tasks` names one concrete run rather than a pattern, which
 costs one delegation record per run. §6 makes that visible and §8 records the residual.
+
+#### 3.1.2 Where the reference is read, which §9 must freeze and an earlier draft left out
+
+§3.1 says what crosses and was silent about **where it is read**, which is the half an item needs.
+Measured at `22c9948`:
+
+- **The gateway reads no caller metadata at all.** `grep -n metadata src/ctrlrun/gateway/server.py
+  src/ctrlrun/gateway/mcp.py src/ctrlrun/gateway/wire.py` returns nothing, and
+  `gateway/server.py:738`, `:753` and `:755` call `_control.evaluate(action)` and
+  `_control.execute(action, executor, effect_key)` positionally. **`v0.9`'s `task` never reaches the
+  gateway either**, which is `v0.9 §6.3.2`'s "the gateway's `tools/call`: no task" row, still true.
+- **The ACS hook reads `params.metadata`** (`acs.py:412`) and also calls `evaluate` and `execute`
+  without a task or a hop.
+
+**So §9's frozen list, which stops at `Control`'s Python signatures, does not let item 1 wire either
+surface**, and §9's own rule is that anything not there is a spec amendment before it is code. The
+rows are added: the gateway and the ACS hook each read `hop` and `task` from the caller metadata
+their transport already carries, under `v0.3 §8.2`'s rule of exactly one source and no default.
+
+**And reading them there is safe for §3.1.1's reason and no other.** They are lookup keys, not
+assertions: the principal still comes from the `IdentityProvider` and never from the payload, and a
+hop addressed to somebody else matches nothing. A reviewer who accepts §3.1.1 for the in-process
+case must accept it here; a reviewer who rejects it rejects both, which is why the argument is made
+once and cited twice.
 
 ### 3.2 A record, not a token, which is O2
 
@@ -514,10 +622,18 @@ milestone that would want it:
 > `_resumed_context` could read it back, which is a receipt-and-event change v0.9 does not make and
 > v0.10 will want anyway, since a task crossing a hop is exactly its subject.
 
-**v0.10 makes that change, and it is not optional here.** A hop is not a containment dimension, it
-is the selection of which grant decides (§2.3). A resumed leg that did not know its hop would fall
-back to deciding against any matching grant, which is §2.3.1's hole reappearing on every
-continuation, and a continuation is exactly where an MCP multi round-trip lives.
+**v0.10 makes that change, and what it buys is evidence, not blast radius.** An earlier draft said a
+resumed leg that did not know its hop "would fall back to deciding against any matching grant, which
+is §2.3.1's hole reappearing on every continuation". **That is wrong, and the code says so in a
+comment**: at `control.py:1847`, *"the policy is evaluated again for the receipt, not to re-decide.
+The action was decided and reserved on the first leg; refusing here would strand a reservation the
+remote may already be acting on"*, and `v0.3 §5.6.1` gives authority the same treatment. The resumed
+leg records a denial and the executor still runs. So what a hop on `resume` fixes is **which grant
+the receipt names**, on the only receipt an MCP multi round-trip ever gets (`v0.9 §8.3`), and that
+is worth fixing on its own terms rather than by borrowing an argument that does not apply.
+
+**The decision point the earlier draft missed is `Control._suspend`, and it is a real one.** §3.4.3
+carries it, because it is not about the resumed leg at all.
 
 **What lands.** `EXECUTION_STARTED` carries `data.hop` and `data.task`, which is an empty mapping
 today at `control.py:1487` and `control.py:1561`. `_resumed_context` (`control.py:1916`) reads both
@@ -546,10 +662,19 @@ be denied on the only receipt an MCP multi round-trip ever gets**. So:
 | both values, written by this build | evaluated on **both** dimensions, and the hop selects the grant |
 | neither, written by 0.9.0 | evaluated as 0.9.0 evaluated it: `evaluate_task=False`, and no hop selection |
 
-**A missing value is absence, not a refusal**, and the distinction is load-bearing exactly once, at
+**The discriminator is the presence of the KEY, never the value.** This is stated because the
+obvious reading of the table is wrong in the fail-open direction: a 0.10 build suspending an action
+that carries a hop and no task writes `{"hop": "dlg_...", "task": None}`, and an implementer keying
+on *value* reads "task is absent, therefore 0.9.0, therefore no hop selection either" and drops a
+hop that is right there in the event. So: `"hop" in data` and `"task" in data` decide, `data == {}`
+is the 0.9.0 row, and a `None` under a present key is a value this build wrote and means the caller
+supplied none. T487 asserts the key-presence reading against a `{"hop": ..., "task": None}` event,
+which is the case a value-keyed implementation gets wrong while every other test stays green.
+
+**A missing key is absence, not a refusal**, and the distinction is load-bearing exactly once, at
 the upgrade. It is not a widening the other way round: a leg this build suspended always carries
-both, so the absent case cannot be manufactured by a caller, only by having been suspended before
-the upgrade. T487 is the test, and §10 carries the row.
+both keys, so the absent case cannot be manufactured by a caller, only by having been suspended
+before the upgrade. §10 carries the row.
 
 **And the ambient-context hazard stays closed, which is the reason to read the value from the event
 and not from a context variable.** `v0.9 §6.3.2`'s closing paragraph works out that a task read from
@@ -559,7 +684,43 @@ evaluate the resumed leg against an unrelated task. The event is durable, is bou
 reads either value from an ambient context**, and a test asserts it by resuming inside an unrelated
 `task=` and `hop=` and requiring the event's values to win.
 
-#### 3.4.3 A relay agent is both sides at once, and the field is single-valued
+#### 3.4.3 `Control._suspend` is the decision point, and it is where the fallback reopens
+
+**`Control._suspend` re-decides authority, raises, and takes no hop.** It is the lease extension:
+an action that suspends across a round trip asks to keep holding its reservation, and
+`control.py:2218` evaluates authority again and `control.py:2227` raises `AuthorityDenied` when it
+no longer passes. The source states why in the comment above it, and the sentence is `v0.3 §5.7`'s:
+*"Without this, §5.7's 'a chain of any depth is cut by one write' is false for exactly the actions
+in flight when an operator hits the switch."*
+
+**So it is the one place §10's row "there is no fallback" can be falsified.** Under §2.3.2 the
+decision at `execute`'s top is pinned to the hop; the decision at `_suspend`, reached mid-execution,
+is not, so a receiver holding any grant of its own keeps its reservation across the round trip on
+that grant after the hop is cut. Revocation would then fail to cut exactly the in-flight action the
+check at `:2218` exists to cut, which is the guarantee inverted rather than weakened.
+
+**The hop reaches `_suspend` through the context variable, and that is correct here for a reason
+that does not hold at `resume`.** `_suspend` runs **inside** the `Control.execute` call that was
+given the hop, on the same stack, so the ambient value is this action's by construction.
+`Control.resume` is a **different call**, entered by a process that may sit inside some unrelated
+`hop=`, which is why §3.4.2 reads its values from the durable event instead. The two paths take
+their hop from different places on purpose, and an implementation that used one mechanism for both
+gets `v0.9 §6.3.2`'s ambient-context hazard back on the path that has no defence against it.
+
+| Path | Where the hop comes from | Why |
+|---|---|---|
+| `Control.execute`, `@protect` | the caller's `hop=` | the action is being proposed now |
+| `Control._suspend` | the context variable `execute` set | same call, same stack, mid-execution |
+| `Control.resume` | `EXECUTION_STARTED`'s `data.hop` (§3.4.2) | a different call, whose ambient context is unrelated |
+| `Control.evaluate` | the caller's `hop=` | it must agree with `execute` (§9) |
+
+**T488a is the test**, and it is a two-process shape rather than an assertion about a signature: an
+action runs under a hop, suspends, the hop is revoked, and the lease extension is refused
+`authority_revoked` **while the receiver holds a grant of its own that would admit the action**.
+Without the hop at `_suspend` that test passes for the wrong reason on a build with no rule at all,
+so the negative control is the same scenario with the hop intact, which must extend.
+
+#### 3.4.4 A relay agent is both sides at once, and the field is single-valued
 
 The table above has two rows and a chain of two hops has a **middle**: an agent that presents one
 hop and creates another during the same action. §2.6's own worked example contains one, so this is
@@ -577,15 +738,26 @@ saying which way round: an agent acting under no hop and creating one writes the
 there is no presented one to displace it. An agent acting under a hop writes the presented one
 whether or not it also created something.
 
-**What finds the created hop instead**: `DELEGATION_CREATED` with `data.created_via = "hop"` and
-`data.delegation_id`, which `v0.3 §7` already appends and which §6.2's surface already reads. The
-evidence exists; it is an event rather than a receipt field, on §3.4.1's rule that a receipt carries
-what decided this action and nothing derivable elsewhere.
+**What finds the created hop instead**: `DELEGATION_CREATED`, carrying `data.created_via = "hop"`,
+`data.delegation_id`, and **`action_id` naming the action that created it**.
+
+**That last field is new, and an earlier draft of this section assumed it was already there.** It is
+not: `_append_delegation` (`control.py:4316`) writes `Event(type=type_, action_id=None, ...)`, and
+its docstring gives the reason, that the three `DELEGATION_*` types "are about an authority record,
+created and revoked outside any action's life". That is true of `ctrlrun delegate` from a shell and
+**false of a hop created inside a running action**, which is the ordinary case here. Left as it is,
+the relay's created hop is linked to the relay's action by nothing but a timestamp, and the
+"evidence exists" sentence above would have been a promise the event could not keep.
+
+So: **a hop created inside an action appends `DELEGATION_CREATED` with that action's `action_id`**;
+one created outside an action keeps `None`, exactly as today, and `v0.3 §7`'s note that these events
+name their record in `data.delegation_id` is unchanged. §9 carries the row and §10 the fail-closed
+line. This is what makes §1.2's rule 3 true across a relay rather than only across a leaf.
 
 **Rejected: two fields**, `hop_in` and `hop_out`. It would put a value on the hot path that is
 `null` on every receipt except a relay's, and it would make "which hop" answerable two ways on the
-one shape where an implementation is most likely to fill the wrong one. The two-hop chain in §2.6
-is then reconstructed by the walk, which is what `chain[]` renders (§6.2).
+one shape where an implementation is most likely to fill the wrong one. The two-hop chain in §2.6 is
+then reconstructed by the walk, which is what `chain[]` renders (§6.2).
 
 ### 3.5 `ctrlrun.receipt/v7`
 
@@ -608,7 +780,7 @@ read from a store is hashed as the document it was read from.
 | T485 | A suspended action resumed under a task-bound, hop-selected grant is evaluated on both dimensions and is **not** denied, with `EXECUTION_STARTED` carrying both values. `v0.9 §6.3.2`'s cost, paid |
 | T486 | The resume runs inside an unrelated `task=` and `hop=`: the event's values decide and the ambient ones reach nothing. `v0.9 §6.3.2`'s ambient-context hazard, still closed |
 | T487 | A leg suspended by **0.9.0** and resumed by this build: `EXECUTION_STARTED` carries neither value, the leg is evaluated as 0.9.0 evaluated it, and a task-bound grant does **not** deny it. The upgrade case (§3.4.2, §10) |
-| T488 | A relay agent presents one hop and creates another in the same action: its receipt's `hop` names the one it **acted under**, and the created hop is found from `DELEGATION_CREATED`. §3.4.3's precedence |
+| T488 | A relay agent presents one hop and creates another in the same action: its receipt's `hop` names the one it **acted under**, and the created hop is found from `DELEGATION_CREATED`. §3.4.4's precedence |
 
 ---
 
@@ -632,10 +804,35 @@ item is told not to overclaim the row.
 
 `upstream:` is a new action-entry key, beside `mcp:`, and carries at most two pins.
 
-| Key | Compared against | Shape |
-|---|---|---|
-| `tls_cert_sha256` | the SHA-256 of the upstream's **leaf certificate**, DER form | a **list** of `sha256:…` strings |
-| `tool_schema_sha256` | `"sha256:" + hex(SHA-256(canonical_bytes(<the tool's entry in tools/list>)))` | one `sha256:…` string |
+| Key | Compared against | Shape | Feeds |
+|---|---|---|---|
+| `tls_cert_sha256` | the SHA-256 of the upstream's **leaf certificate**, DER form | a **list** of `sha256:…` strings | §4.3 checks 1 and 2 |
+| `tls_cert_file` | the certificate itself | a path to a PEM file holding one or more certificates | §4.3 check 3 |
+| `tool_schema_sha256` | `"sha256:" + hex(SHA-256(canonical_bytes(<the tool's entry in tools/list>)))` | one `sha256:…` string | §4.3 checks 1 and 2 |
+
+**Two TLS keys, because a digest cannot be a trust anchor, and an earlier draft had only the
+digest.** §4.3's check 3 makes the pinned certificates the connection's only trust anchors, and
+`SSLContext.load_verify_locations` takes PEM: there is no way to hand OpenSSL a hash and have it
+validate a chain against it. A deployment that configured only `tls_cert_sha256` had given the
+kernel nothing to build a trust store from, so check 3 was unimplementable from the configuration
+the document defined.
+
+**The mechanism works, which is why this is a configuration gap and not a dead end.** P8, against a
+CA-signed leaf rather than a self-signed one, which is the realistic shape:
+
+```
+ssl.VERIFY_X509_PARTIAL_CHAIN available: True
+the pinned server   HANDSHAKE OK
+a swapped server    REFUSED  SSLCertVerificationError: CERTIFICATE_VERIFY_FAILED
+```
+
+A CA-signed leaf loaded through `load_verify_locations(cadata=<PEM>)` with
+`verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN` is a valid anchor, and a swap is refused at the
+handshake before any request byte.
+
+**An entry that pins by digest alone gets checks 1 and 2 and not check 3**, stated as a limit rather
+than discovered, and the startup check (check 1) says so on the line it prints, because a pin an
+operator believes is enforcing at the handshake and is not is worse than no pin.
 
 **The certificate, not the public key, and the trade is real.** The key is the right thing to pin,
 because a renewal keeps it and a certificate pin fires on every rotation. P4 measured what it costs:
@@ -693,8 +890,25 @@ connection, which is a decision taken after the executor has begun.
 
 **The ACS hook cannot.** `acs.py`'s own docstring settles it: ACS is advisory, the *platform* runs
 the tool, and `AcsControlHook` never holds a connection to anything. There is no observation point,
-so there is nothing to pin. A pin on an action reaching the kernel through the ACS hook is a **load
-error**, naming the surface, rather than a key that silently does nothing.
+so there is nothing to pin.
+
+**Where that is refused is at the surface's constructor, not at load**, and an earlier draft of this
+section said "a **load error**, naming the surface", which is not implementable. There is one
+loader: `Policy.from_file` is reached by `Control.from_file` and `@protect` (`control.py:761`), by
+`ctrlrun scan` (`scan.py:458`, `:521`) and by `verify`'s worker (`verify/worker.py:69`), and **it
+cannot know which surface will later run an action**. The same `ctrlrun.yaml` is loaded by the
+gateway, by a decorator-based worker, by `scan` and by `verify`.
+
+**And a load error would have broken §7.3's own exit criterion.** That section requires a shipped
+example that pins an upstream and requires G27 to grade `PASS` on it; `verify` loads through the
+in-process path, so a document carrying `upstream:` would refuse to load under `verify` and G27
+could never be graded on anything this repository ships. §7 already has `verify` seeding an
+observation for check 2 in-process, which is precisely the configuration a load error would forbid.
+
+So the rule is: **`AcsControlHook` refuses at construction** with `InvalidArgument` naming the key
+and the surface, exactly as `v0.3 §8.4` has it refuse a hook built with no identity provider. There
+is no constructor-time analogue for "in-process", because any `Control` may be used in-process, so
+§4.4's second half is answered differently below.
 
 **In-process `@protect` is refused, and P4 is why the refusal is a decision rather than a gap.** The
 probe stood up a TLS server and read the leaf certificate off `ctrlrun.transport.HTTPSConnection`
@@ -710,8 +924,16 @@ after `connect()`, so the observation point demonstrably exists. It is refused a
 - and it would be **silently** conditional, which is the fail-open direction: a pin configured, no
   check performed, nothing red.
 
-So a pin on an action that reaches the kernel in-process is a load error too, on the same rule and
-with the same message shape. §8 records what lifting it would take.
+**So what happens in-process is a refusal at decision time, under `upstream_unverified`.** There is
+no earlier moment at which the kernel knows: `Control.execute` is where an in-process action first
+exists, and nothing before it distinguishes a `Control` that will be used in-process from one the
+gateway holds. That is not a special case, it is §4.5's existing fail-closed row doing its job: the
+in-process path observes no upstream, so nothing is verified, so the action is refused. **An
+operator who pins an upstream for an action their own code executes directly gets a refusal on
+every call**, which is loud, correct, and exactly what the pin says they asked for.
+
+`verify` and `scan` load such a document without error, which is what §7.3 needs, and `verify`
+grades G27 by seeding an observation (§7). §8 records what lifting the in-process limit would take.
 
 ### 4.5 The refusals
 
@@ -722,10 +944,20 @@ with the same message shape. §8 records what lifting it would take.
 
 Both are `ActionDenied` with their own reason, under the standing rule that `errors.py`'s closed set
 already covers every refusal here, which `v0.9` kept for a whole milestone without an exception. At the gateway both return a new JSON-RPC code,
-**`-41013` `ctrlrun.upstream_unpinned`**, HTTP 403, with `reason` and `action_id` in `data` as
+**`-41016` `ctrlrun.upstream_unpinned`**, HTTP 403, with `reason` and `action_id` in `data` as
 `-41012` carries them, and **the upstream is never called**. A distinct code earns its keep on
 `v0.3 §8.4`'s test: `-41001` means this action is not permitted to anyone, `-41012` means not to
-you, and `-41013` means not against **that server**, which a client answers differently from either.
+you, and `-41016` means not against **that server**, which a client answers differently from either.
+
+**`-41016`, and the number was checked rather than assumed.** An earlier draft of this section took
+`-41013`, which is **already allocated**: `SPEC-mcp-operator.md` §9.3 adds `-41013`
+`ctrlrun.not_a_human` and `-41014` `ctrlrun.principal_expired` to `v0.2 §6.10`'s table, and
+`gateway/operator.py:112-121` ships `-41013`, `-41014` and `-41015`. **There is one namespace**,
+which that section says in as many words, so the range is walked before a number is taken. `-41001`
+to `-41015` are allocated at `22c9948`, and `-41016` is the first free one. This document's §1.4
+claims every cross-module assertion was probed; allocating a taken number was a one-line grep that
+claim did not cover, and the rule it adds is that **a new identifier in a shared namespace is
+searched for before it is spent**.
 
 **`upstream_unverified` is the fail-closed half and it is the one to get right.** A pin that does
 nothing when nothing was observed is a pin that an upstream can switch off by never being observed.
@@ -736,16 +968,23 @@ Bumped **once**, here, by item 3. The key it adds is `upstream:` on an action en
 
 **An older reader refuses the document rather than ignoring the key**, for the reason `v0.9 §10.1`
 gives about `tasks:`: an older reader that ignored `upstream:` would authorise the action against
-any server at all, which is the whole of what the key restricts. The refusal takes the shape
-`policy.py` already uses for v3, v4, v5 and v7 keys (`require_v7`, `policy.py:1176`), and the
-consequence sentence is written in the same voice.
+any server at all, which is the whole of what the key restricts.
+
+**The refusal takes the shape `policy.py` uses for an ACTION-ENTRY key, which is not `require_v7`'s.**
+An earlier draft cited `require_v7` (`policy.py:1176`); that function walks
+`document["authority"]["grants"]` and the `break_glass` entries, because `tasks:` and `budgets:` are
+**grant** keys. `upstream:` sits on an action entry, so the shape to follow is `_V4_ENTRY_KEYS`
+(`policy.py:155`) and `_V5_ENTRY_KEYS` (`policy.py:164`), enforced in the action-entry parser at
+`policy.py:1496`. The rationale that makes `require_v7` shared with `authority.py`, that
+`v0.3 §8.3`'s `--authority` file carries no policy section, **does not apply here at all**: a
+standalone authority document carries no action entries, so there is nothing on that path to gate.
 
 ### 4.7 Acceptance tests for item 3
 
 | | Test |
 |---|---|
 | T489 | A pinned certificate that matches admits the action; the negative control |
-| T490 | A swapped server behind the same name is refused at check 2 with `upstream_mismatch` and `-41013`, and the upstream is never called, asserted by a listener that records connections |
+| T490 | A swapped server behind the same name is refused at check 2 with `upstream_mismatch` and `-41016`, and the upstream is never called, asserted by a listener that records connections |
 | T491 | The same swap at check 3: the handshake fails, `NotExecuted` is raised before any request byte, and the effect is recorded `FAILED` and not `AMBIGUOUS` |
 | T492 | A tool whose advertised schema moved under an approved action name is refused; the identical schema is admitted. Both hashes computed through `canonical_bytes` |
 | T493 | An entry pinning an upstream that nothing has observed is refused `upstream_unverified`, not admitted |
@@ -829,6 +1068,7 @@ budget from an observed run is untouched.
 |---|---|
 | T498 | The generated property: over every constructible pair of refusals, enforce's raised reason equals observe's `blocked_reason`. The pair set is asserted non-empty and its size is reported |
 | T499 | `v0.9 §4.2.1b`'s first named case: out of scope and awaiting approval, both modes name the same reason |
+| T499a | P7 as a test: an action tripping both `policy_unapproved` and a later refusal names `policy_unapproved` in **both** modes. The case that proves the list starts at `execute`'s entry, and the one a `_secure`-only refactor leaves broken while every other pair goes green |
 | T500 | Its second: `policy_unapproved` against a later refusal, both modes name the same reason |
 | T501 | Every pair the generator could not construct is named in the test's own output, and the list is asserted against the declared order so a shrinking pair set fails red |
 | T502 | The four v0.9 regressions as regression tests: the resumed observed receipt's spend, the doubled `_Observation` event, the `effect_key` on the budget-refusal event, and the picklability of every `InvalidArgument` subclass across `verify`'s JSON-over-stdin children |
@@ -864,9 +1104,25 @@ envelope did the peer actually hold, and which hop narrowed it**.
 | `chain[]` | one entry per ancestor to the root: `id`, `depth`, `revoked_at`, and **the dimension on which each step narrows** |
 | `revoked_at` | on the hop itself, or `null` |
 
-**`chain[]` carrying which dimension narrowed at each step is the part that answers the question.**
+**`chain[]` carrying which dimensions narrowed at each step is the part that answers the question.**
 An operator looking at a refused action knows the chain is valid or it is not; what they cannot see
 today is which link took the resource away. This renders it once per step.
+
+**Plural, and it needs a helper that does not exist.** An earlier draft said "the dimension on which
+each step narrows", singular, which has no defined answer: T470 is "a hop that narrows on **every**
+dimension", so a step routinely narrows on several at once. And `contained_dimension`
+(`authority.py:889`) computes the **complement** of what is wanted: it returns the first row the
+child *violates*, or `None` when the child is contained. There is no function anywhere in the tree
+that answers "which rows did this step make strictly stricter"; the seven call sites of
+`contained_dimension` (§2.2) are all asking the other question.
+
+So §9 carries a row for `narrowed_dimensions(parent, child) -> tuple[str, ...]`, returning the
+subset of `DIMENSIONS` on which the child is strictly stricter, in `DIMENSIONS` order. **It is a
+reporting helper and it decides nothing**, which is the line that keeps §2.2's no-second-relation
+rule intact: `contained_dimension` remains the only thing any decision calls, and a build in which
+`narrowed_dimensions` disagreed with it would be wrong about a rendering and not about an
+authorization. The two are tested against each other on the same pairs so the disagreement is still
+caught.
 
 **Its own document rather than a key in `ctrlrun.inspection/v2`**, on `v0.9 §10.1`'s argument for
 `ctrlrun.budget/v1`: that one answers about an **action** and this answers about an **authority
@@ -875,11 +1131,22 @@ record**, and a reader handed one would have to know which shape it got before i
 ### 6.3 One command from the refusal to the thing that explains it
 
 **Every refusal that names a delegation prints the command with its argument filled in**, not with a
-placeholder. `authority_hop` prints the presented id, `authority_escalation` with
-`missing_parent_id` prints that id, `authority_revoked` prints the revoked one.
+placeholder. `authority_hop` prints the presented id, `authority_revoked` prints the revoked one,
+and `authority_escalation` with `missing_parent_id` prints **the presented hop**, naming the
+unreachable ancestor in the prose beside it.
+
+**That last row is not a detail, and an earlier draft got it backwards by printing the missing id.**
+The id `missing_parent_id` carries is by construction the record the store could **not** read, so
+`ctrlrun inspect --hop <that id>` is the unknown-id path and exits non-zero with nothing on stdout
+(§6.5's T504). A refusal whose one suggested command is guaranteed to fail is worse than no
+suggestion: it sends an operator to a dead end and teaches them the line is noise. The presented hop
+**is** readable, its `chain[]` is what shows where the walk stopped, and that is the thing the
+operator needs.
 
 ```
-denied: stripe.refund  authority_escalation  (a record in the chain could not be read)
+denied: stripe.refund  authority_escalation
+        dlg_5c44df6177f0a1b2c3d4e5f60718293a is live, but dlg_a3da9cb912f04e7788b1c5d6e7f80912
+        above it could not be read
         ctrlrun inspect --hop dlg_5c44df6177f0a1b2c3d4e5f60718293a
 ```
 
@@ -927,7 +1194,7 @@ over a generated pair set (§5.3) and item 5's is a rendering.
 | Id | Title | Width | Positive control | `N/A` when |
 |---|---|---|---|---|
 | G25 | `a hop narrows or it is refused` | 30 | a hop that narrows correctly admits the action | no grant in the document is delegable |
-| G26 | `both receipts name one hop` | 26 | the two ids compared and equal | no grant in the document is delegable |
+| G26 | `a hop is named on both sides` | 28 | the two ids compared and equal | no grant in the document is delegable |
 | G27 | `a swapped upstream is denied` | 28 | the pinned upstream admits the action | no action entry pins an upstream |
 
 **G27 grades §4.3's check 2 and only check 2**, and the scope is written here because the title
@@ -947,6 +1214,14 @@ because v0.7 had to shorten one and v0.8 three.
 
 **G25's title says "narrows or it is refused" and not "widening is refused"**, because the guarantee
 grades both halves and a title naming only the negative would let the positive control drift out.
+
+**G26's title says "named on both sides" and not "both receipts name one hop"**, which is what an
+earlier draft called it. The two ends of a hop are not always two receipts: a relay's receipt names
+the hop it acted under, so the hop it *created* is named by `DELEGATION_CREATED` and that event's
+`action_id` (§3.4.4). **G26's scenario MUST be built over a chain with a middle**, not over a single
+issuer and a single receiver, because the single-link shape grades a pairing that was never in doubt
+and would pass on a build where the relay case is broken. That is §7.1's rule applied to G26 rather
+than restated for it.
 
 ### 7.1 G25 must not pass for a reason that has nothing to do with G25
 
@@ -1053,15 +1328,20 @@ One justification per row. Anything not here is a spec amendment before it is co
 |---|---|
 | `hop=` on `@protect` and `Control.execute` | nothing carries which envelope an action is proposed under. It cannot go on `Action` for `v0.9 §6.3.1`'s reason, which is unchanged and not weaker here: the payload `canonicalize` builds is fixed, and adding to it moves every action hash in existence, so every outstanding approval stops matching and every receipt's hash ceases to reproduce |
 | `hop=` on `Authority.evaluate` | **amends a signature `SPEC-v0.3.md` §11 froze and `v0.9 §10.3` already amended once**, and is recorded here the same way rather than slipped in. §2.3 puts the selection of the deciding grant inside the evaluation, which is the only place that can refuse a fallback |
-| `hop=` on `Control.evaluate` | **also amends a frozen signature**, for `v0.9 §10.3`'s reason: without it `Control.evaluate` and `Control.execute` disagree about a hop-selected grant, and `ctrlrun.adapter.needs_approval` routes through `evaluate` |
+| `hop=` on `Control.evaluate` | **also amends a frozen signature**, for `v0.9 §10.3`'s reason: without it `Control.evaluate` and `Control.execute` disagree about a hop-selected grant |
+| `hop=` and `task=` on `ctrlrun.adapter.needs_approval` | the row above closes the disagreement one frame too shallow, and an earlier draft stopped there. `needs_approval(control, action, arguments, *, resource=None)` (`adapter.py:428`) ends `return control.evaluate(proposed).decision is Decision.APPROVE`, takes no task and no hop, and is the public pre-invocation predicate for the OpenAI Agents SDK shape. Without them the predicate evaluates against the receiver's whole candidate set while `execute` evaluates against the hop alone, so it answers "no human needed" for a call `execute` then refuses. Its own docstring makes the argument for `resource=`: "a predicate that skipped it would evaluate a different action from the one that runs" |
+| `hop` and `task` read from caller metadata at the gateway and the ACS hook | §3.1.2. Neither surface reads any caller metadata for authorization today and neither threads `v0.9`'s task, so without these rows item 1 cannot wire the two surfaces where a hop actually arrives over a wire |
+| `action_id` on `DELEGATION_CREATED`, where the hop was created inside an action | §3.4.4. The event is action-less by construction (`control.py:4316`), which is true of `ctrlrun delegate` from a shell and false of a hop created mid-action. Without it a relay's created hop is linked to the action that created it by nothing but a timestamp, and §1.2's rule 3 is false across every middle link |
 | `Control.hop(parent_id, grant, *, by) -> Delegation` | `Control.delegate` hardcodes `via="api"` (`control.py:3863`) and the private `_delegate` takes `via`. Exposing `via=` publicly would let API code write `"cli"` or `"break-glass"` into `created_via`, which is **evidence about which surface acted**, and a caller that can forge it makes the field decorative. A method whose name fixes the value cannot |
-| `CreatedVia` gains `"hop"`, from three values to four | **an exported type alias whose value changes** (`authority.py:124`), read by `_CREATED_VIA` at parse time (`authority.py:834`), which raises `_UnreadableError` on a value it does not know. An older binary meeting a `"hop"` row therefore reports the delegation unreadable, which is the fail-closed direction and is stated rather than discovered |
+| `CreatedVia` gains `"hop"`, from three values to four | **an exported type alias whose value changes** (`authority.py:124`), read by `_CREATED_VIA` at parse time (`authority.py:834`), which raises `_UnreadableError` on a value it does not know. **The blast radius of an older binary meeting one is the whole deployment, not one delegation**: see §9.3, which is not a footnote |
 | `Receipt.hop` | §3.4. One field, the id both sides name |
 | `data.hop` and `data.task` on `EXECUTION_STARTED` | §3.4.2. The event's `data` is `{}` today (`control.py:1487`, `control.py:1561`); it becomes the durable binding `_resumed_context` reads back, which is what lets a resumed leg be evaluated on both dimensions instead of skipping them |
 | `AUTHORITY_HOP` (`"authority_hop"`) | a presented hop that names no live delegation addressed to this principal is not any existing reason: it is not `no_authority`, which means nothing matched, and not `authority_escalation`, which means a chain step failed. §2.3.2 rule 3 forbids using it as a bucket for either |
 | `UpstreamPin`, and `upstream` on an action entry | §4.2. `McpOptions` (`policy.py:543`) carries per-tool assertions an operator makes about their upstream and is the closest existing name; it holds claims about **behaviour** (`not_executed_on_error`) and this holds claims about **identity**, and merging them would put an authorization input in a structure whose documented job is a `NotExecuted` hint |
+| `narrowed_dimensions(parent, child)` | §6.2. `contained_dimension` answers which row a child **violates**; no name in the tree answers which rows it **narrows**, which is what an operator reading a chain needs. A reporting helper that decides nothing, so §2.2's one-relation rule is untouched |
 | `UPSTREAM_MISMATCH`, `UPSTREAM_UNVERIFIED` | §4.5. Two reasons, separately observable, because "the server changed" and "nobody has checked" are different findings and an operator fixes them differently |
-| `-41013` `ctrlrun.upstream_unpinned` | §4.5, on `v0.3 §8.4`'s test for `-41012`: a client answers "not permitted to anyone", "not permitted to you" and "not against that server" three different ways |
+| `ssl_context=` on `ctrlrun.gateway.transport.request` | §4.3's check 3 cannot be implemented without it: `request` builds its client as `httpx.Client(timeout=timeout, follow_redirects=False)` (`gateway/transport.py:155`) and accepts no context, no verify argument and no client. A module-level default is refused rather than omitted: one context set globally pins every caller of this module to one certificate, and the gateway fronts one upstream while the ACS hook and in-process callers share the module |
+| `-41016` `ctrlrun.upstream_unpinned` | §4.5, on `v0.3 §8.4`'s test for `-41012`: a client answers "not permitted to anyone", "not permitted to you" and "not against that server" three different ways |
 
 **No new error type.** `errors.py`'s closed set already covers every refusal here: `authority_hop`
 is an `AuthorityDenied` reason, and both upstream reasons are `ActionDenied` reasons. If an item
@@ -1116,10 +1396,35 @@ key table.
 
 ### 9.2 The module map
 
-**No new module.** The hop is `authority.py` and `control.py`; the pin is `policy.py` for the key and
-`gateway/` for the three checks; the ordered list is `control.py`; the surface is `reporting.py` and
-`cli/`. A reorganisation of `control.py` is out of scope (§8) and does not become in scope as a side
+**No new module.** The hop is `authority.py` and `control.py`. The pin is `policy.py` for the key,
+**`control.py` for check 2's decision** and `gateway/` for checks 1 and 3; an earlier draft of this
+line said "`gateway/` for the three checks", which contradicted §4.3's own table, where check 2 is
+`Control` comparing the pin against what was observed. The `DENY` lives where every other `DENY`
+lives. The ordered list is `control.py`; the surface is `reporting.py` and `cli/`. A reorganisation of `control.py` is out of scope (§8) and does not become in scope as a side
 effect of item 4 rewriting two methods inside it.
+
+### 9.3 The first hop makes 0.10.0 a one-way upgrade, and §9's "no migration" does not soften it
+
+**Stated as its own subsection because §9's migration paragraph reads as though the absence of a
+migration made rollback cheap.** It does not, and the mechanism is worse than v0.9's one-way
+migration `0007`.
+
+`CreatedVia`'s vocabulary is closed. `_delegation_from_record` (`authority.py:834`) looks the stored
+string up in `_CREATED_VIA` and raises `_UnreadableError` on a value it does not know, and
+`Authority._candidates` (`authority.py:1608`) reads **every** delegation row before filtering any of
+them, so one unreadable row aborts the whole evaluation. `authority.py:118-123` already says so, in
+the source, in as many words: a value outside the vocabulary "makes `_candidates` raise and answers
+`authority_unreadable` for **every action in the deployment**", and a deployment that wrote rows a
+reader does not know "would deny everything, which is fail-closed and useless".
+
+**So the moment the first hop is written, 0.9.x can no longer run against that store**, and not for
+the delegation it cannot read: for every action by every principal. `v0.3 §4.6` makes an unreadable
+delegation a denial rather than a skip, deliberately, so this is the fail-closed direction working
+as designed and it is still a deployment that stops.
+
+**The release item carries this in the notes**, beside the upgrade check it already owes, and the
+note says the thing operators need: the irreversible step is **creating the first hop**, not
+installing 0.10.0. A deployment that installs and creates none can still roll back.
 
 ---
 
@@ -1137,14 +1442,14 @@ effect of item 4 rewriting two methods inside it.
 | A chain of hops and delegations exceeds `max_delegation_depth` | **refused**, `max_depth` (§2.5) |
 | A hop is presented with no resolvable receiving identity | **refused before an action exists** (§3.3), `-41007` at the gateway, no receipt and no events |
 | A resumed leg whose `EXECUTION_STARTED` carries no hop or task, written by 0.9.0 | **evaluated as 0.9.0 evaluated it**: `evaluate_task=False`, no hop selection. A missing value is absence, not a refusal, or every in-flight action across the upgrade would be denied on the only receipt it gets (§3.4.2's table, T487) |
-| A relay agent presents one hop and creates another in the same action | its receipt's `hop` names the hop it **acted under**; the created one is evidence as `DELEGATION_CREATED` (§3.4.3) |
+| A relay agent presents one hop and creates another in the same action | its receipt's `hop` names the hop it **acted under**; the created one is evidence as `DELEGATION_CREATED` (§3.4.4) |
 | An action entry pins an upstream and nothing has observed one | **refused**, `upstream_unverified` (§4.5). Never admitted |
-| An observed certificate hash is in no pinned list | **refused**, `upstream_mismatch`, `-41013`, upstream never called (§4.5) |
+| An observed certificate hash is in no pinned list | **refused**, `upstream_mismatch`, `-41016`, upstream never called (§4.5) |
 | A swapped upstream at handshake time | **`NotExecuted` before the first request byte**, effect `FAILED`, not `AMBIGUOUS` (§4.3) |
 | An advertised tool schema moved under an approved action name | **refused**, `upstream_mismatch` (§4.2) |
 | `upstream:` in a `ctrlrun.policy/v7` document | **load error**, naming the key and its consequence (§4.6) |
 | `upstream:` on an action reaching the kernel in-process or through the ACS hook | **load error**, naming the surface (§4.4) |
-| An older binary meets a `created_via` of `"hop"` | **the delegation is unreadable**, which `v0.3 §4.6` makes a denial and not a skip (§9) |
+| An older binary meets a `created_via` of `"hop"` | **every action in the deployment is refused** `authority_unreadable`, not just that delegation: `_candidates` reads all rows before filtering and raises (§9.3). Fail closed, and a rollback that stops the deployment |
 | Observe mode and enforce mode reach different refusals | **cannot arise**: one declared order, walked by both (§5.2). This row is a MUST and §5.3 is its proof obligation |
 
 ---
