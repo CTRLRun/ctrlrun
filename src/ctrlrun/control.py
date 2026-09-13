@@ -565,6 +565,15 @@ class _ObservedRefusalError(Exception):
 #: SPEC-v0.9 §4.5 — its own reason, because an exhausted budget, an out-of-scope record and a
 #: failing scope provider all deny the same action with the same exception type.
 BUDGET_EXHAUSTED: Final = "budget_exhausted"
+
+#: SPEC-v0.9 §2.3 and §2.4.1 refuse before anything is charged, and an independent review found
+#: both escaping as a bare `InvalidArgument`: no `ACTION_DENIED`, no receipt, nothing in the one
+#: record an operator has of a refused action. They keep that exception type, because neither is
+#: a budget running out, but they are refusals and they are recorded as refusals. Two reasons
+#: rather than one: an operator who declared a budget on an action with no `effect:` template has
+#: a different thing to fix than one whose agent proposed a negative amount.
+BUDGET_UNMEASURABLE: Final = "budget_unmeasurable"
+BUDGET_UNKEYED: Final = "budget_unkeyed"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
 
@@ -2222,11 +2231,6 @@ class Control:
         may take twice, once more after a `reconcile` hook moves an `AMBIGUOUS` record, and the
         hook is a network call whose duration would otherwise sit inside the window.
         """
-        approval_id = (
-            self._presented(action, effect_key, evaluation, started_at, preconditions)
-            if evaluation.decision is Decision.APPROVE
-            else None
-        )
         # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
         # reconcile between them cannot change what this action spends.
         #
@@ -2234,7 +2238,18 @@ class Control:
         # action that reaches it: a budgeted grant whose action resolved no effect key spends
         # nothing against every budget on the chain, for ever, and returning early would be the
         # kernel declining to notice.
+        #
+        # **And before the approval gate**, because §2.3's and §2.4.1's refusals depend on nothing
+        # the gate produces and are unconditional: the action cannot run whatever a human says.
+        # Assembling after the gate asks a human to approve a refund the kernel has already
+        # decided to refuse, and leaves a granted approval behind for an action nothing can
+        # execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape. T446.
         charges = self._charges_for(action, effect_key)
+        approval_id = (
+            self._presented(action, effect_key, evaluation, started_at, preconditions)
+            if evaluation.decision is Decision.APPROVE
+            else None
+        )
         if approval_id is None and effect_key is None:
             # SPEC-v0.6 §7.2's `ALLOW` row, which §7.2.2 step 1 quietly assumed a reservation
             # for. There is nothing to take here -- no grant to check, no key to hold -- but a
@@ -3205,15 +3220,44 @@ class Control:
         result = _AUTHORITY_RESULT.get(None)
         if result is None:
             return ()
-        charges = self._authority._charges_for(action, result, store=self._store)
+        try:
+            charges = self._authority._charges_for(action, result, store=self._store)
+        except InvalidArgument as unmeasurable:
+            # §2.3. The kernel cannot measure what this action spends, so it cannot hold the
+            # grant to its budget, so it declines to run it. Recorded before it is re-raised.
+            raise self._refuse_unmeasurable(action, BUDGET_UNMEASURABLE, unmeasurable) from None
         if charges and effect_key is None:
-            raise InvalidArgument(
-                f"{action.name}: grant {charges[0].grant_id!r} carries a budget and this action "
-                "resolved no effect key, so nothing could be charged against it. Declare an "
-                "`effect:` template for the action, or take the budget off the grant "
-                "(SPEC-v0.9 §2.4.1)"
-            )
+            raise self._refuse_unmeasurable(
+                action,
+                BUDGET_UNKEYED,
+                InvalidArgument(
+                    f"{action.name}: grant {charges[0].grant_id!r} carries a budget and this "
+                    "action resolved no effect key, so nothing could be charged against it. "
+                    "Declare an `effect:` template for the action, or take the budget off the "
+                    "grant (SPEC-v0.9 §2.4.1)"
+                ),
+            ) from None
         return charges
+
+    def _refuse_unmeasurable(
+        self, action: Action, reason: str, error: InvalidArgument
+    ) -> InvalidArgument:
+        """§2.3 and §2.4.1's refusals, with the events and the receipt they were missing.
+
+        Returns the error for the caller to `raise`, like `_refuse_scope`, so a reader can see
+        the control flow leaves at the call site. The message is the one the guard already wrote:
+        it names the grant, the metric and the offending value, and an operator reading the
+        receipt needs exactly that.
+        """
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
+        self._record(
+            action,
+            Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=str(error),
+        )
+        return error
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
         """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.

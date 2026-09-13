@@ -630,3 +630,92 @@ def test_T432_a_refused_retry_charges_nothing(store, clock) -> None:
     after = [(row.effect_key, row.amount, row.released_at) for row in store.consumptions()]
     assert after == before, "a refused retry is not a second spend"
     assert _held(store) == 100
+
+
+# --- §2.3 and §2.4.1 refuse, and a refusal is a thing the operator can see --------------------
+
+APPROVE_DOC = DOC.replace("decision: allow", "decision: approve")
+
+
+def _approving_control(store, clock):
+    from ctrlrun.approval import LocalApprovalProvider
+
+    return Control(
+        policy=Policy.from_yaml(APPROVE_DOC, source="<a>"),
+        store=store,
+        approvals=LocalApprovalProvider(store, clock=clock, poll_interval=timedelta(0)),
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(APPROVE_DOC, source="<a>"),
+    )
+
+
+def test_T444_an_unmeasurable_action_is_refused_with_an_event_and_a_receipt(store, clock) -> None:
+    """§2.3 and §2.4.1 refuse. **A refusal nobody can see is not a refusal.**
+
+    A review found these three escaping as bare `InvalidArgument` with no `ACTION_DENIED` and no
+    receipt, which leaves the one record an operator has of a refused action empty. The exception
+    type stays what §2.3 says it is: this is an argument the kernel cannot measure, not a budget
+    that ran out.
+    """
+    control = _control(store, clock)
+    for arguments, fragment in (
+        ({"amount": -250, "id": "1"}, "-250"),
+        ({"id": "1"}, "carries no 'amount' argument"),
+    ):
+        before = len(store.events())
+        with pytest.raises(InvalidArgument) as caught:
+            control.execute(
+                Action(
+                    name="payments.refund",
+                    arguments=arguments,
+                    principal=AGENT,
+                    environment="prod",
+                ),
+                lambda: {"ok": True},
+                "refund:1",
+            )
+        assert fragment in str(caught.value)
+        written = [str(event.type) for event in store.events()][before:]
+        assert "ACTION_DENIED" in written, written
+        receipt = store.receipts()[-1]
+        assert receipt.result is ReceiptResult.DENIED
+        assert receipt.decision_reason == "budget_unmeasurable", receipt.decision_reason
+    assert store.consumptions() == (), "nothing was charged for any of them"
+
+
+def test_T445_a_keyless_budgeted_action_is_refused_with_an_event_and_a_receipt(
+    store, clock
+) -> None:
+    """§2.4.1's refusal, given the same treatment. Its reason is distinct from §2.3's because an
+    operator who declared a budget on an action with no `effect:` template has a different thing
+    to fix than one whose agent proposed a negative amount."""
+    control = _control(store, clock)
+    with pytest.raises(InvalidArgument):
+        control.execute(_action(), lambda: {"ok": True}, None)
+    assert "ACTION_DENIED" in [str(event.type) for event in store.events()]
+    receipt = store.receipts()[-1]
+    assert receipt.result is ReceiptResult.DENIED
+    assert receipt.decision_reason == "budget_unkeyed", receipt.decision_reason
+
+
+def test_T446_no_human_is_asked_to_approve_an_action_the_kernel_will_refuse(store, clock) -> None:
+    """**The ordering half.** §2.3's and §2.4.1's refusals do not depend on anything the approval
+    gate produces, and they are unconditional: the action can never run, whatever a human says.
+
+    Running them after the gate asks a human to sit and approve a refund the kernel has already
+    decided to refuse, and leaves a granted approval in the store for an action nothing can
+    execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape.
+    """
+    control = _approving_control(store, clock)
+    action = Action(
+        name="payments.refund",
+        arguments={"amount": -250, "id": "1"},
+        principal=AGENT,
+        environment="prod",
+    )
+    with pytest.raises(InvalidArgument):
+        control.execute(action, lambda: {"ok": True}, "refund:1")
+    written = [str(event.type) for event in store.events()]
+    assert "APPROVAL_REQUESTED" not in written, written
+    assert "ACTION_DENIED" in written, written
