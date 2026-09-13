@@ -269,7 +269,11 @@ def test_T441_an_action_with_no_metric_argument_is_refused(store, clock) -> None
     )
     with pytest.raises(InvalidArgument) as caught:
         control.execute(action, lambda: {"ok": True}, "refund:1")
-    assert "amount" in str(caught.value)
+    # **The message, not just the type.** A mutation run found this guard removable: with it
+    # gone, `None` falls through to the non-integer check and raises anyway, so the test passed
+    # for a reason that was not this rule. That is CONTRIBUTING.md's first pattern, a subsumed
+    # guard, and the list allows keeping one for its message on the condition a test asserts it.
+    assert "carries no 'amount' argument" in str(caught.value), str(caught.value)
 
 
 def test_T442_a_budgeted_grant_refuses_an_action_with_no_effect_key(store, clock) -> None:
@@ -283,3 +287,46 @@ def test_T442_a_budgeted_grant_refuses_an_action_with_no_effect_key(store, clock
         control.execute(_action(), lambda: {"ok": True}, None)
     assert "effect" in str(caught.value)
     assert store.consumptions() == ()
+
+
+def test_T412b_every_ancestor_is_charged_through_a_real_chain(store, clock) -> None:
+    """§2.7, driven end to end rather than at the store.
+
+    **The rule that makes the feature mean anything**, and a mutation run found nothing exercising
+    it through `Control`: removing the ancestor walk left 84 tests green. Without it a holder of a
+    250-a-day grant delegates children, each correctly contained, and every child spends the
+    parent's budget over again.
+    """
+    from ctrlrun.authority import Grant, Subject
+
+    delegable = DOC.replace(
+        "        - {metric: amount, limit: 250, window: PT24H}",
+        "        - {metric: amount, limit: 250, window: PT24H}\n"
+        "      delegable: true\n"
+        '      expires_at: "2027-01-01T00:00:00Z"',
+    )
+    control = Control(
+        policy=Policy.from_yaml(delegable, source="<d>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(delegable, source="<d>"),
+    )
+    child = Grant(
+        id="",
+        subject=Subject(agent="payer", user="ada"),
+        actions=("payments.refund",),
+        expires_at=datetime(2026, 12, 1, tzinfo=UTC),
+        budgets=((control.authority.grants["payer"].budgets or ())[0],),
+    )
+    delegation = control.delegate("payer", child, by=AGENT)
+
+    control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+    charged = {row.grant_id for row in store.consumptions()}
+    assert charged == {"payer", delegation.delegation_id}, (
+        f"every ancestor must be charged, not only the grant that decided: {charged}"
+    )
+    # And the parent's budget is what refuses, even though the child is within its own.
+    with pytest.raises(ActionDenied) as caught:
+        control.execute(_action("2", 200), lambda: {"ok": True}, "refund:2")
+    assert caught.value.reason == "budget_exhausted"

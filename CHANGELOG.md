@@ -29,6 +29,22 @@ any change to one appears here.
   The task reaches the authority decision and the receipt, and **never the action hash**: a field
   on `Action` would move every hash in existence and invalidate every stored approval.
 
+- **Consequence budgets, enforced** (SPEC-v0.9 §4). **G22.** A budgeted grant charges every
+  ancestor on reserve, inside the reservation's own transaction, and the ledger is released
+  exactly when the effect reaches `FAILED`.
+
+  **Ambiguity is not a refund.** An `AMBIGUOUS` effect keeps its consumption until a human or a
+  `reconcile` hook resolves it, because otherwise an agent that can generate ambiguity can
+  generate authority, and generating ambiguity is free for any flaky integration. This is the
+  correctness hole that kept budgets out of four milestones.
+
+  The refusal is `ActionDenied(reason="budget_exhausted")`, naming the grant, the metric and the
+  window, and **never the remaining balance**: refused actions cost nothing, so a refusal that
+  reported the balance is an oracle an attacker binary-searches.
+
+  `ctrlrun verify` reports **22/22** on the shipped examples, with G22, G23 and G24 all graded
+  against positive controls.
+
 - **The budget ledger, and one amendment to a frozen protocol** (SPEC-v0.9 §3). `StateStore` has
   been frozen since v0.6 and gains exactly two things: `charges=` on `reserve_effect` and
   `consume_approval_and_reserve`, and `consumptions()` to read the ledger back. Migration
