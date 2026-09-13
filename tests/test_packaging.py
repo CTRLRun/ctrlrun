@@ -810,6 +810,48 @@ ADAPTER_DIRECTORIES = ("langgraph", "openai-agents")
 
 
 @pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
+    """The test below checks the range in the tree. Nothing checked what is on PyPI.
+
+    They came apart and stayed apart for four releases: the range was widened at 0.7, 0.8, 0.9
+    and 0.10, the adapter was never re-published, and `ctrlrun-openai-agents` 1.0.0 went on
+    declaring `ctrlrun<0.6` while the kernel reached 0.10.0. `pip install ctrlrun-openai-agents`
+    beside a current kernel then either refuses to resolve or silently downgrades ctrlrun to
+    0.5.x -- the same defect the test below was written for, one repository boundary out, where
+    it does not look.
+
+    `adapters/PUBLISHED.toml` is the record of the published side. If an adapter's range has
+    moved away from what was published, its **version** must have moved too, or the widening is
+    one nobody can install. Hand-written rather than fetched, because a check that needs the
+    network is a check that gets skipped in the run that mattered.
+    """
+    import tomllib as _tomllib
+
+    published_file = REPO_ROOT / "adapters" / "PUBLISHED.toml"
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    if not manifest.exists() or not published_file.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+
+    with published_file.open("rb") as handle:
+        published = _tomllib.load(handle)[adapter]
+    with manifest.open("rb") as handle:
+        project = _tomllib.load(handle)["project"]
+
+    declared = next(d for d in project["dependencies"] if d.startswith("ctrlrun")).removeprefix(
+        "ctrlrun"
+    )
+
+    if declared == published["kernel"]:
+        return
+    assert project["version"] != published["version"], (
+        f"adapters/{adapter} declares ctrlrun{declared} but {published['version']} on PyPI "
+        f"declares ctrlrun{published['kernel']}, and the version has not moved. Bump it and tag "
+        f"`adapters-{adapter}-v<version>`, then record the new version and range in "
+        "adapters/PUBLISHED.toml. A widened range nobody can install is not a widened range."
+    )
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
 def test_each_adapter_declares_a_kernel_range_that_contains_this_kernel(adapter):
     """SPEC-v0.5 §6.3's two ranges, checked against the kernel that is actually here.
 

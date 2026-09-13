@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# What is actually on PyPI, and the kernel range that distribution declares.
+#
+# `test_each_adapter_declares_a_kernel_range_that_contains_this_kernel` checks the range in
+# `adapters/<x>/pyproject.toml` against the kernel in this repository. That is a fact about the
+# tree. It is not a fact about what a user gets from `pip install`, and the two came apart:
+# the range was widened at 0.7, 0.8, 0.9 and 0.10 and the adapter was **never re-published**, so
+# `ctrlrun-openai-agents` 1.0.0 went on declaring `ctrlrun<0.6` while the kernel reached 0.10.0.
+# `pip install ctrlrun-openai-agents` beside a current kernel then either refuses to resolve or
+# silently downgrades ctrlrun to 0.5.x.
+#
+# This file is the record of the published side, updated by hand **in the same commit that tags
+# a release**. `test_a_widened_kernel_range_is_not_shipped_without_a_new_version` compares it to
+# the tree: if an adapter's range has moved away from what was published, its version must have
+# moved too, or the release is one nobody can install.
+#
+# It is deliberately hand-written rather than fetched. A test that asked PyPI would need the
+# network, and `SPEC-v0.4 §3.9`'s discipline applies: a check that cannot run offline is a check
+# that gets skipped in the run that mattered.
+
+[langgraph]
+version = "1.0.0"
+kernel = ">=0.5,<0.6"
+
+[openai-agents]
+version = "1.0.0"
+kernel = ">=0.5,<0.6"
