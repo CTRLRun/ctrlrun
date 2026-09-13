@@ -892,3 +892,51 @@ def test_T488c_revoking_a_hop_cuts_an_in_flight_action_on_every_round(tmp_path):
     # The control: without a competing grant the revocation cuts round two either way, so a test
     # that omitted the grant above would pass over the defect.
     assert run(receiver_holds_its_own=False) == "cut: authority_revoked"
+
+
+@pytest.mark.authority
+def test_T474c_a_malformed_hop_id_is_refused_without_reaching_the_log_verbatim(tmp_path):
+    """§3.3, and an independent review's finding.
+
+    The refusal was always right. The **evidence row** was not: a hop reaches the kernel from the
+    caller, through `@protect`'s template and so from the action's arguments, and every refused
+    action writes one `AUTHORITY_DENIED` into an append-only log an operator reads on a terminal.
+    A megabyte of `A`, or NULs and ANSI escapes, went straight through.
+
+    An id this kernel could not have minted is recorded as its length and nothing else.
+    """
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    now = datetime.now(UTC)
+    for presented in ("A" * 4096, "dlg_x\n\ninjected\x00\x1b[31m", "issuer"):
+        result = authority.evaluate(_action(), now=now, store=store, hop=presented)
+        assert result.reason == AUTHORITY_HOP, presented
+        assert result.hop == presented, "the result carries what was presented"
+
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+
+    control = Control(
+        Policy.from_yaml(
+            "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n    decision: allow\n",
+            source="t",
+        ),
+        store,
+        authority=authority,
+    )
+    from ctrlrun.errors import AuthorityDenied
+
+    with pytest.raises(AuthorityDenied):
+        control.execute(_action(), lambda: "ok", hop="A" * 4096)
+
+    logged = [
+        event.data.get("hop")
+        for event in store.events()
+        if event.type is EventType.AUTHORITY_DENIED and "hop" in event.data
+    ]
+    assert logged, "no AUTHORITY_DENIED carried a hop"
+    assert all(len(value) < 64 for value in logged), (
+        f"a caller-supplied id reached the evidence log at full length: {len(logged[-1])}"
+    )
+    assert "malformed" in logged[-1] and "4096" in logged[-1]

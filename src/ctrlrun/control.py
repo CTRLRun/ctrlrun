@@ -51,6 +51,7 @@ from .approval import (
     unsatisfied,
 )
 from .authority import (
+    _DELEGATION_ID,
     RESOURCE_SEPARATOR,
     Authority,
     AuthorityResult,
@@ -1173,7 +1174,20 @@ class Control:
         # is what lets §6.3 print `ctrlrun inspect --hop <id>` with the argument filled in. The id
         # and nothing else: §3.3 refuses to describe the envelope a refusal would otherwise leak.
         if result.hop is not None:
-            data["hop"] = result.hop
+            # SPEC-v0.10 §3.3 — the presented id, **bounded**. A hop reaches the kernel from the
+            # caller (through `@protect`'s template, so from the action's arguments), and a
+            # refusal writes one `AUTHORITY_DENIED` row per refused action into an append-only
+            # log an operator reads on a terminal. An independent review drove a megabyte of
+            # `A`, then NULs, newlines and ANSI escapes, straight through to `data.hop`.
+            #
+            # An id that is not one this kernel could have minted is recorded as its length and
+            # nothing else: enough to tell a typo from a flood, and no more. `new_delegation_id`
+            # mints `dlg_` plus 32 hex, so a well-formed id is 36 characters and unharmed.
+            data["hop"] = (
+                result.hop
+                if _DELEGATION_ID.match(result.hop)
+                else f"<malformed, {len(result.hop)} characters>"
+            )
         for key in ("dimension", "missing_parent_id", "expired_parent_id", "cycle_at"):
             value = getattr(result, key)
             if value is not None:
@@ -1402,6 +1416,12 @@ class Control:
         # stale grant id: a refusal whose receipt carried the previous action's task would be the
         # same defect on a new field.
         _TASK.set(None)
+        # SPEC-v0.10 §3.4 — **and the hop**, for the reason the block above gives for the other
+        # five. `v0.3 §4.3.1` puts `principal_expired` above authority, so a denied receipt is
+        # written before `_authority_result` ever runs; without this reset it names the previous
+        # action's hop. A review demonstrated exactly that, which is the same defect this block's
+        # own comment was written for, reproduced on the field v0.10 adds.
+        _HOP.set(None)
         _SCOPE_HASH.set(None)
         _BUDGET_CHARGES.set(())
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
@@ -2014,6 +2034,15 @@ class Control:
         # makes the whole evidence for an MCP multi round-trip. In observe mode the ledger is
         # empty by design, so this sets `()` and §4.2.1a's counterfactual is computed below.
         self._resumed_charges(held.effect_key, held.record.attempt)
+        # SPEC-v0.10 §3.4, and `v0.9 §13.8`'s defect on the field beside the one it was found on.
+        # `execute` clears five context variables at its top so a receipt cannot carry the
+        # previous action's evidence; `resume` re-establishes four of them (the task, the hop and
+        # the two authority values through `_authority_result`, the charges through the line
+        # above) and left this one alone. A resumed receipt then reported an unrelated action's
+        # scope hash, on the one receipt an MCP multi round-trip ever gets. A resumed leg fetches
+        # no scope of its own (`v0.9 §5.3` runs the provider before the reservation, which this
+        # leg already holds), so the honest value is none.
+        _SCOPE_HASH.set(None)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
