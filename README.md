@@ -6,10 +6,11 @@
 </p>
 
 <p align="center">
-  <strong>Execution safety for AI agents.</strong><br>
-  The model guesses. CTRLRun does not.<br>
+  <strong>CTRLRun stops AI agents from taking wrong, restricted, or malicious actions in your workflows.</strong><br>
+  Every action is checked against your rules before it runs. Allowed actions go through.<br>
+  Sensitive ones wait for a person. Forbidden ones are blocked.<br>
   <br>
-  A Python library that sits between the decision to act and the call that acts.<br>
+  Execution safety for AI agents. A Python library that sits between the decision to act and the call that acts.<br>
   A consequential action happens at most once, exactly as approved, and leaves a receipt.<br>
   When the outcome is unknown, CTRLRun says so instead of guessing.<br>
   <br>
@@ -34,7 +35,7 @@
 <!-- end generated -->
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/demo.gif" alt="ctrlrun demo: a refund commits at the remote, the response is lost, the agent retries, and the retry is refused, remote refund calls: 1. Then a human approves a €2,000 refund, the agent executes €5,000, and that is refused too." width="800">
+  <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/demo.gif" alt="A terminal recording of the three steps below. A policy file gives refunds up to €500 to the agent, sends refunds up to €10,000 to a human, and denies the rest. The agent refunds €500 on its own; a €5,000 refund stops and names the request a human answers. ctrlrun approve grants it against the hash of that exact action. The agent runs the €5,000 refund, then tries €9,000 on the same approval, and that is refused: calls that reached the provider, 1, the €9,000 never left." width="800">
 </p>
 
 ```bash
@@ -43,14 +44,18 @@ pip install ctrlrun && ctrlrun demo
 
 ## What it does
 
-A ticket asks for a €500 refund. The agent calls the refund tool with €5,000, one extra zero.
-The tool is in its list, the arguments are well formed, and the model is completely confident.
-Nothing above the call disagrees, because nothing above the call is a check: a tool being
-callable is not permission to call it with those arguments.
+**The model guesses. CTRLRun does not.** The ticket says refund €500. The agent asks for
+€5,000, one extra zero. The tool is in its list, the arguments are well formed, and the model
+is completely confident. Nothing above the call disagrees, because nothing above the call is a
+check: a tool being callable is not permission to call it with those arguments.
+
+| Without CTRLRun | With CTRLRun |
+|---|---|
+| Nothing checks the amount. The call goes through. **€4,500 too much.** | Your rule checks the amount. The call never leaves. **€0 wrongly paid.** |
 
 CTRLRun is that check. It reads the arguments about to leave your process and answers what may
-happen to them. Four rules do the work, and each one is a test in this repository before it is
-a sentence here.
+happen to them: let it run, ask a human, or stop it cold. Four rules do the work, and each one
+is a test in this repository before it is a sentence here.
 
 | | |
 |---|---|
@@ -137,39 +142,37 @@ refund, delete, deploy, grant, revoke, approve, submit, purchase or cancel**, yo
 
 ## Use it in three steps
 
+The animation above is this section, recorded against the real library: one policy file, two
+short programs, four commands, nothing staged.
+
 **1. Install it.**
 
 ```bash
 pip install ctrlrun
 ```
 
-**2. Write down what the agent may do.** One file, `ctrlrun.yaml`. Cheap to undo is autonomous,
-handing out power needs a human, destroying the evidence is not an agent action at any size.
-Anything not listed is denied; there is no default-allow.
+**2. Write down what the agent may do.** One file, `ctrlrun.yaml`. Amounts are integer minor
+units, so `50000` is €500. Both ends of every band are bound, because an upper bound alone lets
+a negative amount through, and a refund of a negative amount is a charge. Anything not listed is
+denied; there is no default-allow.
 
 ```yaml runnable
 schema: ctrlrun.policy/v2
 
 actions:
-  # Cheap to undo: the agent does it alone.
-  crm.update_record:
-    effect: "crm:{record_id}:{field}"
-    decision: allow
-
-  # Hands out power: read-only is autonomous, anything above it is a human's call.
-  iam.grant_role:
-    effect: "grant:{user_id}:{role}"
+  stripe.refund:
+    effect: "refund:{payment_id}"
     rules:
-      - when: { role_in: [reader, viewer] }
-        decision: allow
-      - decision: approve
-
-  # Destroys the evidence: denied, whoever asks.
-  audit.log.delete:
-    decision: deny
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow      # up to €500: the agent acts alone
+      - when: { amount_gte: 0, amount_lte: 1000000 }
+        decision: approve    # up to €10,000: a human decides
+      - decision: deny       # above that: never
 ```
 
-**3. Wrap the call that has the consequence**, and name the effect it has in the world.
+**3. Wrap the call that has the consequence.** The decorator names the action, the effect key
+names the consequence it has in the world, and the context names who is acting. `stripe` here
+is a stand-in that records calls instead of making them.
 
 ```python runnable file=agent.py
 import sys
@@ -177,88 +180,178 @@ import sys
 import ctrlrun
 
 
-class FakeDirectory:
-    calls: list[tuple[str, str]] = []
+class FakeStripe:
+    """Stands in for the provider: it records calls instead of making them."""
 
-    def grant(self, user_id: str, role: str) -> dict:
-        self.calls.append((user_id, role))
-        return {"user": user_id, "role": role, "status": "granted"}
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def refund(self, payment_id: str, amount: int) -> dict:
+        self.calls.append((payment_id, amount))
+        return {"id": f"re_{payment_id}", "amount": amount, "status": "succeeded"}
 
 
-directory = FakeDirectory()
+stripe = FakeStripe()
 
 
-@ctrlrun.protect("iam.grant_role", effect="grant:{user_id}:{role}")
-def grant_role(user_id: str, role: str) -> dict:
-    return directory.grant(user_id, role)
+@ctrlrun.protect("stripe.refund", effect="refund:{payment_id}")
+def refund(payment_id: str, amount: int) -> dict:
+    return stripe.refund(payment_id, amount)
 
 
 if __name__ == "__main__":
-    with ctrlrun.context(agent="onboarding-agent"):
-        print("reader:", grant_role(user_id="u_412", role="reader")["status"])
+    with ctrlrun.context(agent="support-agent"):
+        print("€500   ->", refund(payment_id="txn_1", amount=50_000)["status"])
         try:
-            grant_role(user_id="u_412", role="admin")
+            refund(payment_id="txn_2", amount=500_000)
         except ctrlrun.ApprovalRequired as pending:
-            print("admin: a human decides:", pending.request_id)
+            print("€5,000 -> a human decides:", pending.request_id)
             with open("request_id.txt", "w") as handle:
                 handle.write(pending.request_id)
         else:
-            sys.exit("the admin grant ran without a human; the policy is not in force")
+            sys.exit("the €5,000 refund ran without a human; the policy is not in force")
+    print("calls that reached the provider:", len(stripe.calls))
 ```
 
-The `reader` grant runs on its own. The `admin` one stops and names the request a human answers:
+The €500 refund runs on its own. The €5,000 one stops and names the request a human answers:
 
 ```text
-reader: granted
-admin: a human decides: apr_649156806800a3545de597c028c9dae5
+€500   -> succeeded
+€5,000 -> a human decides: apr_63e80076f2cccfee52b17491a4b2e125
+calls that reached the provider: 1
 ```
 
-A human answers from the shell, and the grant names the exact action hash it authorizes:
+**A human answers from the shell.** The grant names the hash of the exact action the human
+read, and when it lapses. Ids, hashes and dates are generated per run; yours differ.
 
 ```bash runnable
 ctrlrun approve "$(cat request_id.txt)"
 ```
 
-Present it with `ctrlrun.with_approval(request_id)` and the agent gets that action and nothing
-next to it: the same approval spent on `owner` instead of `admin` raises `ApprovalMismatch`.
-Every attempt, refusals included, leaves a receipt you can read with `ctrlrun receipts`.
+```text
+granted apr_63e80076f2cccfee52b17491a4b2e125 for sha256:22ec1c398e4b93d080b6cba61e5e11b0e21879552ac5dbf63c192d2b2e6af752
+expires 2026-09-13T20:10:11.367Z
+```
 
-That is the whole integration: a policy file, a decorator, a context, and `with_approval` to
-present a grant. Everything else is in the documentation.
+**The agent presents it, then tries to spend it on something else.** The first call is exactly
+what the human approved, and it runs. The second is the same approval with one digit changed,
+and it matches nothing:
+
+```python runnable file=approved.py
+import sys
+
+import ctrlrun
+
+from agent import refund, stripe
+
+with open("request_id.txt") as handle:
+    request_id = handle.read().strip()
+
+with ctrlrun.context(agent="support-agent"), ctrlrun.with_approval(request_id):
+    # Exactly what the human read: €5,000 on txn_2.
+    print("€5,000 with the approval ->", refund(payment_id="txn_2", amount=500_000)["status"])
+
+    # The same approval, one digit changed.
+    try:
+        refund(payment_id="txn_2", amount=900_000)
+    except ctrlrun.ApprovalMismatch:
+        print("€9,000 on that same approval -> refused")
+    else:
+        sys.exit("a mutated action ran on a human's approval; that is the bug this exists to stop")
+
+print("calls that reached the provider:", len(stripe.calls), "(the €9,000 never left)")
+```
+
+```text
+€5,000 with the approval -> succeeded
+€9,000 on that same approval -> refused
+calls that reached the provider: 1 (the €9,000 never left)
+```
+
+Every attempt, refusals included, left a receipt, and `ctrlrun receipts` lists them. That is the
+whole integration: a policy file, a decorator, a context, and `with_approval` to present a grant.
+Money is the example, not the scope. A condition is `<argument>_<op>`, so the same policy
+language reads `role_in: [reader, viewer]` or `replicas_lte: 10` as easily as `amount_lte`, and
+[nine domains](#the-same-shape-in-nine-domains) below have one policy each.
 [Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) walks the same path
 with every output explained ·
 [Policy YAML reference](https://ctrlrun.dev/docs/reference/policy-yaml) ·
 [Cookbook](https://ctrlrun.dev/docs/cookbook/index): refunds, deploys, IAM, deletions, email, MCP.
 
+## Three ways to use it
+
+**You probably do not need an adapter.** `@protect` covers anything running in this process: a
+raw model call, a LangChain tool, a hand-rolled loop, a cron job. The gateway covers anything
+that reaches its tools over MCP, in any language.
+
+| You have | Use | Needs |
+|---|---|---|
+| Python in this process | the `@protect` decorator, shown above | nothing beyond `pip install ctrlrun` |
+| Tools behind an MCP server, in any language | the gateway: `pip install "ctrlrun[gateway]"` | one command, no change to agent or server code |
+| A framework with its own approval interrupt | an adapter | the framework to have a human-in-the-loop primitive |
+
+**It works with agents you can and can't modify.** WhatsApp, Slack and Teams bots, ChatGPT,
+Cursor, Codex, OpenAI Agents: any AI agent you have. CTRLRun checks the action, not the
+agent, so if the agent acts through a tool server or an API you run, the action is checked, and
+the agent is not rebuilt, redeployed or told.
+[Agents you can't modify](https://ctrlrun.dev/docs/agents-you-cant-modify) says where the
+boundary goes for each kind.
+
+An adapter exists for one reason: to route an `approve` decision through the framework's own
+interrupt, so a human answers where they already answer. There is never a second place to say
+yes. [`ctrlrun-langgraph`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/langgraph/README.md)
+gives **prevention**, because the resumption carries the arguments and core re-checks them
+against the hash.
+[`ctrlrun-openai-agents`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/openai-agents/README.md)
+gives **attribution**, because that SDK records *that* a call was approved and not what its
+arguments were. None of the three is only for agents: a worker, a webhook handler and a
+scheduled job cannot tell a first attempt from a retry either.
+
 ## How it works
 
-Every protected call, whichever way it arrives, goes through the same six steps.
+Every protected call, whichever way it arrives, goes through the same seven steps. Only then
+does it reach your systems.
 
 ```text
-  normalize  →  decide  →  approve  →  reserve  →  execute  →  record
+  normalize  →  decide  →  approve  →  reserve  →  execute  →  resolve  →  record
 ```
 
-1. **Normalize.** The call becomes an `Action`: a name, canonical arguments (sorted keys, no
-   floats), a resource, the principal. Its SHA-256 is the action hash.
-2. **Decide.** Authority first (may *this principal* propose this at all?), then policy (how
-   much autonomy does *this action* get?). Unknown action, missing policy or missing principal
-   is `deny`.
-3. **Approve.** A human answers against the action hash. The approval is single-use, expires,
-   and matches nothing but that exact action. Name a `preconditions=` provider and the approval
-   is also bound to the resource state it was granted against, rechecked strictly before the
-   reservation: that **narrows** the window between the answer and the execution, from minutes of
-   deliberation to milliseconds. It does not close it, because the recheck is a network call and
-   cannot run inside the atomic write.
-4. **Reserve.** The effect key, `refund:txn_1` or `namespace:prod-eu:checkout`, is taken in one
-   atomic write. A second caller, in another process or on another host, is refused.
-5. **Execute.** Your function runs. Only `NotExecuted`, raised by you, means `FAILED`; every
-   other exception and every timeout means `AMBIGUOUS`. Deciding which one you are looking at is
-   the hard part, so `ctrlrun.transport` does it for you: `urlopen`, `HTTPConnection` and
+1. **Normalize: one action, one id.** The call becomes an `Action`: a name, canonical arguments
+   (sorted keys, no floats), a resource, the principal. Its SHA-256 is the action hash.
+2. **Decide: allow, ask or block.** Authority first (may *this principal* propose this at all,
+   and within what bounds?), then policy (how much autonomy does *this action* get?). Unknown
+   action, missing policy or missing principal is `deny`. Silence is never permission.
+3. **Approve: bound to this action.** A human answers against the action hash. The approval is
+   single-use, expires, and matches nothing but that exact action, so arguments changed after
+   the answer void it and a person answers again. Name a `preconditions=` provider and the
+   approval is also bound to the resource state it was granted against, rechecked strictly
+   before the reservation: that **narrows** the window between the answer and the execution,
+   from minutes of deliberation to milliseconds. It does not close it, because the recheck is a
+   network call and cannot run inside the atomic write.
+4. **Reserve: claimed once.** The effect key, `refund:txn_1` or `namespace:prod-eu:checkout`, is
+   taken in one atomic write. A second caller, in another process or on another host, is refused.
+5. **Execute: your code runs.** Only `NotExecuted`, raised by you, means `FAILED`; every other
+   exception and every timeout means `AMBIGUOUS`. Deciding which one you are looking at is the
+   hard part, so `ctrlrun.transport` does it for you: `urlopen`, `HTTPConnection` and
    `HTTPSConnection` from stdlib `urllib` and `http.client`, which raise `NotExecuted` only where
    the connection they opened was handed no request byte. After one byte, every failure stays the
    exception it was, and the outcome is `AMBIGUOUS`. No setting widens that.
-6. **Record.** A portable JSON receipt: who, what, decision, approval, effect key, outcome, and
-   the hash of the policy that decided it, chained to the receipt before it.
+6. **Resolve: unknown is not failed.** An `AMBIGUOUS` effect keeps its key and refuses a retry
+   until `ctrlrun resolve`, or a `reconcile` hook that asked the remote, says what happened.
+   Nothing runs twice on a guess.
+7. **Record: a receipt either way.** A portable JSON receipt: who, what, decision, approval,
+   effect key, outcome, and the hash of the policy that decided it, chained to the receipt
+   before it. Refusals get one too.
+
+**Who may ask, and how much.** The policy decides the action and cannot see who is asking. Who
+may ask at all is a second axis, authority: every principal needs a grant, a delegation cannot
+widen one, and an action needs both axes, the stricter of the pair. Since 0.9 a grant can also
+carry a **budget**, a metric with a limit over a rolling window, consumed on reserve inside the
+same write, so a thousand refunds that each pass `amount_lte` cannot add up to more than the
+grant allows. An `AMBIGUOUS` effect holds its budget until it is resolved, because otherwise an
+agent that can manufacture ambiguity could manufacture authority. A budget bounds what the next
+reservation may do; it cannot recall an action already in flight.
+[Authority](https://ctrlrun.dev/docs/authority) has the whole model.
 
 State lives in SQLite by default, a file with no server and no ops, and the reservation holds
 across processes rather than merely across threads. Point it at Postgres when more than one
@@ -279,27 +372,8 @@ grades the transport classifier.
 | **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
 <!-- end generated -->
 
-### Three ways to use it
-
-**You probably do not need an adapter.** `@protect` covers anything running in this process: a
-raw model call, a LangChain tool, a hand-rolled loop, a cron job. The gateway covers anything
-that reaches its tools over MCP, in any language.
-
-| You have | Use | Needs |
-|---|---|---|
-| Python in this process | the `@protect` decorator, shown above | nothing beyond `pip install ctrlrun` |
-| Tools behind an MCP server, in any language | the gateway: `pip install "ctrlrun[gateway]"` | one command, no change to agent or server code |
-| A framework with its own approval interrupt | an adapter | the framework to have a human-in-the-loop primitive |
-
-An adapter exists for one reason: to route an `approve` decision through the framework's own
-interrupt, so a human answers where they already answer. There is never a second place to say
-yes. [`ctrlrun-langgraph`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/langgraph/README.md)
-gives **prevention**, because the resumption carries the arguments and core re-checks them
-against the hash.
-[`ctrlrun-openai-agents`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/openai-agents/README.md)
-gives **attribution**, because that SDK records *that* a call was approved and not what its
-arguments were. None of the three is only for agents: a worker, a webhook handler and a
-scheduled job cannot tell a first attempt from a retry either.
+[Follow one action through every check](https://ctrlrun.dev/execution-boundary), interactively,
+with nothing installed.
 
 ## The same shape in nine domains
 
@@ -341,12 +415,28 @@ full reference, and a browser demo that runs with no install.
 
 | | |
 |---|---|
-| Start here | [Why](https://ctrlrun.dev/docs/why) · [Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/docs/try-it) |
+| Start here | [Why](https://ctrlrun.dev/docs/why) · [Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/docs/try-it) · [The execution boundary](https://ctrlrun.dev/execution-boundary), one action through every check |
 | The ideas, and doing something with them | [Concepts](https://ctrlrun.dev/docs/concepts/outcomes-and-ambiguous) · [Guides](https://ctrlrun.dev/docs/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/docs/cookbook/index) |
-| MCP | [Overview](https://ctrlrun.dev/docs/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/docs/mcp/gateway-in-5-minutes) |
+| Agents and MCP | [Agents you can't modify](https://ctrlrun.dev/docs/agents-you-cant-modify) · [MCP overview](https://ctrlrun.dev/docs/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/docs/mcp/gateway-in-5-minutes) |
 | Running it for real | [Production](https://ctrlrun.dev/docs/production/index) · [Postgres](https://ctrlrun.dev/docs/production/postgres) · [Recovery](https://ctrlrun.dev/docs/production/recovery) · [Operations](https://ctrlrun.dev/docs/production/operations) |
 | Every key, flag and error | [Reference](https://ctrlrun.dev/docs/reference/policy-yaml) · [FAQ](https://ctrlrun.dev/docs/faq) |
+| Compared with | [Idempotency keys](https://ctrlrun.dev/docs/compare/idempotency-keys) · [Framework human-in-the-loop](https://ctrlrun.dev/docs/compare/framework-hitl) · [Guardrail libraries](https://ctrlrun.dev/docs/compare/guardrail-libraries) · [Durable workflows](https://ctrlrun.dev/docs/compare/durable-workflows) · [Governance toolkits](https://ctrlrun.dev/docs/compare/governance-toolkits) |
 | What holds, and what does not | [Threat model](https://ctrlrun.dev/docs/THREAT_MODEL) · [What `verify` proves](https://ctrlrun.dev/docs/verify) · [`CLAIMS.md`](https://ctrlrun.dev/docs/CLAIMS), every sentence mapped to its test · [How this is built](https://ctrlrun.dev/docs/how-this-is-built) |
+
+## Open source, Pro, Enterprise
+
+The boundary is the same in every tier. What differs is who runs it.
+
+- **ctrlrun Open Source: free, run it yourself.** The boundary itself, at no cost. No account,
+  no card, no call with us. Every rule that decides is code you can read, and every action
+  leaves a receipt you keep. Free to use and free to change, under the Apache-2.0 licence.
+- **ctrlrun Pro, in development: the boundary, run for you.** Connect your agents and workflows
+  and see what each connection covers. Search every action, decision and outcome across your
+  agents. Manage policies and approvals from one place, test a rule in observe mode, then turn
+  enforcement on. [Request early access](https://ctrlrun.dev/#pro-and-enterprise).
+- **ctrlrun Enterprise, engagements open: the boundary, shaped to you.** Everything in Pro, with
+  CTRLRun engineers who design, integrate and maintain the controls your business needs.
+  [Keep your stack, add the boundary](https://ctrlrun.dev/protect-my-agent).
 
 ## Contributing
 
@@ -364,3 +454,7 @@ where it is going. Releases carry PyPI provenance attestations from GitHub Actio
 ## License
 
 Apache-2.0. The enforcement kernel is and will remain fully open source.
+
+<p align="center">
+  Let agents act. <strong>Keep the consequences yours to decide.</strong>
+</p>
