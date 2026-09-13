@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """No model, no agent: a webhook delivered twice, and a payout sent twice.
 
 Every webhook worth receiving is delivered at least once, which is a promise about the

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Route a CTRLRun `APPROVE` through the OpenAI Agents SDK's own tool-approval interruption.
 SPEC-v0.5 §2, §3.5.
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun.transport`, the `NotExecuted` classifier. SPEC-v0.7 §2; T220 to T229b, T231.
 
 T230, G12 in verify under the amended network guard, is at the end of this file.

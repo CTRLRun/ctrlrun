@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The store suites. SPEC-v0.6 §2.3, §2.4, §2.5.
 
 Every case is a statement about a `StateStore` method rather than about `Control`'s composition

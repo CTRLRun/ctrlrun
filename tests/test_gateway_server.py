@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The gateway in the execution path. Build-list item 6c; SPEC-v0.2 §6.1, §6.3, §6.5-§6.10.
 
 Acceptance tests T19, T21, T22, T23, T25, and the end-to-end halves of T20 and T24 that

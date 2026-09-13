@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The invariants the fuzz targets assert, and the decoders that turn bytes into inputs.
 
 **No Atheris import lives here on purpose.** Atheris is one driver for these properties and

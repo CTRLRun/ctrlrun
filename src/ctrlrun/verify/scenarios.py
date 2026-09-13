@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Deriving scenarios from a configuration, and running them. SPEC-v0.4 §3.
 
 Everything here is derived from the two documents verify reads. There is **no randomness** —

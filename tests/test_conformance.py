@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The conformance kit. SPEC-v0.5 §5; T130-T134b.
 
 The kit's own tests are the answer to the question the kit itself cannot answer: *would it

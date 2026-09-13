@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Clock-skew detection. Build-list item 1 of v0.7; SPEC-v0.7 §3, §8.1 T209-T219.
 
 **Item 1 observes and reports. It changes no decision.** Every lease is decided against the

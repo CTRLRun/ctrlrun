@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Control, @protect and context(). SPEC-v0.1 §2.2, §6, §8; acceptance test T6."""
 
 import json

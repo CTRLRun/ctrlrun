@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Route a CTRLRun `APPROVE` through LangGraph's own `interrupt()`. SPEC-v0.5 §2, §3.
 
 **An adapter exists for exactly one reason**, and this is the whole of it: when a policy says a

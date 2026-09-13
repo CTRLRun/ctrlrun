@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T272 to T280: `ctrlrun revoke --created-by` and `--under` (SPEC-v0.8 §7).
 
 The selector is a query over rows that already exist. Every match is revoked exactly as one id

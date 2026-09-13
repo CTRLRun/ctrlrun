@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The ACS control hook. SPEC-v0.2 §9 (amended), acceptance tests T51-T55.
 
 ACS is an *advisory* interface: a Guardian returns a decision and the platform executes. That

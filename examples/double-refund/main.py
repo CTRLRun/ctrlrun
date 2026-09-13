@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """A lost response is not a failure, and a blind retry is a second refund.
 
 The remote commits the refund and *then* the reply goes missing. That order is the whole

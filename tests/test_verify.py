@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun verify` — the registry, the engine, G1-G6 and G10. SPEC-v0.4 §2, §3; T100-T107.
 
 T125 and T125b live here too, despite sitting at the end of the number range: they are the two

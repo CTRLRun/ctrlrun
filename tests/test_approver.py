@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T281 to T296: the approver is a principal (SPEC-v0.8 §2, §4.1).
 
 Opt in, then fail closed. A `Control` with no `ApproverIdentity` is 0.7.0 exactly; one that
