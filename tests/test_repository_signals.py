@@ -626,6 +626,57 @@ def test_every_lock_a_workflow_installs_from_exists_and_is_hashed():
                 assert "--hash=" in lines[index + 1], f"{lock}: {line} carries no hash"
 
 
+# --- coverage is measured and the floors are held ---------------------------------------------
+
+
+def test_ci_measures_coverage_on_one_version_and_holds_the_floors():
+    """CONTRIBUTING.md states 90% of statements and 80% of branches; this is the step that
+    holds them, on one version of the matrix, from the JSON `scripts/check.sh` writes."""
+    workflow = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["check"]["steps"]
+    check = next(s for s in steps if s.get("name") == "check")
+    assert "CTRLRUN_COVERAGE" in check["env"]
+    floors = next(s for s in steps if s.get("name") == "Coverage floors")
+    assert "scripts/coverage_floor.py coverage.json" in floors["run"]
+    assert "--statements 90" in floors["run"] and "--branches 80" in floors["run"]
+    assert floors["if"] == "matrix.python-version == '3.12'"
+
+    script = (REPO_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    assert "--cov=ctrlrun --cov-branch" in script and "json:coverage.json" in script
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "90% of\nstatements and 80% of branches" in contributing
+
+
+def test_coverage_floor_names_the_number_that_slipped(tmp_path):
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "covered_lines": 91,
+                    "num_statements": 100,
+                    "covered_branches": 79,
+                    "num_branches": 100,
+                }
+            }
+        )
+    )
+    script = REPO_ROOT / "scripts" / "coverage_floor.py"
+    held = subprocess.run(
+        [sys.executable, str(script), str(report), "--statements", "90", "--branches", "79"],
+        capture_output=True,
+        text=True,
+    )
+    assert held.returncode == 0, held.stderr
+    slipped = subprocess.run(
+        [sys.executable, str(script), str(report), "--statements", "90", "--branches", "80"],
+        capture_output=True,
+        text=True,
+    )
+    assert slipped.returncode == 1
+    assert slipped.stderr.strip() == "coverage_floor: below the floor: branches"
+
+
 # --- a build anyone can repeat ---------------------------------------------------------------
 
 
