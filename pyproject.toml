@@ -73,6 +73,10 @@ dev = [
     # isolation the tests did not already have. `scripts/check.sh` passes `-n auto`; `-p
     # no:randomly -n0` is how an ordering bug is reproduced.
     "pytest-xdist>=3",
+    # Coverage is measured once per CI run, on one Python version, and `scripts/coverage_floor.py`
+    # holds the floors CONTRIBUTING.md states. Subprocess workers are covered too: pytest-cov
+    # starts coverage in every child interpreter it spawns.
+    "pytest-cov>=6",
     "mypy>=2.3",
     "ruff>=0.16",
     # SPEC-v0.4 §4.3 - T115 validates `ctrlrun verify --junit` against the checked-in

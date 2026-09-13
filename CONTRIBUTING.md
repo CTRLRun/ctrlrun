@@ -45,11 +45,35 @@ that and asserts nothing skipped.
 Use the project's own interpreter for every check. A bare `python` from elsewhere gives two
 spurious failures, one of which is a false green.
 
+`CTRLRUN_COVERAGE=1 scripts/check.sh` measures coverage as well and writes `coverage.json`.
+CI does that on Python 3.12 and holds two floors with `scripts/coverage_floor.py`: **90% of
+statements and 80% of branches**, subprocess workers included. A change that drops either is
+red on its own pull request.
+
 CI does not install the extras the way the block above does. It installs from
 `requirements/*.txt`, hash-pinned locks that `scripts/lock.sh` writes with `uv pip compile`,
 and then the checkout with `--no-deps`; the floors in `pyproject.toml` are unchanged by that.
 When a dependency or an extra changes, run `scripts/lock.sh` and commit what it rewrote, or CI
 installs the old resolution against the new declaration.
+
+## Coding standards
+
+Python, 3.11 and later, in the style `ruff` enforces from `pyproject.toml`:
+
+- **Formatting** is `ruff format` (Black-compatible, line length 100). There is no
+  discretion here: a file either matches the formatter's output or CI is red.
+- **Linting** is `ruff check` with the rule sets `E`, `F`, `W` (pycodestyle and pyflakes),
+  `I` (import order), `N` (PEP 8 naming), `UP` (no deprecated syntax or APIs), `B` (bugbear's
+  likely defects), `ANN` (every signature annotated), `SIM` and `RUF`.
+- **Types** are checked by `mypy --strict` over `src/`, with `warn_unreachable` on. Untyped
+  code does not merge.
+- **Exceptions are rare and carry their reason.** A `# noqa: <rule>` names the rule and says
+  why on the same line; a per-file ignore lives in `pyproject.toml` with a comment above it.
+  A reviewer may ask for either to be removed.
+
+`scripts/check.sh` runs all three before the tests, cheapest first, and CI runs that same
+script, so a style failure is found on your machine in a second rather than in CI in ten
+minutes.
 
 ## Specification first
 
@@ -68,7 +92,13 @@ spec listed the check against one method and nothing enumerated the others. `doc
 ## Tests first
 
 Write the acceptance tests before the implementation. A red suite is the specification; make
-it green. Then:
+it green.
+**The policy, stated once so that it can be pointed at:** new functionality MUST arrive with
+tests for it, in the same pull request, in the automated suite that CI runs. A pull request
+that adds behaviour without tests for that behaviour does not merge, whatever else it does
+well. A bug fix MUST arrive with the regression test that failed before the fix.
+
+Then:
 
 - **Every MUST is mutation-tested.** Remove the check, confirm the named test fails, restore
   it, and put the table in the pull request. A row that stays green is a guard nothing
@@ -117,6 +147,36 @@ the line it cites and fails if the named symbol is not on it.
 The same standard applies to *not applicable*: `ctrlrun verify` reports a guarantee a
 configuration cannot exercise as `N/A` with the reason, never as a pass, and there is no flag
 that folds one into the count.
+
+## Code review
+
+Every pull request is reviewed on GitHub by a person other than its author before it merges,
+and nobody merges their own. That is the whole of the rule for who; this section is what the
+review checks and what makes a change acceptable.
+
+**How it is conducted.** The reviewer reads the pull request against the specification
+section it claims to implement, not against the diff alone, and writes findings as review
+comments on the lines they concern. A finding is answered in the pull request, by a change or
+by a written reason; a declined finding keeps its reasoning in the thread. Automated review
+comments (CodeRabbit, CodeQL) are read and answered the same way, and none of them counts as
+the human review.
+
+**What must be checked.**
+
+- The specification section exists and the change does what it says, no more.
+- The tests came first and the mutation table is in the description for every MUST the change
+  touches (*Tests first* above, including the four shapes of a false green).
+- Every public name is frozen in the spec's names section, every entry point is enumerated,
+  and `CLAIMS.md` in `CTRLRun/ctrlrun-docs` still holds for every sentence the change affects.
+- The change does not weaken a fail-closed rule, widen a default, add an unpinned install, a
+  write permission to a workflow, a binary, or a dependency that is not in the locks.
+- The commits are signed off and the message says what changed and why.
+
+**What is required to be acceptable.** One approving review from a person who did not write
+the change; the required checks green (`check` on every Python version, `package`, `gate`);
+every finding answered; and, for anything under `src/`, the maintainer's read. The independent
+review below is in addition to this for the parts of the kernel where a defect is a security
+defect.
 
 ## Independent review
 
@@ -198,6 +258,23 @@ tracked.
 
 Adapters ship on their own version line (`adapters-langgraph-1.0`), from `adapters/`, and gate
 no kernel release.
+
+**A release can be rebuilt by anyone and compared byte for byte.** The workflows set
+`SOURCE_DATE_EPOCH` to the tagged commit's timestamp and normalise the sdist with
+`scripts/normalize_sdist.py`, so from a clean clone of the tag, with the interpreter series
+CI uses (3.11):
+
+```bash
+pip install --require-hashes -r requirements/build.txt
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+python -m build --no-isolation
+python scripts/normalize_sdist.py dist/*.tar.gz
+sha256sum dist/*
+```
+
+The hashes match the distributions on PyPI and on the GitHub Release, for every release cut
+after this was added. CI's `package` job builds every pull request twice and fails if the two
+differ, so the property is checked before a tag rather than claimed after one.
 
 ## Reporting a vulnerability
 
