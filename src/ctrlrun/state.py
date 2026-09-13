@@ -1429,6 +1429,11 @@ class InMemoryStateStore:
             self._effects[effect_key] = _transitioned(
                 record, state, now, result=result, error=error
             )
+            # SPEC-v0.9 §4.1. **This order is the atomicity**, and unlike the SQL stores there is
+            # no rollback to fall back on: `_checked` raising is what must leave the ledger
+            # untouched. Moving the release above it keys it on the *call* rather than the state
+            # reached, and a refused `fail_effect` then releases the hold on an `AMBIGUOUS`
+            # record, which is a manufacturable refund. T425 pins it.
             self._release_locked(effect_key, state, now)
 
 

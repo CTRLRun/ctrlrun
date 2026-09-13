@@ -2266,6 +2266,22 @@ class Control:
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease, charges)
+                # SPEC-v0.9 §10.1 — **after the store call took**, and an independent review is
+                # why. Set where the charges were computed, a refusal raised later in this loop
+                # still reached `_record` with them stamped, so a `denied` receipt claimed the
+                # action charged the very grant it was refused from spending against. A receipt
+                # asserting a spend that never happened is the one thing an evidence trail may
+                # not do.
+                _BUDGET_CHARGES.set(
+                    tuple(
+                        {
+                            "grant_id": charge.grant_id,
+                            "metric": charge.metric,
+                            "amount": charge.amount,
+                        }
+                        for charge in charges
+                    )
+                )
                 break
             except BudgetExhaustedError as exhausted:
                 # SPEC-v0.9 §3.3.2 — **its own clause, before the `ActionDenied` one**, for the
@@ -3197,16 +3213,6 @@ class Control:
                 "`effect:` template for the action, or take the budget off the grant "
                 "(SPEC-v0.9 §2.4.1)"
             )
-        _BUDGET_CHARGES.set(
-            tuple(
-                {
-                    "grant_id": charge.grant_id,
-                    "metric": charge.metric,
-                    "amount": charge.amount,
-                }
-                for charge in charges
-            )
-        )
         return charges
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:

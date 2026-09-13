@@ -430,6 +430,12 @@ def test_T425_the_release_is_keyed_on_the_state_reached_not_the_call(store, cloc
 
     "The release is keyed on the record reaching `FAILED`, never on the call that tried to put it
     there."
+
+    The mutant only bites in memory. Both SQL stores run the transition inside one transaction and
+    roll it back when the check raises, so there the order is equivalent and the rollback carries
+    §4.1. The in-memory store mutates a dict under a lock and has no rollback, so the order **is**
+    the atomicity. The test runs on all three anyway: which backend enforces §4.1 by which
+    mechanism is an implementation detail, and the guarantee is not.
     """
     from ctrlrun.errors import AmbiguousEffect
 
@@ -510,3 +516,117 @@ def test_T428_a_human_resolving_FAILED_mid_flight_releases_and_the_call_does_not
     with pytest.raises(CTRLRunError):
         store.fail_effect("e1", "a", "the executor says so too")
     assert [row.released_at for row in store.consumptions()] == released
+
+
+# --- §4.2's rows that only the Control route can reach ---------------------------------------
+
+CEILING_DOC = DOC.replace(
+    "    decision: allow", "    decision: allow\n    max_attempts: 3"
+).replace("limit: 250", "limit: 1000")
+
+
+def _ceiling_control(store, clock) -> Control:
+    return Control(
+        policy=Policy.from_yaml(CEILING_DOC, source="<c>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(CEILING_DOC, source="<c>"),
+    )
+
+
+def _boom() -> Any:
+    raise NotExecuted("the remote rejected it before doing anything")
+
+
+def test_T429_the_ceiling_refusing_after_the_reservation_was_won_releases(store, clock) -> None:
+    """§4.2's ceiling row, and three others on the way to it.
+
+    **This is the shape v0.8's item 4 missed.** The kernel wins the reservation, charges for it,
+    then refuses on its own attempt ceiling and drives `begin_execution` + `fail_effect` itself.
+    The executor never ran, so by §4.1 the charge is released, and the release is driven by the
+    kernel rather than by any outcome.
+
+    The route also covers the `reconcile` hook row (the hook moves the record to `FAILED`, which
+    releases the first charge like a human's `resolve_effect(FAILED)`) and the second-`_take` row
+    (the renewal takes a **fresh** charge, per §4.3).
+    """
+    control = _ceiling_control(store, clock)
+    for _ in range(2):
+        with pytest.raises(NotExecuted):
+            control.execute(_action(), _boom, "refund:1")
+    with pytest.raises(TimeoutError):
+        control.execute(
+            _action(), lambda: (_ for _ in ()).throw(TimeoutError("lost")), "refund:1"
+        )
+    assert store.get_effect("refund:1").state is EffectState.AMBIGUOUS
+    assert _held(store) == 100, "R2: the ambiguous attempt's charge is held"
+
+    with pytest.raises(ActionDenied) as refused:
+        control.execute(_action(), _boom, "refund:1", reconcile=lambda key: "not_executed")
+    assert refused.value.reason == "attempt_ceiling"
+    assert store.get_effect("refund:1").state is EffectState.FAILED
+    # The hook released the ambiguous charge; the renewal took a fresh one; the kernel's own
+    # fail_effect released that one too. Every row is charged, and every row is released.
+    assert _held(store) == 0
+    assert len(store.consumptions()) == 4, "three attempts plus the renewal, each charged once"
+
+
+def test_T430_begin_execution_refused_after_the_reservation_was_won_holds(store, clock) -> None:
+    """§4.2's `begin_execution`-refused row: the reservation is won and charged, then taken away.
+
+    Mechanically the lapsed-lease row, but a distinct call path: the kernel holds a reservation it
+    can no longer execute against. The charge is **held**, by the ambiguity rule, because nobody
+    can say the effect did not happen.
+    """
+    control = _control(store, clock)
+    taken: list[str] = []
+
+    def steal() -> Any:  # pragma: no cover - never reached
+        raise AssertionError("the executor must not run")
+
+    original = store.begin_execution
+
+    def refuse(effect_key: str, action_id: str) -> Any:
+        taken.append(effect_key)
+        store.mark_ambiguous(effect_key, action_id, "another process got there first")
+        return original(effect_key, action_id)
+
+    store.begin_execution = refuse  # type: ignore[method-assign]
+    with pytest.raises(Exception):
+        control.execute(_action(), steal, "refund:1")
+    assert taken == ["refund:1"]
+    assert _held(store) == 100, "a reservation taken away is ambiguous, and R2 holds the charge"
+
+
+def test_T431_mark_ambiguous_refused_moves_nothing(store, clock) -> None:
+    """§4.2's `mark_ambiguous`-refused row. It folds the refusal into the error text rather than
+    calling `_unrecorded`, so §4.1 applies over the state the record actually reached."""
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    store.begin_execution("e1", "a")
+    store.commit_effect("e1", "a", {"ok": True})
+    released = [row.released_at for row in store.consumptions()]
+    with pytest.raises(Exception):
+        store.mark_ambiguous("e1", "a", "too late")
+    assert [row.released_at for row in store.consumptions()] == released
+    assert _held(store) == 100, "the record reached COMMITTED, and a committed spend is a spend"
+
+
+def test_T432_a_refused_retry_charges_nothing(store, clock) -> None:
+    """§4.2's last row. The refusal happens in `plan_reservation`, **before** any reservation is
+    won, so there is nothing to charge and nothing to release.
+
+    The retry is refused rather than answered from the record: `DuplicateEffect` is the kernel
+    telling the caller the effect already happened, which is the point. What matters to §4.2 is
+    that the second call leaves the ledger exactly as the first left it.
+    """
+    from ctrlrun.errors import DuplicateEffect
+
+    control = _control(store, clock)
+    control.execute(_action(), lambda: {"ok": True}, "refund:1")
+    before = [(row.effect_key, row.amount, row.released_at) for row in store.consumptions()]
+    with pytest.raises(DuplicateEffect):
+        control.execute(_action(), lambda: {"ok": True}, "refund:1")
+    after = [(row.effect_key, row.amount, row.released_at) for row in store.consumptions()]
+    assert after == before, "a refused retry is not a second spend"
+    assert _held(store) == 100
