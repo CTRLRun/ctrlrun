@@ -739,6 +739,34 @@ for _index, _group in enumerate(_ORDERED_GROUPS):
 _UNLISTED_RANK: Final = _RANKS[NO_AUTHORITY] + 1
 
 
+def _where_to_look(result: AuthorityResult) -> str:
+    """SPEC-v0.10 §6.3 — the command, with its argument filled in, never a placeholder.
+
+    **The argument is always the PRESENTED hop**, with whatever the refusal knows about the chain
+    named in the prose beside it. An earlier draft of §6.3 had `missing_parent_id` print the id it
+    names; that id is by construction the record the store could **not** read, so
+    `inspect --hop <it>` is the unknown-id path and exits non-zero. A refusal whose one suggested
+    command is guaranteed to fail is worse than no suggestion: it sends an operator to a dead end
+    and teaches them the line is noise.
+
+    `authority_revoked` gets the same treatment for the same reason, measured: `_check_chain`
+    returns no id for the revoked node, so the only id in hand is the leaf.
+
+    Nothing is suggested where there is no id, which is a principal that presented no hop and
+    holds no delegation: `inspect --hop` has no argument there and the operator's question is a
+    different one.
+    """
+    hop = result.hop or result.delegation_id
+    if hop is None:
+        return ""
+    detail = ""
+    if result.missing_parent_id is not None:
+        detail = f"; {result.missing_parent_id} in its chain could not be read"
+    elif result.expired_parent_id is not None:
+        detail = f"; {result.expired_parent_id} above it has expired"
+    return f"{detail}. ctrlrun inspect --hop {hop}"
+
+
 def _rank(reason: str) -> int:
     """Where `reason` sits in the declared order (SPEC-v0.10 §5)."""
     rank: int = _RANKS.get(reason, _UNLISTED_RANK)
@@ -1179,7 +1207,7 @@ class Control:
             effect_key=effect_key,
         )
         raise AuthorityDenied(
-            f"{action.name} denied: {result.reason}",
+            f"{action.name} denied: {result.reason}{_where_to_look(result)}",
             reason=result.reason,
             action_id=action.action_id,
             grant_id=result.grant_id,

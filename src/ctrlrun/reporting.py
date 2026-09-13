@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from .approval import ApprovalRecord
-from .authority import Budget
+from .authority import Authority, Budget, _delegation_from_record, narrowed_dimensions
 from .effect import EffectRecord, EffectState
 from .errors import CTRLRunError, InvalidArgument
 from .policy import OBSERVE, Decision
@@ -50,6 +50,12 @@ STATS_SCHEMA: Final = "ctrlrun.stats/v1"
 #: to know which of two shapes it got. §7.1 keeps both behind `ctrlrun inspect`, which is the
 #: surface question and a separate one.
 BUDGET_SCHEMA: Final = "ctrlrun.budget/v1"
+
+#: SPEC-v0.10 §6.2. Its own document rather than a key inside `ctrlrun.inspection/v2`, on
+#: `v0.9 §10.1`'s argument for `ctrlrun.budget/v1`: that one answers about an **action** and this
+#: answers about an **authority record**, and a reader handed one would have to know which shape
+#: it got before it could read either.
+HOP_SCHEMA: Final = "ctrlrun.hop/v1"
 
 #: The three relative units of SPEC-v0.3 §6.4, and the `timedelta` keyword each names.
 _RELATIVE_UNITS: Final[Mapping[str, str]] = {"m": "minutes", "h": "hours", "d": "days"}
@@ -316,6 +322,106 @@ def budget_document(
         "at": iso_timestamp(now),
         "budgets": reported,
     }
+
+
+def hop_document(
+    delegation_id: str,
+    authority: Authority,
+    store: StateStore,
+) -> dict[str, Any] | None:
+    """One authority record and the chain above it (SPEC-v0.10 §6.2), or `None` if unknown.
+
+    The 3am question §6.2 exists for is **which envelope did the peer actually hold, and which hop
+    narrowed it**. The chain answers the first; `narrowed[]` on each step answers the second, which
+    is the part nothing could answer before: an operator could see that a chain was valid or not,
+    and never which link took the resource away.
+
+    `depth` is **derived by walking to the root**, never read from the stored column, for
+    `v0.3 §5.5`'s reason: a row edited directly in the database must not be able to assert its way
+    to a shorter chain, and a view that trusted the column would launder exactly that edit.
+
+    One command answers about a hop and about an ordinary delegation alike, which is why
+    `created_via` is rendered rather than filtered on: an operator paged about a refusal does not
+    yet know which kind they have.
+    """
+    record = store.get_delegation(delegation_id)
+    if record is None:
+        return None
+    delegation = _delegation_from_record(record)
+    walk = authority._walk(delegation, store=store)
+    chain: list[dict[str, Any]] = []
+    steps = [*walk.nodes]
+    for index, node in enumerate(steps):
+        parent_grant = (
+            steps[index + 1].grant if index + 1 < len(steps) else (walk.root if walk.root else None)
+        )
+        parent_record = store.get_delegation(node.parent_id)
+        chain.append(
+            {
+                "id": node.delegation_id,
+                "parent_id": node.parent_id,
+                "depth": len(steps) - index,
+                "created_via": str(node.created_via),
+                "revoked_at": _iso_or_none(node.revoked_at),
+                "narrowed": list(narrowed_dimensions(parent_grant, node.grant))
+                if parent_grant is not None
+                else [],
+            }
+        )
+        if parent_record is None:
+            break
+    return {
+        "schema": HOP_SCHEMA,
+        "hop": delegation.delegation_id,
+        "created_by": {
+            "agent": delegation.created_by.agent,
+            "user": delegation.created_by.user,
+        },
+        "created_at": _iso_or_none(delegation.created_at),
+        "created_via": str(delegation.created_via),
+        "subject": {
+            "agent": delegation.grant.subject.agent,
+            "user": delegation.grant.subject.user,
+        },
+        "depth": len(walk.nodes),
+        "revoked_at": _iso_or_none(delegation.revoked_at),
+        "root_id": walk.root_id,
+        "missing_parent_id": walk.missing_parent_id,
+        "chain": chain,
+    }
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def hop_lines(document: Mapping[str, Any]) -> list[str]:
+    """§6.2's view for a terminal, from the same document `--json` emits.
+
+    One producer, for `inspection_for`'s reason: two builders that agree today disagree later.
+    """
+    created = document["created_by"]
+    who = created["agent"] + (f" for {created['user']}" if created["user"] else "")
+    lines = [
+        f"{document['created_via']} {document['hop']}",
+        f"  created by {who} at {document['created_at']}",
+        f"  issued to {document['subject']['agent']}"
+        + (f" for {document['subject']['user']}" if document["subject"]["user"] else ""),
+        f"  depth {document['depth']}, walked to the root rather than read from the row",
+    ]
+    if document["revoked_at"]:
+        lines.append(f"  REVOKED at {document['revoked_at']}")
+    for step in document["chain"]:
+        narrowed = ", ".join(step["narrowed"]) or "nothing"
+        mark = "  REVOKED" if step["revoked_at"] else ""
+        lines.append(f"  {step['id']} (depth {step['depth']}) narrows {narrowed}{mark}")
+    if document["missing_parent_id"]:
+        # §6.3's rule: the id the store could not read is named in the prose and never printed as
+        # a command's argument, because `inspect --hop` on it is the unknown-id path.
+        lines.append(f"  the chain stops here: {document['missing_parent_id']} could not be read")
+    elif document["root_id"]:
+        lines.append(f"  root {document['root_id']}")
+    return lines
 
 
 def budget_lines(document: Mapping[str, Any]) -> list[str]:
