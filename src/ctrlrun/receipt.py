@@ -100,7 +100,7 @@ _V5_KEYS: Final = (*_V4_KEYS, "approvers", "authority_grant_id")
 #: guarantee catalogue's own rule: a key listed here is a key `to_dict` projects, so naming one
 #: before something writes it is a `KeyError` on every receipt, which is the field-level form of
 #: a stub row. Item 7 asserts all three are present before the release.
-_V6_KEYS: Final = (*_V5_KEYS, "task")
+_V6_KEYS: Final = (*_V5_KEYS, "task", "scope_hash")
 _KEYS: Final = {
     _V1: _V1_KEYS,
     _V2: _V2_KEYS,
@@ -476,6 +476,12 @@ class Receipt:
     #: which is every 0.8.0 call. **Not part of the action hash** (§6.3.1): a field on `Action`
     #: would move every hash in existence and invalidate every stored approval.
     task: str | None = None
+    #: SPEC-v0.9 §5.5: `"sha256:…"` over what the scope provider returned, or `None` where none
+    #: was configured. **The hash and never the scope**: a scope is a list of what a principal
+    #: may touch, and an evidence store is not the place to accumulate a second copy of an
+    #: authorization system's state (`v0.7 §6.10`). Its own domain tag, so it can never equal a
+    #: precondition fingerprint over the same mapping.
+    scope_hash: str | None = None
     #: The schema this receipt is written under (§6.11). A receipt this binary builds is
     #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`
     #: where it declared none, which renders with no `schema` key at all.
@@ -568,6 +574,7 @@ class Receipt:
             # conditional key is a `KeyError`, and a reader tells "no task" from "this binary
             # predates tasks" by the schema label.
             "task": self.task,
+            "scope_hash": self.scope_hash,
         }
 
     def to_json(self) -> str:
@@ -656,6 +663,11 @@ class Receipt:
             task=(
                 document.get("task")
                 if schema == _V6 and isinstance(document.get("task"), str)
+                else None
+            ),
+            scope_hash=(
+                document.get("scope_hash")
+                if schema == _V6 and isinstance(document.get("scope_hash"), str)
                 else None
             ),
             schema=schema,

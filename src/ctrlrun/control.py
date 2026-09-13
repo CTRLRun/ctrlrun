@@ -8,6 +8,7 @@ what happened. SPEC-v0.1 §8 freezes the names here.
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import logging
 import os
@@ -21,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
-from .action import Action, Principal
+from .action import Action, Principal, canonical_bytes
 from .approval import (
     APPROVAL_UNRECORDED,
     APPROVALS_UNVERIFIABLE,
@@ -49,6 +50,7 @@ from .approval import (
     unsatisfied,
 )
 from .authority import (
+    RESOURCE_SEPARATOR,
     Authority,
     AuthorityResult,
     BreakGlassEnvelope,
@@ -56,6 +58,7 @@ from .authority import (
     Delegation,
     Grant,
     _optional_from_yaml,
+    matches,
 )
 from .effect import (
     _EXECUTOR_RUN,
@@ -212,6 +215,10 @@ _AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_gran
 #: the same reason: set at the one place that knows it rather than at each receipt site, because
 #: a site that forgot would stamp the **previous** action's task onto this one's evidence.
 _TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
+#: SPEC-v0.9 §5.5 — the scope hash reaches the receipt the way the task does, and is reset
+#: beside it: a refusal whose receipt carried the previous action's scope would be the same
+#: stale-evidence defect on a new field.
+_SCOPE_HASH: ContextVar[str | None] = ContextVar("ctrlrun_scope_hash")
 
 #: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
 #: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
@@ -507,6 +514,77 @@ def _hash_or_none(value: object) -> str | None:
     is nothing, and a resumed leg's receipt says `null` rather than whatever was found.
     """
     return value if isinstance(value, str) else None
+
+
+class _ScopeRefusedError(Exception):
+    """SPEC-v0.9 §5.6's refusal, carried out of `_secure`'s loop without meeting its handlers.
+
+    **Not an `ActionDenied` subclass, and that is the whole point.** `_secure`'s `except
+    ActionDenied` appends `APPROVAL_DENIED` unconditionally, so a scope refusal raised as one
+    fabricates an approval denial for an action no human ever saw, and records `ACTION_DENIED`
+    twice. `SPEC-v0.9 §3.3.2` names this hazard for the budget refusal a later item adds; it is
+    the same handler and the same defect, found here first by reading the events a refusal wrote.
+
+    `_refuse_scope` has already written the events and the receipt, so this carries only the
+    public error the caller should see.
+    """
+
+    def __init__(self, denial: ActionDenied) -> None:
+        super().__init__(str(denial))
+        self.denial = denial
+
+
+class _ObservedRefusalError(Exception):
+    """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
+    swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
+    refusal, and a caller that could catch it could mistake an observed run for an enforced one.
+
+    **It carries the reason**, and an independent review is why it does. Without it
+    `_observe_secure` had one hardcoded `out_of_scope` for both refusals, so a deployment whose
+    scope *source was down* read a counterfactual saying the record was not theirs. Observe mode
+    exists to tell an operator what enforce mode would do; reporting the wrong category is the one
+    way it can be worse than useless.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: SPEC-v0.9 §5.6 — the two refusal reasons, distinct because a test asserting only the exception
+#: type cannot tell which guard fired. `scope_unavailable` is "the provider could not answer";
+#: `out_of_scope` is "it answered, and the record is not this principal's". G23 is the first.
+SCOPE_UNAVAILABLE: Final = "scope_unavailable"
+OUT_OF_SCOPE: Final = "out_of_scope"
+
+#: SPEC-v0.9 §5.5 — its own domain tag, so a scope hash can never equal a precondition
+#: fingerprint over the same mapping. That matters precisely because §5.7 permits both.
+_SCOPE_SCHEMA: Final = "ctrlrun.scope/v1"
+
+#: §5.4 — the key the provider answers under. A scope is a set of resource patterns, matched
+#: with the relation `authority.py` already uses for a grant's `resources:`.
+_SCOPE_RESOURCES: Final = "resources"
+
+
+def _checked_scope(scope: object, where: str) -> _Preconditions | None:
+    """SPEC-v0.9 §5.6's third row, and `v0.7 §6.2`'s rule for a non-callable `preconditions=`."""
+    if scope is not None and not callable(scope):
+        raise InvalidArgument(
+            f"{where}: scope must be a callable taking the Action and returning a mapping "
+            f"with {_SCOPE_RESOURCES!r}, not {type(scope).__name__}"
+        )
+    return cast("_Preconditions | None", scope)
+
+
+def _scope_hash(scope: Mapping[str, Any]) -> str:
+    """`"sha256:" + hex(SHA-256(canonical_bytes({schema, scope})))` (SPEC-v0.9 §5.5).
+
+    Through `canonical_bytes` and nothing else, so `v0.1 §2.3`'s float rejection and the
+    non-string-key refusal are inherited rather than re-argued: a scope hashed over a float
+    would drift. Whatever it raises is the caller's to turn into `scope_unavailable`.
+    """
+    document = {"schema": _SCOPE_SCHEMA, "scope": dict(scope)}
+    return "sha256:" + hashlib.sha256(canonical_bytes(document)).hexdigest()
 
 
 def _checked_preconditions(preconditions: object, where: str) -> _Preconditions | None:
@@ -987,6 +1065,7 @@ class Control:
         reconcile_eagerly: bool = False,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
         task: str | None = None,
+        scope: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
@@ -1009,6 +1088,15 @@ class Control:
         any (§6.5), which is why every 0.8.0 caller is unchanged. It reaches the authority
         decision and **never the action hash**: §6.3.1 argues that at length, and the short form
         is that a field on `Action` would move every action hash in existence.
+
+        `scope` answers whether this action's resource is in the calling principal's assigned
+        scope (SPEC-v0.9 §5). It is called with the `Action` and returns a mapping carrying a
+        `resources` list; **the kernel matches**, with the relation a grant's `resources:` uses.
+        It runs **strictly before the reservation** and before the precondition recheck, so a
+        provider that hangs can only fail closed. A provider that raises, answers with the wrong
+        shape, or answers something the canonicalizer refuses denies the action
+        `scope_unavailable`; a resource the scope does not cover denies it `out_of_scope`. Only
+        the hash of what it returned reaches the receipt, never the scope itself.
 
         `preconditions` reads the state an approval depends on (SPEC-v0.7 §6). It is called
         with the `Action` and returns a mapping, which is hashed through `canonical_bytes` and
@@ -1051,6 +1139,8 @@ class Control:
                 f"This call asked for {effect_key!r}"
             )
         provider = _checked_preconditions(preconditions, "execute(preconditions=...)")
+        scoper = _checked_scope(scope, "execute(scope=...)")
+        scoped: list[str | None] = []
         self._check_environment(action)
         held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
@@ -1079,6 +1169,7 @@ class Control:
         # stale grant id: a refusal whose receipt carried the previous action's task would be the
         # same defect on a new field.
         _TASK.set(None)
+        _SCOPE_HASH.set(None)
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -1108,6 +1199,8 @@ class Control:
                     reconciler,
                     held,
                     provider,
+                    scoper,
+                    scoped,
                 )
             self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
             self._record(
@@ -1156,6 +1249,8 @@ class Control:
                         reconciler,
                         held,
                         provider,
+                        scoper,
+                        scoped,
                     )
                 self._refuse_authority(action, result, started_at, effect_key)
             self._append(
@@ -1192,6 +1287,8 @@ class Control:
                     reconciler,
                     held,
                     provider,
+                    scoper,
+                    scoped,
                 )
             # SPEC-v0.6 §7.2.1's third bullet: *"the refusal is recorded against the approval
             # so the history shows a grant that met a denial."* It was not. An independent
@@ -1265,10 +1362,21 @@ class Control:
                 reconciler,
                 held,
                 provider,
+                scoper,
+                scoped,
             )
         compared = _Compared()
         approval, reservation = self._secure(
-            action, evaluation, started_at, effect_key, held, reconciler, provider, compared
+            action,
+            evaluation,
+            started_at,
+            effect_key,
+            held,
+            reconciler,
+            provider,
+            compared,
+            scoper,
+            scoped,
         )
         attempt = 1 if reservation is None else reservation.attempt
         # SPEC-v0.7 §5.5 — the check, on the attempt number the store **assigned**, after the
@@ -1331,6 +1439,8 @@ class Control:
         reconciler: _Reconciler,
         lease: timedelta,
         preconditions: _Preconditions | None = None,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> Receipt:
         """Run an action observe mode has finished deciding about (SPEC-v0.3 §6.2).
 
@@ -1342,7 +1452,15 @@ class Control:
         """
         compared = _Compared()
         approval, reservation = self._observe_secure(
-            action, evaluation, effect_key, lease, observation, preconditions, compared
+            action,
+            evaluation,
+            effect_key,
+            lease,
+            observation,
+            preconditions,
+            compared,
+            scope,
+            scoped,
         )
         held_key = None if reservation is None else effect_key
         attempt = 1 if reservation is None else reservation.attempt
@@ -1392,6 +1510,8 @@ class Control:
         observation: _Observation,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Attempt what `_secure` takes, record every refusal, and hold nothing it lost.
 
@@ -1418,6 +1538,15 @@ class Control:
             reason, _ = self._policy_approval_state()
             if reason is not None:
                 observation.block(reason)
+        # SPEC-v0.9 §5.2.2's observe row. The provider **runs**, so its hash reaches the receipt
+        # and an operator sizing a scope before turning it on sees what would have happened; the
+        # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
+        # enforces, and a check that enforced here would refuse during the phase whose entire
+        # purpose is to refuse nothing.
+        try:
+            self._in_scope(action, scope, scoped, enforcing=False)
+        except _ObservedRefusalError as would:
+            observation.block(would.reason)
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
@@ -1508,6 +1637,8 @@ class Control:
         lease: timedelta,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Observe mode's `_take`: **check the grant, never spend it** (SPEC-v0.6 §7.2.3).
 
@@ -2061,6 +2192,8 @@ class Control:
         reconciler: _Reconciler,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Take everything this action needs before it may run: the grant, and the key.
 
@@ -2097,6 +2230,12 @@ class Control:
         # and whatever the second attempt meets is final.
         for reconciled in (False, True):
             try:
+                # SPEC-v0.9 §5.3, §5.7 — **before the recheck and before every `_take`**. It is
+                # in the loop and not above it because the `reconcile` hook between the two
+                # passes is a network call, and a scope fetched before it would be compared
+                # against a world that moved while it ran. §5.8 states what this costs the
+                # precondition's own window, which is that it now contains this call.
+                self._in_scope(action, scope, scoped)
                 if approval_id is not None:
                     # **Immediately before `_take`, and nothing between them.** The window this
                     # narrows is the time from the provider's fetch to the store call; anything
@@ -2105,6 +2244,14 @@ class Control:
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
                 break
+            except _ScopeRefusedError as refused:
+                # SPEC-v0.9 §5.6. Its own clause, **before** the `ActionDenied` one:
+                # `_refuse_scope` has already written the events and the receipt, and an
+                # exception raised inside an `except` clause leaves the whole `try` rather than
+                # meeting its siblings. Routed through `except ActionDenied` instead, this would
+                # append `APPROVAL_DENIED` for an action no human saw and a second
+                # `ACTION_DENIED` (§3.3.2's hazard, the same handler).
+                raise refused.denial from None
             except AmbiguousEffect as refused:
                 # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
                 # when an expired lease is declared AMBIGUOUS, and the report belongs beside this
@@ -2931,6 +3078,102 @@ class Control:
             )
             return None
 
+    def _in_scope(
+        self,
+        action: Action,
+        scope: _Preconditions | None,
+        seen: list[str | None] | None,
+        *,
+        enforcing: bool = True,
+    ) -> None:
+        """SPEC-v0.9 §5: fetch the principal's scope and match this action's resource into it.
+
+        **Strictly before the reservation, before every `_take`** (§5.3), and before `_recheck`
+        (§5.7): `out_of_scope` says the principal never had the right to the record and
+        `precondition_changed` says the record moved, and an operator handed the second when the
+        first is true goes looking for a race that is not there.
+
+        The ordering is the safety argument and not a preference. After the reservation, a
+        provider that hangs leaves a lease to lapse and an `AMBIGUOUS` record nobody can resolve:
+        a *scope check* would have manufactured the state it exists to prevent (`v0.7 §6.2`).
+
+        Called twice where `_secure` takes twice, for `v0.7 §6.2`'s reason: the `reconcile` hook
+        between them is a network call whose duration would otherwise sit inside the window.
+        Idempotent from the caller's side, and `seen` keeps the hash the first call computed so
+        the receipt records one answer rather than the last.
+        """
+        if scope is None:
+            return
+        # SPEC-v0.9 §5.2.2's observe row: the provider **runs**, so its hash reaches the receipt
+        # and an operator sizing a scope before turning it on sees what would have happened, and
+        # it refuses nothing. `v0.3 §6.2` is the rule: observe mode records rather than enforces,
+        # and a check that enforced under observation would refuse during the phase whose whole
+        # purpose is to refuse nothing.
+        refuse = self._refuse_scope if enforcing else self._would_refuse_scope
+        try:
+            answered = scope(action)
+            if not isinstance(answered, Mapping):
+                raise TypeError(
+                    f"a scope provider returns a mapping, not {type(answered).__name__}"
+                )
+            digest = _scope_hash(answered)
+        except Exception as exc:
+            # **Every failure the provider can produce, not two of them** (§5.6): it raised, it
+            # answered with the wrong shape, or it answered something the canonicalizer refuses.
+            # All three are "the scope could not be read", which is fail-closed, and none of them
+            # is `out_of_scope`, which is a statement that it *was* read.
+            raise refuse(action, SCOPE_UNAVAILABLE, str(exc)) from exc
+        if seen is not None:
+            seen.append(digest)
+        _SCOPE_HASH.set(digest)
+        patterns = answered.get(_SCOPE_RESOURCES)
+        if not isinstance(patterns, (list, tuple)) or not all(
+            isinstance(one, str) for one in patterns
+        ):
+            raise refuse(
+                action,
+                SCOPE_UNAVAILABLE,
+                f"the scope carries no usable {_SCOPE_RESOURCES!r} list",
+            )
+        # §4.4's rule for a grant that declares `resources:`, applied here for the same reason:
+        # an action carrying no resource does not match a scope that names them, and treating it
+        # as in-scope would make the check optional for any caller who omitted the field.
+        if action.resource is None or not any(
+            matches(pattern, action.resource, separator=RESOURCE_SEPARATOR) for pattern in patterns
+        ):
+            raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
+
+    def _refuse_scope(self, action: Action, reason: str, error: str) -> _ScopeRefusedError:
+        """The refusal, with its events and its receipt. Returns it for the caller to raise.
+
+        Returned rather than raised so the call site reads `raise self._refuse_scope(...)` and a
+        reader can see the control flow leaves there: an exception raised inside a helper is a
+        `return` a linter cannot see.
+        """
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": error})
+        self._record(
+            action,
+            Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=error,
+        )
+        return _ScopeRefusedError(ActionDenied(f"{action.name} denied: {reason}", reason=reason))
+
+    def _would_refuse_scope(self, action: Action, reason: str, error: str) -> _ObservedRefusalError:
+        """Observe mode's counterpart: record what would have happened, and refuse nothing.
+
+        Returns a sentinel the caller raises, which `_observe_secure` catches. A `None` return
+        would make `_in_scope`'s `raise` a type error and a separate code path in `_in_scope`
+        would be the flag through it that `_observe_secure`'s own docstring argues against.
+        """
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {"reason": reason, "error": error, "observed": True},
+        )
+        return _ObservedRefusalError(reason)
+
     def _recheck(
         self,
         action: Action,
@@ -3714,6 +3957,7 @@ class Control:
             # path, and so one nobody would notice breaking.
             authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             task=_TASK.get(None),
+            scope_hash=_SCOPE_HASH.get(None),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,
@@ -3917,6 +4161,7 @@ def protect(
     control: Control | None = None,
     preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
     task: str | None = None,
+    scope: Callable[[Action], Mapping[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
 
@@ -3951,6 +4196,10 @@ def protect(
     # that changes per call. The operator declares the template; nothing here infers a task
     # from an argument it was not pointed at, which is the line §6.3 draws.
     _check_template(name, "task", task)
+    # SPEC-v0.9 §5.6's third row: **at decoration time** for `@protect`, which is `v0.7 §6.2`'s
+    # rule for a non-callable `preconditions=`. A misconfiguration an operator hears about at
+    # import is one they fix before an agent runs, not during.
+    _checked_scope(scope, f"protect({name!r}, scope=...)")
     held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
     _reconciler(reconcile, reconcile_eagerly, f"protect({name!r}")
 
@@ -4032,6 +4281,7 @@ def protect(
                     reconcile_eagerly=reconcile_eagerly,
                     preconditions=provider,
                     task=bound_task,
+                    scope=scope,
                 )
             except ApprovalRequired as pending:
                 if not wait:

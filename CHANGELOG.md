@@ -29,8 +29,32 @@ any change to one appears here.
   The task reaches the authority decision and the receipt, and **never the action hash**: a field
   on `Action` would move every hash in existence and invalidate every stored approval.
 
+- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
+  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
+  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
+  **strictly before the reservation** and before the precondition recheck, so a provider that
+  hangs leaves nothing reserved and nothing executed. **G23** grades it.
+
+  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
+  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
+
+  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
+  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
+  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
+  under `@protect`.
+
+  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
+  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
+  principal may touch, and an evidence store is not the place to keep a second copy of it.
+
+  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
+  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
+  the three mechanical differences that justify it.
+
 ### Changed
 
+- `ctrlrun.receipt/v6` carries `scope_hash` beside `task`, and `ctrlrun.guarantees/v5` carries
+  **G23** beside G24.
 - `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` on a grant is
   refused in a `v6` document rather than ignored, because an older reader would grant the action
   on every task. `DIMENSIONS` grows from six entries to seven, and it is exported and iterated by
