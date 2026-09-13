@@ -2146,3 +2146,43 @@ def test_a_retry_of_an_unmeasurable_call_is_answered_every_time(budgeted_client,
         )
         assert response.json()["error"]["code"] == -41001
     assert upstream.calls == []
+
+
+def test_T480_a_metadata_agent_id_decides_nothing_and_the_provider_s_principal_decides(
+    client, upstream, store
+):
+    """SPEC-v0.10 §3.1.2 end to end, and `v0.3`'s T91d at the hop.
+
+    `params.metadata` is the caller's own JSON, and it is where a hop arrives. The parser half of
+    this is in `test_mcp.py`; this is the half that matters to an operator reading evidence: the
+    receipt names the principal the `IdentityProvider` resolved from `X-Agent`, and the name the
+    payload asked for appears **nowhere** in it.
+
+    An agent that could pick its own principal by typing one would defeat every authority decision
+    downstream, because authority matches on the subject.
+    """
+    upstream.respond({"resultType": "complete", "content": []})
+    body = _call()
+    body["params"]["metadata"] = {
+        "agent_id": "treasury-admin",
+        "principal": "treasury-admin",
+        "user": "root@example.com",
+        "task": "refund-run:7",
+    }
+
+    response = client.post(
+        "/mcp", content=json.dumps(body).encode(), headers=_headers(body_call=body)
+    )
+
+    assert response.status_code == 200, response.text
+    receipt = store.receipts()[-1]
+    assert receipt.principal.agent == "refund-agent", (
+        "the payload named the acting principal; X-Agent is the only thing that may"
+    )
+    assert receipt.principal.user != "root@example.com"
+    # And nowhere else in the evidence either -- not in the receipt, not in the events.
+    rendered = json.dumps(receipt.to_dict()) + json.dumps(
+        [event.data for event in store.events()], default=str
+    )
+    assert "treasury-admin" not in rendered, "a payload-chosen name reached the evidence log"
+    assert "root@example.com" not in rendered, rendered

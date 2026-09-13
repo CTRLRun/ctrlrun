@@ -810,6 +810,8 @@ _FROZEN_V0_10: tuple[tuple[str, str, str | None], ...] = (
     ("ctrlrun.upstream", "observe_upstream", "verify"),
     ("ctrlrun.upstream", "check", "upstream"),
     ("ctrlrun.upstream", "pinned_context", "certs"),
+    ("ctrlrun.adapter", "needs_approval", "hop"),
+    ("ctrlrun.adapter", "needs_approval", "task"),
 )
 
 
@@ -838,21 +840,23 @@ def test_every_v0_10_name_the_spec_freezes_is_importable_with_the_parameter_it_n
         )
 
 
-def test_the_three_rows_of_section_9_that_did_not_ship_still_have_not():
-    """§9.4's table, pinned so it stays true in both directions.
+def test_the_row_of_section_9_that_did_not_ship_still_has_not():
+    """§9.4's remaining row, pinned in the other direction.
 
-    If one of these is built later, this test fails and §9.4's row comes out in the same commit.
-    That is the point: the document and the tree are wrong together or right together, never one
-    of each, which is the state §9.4 exists because of.
+    Two of §9.4's three rows are built. This is the one deliberately not built: check 3 shipped on
+    `upstream.observe_upstream(url, *, verify=...)` and the forwarder's `verify`, which is
+    per-gateway where a parameter on the shared request helper would be per-process. Adding it
+    later would be a second way to configure the same pin, so if somebody does, this fails and
+    §9.4's row comes out in the same commit.
+
+    The document and the tree are wrong together or right together, never one of each. That is
+    the state §9.4 exists because of.
     """
     import inspect
 
-    from ctrlrun import adapter
     from ctrlrun.gateway import transport
 
-    assert "hop" not in inspect.signature(adapter.needs_approval).parameters, (
-        "needs_approval now takes a hop: build it, and delete its row from SPEC-v0.10 §9.4"
-    )
     assert "ssl_context" not in inspect.signature(transport.request).parameters, (
-        "transport.request now takes ssl_context: delete its row from SPEC-v0.10 §9.4"
+        "transport.request now takes ssl_context: delete its row from SPEC-v0.10 §9.4, and say "
+        "there which of the two pin-configuration surfaces is now the one to use"
     )
