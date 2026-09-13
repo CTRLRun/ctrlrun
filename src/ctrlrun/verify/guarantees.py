@@ -24,10 +24,12 @@ from typing import Final
 #: SPEC-v0.8 §11.4: `v4` is G1 to G21, and it moves once, here, with G18. G17, G19, G20 and G21
 #: join it with their items, and item 8 asserts all five present before the release. No stub
 #: rows: a guarantee that reports anything before its check exists is a false green.
-#: SPEC-v0.9 §8: `v5` is G1 to G24, and it moves once, here, with G24. G22 and G23 join it with
+#: SPEC-v0.10 §7: `v6` is G1 to G27, and it moves once, with item 1's G25. G26 and G27 join it
+#: with their items.
+#: SPEC-v0.9 §8: `v5` was G1 to G24, and it moved once, with G24. G22 and G23 joined it with
 #: their items. No stub rows: a guarantee that reports anything before its check exists is a
 #: false green, which is what 0.6.1 had to fix and what G17 shipped as in v0.8.
-CATALOGUE: Final = "ctrlrun.guarantees/v5"
+CATALOGUE: Final = "ctrlrun.guarantees/v6"
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,14 @@ GUARANTEES: Final = (
         "grant refused off its task",
         ("v0.9 §6.2", "v0.9 §9 T380", "v0.9 §9 T381"),
     ),
+    Guarantee(
+        "G25",
+        # 30 characters against `report._TITLE_WIDTH`'s 32. "narrows or it is refused" and not
+        # "widening is refused", because the guarantee grades both halves and a title naming only
+        # the negative would let the positive control drift out (SPEC-v0.10 §7).
+        "a hop narrows or it is refused",
+        ("v0.10 §2.4", "v0.10 §2.7 T470", "v0.10 §2.7 T471", "v0.10 §2.7 T472"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -266,6 +276,12 @@ NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 #: SPEC-v0.9 §8, G24. A statement about the operator's **document**, like every reason in this
 #: module: it says what the document does not declare, not what the kernel is not configured for.
 NO_TASKS: Final = "no grant names a task"
+#: SPEC-v0.10 §7, G25's second reason: the document has a delegable grant and verify can drive no
+#: action under it, so the scenario cannot be built. `NO_DELEGABLE_GRANT` above is G25's first and
+#: was already here, because a hop is a delegation; G25 reuses it rather than adding a second
+#: spelling. This one is added because a reason that was silently unreachable would be the false
+#: `N/A` §7 opens by forbidding.
+NO_HOP_ACTION: Final = "the document's delegable grant admits no action verify can drive"
 #: SPEC-v0.9 §8, G22. A statement about the operator's **document**: whether any grant it declares
 #: carries a budget at all.
 NO_BUDGET: Final = "no grant carries a budget"
@@ -419,6 +435,7 @@ __all__ = [
     "NO_EXPIRES_AT",
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
+    "NO_HOP_ACTION",
     "NO_METRIC_TO_MEASURE",
     "NO_RESOURCE_TO_SCOPE",
     "NO_TASKS",

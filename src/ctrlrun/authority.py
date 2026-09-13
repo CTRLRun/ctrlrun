@@ -74,6 +74,13 @@ AUTHORITY_CONSTRAINT: Final = "authority_constraint"
 #: at all. `SPEC-v0.8 §5.2` records what that costs: a refusal that does not name its dimension
 #: is the least diagnosable one in the file. G24 asserts this value.
 AUTHORITY_TASK: Final = "authority_task"
+#: SPEC-v0.10 §2.3.2 rule 2 — a hop was presented and does not reach this action: the id names no
+#: delegation, or the one it names does not match the action's shape. Its own reason for the same
+#: argument `AUTHORITY_TASK` makes one line up: without it three of the six refusal shapes report
+#: `no_authority` with no `grant_id` at all (§2.3.3's probe), so the milestone's headline refusal,
+#: "this hop does not authorise this action", is indistinguishable from holding nothing, and §6.3's
+#: promise to print `ctrlrun inspect --hop <id>` has no id to print.
+AUTHORITY_HOP: Final = "authority_hop"
 NO_AUTHORITY: Final = "no_authority"
 
 #: §4.3 — fixed rather than short-circuited, so the evidence for one configuration does not
@@ -92,6 +99,10 @@ REASON_PRECEDENCE: Final = (
     # arguments and the task is still wrong.
     AUTHORITY_TASK,
     AUTHORITY_CONSTRAINT,
+    # SPEC-v0.10 §2.3.2 — above `no_authority` and below everything that inspects a grant the hop
+    # actually reached. A presented hop that does not reach the action is a fact about the hop; the
+    # reasons above are facts about a grant that did reach it, and they are more specific.
+    AUTHORITY_HOP,
     NO_AUTHORITY,
 )
 
@@ -121,12 +132,16 @@ _ID_HEX_BYTES: Final = 16  # "dlg_" + 32 hex chars
 #: change that moves the `Literal`, this mapping and every reader together, in one commit; a
 #: deployment that wrote `break-glass` rows under a reader that knew two values would deny
 #: everything, which is fail-closed and useless.
-CreatedVia = Literal["api", "cli", "break-glass"]
+#: SPEC-v0.10 §2.2 — `hop` is the fourth value, for a delegation created across an agent boundary
+#: by `Control.hop`. §9.3 states what it costs: an older binary meeting one denies **every action in
+#: the deployment**, so creating the first hop is the irreversible step of the 0.10 upgrade.
+CreatedVia = Literal["api", "cli", "break-glass", "hop"]
 
 _CREATED_VIA: Final[Mapping[str, CreatedVia]] = {
     "api": "api",
     "cli": "cli",
     "break-glass": "break-glass",
+    "hop": "hop",
 }
 
 #: SPEC-v0.3 §5.3 — the creation-time vocabulary. Disjoint from the evaluation reasons above,
@@ -532,27 +547,14 @@ class Grant:
         return self.expires_at is not None and now > self.expires_at
 
     def matches_shape(self, action: Action) -> bool:
-        """Subject, action name, resource and environment — all four, or no match (§4.3)."""
-        if not self.subject.matches(action.principal):
-            return False
-        if not any(
-            matches(pattern, action.name, separator=ACTION_SEPARATOR) for pattern in self.actions
-        ):
-            return False
-        if self.resources is not None:
-            # §4.4 — an action whose resource is None does not match a grant that declares
-            # `resources:`. To grant an action that carries no resource, omit the key.
-            if action.resource is None:
-                return False
-            if not any(
-                matches(pattern, action.resource, separator=RESOURCE_SEPARATOR)
-                for pattern in self.resources
-            ):
-                return False
-        # §4.2 — matched by exact string, not by pattern: an environment name is a short
-        # closed list, and a glob over it buys nothing but a way to typo `prod*` into
-        # matching `production-canary`.
-        return self.environments is None or action.environment in self.environments
+        """Subject, action name, resource and environment — all four, or no match (§4.3).
+
+        **One implementation, and it is `unmatched_shape`'s** (SPEC-v0.10 §2.3.2): that function
+        answers *which* of the four failed, this one answers *whether* any did, and a second walk
+        here would be two things that agree today. `contained_dimension` and `v0.3 §5.4` are the
+        same arrangement for the other half of §4.3's `iff`.
+        """
+        return unmatched_shape(self, action) is None
 
     def task_holds(self, task: str | None) -> bool:
         """Is this grant good for the task the caller named? (SPEC-v0.9 §6.4, §6.5.)
@@ -632,6 +634,10 @@ class AuthorityResult:
     grant_id: str | None = None
     delegation_id: str | None = None
     depth: int = 0
+    #: SPEC-v0.10 §2.3.2 — the hop that was presented, on every result an action under one
+    #: produces, passing or failing. `data.hop` is what §6.3 turns into a command, and §3.3 is why
+    #: the id may be echoed while nothing else about the envelope may.
+    hop: str | None = None
     dimension: str | None = None
     missing_parent_id: str | None = None
     expired_parent_id: str | None = None
@@ -640,6 +646,21 @@ class AuthorityResult:
 
 
 # --- serialization and containment (SPEC-v0.3 §5.2, §5.4, §5.5) -------------------------
+
+
+class _HopRefusedError(Exception):
+    """A presented hop that does not reach this action (SPEC-v0.10 §2.3.2 rule 2).
+
+    Internal, and `_UnreadableError`'s shape: `evaluate` turns it into `authority_hop`. It carries
+    `dimension` only where the delegation exists, because an id naming nothing has no grant whose
+    rows could have failed, and a `dimension` on that refusal would be evidence about a record
+    nobody has.
+    """
+
+    def __init__(self, *, grant_id: str | None = None, dimension: str | None = None) -> None:
+        super().__init__(grant_id or "<unknown hop>")
+        self.grant_id = grant_id
+        self.dimension = dimension
 
 
 class _UnreadableError(Exception):
@@ -884,6 +905,42 @@ def _metric_value(action: Action, metric: str, grant_id: str) -> int:
             "units (SPEC-v0.9 §2.3)"
         )
     return int(value)
+
+
+def unmatched_shape(grant: Grant, action: Action) -> str | None:
+    """The first of §4.3's four shape rows `action` fails against `grant`, or `None` (v0.10 §2.3.2).
+
+    `matches_shape` is this, reduced to a bool. It exists as its own name because a **presented
+    hop** that does not reach an action must report *which* row stopped it: without it three of the
+    six refusal shapes answer `no_authority` with no `grant_id`, which an operator cannot tell from
+    holding no authority at all, and §6.3's "print the command with its argument filled in" has no
+    argument. `v0.9 §6.2` made the same argument for `authority_task` against the `environments`
+    precedent.
+
+    Order is §4.3's, and it is fixed for `contained_dimension`'s reason: the evidence for one
+    configuration must not depend on the order an implementation happens to check things in.
+    """
+    if not grant.subject.matches(action.principal):
+        return "subject"
+    if not any(
+        matches(pattern, action.name, separator=ACTION_SEPARATOR) for pattern in grant.actions
+    ):
+        return "actions"
+    if grant.resources is not None:
+        # §4.4 — an action whose resource is None does not match a grant that declares
+        # `resources:`. To grant an action that carries no resource, omit the key.
+        if action.resource is None:
+            return "resources"
+        if not any(
+            matches(pattern, action.resource, separator=RESOURCE_SEPARATOR)
+            for pattern in grant.resources
+        ):
+            return "resources"
+    # §4.2 — matched by exact string, not by pattern: an environment name is a short closed list,
+    # and a glob over it buys nothing but a way to typo `prod*` into matching `production-canary`.
+    if grant.environments is not None and action.environment not in grant.environments:
+        return "environments"
+    return None
 
 
 def contained_dimension(parent: Grant, child: Grant) -> str | None:
@@ -1204,6 +1261,7 @@ class Authority:
         store: StateStore,
         task: str | None = None,
         evaluate_task: bool = True,
+        hop: str | None = None,
     ) -> AuthorityResult:
         """Does any grant cover this action? (SPEC-v0.3 §4.3.)
 
@@ -1228,10 +1286,20 @@ class Authority:
         passed: list[AuthorityResult] = []
         failed: dict[str, list[AuthorityResult]] = {}
         try:
-            candidates = self._candidates(store)
+            candidates = (
+                self._candidates(store) if hop is None else self._hop_candidate(hop, action, store)
+            )
         except _UnreadableError as unreadable:
             return AuthorityResult(
-                False, AUTHORITY_UNREADABLE, delegation_id=unreadable.delegation_id
+                False, AUTHORITY_UNREADABLE, delegation_id=unreadable.delegation_id, hop=hop
+            )
+        except _HopRefusedError as refused:
+            return AuthorityResult(
+                False,
+                AUTHORITY_HOP,
+                hop=hop,
+                grant_id=refused.grant_id,
+                dimension=refused.dimension,
             )
         for grant_id, grant, delegation in candidates:
             if not grant.matches_shape(action):
@@ -1275,12 +1343,14 @@ class Authority:
                 )
         if passed:
             # §4.6 — holding two permissions is never worse than holding one, and the grant
-            # named is a property of the set rather than of the document.
-            return min(passed, key=_by_grant_id)
+            # named is a property of the set rather than of the document. **Under a hop there is
+            # exactly one candidate** (SPEC-v0.10 §2.3.2 rule 1), so this picks it rather than
+            # choosing, and the codepoint order §2.3.1 measured decides nothing.
+            return replace(min(passed, key=_by_grant_id), hop=hop)
         for reason in REASON_PRECEDENCE:
             if reason in failed:
-                return min(failed[reason], key=_by_grant_id)
-        return AuthorityResult(False, NO_AUTHORITY)
+                return replace(min(failed[reason], key=_by_grant_id), hop=hop)
+        return AuthorityResult(False, NO_AUTHORITY, hop=hop)
 
     def _charges_for(
         self, action: Action, result: AuthorityResult, *, store: StateStore
@@ -1604,6 +1674,38 @@ class Authority:
         if walk.depth_exceeded is not None:
             return parent.grant, walk.depth_exceeded
         return parent.grant, len(walk.nodes)
+
+    def _hop_candidate(
+        self, hop: str, action: Action, store: StateStore
+    ) -> list[tuple[str, Grant, Delegation | None]]:
+        """The one candidate a presented hop admits (SPEC-v0.10 §2.3.2 rules 1 and 2).
+
+        **The named delegation is the only candidate.** Not "as well as" the principal's own
+        grants, and not "the narrowest of them": §2.3.1 measured what the alternative does, which
+        is that a receiving agent holding a grant of its own is authorised by that one, the hop is
+        never consulted, and `_charges_for` returns `()` so the issuer's budget pays nothing.
+
+        **Its chain is walked, not offered.** The ancestors are not candidates. `_check_chain`
+        walks them exactly as it does for any delegation, so a root addressed to `agent: "*"`
+        cannot authorise the action at its own width, which is the same hole with one extra step.
+
+        Two refusals belong to the hop rather than to the chain, and both are `authority_hop`: an
+        id naming no delegation, and one whose grant does not reach this action's shape. Everything
+        else keeps the reason it already has (§2.3.2 rule 3), because those are facts about a grant
+        the hop did reach.
+
+        A **revoked** delegation is returned rather than refused here, deliberately: it is a live
+        record of an authority that was cut, `_check_chain` answers `authority_revoked` for it, and
+        §2.3.2 rule 3 forbids `authority_hop` standing in for that.
+        """
+        record = store.get_delegation(hop)
+        if record is None:
+            raise _HopRefusedError()
+        delegation = _delegation_from_record(record)
+        dimension = unmatched_shape(delegation.grant, action)
+        if dimension is not None:
+            raise _HopRefusedError(grant_id=hop, dimension=dimension)
+        return [(delegation.delegation_id, delegation.grant, delegation)]
 
     def _candidates(self, store: StateStore) -> list[tuple[str, Grant, Delegation | None]]:
         """Every grant this principal could hold: the document's, then the store's (§4.3)."""
@@ -2215,6 +2317,7 @@ __all__ = [
     "AUTHORITY_ESCALATION",
     "AUTHORITY_EXPIRED",
     "AUTHORITY_GRANT",
+    "AUTHORITY_HOP",
     "AUTHORITY_REVOKED",
     "AUTHORITY_UNREADABLE",
     "CONTAINMENT",
@@ -2240,5 +2343,6 @@ __all__ = [
     "grant_to_json",
     "matches",
     "new_delegation_id",
+    "unmatched_shape",
     "validate_pattern",
 ]

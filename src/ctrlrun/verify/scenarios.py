@@ -4237,6 +4237,119 @@ class Engine:
         finally:
             store.close()
 
+    def _hop_refused(
+        self,
+        control: Control,
+        parent: Grant,
+        widened: Grant,
+        by: Principal,
+        dimension: str,
+    ) -> BaseException:
+        """One widened hop, refused (SPEC-v0.10 §2.4). A method rather than a lambda in the loop,
+        which is `_widened_is_rejected`'s shape and keeps the closure from capturing the loop
+        variable."""
+        return self.refused(
+            lambda: control.hop(parent.id, widened, by=by),
+            (AuthorityEscalation,),
+            f"AuthorityEscalation on {dimension!r}",
+            "a hop that widens was accepted",
+        )
+
+    def g25(self) -> GuaranteeResult:
+        """SPEC-v0.10 §2.4, §7. A hop narrows, or it is refused.
+
+        **The competing grant is the whole point, and §7.1 is why.** A scenario that hops a narrow
+        envelope to a principal holding nothing else passes whether or not §2.3's rule exists,
+        because there is no other grant to fall back to: it grades the containment relation v0.3
+        already shipped, wearing this milestone's name. `SPEC-v0.9 §13.8`'s G22 is what that looks
+        like when it ships.
+
+        So the receiving principal is given a **second hop, wider than the first**, and the
+        narrow one is presented. `verify` cannot mint a root grant (roots come from the operator's
+        document), and a sibling delegation's id is `secrets.token_hex`, so **both codepoint
+        orders are asserted**: a build with no §2.3 rule picks `min()` of two random ids and would
+        otherwise pass about half the time. A coin-flip control is worse than none.
+        """
+        if self.authority is None:
+            return self.na("G25", reg.NO_AUTHORITY_SECTION)
+        delegable = [
+            self.authority.grants[grant_id]
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].delegable
+        ]
+        if not delegable:
+            return self.na("G25", reg.NO_DELEGABLE_GRANT)
+        authority = self.authority
+        parent = delegable[0]
+        selection = self.select(grant_filter=lambda grant: grant.id == parent.id)
+        if selection is None:
+            return self.na("G25", reg.NO_HOP_ACTION)
+        control, store, recorder, _ = self._control_for("G25", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = parent.id
+            by = _principal_for(parent.subject)
+            narrowed, child_principal, _ = _narrow(parent, selection)
+            hop = control.hop(parent.id, narrowed, by=by)
+            detail["hop"] = hop.delegation_id
+            _expect_control(
+                store.get_delegation(hop.delegation_id) is not None,
+                "a hop narrowed on every dimension the parent constrains is accepted",
+                "the hop's delegation row was not written",
+            )
+            _expect_control(
+                hop.created_via == "hop",
+                "the record says it crossed a boundary",
+                f"created_via is {hop.created_via!r}",
+            )
+
+            # The negative control, one dimension at a time. `_widen` is G9's, unchanged, so a
+            # hop and a delegation are refused by the same relation rather than by two that
+            # agree today (SPEC-v0.10 §2.2).
+            refused_on: list[str] = []
+            for dimension in DIMENSIONS:
+                widened = _widen(parent, narrowed, dimension)
+                if widened is None or contained_dimension(parent, widened) is None:
+                    continue
+                offending = contained_dimension(parent, widened)
+                refusal = self._hop_refused(control, parent, widened, by, dimension)
+                _expect(
+                    getattr(refusal, "dimension", None) == offending,
+                    f"the refusal names {offending!r}",
+                    f"it named {getattr(refusal, 'dimension', None)!r}",
+                )
+                refused_on.append(dimension)
+            detail["refused_on"] = refused_on
+            _expect_control(
+                bool(refused_on),
+                "at least one dimension could be widened and was refused",
+                "no dimension of this grant could be widened, so nothing was graded",
+            )
+
+            # §2.3, and §7.1's requirement. A second hop, wider, to the same principal, and the
+            # narrow one presented. Both orders, because the ids are random.
+            wider = replace(narrowed, id="")
+            sibling = control.hop(parent.id, wider, by=by)
+            detail["sibling"] = sibling.delegation_id
+            for presented, label in ((hop, "narrow"), (sibling, "wider")):
+                action = replace(selection.build(), principal=child_principal)
+                result = authority.evaluate(
+                    action,
+                    now=control._clock(),
+                    store=store,
+                    hop=presented.delegation_id,
+                )
+                _expect(
+                    result.grant_id == presented.delegation_id,
+                    f"the {label} hop decides, whichever way the two ids sort",
+                    f"the decision named {result.grant_id!r}",
+                )
+
+        try:
+            return self.graded("G25", selection, store, recorder, body)
+        finally:
+            store.close()
+
 
 #: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
 #: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a
