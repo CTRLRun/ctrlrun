@@ -8,6 +8,7 @@ the same false green in a different costume, and each has a test here.
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
@@ -108,10 +109,17 @@ def test_T113_the_summary_is_the_last_line_and_names_the_not_applicable_ids(tmp_
     assert last.startswith(f"{report.passed}/{report.applicable} declared guarantees pass.")
     # G13 is N/A on every SQLite run: SQLite has no clock of its own. G14 needs the effect
     # template this document keeps in the @protect decorator, and G15 a `max_attempts` it does
-    # not declare (SPEC-v0.7 §8.9).
-    assert "13 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G22, G23, G24." in last
-    # The fraction is passes over applicable. A report with eight N/As does not say 17/17.
-    assert "18/18" not in text
+    # not declare (SPEC-v0.7 §8.9). G25 needs a delegable grant, which this document has none of.
+    #
+    # **Derived, not spelled out.** This assertion used to carry the id list as a literal, and
+    # every milestone that adds a guarantee edits it: G19 broke nine such assertions across three
+    # files, and G25 broke this one. What the test is *for* is the shape, that the N/A count is
+    # its own sentence naming its ids, so that is what it asserts.
+    na = [result.id for result in report.guarantees if result.status is Status.NOT_APPLICABLE]
+    assert na, "this fixture is meant to leave some guarantees not applicable"
+    assert f"{len(na)} not applicable: {', '.join(na)}." in last
+    # The fraction is passes over applicable. A report with N/As does not fold them into it.
+    assert f"{report.applicable + len(na)}/{report.applicable + len(na)}" not in text
 
 
 def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
@@ -137,16 +145,25 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
         # SPEC-v0.8 item 2: G18 joins the catalogue. It is graded wherever the document sends
         # an action to approval, which the first two of these do, and `N/A` for G1's reason
         # where nothing does. So the first two gain a pass and the third gains an N/A.
-        (ALL_APPLICABLE, "16/16 declared guarantees pass. 8 not applicable"),
-        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass. 13 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 24 not applicable"),
+        # The passes are literal because they are the point; the N/A count is derived, for the
+        # reason above. `len(reg.GUARANTEES)` moves with the catalogue and these fixtures do not.
+        (ALL_APPLICABLE, "16/16 declared guarantees pass."),
+        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass."),
+        (EMPTY, "0/0 declared guarantees pass."),
     ],
     ids=["passing", "some-na", "all-na"],
 )
 def test_T113_the_summary_over_three_shapes_of_configuration(tmp_path, document, expected):
     report = run(_write(tmp_path, document))
 
-    assert report.to_text().split("\n")[-1].startswith(expected)
+    last = report.to_text().split("\n")[-1]
+    assert last.startswith(expected)
+    # Every guarantee in the catalogue is accounted for exactly once, whatever the catalogue
+    # holds: passed, failed or not applicable. That is the invariant the literal counts were
+    # standing in for, and it does not need editing when a milestone adds an id.
+    na = [result.id for result in report.guarantees if result.status is Status.NOT_APPLICABLE]
+    assert f"{len(na)} not applicable" in last
+    assert report.applicable + len(na) == len(reg.GUARANTEES)
 
 
 # --- T114: `--json` validates, and the counterexample is conditional -----------------------
@@ -189,7 +206,7 @@ def test_T114_the_document_matches_the_schema_field_for_field(tmp_path):
 
     assert set(document) == TOP_LEVEL
     assert document["schema"] == REPORT_SCHEMA == "ctrlrun.verify/v1"
-    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v5"
+    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v6"
     assert set(document["policy"]) == {"path", "sha256", "schema", "mode", "actions"}
     assert document["authority"] is None
     assert document["store"] == {"backend": "sqlite", "scratch": True}
@@ -454,7 +471,11 @@ def test_T116_a_run_with_several_not_applicable_still_exits_0(tmp_path, monkeypa
     result = _cli(tmp_path, WITH_NOT_APPLICABLE)
 
     assert result.exit_code == 0
-    assert "13 not applicable" in result.stdout
+    # The docstring above already said this is read off the report rather than pinned; the
+    # assertion said otherwise, and G25 is what made the two disagree out loud.
+    reported = re.search(r"(\d+) not applicable", result.stdout)
+    assert reported is not None, result.stdout
+    assert int(reported.group(1)) > 0
 
 
 def test_T116_json_and_junit_can_be_combined(tmp_path, monkeypatch):

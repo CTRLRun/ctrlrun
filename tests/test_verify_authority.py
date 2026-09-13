@@ -122,12 +122,17 @@ def test_T108_G8_asserts_the_denial_by_reason_and_not_by_type(tmp_path, monkeypa
     path = _write(tmp_path, V7 + FULL_AUTHORITY + ACTIONS)
     original = Authority.evaluate
 
-    def wrong_reason(self, action, *, now, store, task=None, evaluate_task=True):
+    def wrong_reason(self, action, *, now, store, task=None, evaluate_task=True, hop=None):
         # SPEC-v0.9 §10.3 — the new keywords are **forwarded**, not merely accepted. A patch that
         # swallowed them would evaluate every action with no task, and a fixture whose grant
         # names one would then deny `authority_task` before the expiry this test is about.
+        #
+        # SPEC-v0.10 §9 — `hop` joins them, and this line is the reason that section predicts the
+        # breakage rather than discovering it: v0.9 added `task=` here and the same patch raised
+        # `TypeError` past every assertion in this file. A keyword added to a signature a test
+        # narrows is a red suite, every time, and forwarding it is the whole fix.
         result = original(
-            self, action, now=now, store=store, task=task, evaluate_task=evaluate_task
+            self, action, now=now, store=store, task=task, evaluate_task=evaluate_task, hop=hop
         )
         if not result.passed and result.reason == "authority_expired":
             return AuthorityResult(False, AUTHORITY_CONSTRAINT, grant_id=result.grant_id)
@@ -1037,9 +1042,13 @@ def test_T413s_G22_grades_the_same_alone_as_it_does_in_a_full_run(tmp_path):
     assert alone.status is not Status.FAIL, alone.reason
 
 
-@pytest.mark.parametrize("gid", ["G22", "G23", "G24"])
+@pytest.mark.parametrize("gid", ["G22", "G23", "G24", "G25"])
 def test_T413t_a_v09_guarantee_grades_the_same_alone_as_in_a_full_run(gid, tmp_path):
-    """The invariant G22 broke, over all three guarantees this milestone added.
+    """The invariant G22 broke, over every guarantee v0.9 and v0.10 added.
+
+    **SPEC-v0.10 §7.2: extended rather than copied.** A fourth milestone adding a fourth copy of
+    this test is how the invariant stops being one invariant, and G25 is at risk in its own way:
+    it reads a store the other scenarios share.
 
     A guarantee that grades differently on its own is reading state an earlier scenario left
     behind, and the report cannot be trusted either way round: whichever answer is right, one of
