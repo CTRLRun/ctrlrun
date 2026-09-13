@@ -1136,9 +1136,23 @@ a refactor rather than as a fifth patch, and it is the reason this item gets the
 
 ### 5.2 What lands
 
-**The order is declared once, as data, and both modes walk it.** One ordered sequence of checks,
-each naming its reason, with the enforcing path raising at the first that fails and the observing
-path recording the first that fails. Neither keeps a copy of the order.
+**The order is declared once, as data, and every check that can refuse declares where it sits in
+it.** The enforcing path raises at the first that fails; the observing path records the one
+**earliest in the declared order**, whatever order it happened to reach them in.
+
+**The unit of ordering is the POSITION, not the reason**, and that is the correction three review
+rounds converged on. A first design ranked the reason. It cannot work, for two structural reasons:
+`approval_required` and `precondition_changed` are both members of `BLOCKED_APPROVAL_REASONS` and
+enforce mode raises them on **opposite sides** of `_in_scope`, so no single rank for the second is
+both above and below `out_of_scope`; and the attempt-ceiling fast path runs in `Control.execute`
+before `_secure` is called at all, so its reason outranks everything `_secure` decides. A review
+demonstrated three live regressions from the reason-ranked version, on pairs the previous build had
+right.
+
+**No check moves**, and that is deliberate: v0.9 aligned three cases by reordering and the three
+reorderings produced four regressions between them (§13.8), which is §5.1's whole argument. What
+changes is that each `observation.block()` call site names its position, so the observing path can
+report the reason enforce mode would raise without either path being rearranged.
 
 **The list starts at `Control.execute`'s entry, not at `_secure`.** An earlier draft said "`_secure`
 raising ... and `_observe_secure` recording", which reads as though the sequence lived inside those
@@ -1163,9 +1177,12 @@ the door this paragraph left open.
 
 **The order to declare is already written down, as a comment.** `control.py:1296-1297` says
 `principal_expired -> authority -> policy -> approval -> reservation -> execution`. Item 4's work is
-to make that comment the data both paths walk, extended with the checks `_secure` adds beneath
-`approval`, and to move observe mode's `policy_unapproved` to the point the list gives it rather
-than the point `_observe_secure` happens to run.
+to make that comment the data every refusing check names itself against, extended with the points
+`_secure` adds beneath `approval` and with the ceiling fast path above it.
+
+**Nothing is moved to a point**, which an earlier draft of this paragraph asked for. Observe mode's
+`policy_unapproved` stays where it is and declares `POLICY_UNAPPROVED`, which is above authority;
+the reported reason is then enforce mode's without either path being rearranged.
 
 **So this item's extent is `Control.execute` and the two `_secure` methods**, and §5.4's "two
 methods" is amended here rather than left to contradict this paragraph. Moving one check inside
@@ -1634,21 +1651,85 @@ installing 0.10.0. A deployment that installs and creates none can still roll ba
 *One subsection per question the drafting could not close, each stating what the code decided and
 which section carries it. `SPEC-v0.4.md` §12 through `SPEC-v0.9.md` §13 are the format.*
 
-**This section is empty on purpose, and item 6 writes it in one pass**, on the pace decision
-`SPEC-v0.9.md` §13 records: the spec amendment an item owes as it lands is its §9 name row, its MUST
-sentences and its §10 fail-closed row, and the prose explaining what building settled is written
-once over the finished milestone rather than five times over guesses.
+### 11.0 What the milestone settled about itself
 
-**The cost of that, and what pays it**, restated because v0.9 found it real: written at the end, this
-section loses the during-the-milestone signal that a reviewer uses to tell which claims have been
-stress-tested by somebody other than their author. What replaces it is unchanged, **an item that
-settles something surprising leaves a line in its `CHANGELOG` entry when it lands**, and item 6
-writes §11 from those lines. An item whose PR body reports a question it could not settle has
-already written its §11 entry and should say so.
+**Every sentence this document wrote about what a later item would do was wrong.** That is the
+finding, and it is sharper than v0.9's because it names a shape rather than a rate.
 
-**And one thing is already known to belong here, so it is named rather than rediscovered.**
-`SPEC-v0.9.md` §13.8's rate is the number to beat: across two review rounds on finished v0.9 code,
-roughly seventeen defects, about half of them introduced by fixing the other half, and not one of
-them an action running that should have been refused. Every one was reporting, tooling, or observe
-mode. **Item 4 rewrites observe mode**, which is where that half lived, so this milestone's own
-version of that count is the first thing §11 should carry.
+`SPEC-v0.9.md` §13.0 established that a specification is reliable on facts checkable by reading one
+line and unreliable on facts that need a value followed through two modules, and this document took
+that seriously: three review rounds ran, **every one of the 44 line citations round three checked
+was exact**, and §1.4 recorded two probes that changed the draft before it was written. The
+citation discipline worked.
+
+What broke was a different class, and round three named it: **a sentence about what a later item
+would do.** §3.4.3's "one residual, until item 2 lands". §4.3's check 2, described in a table as
+though it had a source. §5.2's "move observe mode's `policy_unapproved`". §6.4's `scan` line.
+§4.2's "the loader checks that correspondence". Each was written as settled prose about code that
+did not exist yet; each shipped differently or not at all, and nothing turned red in between.
+
+**The rule that follows, and it is this milestone's contribution to the series: a spec sentence
+whose truth depends on a later item is a test that item owes, named in that item's table, or it is
+not in the document.** A residual that expires when another PR merges needs a red test at the flip,
+not a note.
+
+### 11.1 The mutation table found three guards nothing exercised, and the independent reviews
+found what the mutation table could not
+
+Items 2, 4 and 5 each shipped a guard no test covered, each caught by mutating the source. That is
+v0.9's lesson holding. **What it did not catch is the class that mattered most**, and the three
+independent reviews did:
+
+- a **reason-ranked** decision order, which cannot express enforce mode's real order because the
+  approval axis straddles the scope check and the ceiling fast path sits above `_secure`
+  entirely. The review demonstrated three live regressions on pairs the parent commit had right;
+- `Control.resume` dropping the hop one frame below where it recovered it, so a receiver holding
+  any grant of its own kept its reservation **after the hop was cut**;
+- **nothing in the product observing an upstream**, so two of §10's rows described outcomes no
+  shipped code path could produce.
+
+Each is a claim that crosses two modules, and each was invisible to a test written by the person
+who wrote the code. The standing rule that an independent reviewer reads **every file that calls
+into the changed code, not just the diff**, is what found all three, and `v0.3`'s own record says
+why: a self-review of that spec found four defects, and an independent one found two authorization
+holes visible only from a file the spec did not mention.
+
+### 11.2 A test can be green, mutated, and still prove nothing
+
+Item 4's T498 was generated, non-empty, and asserted the wrong thing: it compared
+`_Observation.block` against the same rank function `block` itself calls. A review inverted the
+declared order at §5.1's own first named case and **all 4,062 tests stayed green**.
+
+The rule §5.3 already carried, restated because it needed teeth: a property test over the kernel's
+internals is a restatement of an implementation. **T498 drives `Control.execute` in both modes**,
+and the acceptance criterion for it is that inverting `DECISION_ORDER` turns something red.
+
+### 11.3 The order is a property of positions, not of reasons
+
+§5.2 prescribed one ordered list both modes walk, with checks moved to declared points. Item 4
+shipped rank-selection instead, on the sound argument that v0.9's three reorderings produced four
+regressions and a change that moves nothing cannot regress a position. **That argument was right
+about the risk and wrong about the mechanism.**
+
+A reason cannot carry the ordering, for two reasons that are structural rather than incidental:
+`precondition_changed` and `approval_required` are both members of `BLOCKED_APPROVAL_REASONS` and
+enforce mode raises them on opposite sides of `_in_scope`, so no single rank for the first is both
+above and below `out_of_scope`; and the attempt-ceiling fast path runs in `execute` before `_secure`
+is called at all. So the **call site declares where it is**, and the reason travels as evidence.
+
+### 11.4 What v0.10 did not close
+
+Stated here rather than discovered by a reader.
+
+- **A receiving agent can decline to present the hop it was given.** §2.3.2. The kernel records
+  which happened and §6.4's `scan` line makes the deployment rule checkable; it cannot compel the
+  choice.
+- **A receiver holding two hops presents whichever it likes.** §3.1.1, and the task that would
+  narrow it arrives from the caller too.
+- **Cross-store propagation.** §3.2, forced by rule 2 and refused fail-closed.
+- **A hop created inside an action is not named on its creator's receipt.** §3.4's issuer row
+  describes it; `Receipt.hop` carries the hop an action ran *under*, and the created one is named
+  by `DELEGATION_CREATED` and its `action_id`. Rule 3 holds through the event, not the receipt.
+- **`Receipt.hop` is read from a context variable at receipt time**, so a nested `evaluate` inside
+  an executor overwrites it. Pre-existing in class for `Receipt.task` since v0.9.
+

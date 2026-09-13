@@ -806,6 +806,17 @@ class Engine:
         for name in sorted(self.policy.actions):
             if action_filter is not None and not action_filter(name):
                 continue
+            if action_filter is None and self.policy.upstream_pin(name):
+                # SPEC-v0.10 §4.4 — an action that pins an upstream refuses on **every**
+                # in-process call, because in-process there is no upstream to observe. `verify`
+                # drives its scenarios in-process, so such an action can only be driven by a
+                # scenario that seeds an observation first, which is G27's and nobody else's.
+                #
+                # Without this, a shipped example that pins (which §7.3's exit criterion
+                # requires) turns every guarantee that happens to select that action into a
+                # `VerifyInternalError`: the pin refuses, and the scenario reports the kernel
+                # broken. Found by adding the pin §7.3 asks for and watching G2 fail.
+                continue
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
             ceiling = self.policy.max_attempts(name)
