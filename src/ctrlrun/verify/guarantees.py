@@ -188,6 +188,15 @@ GUARANTEES: Final = (
         "a hop narrows or it is refused",
         ("v0.10 §2.4", "v0.10 §2.7 T470", "v0.10 §2.7 T471", "v0.10 §2.7 T472"),
     ),
+    Guarantee(
+        "G26",
+        # 28 characters against `report._TITLE_WIDTH`'s 32. "named on both sides" and not "both
+        # receipts name one hop": the two ends of a hop are not always two receipts, because a
+        # relay's receipt names the hop it acted UNDER and the one it created is named by its own
+        # `DELEGATION_CREATED` event (SPEC-v0.10 §3.4.4, §7).
+        "a hop is named on both sides",
+        ("v0.10 §3.4", "v0.10 §3.6 T478", "v0.10 §3.6 T488"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.

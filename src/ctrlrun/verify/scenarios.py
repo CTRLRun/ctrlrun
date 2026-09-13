@@ -1285,6 +1285,7 @@ class Engine:
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
         task: str | None = None,
         scope: Callable[[Action], Mapping[str, Any]] | None = None,
+        hop: str | None = None,
     ) -> Receipt:
         # SPEC-v0.9 §6.3.2 — the active selection's task unless a scenario named one, so a
         # document that binds its grant to a task does not turn every other guarantee red. G24
@@ -1294,13 +1295,25 @@ class Engine:
             task = self._task
         if approval_id is None:
             return control.execute(
-                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
+                action,
+                executor,
+                effect_key,
+                preconditions=preconditions,
+                task=task,
+                scope=scope,
+                hop=hop,
             )
         from ..control import with_approval
 
         with with_approval(approval_id):
             return control.execute(
-                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
+                action,
+                executor,
+                effect_key,
+                preconditions=preconditions,
+                task=task,
+                scope=scope,
+                hop=hop,
             )
 
     def refused(
@@ -4347,6 +4360,104 @@ class Engine:
 
         try:
             return self.graded("G25", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    def g26(self) -> GuaranteeResult:
+        """SPEC-v0.10 §3.4, §7. Every hop is named on both of its ends.
+
+        **Graded over a chain with a middle**, which §7 requires and which is the whole difficulty.
+        A single issuer and a single receiver grade a pairing that was never in doubt: the issuer
+        creates one hop, the receiver runs under it, and one `hop` field on each receipt carries
+        the same string. A **relay** presents one hop and creates another in the same action, and
+        `Receipt.hop` is single-valued, so the created one is named by its own `DELEGATION_CREATED`
+        event (§3.4.4) and never by the relay's receipt.
+
+        So the assertion is: the relay's receipt names the hop it **acted under**, the leaf's
+        receipt names the hop the relay **created**, and the event links that created hop to the
+        relay's action. A build that put the created hop on the relay's receipt would pass a
+        single-link scenario and fail this one.
+        """
+        if self.authority is None:
+            return self.na("G26", reg.NO_AUTHORITY_SECTION)
+        delegable = [
+            self.authority.grants[grant_id]
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].delegable
+        ]
+        if not delegable:
+            return self.na("G26", reg.NO_DELEGABLE_GRANT)
+        parent = delegable[0]
+        selection = self.select(grant_filter=lambda grant: grant.id == parent.id)
+        if selection is None:
+            return self.na("G26", reg.NO_HOP_ACTION)
+        control, store, recorder, _ = self._control_for("G26", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = parent.id
+            by = _principal_for(parent.subject)
+            narrowed, relay_principal, _ = _narrow(parent, selection)
+            hop_in = control.hop(parent.id, replace(narrowed, delegable=True), by=by)
+            detail["hop_in"] = hop_in.delegation_id
+
+            # The relay runs an action under `hop_in` and, inside it, hands work on.
+            action = replace(selection.build(), principal=relay_principal)
+            created: list[str] = []
+
+            def hand_on() -> Any:
+                onward = control.hop(
+                    hop_in.delegation_id,
+                    replace(narrowed, delegable=False),
+                    by=relay_principal,
+                    action_id=action.action_id,
+                )
+                created.append(onward.delegation_id)
+                return "ok"
+
+            relay = _Executor(hand_on)
+            receipt = self.execute(
+                control,
+                action,
+                relay,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+                hop=hop_in.delegation_id,
+            )
+            _expect_control(
+                bool(created),
+                "the relay created a hop of its own",
+                "nothing was handed on, so there is no middle to grade",
+            )
+            detail["hop_out"] = created[0]
+            _expect(
+                receipt.hop == hop_in.delegation_id,
+                f"the relay's receipt names the hop it acted under ({hop_in.delegation_id})",
+                f"it named {receipt.hop!r}",
+            )
+            _expect(
+                receipt.hop != created[0],
+                "and never the hop it created",
+                "the relay's receipt named the hop it created, which authorised nothing here",
+            )
+            linked = [
+                event
+                for event in recorder.events
+                if event.type is EventType.DELEGATION_CREATED
+                and event.data.get("delegation_id") == created[0]
+            ]
+            _expect(
+                bool(linked) and linked[0].action_id == action.action_id,
+                "DELEGATION_CREATED names the action that created the hop",
+                f"it named {linked[0].action_id if linked else None!r}",
+            )
+            _expect(
+                bool(linked) and linked[0].data.get("created_via") == "hop",
+                "and says it crossed a boundary",
+                f"created_via is {linked[0].data.get('created_via') if linked else None!r}",
+            )
+
+        try:
+            return self.graded("G26", selection, store, recorder, body)
         finally:
             store.close()
 

@@ -82,7 +82,7 @@ def _action(**kw: Any) -> Action:
     base: dict[str, Any] = {
         "name": "stripe.refund",
         "resource": "payment:EU-1",
-        "arguments": {"amount": 1000},
+        "arguments": {"amount": 1000, "payment": "EU-1"},
         "principal": Principal(agent="worker"),
         "environment": "production",
     }
@@ -485,9 +485,16 @@ def test_T488b_the_context_variable_is_evidence_only(tmp_path):
     from pathlib import Path as _Path
 
     source = _Path("src/ctrlrun/control.py").read_text()
-    reads = [line for line in source.splitlines() if "_HOP.get" in line]
+    reads = [line.strip() for line in source.splitlines() if "_HOP.get" in line]
 
-    assert reads == [], f"the decision path reads the hop from the context: {reads}"
+    # The receipt writer reads it, which is the point: `_HOP` is `_TASK`'s twin and carries the
+    # hop to the evidence. What must never happen is a DECISION reading it, and the shape that
+    # would take is passing it to `_authority_result`, which is what `_suspend` did once.
+    decisions = [line for line in reads if "_authority_result" in line or "evaluate(" in line]
+    assert decisions == [], f"a decision reads the hop from the context: {decisions}"
+    assert any("hop=_HOP.get" in line for line in reads), (
+        "the receipt should still carry the hop; if this fails the evidence path lost it"
+    )
 
 
 # --- T476 ---------------------------------------------------------------------------------
@@ -637,3 +644,188 @@ def test_T476_eight_agents_hopping_one_issuer_spend_at_most_the_issuers_budget(r
         "§2.7 writes one row per ancestor, so every spend that charged the issuer charged its "
         "own hop too"
     )
+
+
+# --- item 2: §3, the receipt and the resumed leg -------------------------------------------
+
+
+@pytest.mark.authority
+def test_T478_both_ends_of_a_hop_name_it(tmp_path):
+    """§1.2 rule 3. The receipt of an action run **under** a hop names it, and the
+    `DELEGATION_CREATED` event that created it names it too, linked to the action that created
+    it where the creator supplied one (§3.4.4)."""
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml(
+        # An `effect:` template, because the hop carries a budget and `v0.9 §2.4.1` refuses a
+        # budgeted grant whose action resolves no effect key: nothing could be charged.
+        "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n"
+        '    effect: "refund:{payment}"\n    decision: allow\n',
+        source="t",
+    )
+    control = Control(policy, store, authority=authority)
+    # Through `Control.hop`, because the event is half of what this test asserts: the helper
+    # above writes the record straight to the store and appends nothing.
+    hop = control.hop("issuer", grant_from_yaml(NARROW, source="t"), by=Principal(agent="planner"))
+
+    # `Control.execute` takes the effect key; the policy's `effect:` template is `@protect`'s to
+    # resolve (`v0.9 §2.4.1`), and a budgeted grant refuses an action that resolves none.
+    receipt = control.execute(
+        _action(), lambda: "ok", "refund:EU-1", task="refund-run:7", hop=hop.delegation_id
+    )
+
+    assert receipt.hop == hop.delegation_id
+    assert receipt.schema == "ctrlrun.receipt/v7"
+    created = [
+        e
+        for e in store.events()
+        if e.type is EventType.DELEGATION_CREATED
+        and e.data.get("delegation_id") == hop.delegation_id
+    ]
+    assert created and created[0].data["created_via"] == "hop"
+
+
+@pytest.mark.authority
+def test_T479_a_hop_created_outside_an_action_carries_no_action_id(tmp_path):
+    """§3.4.4. `ctrlrun delegate` from a shell creates an authority record outside any action's
+    life, and the event stays exactly as `v0.3 §7` has it."""
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml("schema: ctrlrun.policy/v7\nactions: {}\n", source="t")
+    control = Control(policy, store, authority=authority)
+
+    control.hop("issuer", grant_from_yaml(NARROW, source="t"), by=Principal(agent="planner"))
+
+    created = [e for e in store.events() if e.type is EventType.DELEGATION_CREATED]
+    assert len(created) == 1
+    assert created[0].action_id is None
+
+
+@pytest.mark.authority
+def test_T485_a_leg_this_build_suspended_is_evaluated_on_both_dimensions(tmp_path):
+    """§3.4.2. `EXECUTION_STARTED` carries the task and the hop, and a resumed leg is decided on
+    both rather than skipping either. `v0.9 §6.3.2` named this change and the milestone that
+    would want it."""
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml(
+        # An `effect:` template, because the hop carries a budget and `v0.9 §2.4.1` refuses a
+        # budgeted grant whose action resolves no effect key: nothing could be charged.
+        "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n"
+        '    effect: "refund:{payment}"\n    decision: allow\n',
+        source="t",
+    )
+    control = Control(policy, store, authority=authority)
+    hop = _hop(authority, store)
+    control.execute(
+        _action(), lambda: "ok", "refund:EU-1", task="refund-run:7", hop=hop.delegation_id
+    )
+
+    started = [e for e in store.events() if e.type is EventType.EXECUTION_STARTED]
+    assert started, "no EXECUTION_STARTED was written"
+    assert started[0].data["task"] == "refund-run:7"
+    assert started[0].data["hop"] == hop.delegation_id
+
+
+@pytest.mark.authority
+def test_T487_the_resumed_leg_keys_on_the_key_and_not_the_value(tmp_path):
+    """**The upgrade case, against the real `_resumed_context`** (SPEC-v0.10 §3.4.2).
+
+    A 0.9.0 `EXECUTION_STARTED` carries `{}`. Evaluating the task dimension against an absent
+    value hits `v0.9 §6.4` and denies every in-flight action across the upgrade, on the only
+    receipt an MCP multi round-trip ever gets. So `{}` means `evaluate_task=False` and no hop.
+
+    **And a present key with a `None` value is a value this build wrote.** A 0.10 build running
+    under a hop with no task writes `{"hop": "dlg_...", "task": None}`; a reader keying on the
+    VALUE reads that as 0.9.0's silence and drops a hop the event is carrying. A mutation run
+    found the first version of this test could not tell the two apart, because it asserted over
+    a dict literal instead of driving the function.
+    """
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import Event, EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml("schema: ctrlrun.policy/v7\nactions: {}\n", source="t")
+    control = Control(policy, store, authority=authority)
+    action = _action()
+    store.append_event(
+        Event(
+            type=EventType.EXECUTION_STARTED,
+            action_id=action.action_id,
+            ts=datetime.now(UTC),
+            data={"task": None, "hop": "dlg_" + "1" * 32},
+        )
+    )
+
+    _, _, _, bound = control._resumed_context(action, datetime.now(UTC))
+
+    assert bound.recorded is True, (
+        "a present key with a None value is a value this build wrote, not 0.9.0's silence"
+    )
+    assert bound.hop == "dlg_" + "1" * 32, "the resumed leg dropped a hop the event carried"
+    assert bound.task is None
+
+    # **The case that actually separates the two readings**, and a mutation run is what found
+    # that the block above does not: with a hop present, keying on the value happens to agree.
+    # A 0.10 build running with neither writes `{"task": None, "hop": None}`, and a value-keyed
+    # reader calls that 0.9.0's silence, skips the task dimension, and lets a leg through that a
+    # task-bound grant refuses. That is the fail-open direction.
+    neither, neither_store = _authority(), _store(tmp_path, "s2.db")
+    neither_control = Control(policy, neither_store, authority=neither)
+    plain = _action()
+    neither_store.append_event(
+        Event(
+            type=EventType.EXECUTION_STARTED,
+            action_id=plain.action_id,
+            ts=datetime.now(UTC),
+            data={"task": None, "hop": None},
+        )
+    )
+
+    _, _, _, both_none = neither_control._resumed_context(plain, datetime.now(UTC))
+
+    assert both_none.recorded is True, (
+        "both keys present with None values is a leg THIS build suspended under no hop and no "
+        "task; read as 0.9.0's silence it skips the task dimension and admits a leg a "
+        "task-bound grant refuses"
+    )
+
+
+@pytest.mark.authority
+def test_T487b_a_leg_0_9_0_suspended_is_evaluated_as_0_9_0_evaluated_it(tmp_path):
+    """The other row of §3.4.2's table: `{}` is the only shape that means the fields predate
+    this build, and it must not be read as "the caller named neither"."""
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import Event, EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml("schema: ctrlrun.policy/v7\nactions: {}\n", source="t")
+    control = Control(policy, store, authority=authority)
+    action = _action()
+    store.append_event(
+        Event(
+            type=EventType.EXECUTION_STARTED,
+            action_id=action.action_id,
+            ts=datetime.now(UTC),
+            data={},
+        )
+    )
+
+    _, _, _, bound = control._resumed_context(action, datetime.now(UTC))
+
+    assert bound.recorded is False, (
+        "evaluating the task dimension on a 0.9.0 leg denies every action in flight across the "
+        "upgrade (v0.9 §6.4), on the only receipt an MCP multi round-trip ever gets"
+    )
+    assert bound.hop is None and bound.task is None

@@ -203,6 +203,16 @@ class AcsControlHook:
         payload = _mapping(params.get("payload"), "params.payload")
         action = self._action(params, payload, headers)
         effect_key = self._effect_key(action)
+        # SPEC-v0.10 §3.1.2 — the hop and the task the caller referenced, from the metadata bag
+        # this hook already reads. **Lookup keys, not assertions**: the principal is still the
+        # `IdentityProvider`'s and `params.metadata.agent_id` is still ignored (§8.4), and a hop
+        # addressed to somebody else matches nothing. Non-strings are dropped rather than
+        # coerced, so a malformed bag references no hop rather than failing the call.
+        metadata = _mapping(params.get("metadata"), "params.metadata")
+        hop = metadata.get("hop")
+        task = metadata.get("task")
+        hop = hop if isinstance(hop, str) else None
+        task = task if isinstance(task, str) else None
 
         # SPEC-v0.2 §6.10's rule, in ACS's shape: a client comes back by re-sending the
         # identical call, and the newest granted, unexpired approval for this action's hash
@@ -214,7 +224,7 @@ class AcsControlHook:
         # in the spec so this item could not miss it.
         granted = (
             self._control.store.find_granted_approval(action.action_hash)
-            if self._control.evaluate(action).decision.value == "approve"
+            if self._control.evaluate(action, task=task, hop=hop).decision.value == "approve"
             else None
         )
 
@@ -228,9 +238,13 @@ class AcsControlHook:
         try:
             if granted is not None:
                 with with_approval(granted.approval_id):
-                    self._control.execute(action, suspend_holding_the_reservation, effect_key)
+                    self._control.execute(
+                        action, suspend_holding_the_reservation, effect_key, task=task, hop=hop
+                    )
             else:
-                self._control.execute(action, suspend_holding_the_reservation, effect_key)
+                self._control.execute(
+                    action, suspend_holding_the_reservation, effect_key, task=task, hop=hop
+                )
         except Suspended:
             return _final(rpc_id, request_id, ALLOW)
         except IdentityError as refused:

@@ -648,7 +648,7 @@ class Gateway:
 
         if isinstance(presented, str) and presented:
             return self._continue(action, executor, held, presented, request_id)
-        return self._through_control(action, executor, effect_key, held, request_id)
+        return self._through_control(action, executor, effect_key, held, request_id, parsed)
 
     def _continue(
         self,
@@ -727,6 +727,7 @@ class Gateway:
         effect_key: str | None,
         held: dict[str, Any],
         request_id: JsonRpcId,
+        parsed: ParsedRequest,
     ) -> _Response:
         from ..control import _UnmeasurableError, with_approval
 
@@ -735,7 +736,14 @@ class Gateway:
         # `Control.evaluate` reads the store to resolve delegations and still writes nothing.
         # Left as `Policy.evaluate`, an action a grant forbids outright would still have its
         # approval flow run, and a human would be asked about a call that could never run.
-        if self._control.evaluate(action).decision.value == "approve":
+        # SPEC-v0.10 §3.1.2 — the hop and the task the caller referenced, from `params.metadata`.
+        # **`evaluate` gets the same two as `execute`**, which is §9's reason for putting `hop=` on
+        # it at all: without that a hop-selected grant is decided one way for the approval
+        # pre-check and another for the call, and a human is asked about an action the hop admits
+        # or not asked about one it refuses.
+        if self._control.evaluate(action, task=parsed.task, hop=parsed.hop).decision.value == (
+            "approve"
+        ):
             approval = self._control.store.find_granted_approval(action.action_hash)
             if approval is None and self._control.policy.mode != OBSERVE:
                 # SPEC-v0.3 §6.2 — §6.10's pre-check exists to spare a human, and it spares
@@ -750,9 +758,13 @@ class Gateway:
         try:
             if approval is not None:
                 with with_approval(approval.approval_id):
-                    receipt = self._control.execute(action, executor, effect_key)
+                    receipt = self._control.execute(
+                        action, executor, effect_key, task=parsed.task, hop=parsed.hop
+                    )
             else:
-                receipt = self._control.execute(action, executor, effect_key)
+                receipt = self._control.execute(
+                    action, executor, effect_key, task=parsed.task, hop=parsed.hop
+                )
         except AuthorityDenied as refused:
             # SPEC-v0.3 §8.4 — **before** `ActionDenied`, which it subclasses. The other order
             # makes this branch unreachable and reports every authority denial as `-41001`,

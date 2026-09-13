@@ -137,10 +137,10 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 23/23"' in script
+    assert 'test "$AUTHORITY" = "verified 24/24"' in script
     assert 'test "$TEMPLATES" = "verified 11/11"' in script
     assert 'test "$AUTHORITY_NA" = "2"' in script
-    assert 'test "$TEMPLATES_NA" = "14"' in script
+    assert 'test "$TEMPLATES_NA" = "15"' in script
 
 
 @pytest.mark.authority
@@ -152,11 +152,11 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    # 23, not 22: SPEC-v0.10 §7.3 requires G25 to grade PASS on a shipped example, and
+    # 24, not 22: SPEC-v0.10 §7.3 requires G25 **and** G26 to grade PASS on a shipped example, and
     # `examples/authority/payments.yaml` is the one with a delegable grant to hop from. This
     # pin stays a literal on purpose (it is a CI pin on a shipped example, which exists to fail
     # when a shape changes) while the N/A counts above are derived.
-    assert authority.badge["message"] == "verified 23/23"
+    assert authority.badge["message"] == "verified 24/24"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
     # no `max_attempts` (SPEC-v0.7 §8.9).
     assert authority.not_applicable == 2

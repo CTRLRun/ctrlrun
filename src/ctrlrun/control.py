@@ -200,6 +200,39 @@ DEFAULT_STATE_DIR: Final = ".ctrlrun"
 DEFAULT_STATE_FILENAME: Final = "state.db"
 
 
+@dataclass
+class _Bound:
+    """The task and hop a suspended leg was running under (SPEC-v0.10 §3.4.2).
+
+    `recorded` is the discriminator and it is **key presence**, not value: an event this build
+    wrote always carries both keys, so `recorded` is `True` even when both values are `None`, and
+    an event 0.9.0 wrote carries `{}` and leaves it `False`. That is what tells "the caller named
+    no task" from "this leg predates the fields", and conflating them denies every action in
+    flight across the upgrade.
+    """
+
+    task: str | None = None
+    hop: str | None = None
+    recorded: bool = False
+
+
+def _started_data() -> dict[str, Any]:
+    """What `EXECUTION_STARTED` carries so a resumed leg can be decided (SPEC-v0.10 §3.4.2).
+
+    `v0.9 §6.3.2` named this change and the milestone that would want it: recovering the first
+    leg's task means stamping it here so `_resumed_context` can read it back. v0.10 wants it for
+    the hop too, since a hop crossing a boundary is exactly what a continuation must still be
+    bound by.
+
+    **Both keys are always present, and `None` is a value.** §3.4.2's discriminator is the presence
+    of the KEY, never the value: a 0.10 build running with a hop and no task writes
+    `{"hop": "dlg_…", "task": None}`, and a reader keying on the value would conclude "0.9.0 wrote
+    this" and drop a hop that is right there in the event. An event 0.9.0 wrote carries `{}`, which
+    is the only shape meaning "this predates the fields".
+    """
+    return {"task": _TASK.get(None), "hop": _HOP.get(None)}
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -1510,7 +1543,9 @@ class Control:
                     compared=compared,
                 )
                 raise
-        self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
+        self._append(
+            EventType.EXECUTION_STARTED, action, _started_data(), effect_key, approval=approval
+        )
         return self._outcome(
             action,
             evaluation,
@@ -1586,7 +1621,9 @@ class Control:
                 )
                 observation.block(_blocked_by(refused))
                 held_key = None
-        self._append(EventType.EXECUTION_STARTED, action, {}, effect_key, approval=approval)
+        self._append(
+            EventType.EXECUTION_STARTED, action, _started_data(), effect_key, approval=approval
+        )
         return self._outcome(
             action,
             evaluation,
@@ -1844,7 +1881,9 @@ class Control:
         self._report_clock_skew()
         held = self._store.take_continuation(continuation)
         action = held.action
-        started_at, approval, compared = self._resumed_context(action, held.record.created_at)
+        started_at, approval, compared, bound = self._resumed_context(
+            action, held.record.created_at
+        )
         # SPEC-v0.9 §10.1, read from the **ledger** rather than from the contextvar. §8.3 makes
         # this the only receipt an MCP multi round-trip or ACS action ever gets, so it has to
         # report what the action spent, and the two ways to get that wrong are both live: a
@@ -1881,7 +1920,17 @@ class Control:
         # SPEC-v0.3 §5.6.1 gives authority the same treatment, and for a sharper reason: this
         # is the *only* receipt an MCP multi round-trip or ACS action ever gets (§8.3), so a
         # receipt reporting a bare policy reason would be the whole evidence for that action.
-        result = self._authority_result(action, evaluate_task=False)
+        # SPEC-v0.10 §3.4.2 — evaluated on **both** dimensions where this build suspended the
+        # action, because the event carries them. `evaluate_task=False` survives for exactly two
+        # cases now: a lease extension, which genuinely has no task, and a leg **0.9.0**
+        # suspended, whose `EXECUTION_STARTED` carries `{}` and for which evaluating the task
+        # would deny every in-flight action across the upgrade (`v0.9 §6.4`).
+        result = self._authority_result(
+            action,
+            task=bound.task,
+            evaluate_task=bound.recorded,
+            hop=bound.hop,
+        )
         if result is None:
             evaluation = self._policy.evaluate(action)
         elif result.passed:
@@ -1944,7 +1993,7 @@ class Control:
 
     def _resumed_context(
         self, action: Action, fallback: datetime
-    ) -> tuple[datetime, Approval | None, _Compared]:
+    ) -> tuple[datetime, Approval | None, _Compared, _Bound]:
         """Recover the original attempt's evidence, including after a process restart.
 
         EXECUTION_STARTED durably binds the consumed approval to this action ID. Looking
@@ -1961,6 +2010,11 @@ class Control:
         started = fallback
         approval_id = None
         compared = _Compared()
+        # SPEC-v0.10 §3.4.2 — the task and the hop the first leg held, read back rather than
+        # inferred. `v0.9 §6.3.2` skipped the task dimension entirely on this path because the
+        # rehydrated action carries none; with the event carrying it there is nothing left to
+        # skip, except on a leg 0.9.0 suspended.
+        bound = _Bound()
         for event in self._store.events():
             if event.action_id != action.action_id:
                 continue
@@ -1972,6 +2026,17 @@ class Control:
             elif event.type is EventType.EXECUTION_STARTED:
                 started = proposed
                 approval_id = event.approval_id
+                # **Key presence, never the value** (§3.4.2). A 0.10 build running with a hop and
+                # no task writes `{"hop": "dlg_…", "task": None}`; keying on the value would read
+                # that as 0.9.0's `{}` and drop a hop the event is carrying.
+                if "task" in event.data or "hop" in event.data:
+                    task = event.data.get("task")
+                    hop = event.data.get("hop")
+                    bound = _Bound(
+                        task=task if isinstance(task, str) else None,
+                        hop=hop if isinstance(hop, str) else None,
+                        recorded=True,
+                    )
         record = None if approval_id is None else self._store.get_approval(approval_id)
         approval = None if record is None else record.as_approval()
         if compared.at_request is None and record is not None:
@@ -1984,7 +2049,7 @@ class Control:
             # ever gets** (`SPEC-mcp-operator.md` §8.3), so without this the approvers reach the
             # evidence on every action except the ones that get exactly one receipt.
             compared.approvers = record.approvers
-        return started, approval, compared
+        return started, approval, compared, bound
 
     def _outcome(
         self,
@@ -4187,7 +4252,14 @@ class Control:
             )
         return opener
 
-    def hop(self, parent_id: str, grant: Grant, *, by: Principal) -> Delegation:
+    def hop(
+        self,
+        parent_id: str,
+        grant: Grant,
+        *,
+        by: Principal,
+        action_id: str | None = None,
+    ) -> Delegation:
         """Hand part of this authority to another agent (SPEC-v0.10 §2.2).
 
         A hop **is** a delegation: same record, same `contained_dimension`, same chain walk, same
@@ -4203,8 +4275,20 @@ class Control:
         Every §5.3 check of `v0.3` applies unchanged, including rule 0's refusal of an expired
         credential: a hop is the most durable thing a principal can create across a boundary, so
         it is the last place a stale one should still work.
+
+        **`action_id` links a relay's created hop to the action that created it** (§3.4.4).
+        `DELEGATION_CREATED` is action-less by construction, which is true of `ctrlrun delegate`
+        from a shell and false of a hop created mid-action; without the link a relay's created hop
+        is related to its action by a timestamp alone.
+
+        **Explicit, and deliberately not ambient.** No context variable holds the current action,
+        and one read inside the executor would be `<unset>` on a worker thread, which is an
+        ordinary shape for an agent fanning out. `transport.py` documents that hazard for its own
+        register and is explicit that there it fails *safe*; here it would fail in the evidence
+        direction, silently. A caller that knows its action id says so; one that does not gets an
+        event carrying `None`, exactly as today, and §8 records the limit.
         """
-        return self._delegate(parent_id, grant, by=by, via="hop")
+        return self._delegate(parent_id, grant, by=by, via="hop", action_id=action_id)
 
     def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
         """Revoke one delegation (SPEC-v0.3 §5.7).
@@ -4230,7 +4314,13 @@ class Control:
         )
 
     def _delegate(
-        self, parent_id: str, grant: Grant, *, by: Principal, via: CreatedVia
+        self,
+        parent_id: str,
+        grant: Grant,
+        *,
+        by: Principal,
+        via: CreatedVia,
+        action_id: str | None = None,
     ) -> Delegation:
         """The one implementation behind `Control.delegate` and `ctrlrun delegate`.
 
@@ -4271,6 +4361,10 @@ class Control:
                 "created_by_user": by.user,
                 "created_via": via,
             },
+            # SPEC-v0.10 §3.4.4 — the action that created this hop, where the caller named one.
+            # `None` keeps the event exactly as `v0.3 §7` has it, which is what `ctrlrun delegate`
+            # from a shell produces and what every pre-v0.10 reader expects.
+            action_id=action_id,
         )
         return delegation
 
@@ -4374,16 +4468,25 @@ class Control:
             detail,
         )
 
-    def _append_delegation(self, type_: EventType, data: Mapping[str, Any]) -> None:
-        """Append one of §7's three action-less events and fan it out.
+    def _append_delegation(
+        self, type_: EventType, data: Mapping[str, Any], *, action_id: str | None = None
+    ) -> None:
+        """Append one of §7's three delegation events and fan it out.
 
-        `action_id` is `None`: these are about an authority record, created and revoked outside
-        any action's life. `Control` appends them and calls every sink, for `v0.2 §4.1`'s
+        `action_id` is `None` by default: these are about an authority record, created and
+        revoked outside any action's life.
+
+        **SPEC-v0.10 §3.4.4 amends that for one case.** A hop created *inside* a running action
+        is not outside any action's life, and a relay's created hop is otherwise linked to the
+        action that created it by nothing but a timestamp. `Control.hop(action_id=...)` supplies
+        it; every other caller, and every hop created from a shell, keeps `None`.
+
+        `Control` appends them and calls every sink, for `v0.2 §4.1`'s
         reason — the highest-privilege operations in the release must not be the only ones
         missing from the export path.
         """
         stored = self._store.append_event(
-            Event(type=type_, action_id=None, ts=self._clock(), data=data)
+            Event(type=type_, action_id=action_id, ts=self._clock(), data=data)
         )
         self._fan_out("on_event", stored, str(stored.type))
 
@@ -4441,6 +4544,10 @@ class Control:
             # path, and so one nobody would notice breaking.
             authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             task=_TASK.get(None),
+            # SPEC-v0.10 §3.4 — the hop this action ran under, and never the one it created:
+            # `_HOP` is set by `_authority_result` from the hop the decision was made against.
+            # §3.4.4's relay writes its created hop to `DELEGATION_CREATED`, not here.
+            hop=_HOP.get(None),
             scope_hash=_SCOPE_HASH.get(None),
             budget_charges=_BUDGET_CHARGES.get(()),
             receipt_id=new_receipt_id(),
