@@ -549,6 +549,31 @@ class _ScopeRefusedError(Exception):
         self.denial = denial
 
 
+class _UnmeasurableError(InvalidArgument):
+    """SPEC-v0.9 §2.3 and §2.4.1's refusal, **carrying its reason to a protocol boundary**.
+
+    An `InvalidArgument` subclass and not a new type, because §2.3 pins that exception and a
+    caller's `except InvalidArgument` must keep working. What it adds is `reason`, which the
+    boundaries need and could not get from a message.
+
+    An independent review found why that matters. `gateway/server.py`'s `_through_control`
+    catches eight exception types and not `InvalidArgument`, so this refusal raised out of the
+    request handler and the **socket closed with no response** -- the one failure that file's own
+    comment calls the thing this library exists to prevent. And `acs.py` answered
+    `-32002 malformed envelope`, whose comment reads "there is no action", for an action it had
+    just written an `ACTION_DENIED` and a `denied` receipt for; the `IdentityError` clause
+    directly below it states the rule that breaks, that an answer and the evidence may not
+    disagree about the same action.
+
+    `_refuse_unmeasurable` has already written the events and the receipt, so this carries only
+    what a boundary needs to answer with.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class _ObservedRefusalError(Exception):
     """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
     swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
@@ -1578,6 +1603,13 @@ class Control:
             self._in_scope(action, scope, scoped, enforcing=False)
         except _ObservedRefusalError as would:
             observation.block(would.reason)
+        # SPEC-v0.9 §4.2.1 — **above the approval gate, because `_secure` puts it there.**
+        # §2.3's and §2.4.1's refusals do not depend on anything the gate produces and are
+        # unconditional, so T446 moved them above it in enforce mode; observe mode's copy stayed
+        # below and told a pilot a human would have been asked about an action enforce refuses
+        # before anybody is asked. That is T446's own defect on the other side of the mode
+        # switch, and an independent review found it. T451.
+        charges = self._observe_charges(action, effect_key, observation)
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
@@ -1594,11 +1626,6 @@ class Control:
                     if required > 1 and self._approver_identity is None
                     else BLOCKED_APPROVAL_REQUIRED
                 )
-        # SPEC-v0.9 §4.2.1 — **the report, and nothing written.** Observe mode charges nothing,
-        # so this evaluates §3.3.1's predicate against the ledger as it stands and records what
-        # would have happened. Charging here would be the one check in the kernel that enforced
-        # under observation: the run would refuse at the limit while claiming to be observing.
-        self._observe_budget(action, effect_key, observation)
         if approval_id is None and effect_key is None:
             return None, None
         try:
@@ -1663,6 +1690,13 @@ class Control:
                 effect_key,
                 approval=approval,
             )
+        # SPEC-v0.9 §4.2.1 — **below the take, because the store decides in that order.**
+        # `plan_reservation` runs before `check_charges` (§3.3), so an effect that is already
+        # committed raises `DuplicateEffect` and the budget is never consulted. Reporting the
+        # budget first told an operator to raise a limit when the real answer was that the effect
+        # had already happened. The clauses above have returned by now on every refusal enforce
+        # mode would have hit first, so what reaches here is what the budget would decide. T452.
+        self._observe_spend(action, charges, observation)
         return approval, reservation
 
     def _observe_take(
@@ -3267,30 +3301,27 @@ class Control:
             ) from None
         return charges
 
-    def _observe_budget(
+    def _observe_charges(
         self, action: Action, effect_key: str | None, observation: _Observation
-    ) -> None:
-        """SPEC-v0.9 §4.2.1's report: what a budget *would have* refused, charging nothing.
-
-        The predicate is `check_charges`, the same function all three stores decide with, so the
-        report and the enforcement cannot drift: a pilot that said "this would have been fine"
-        about an action enforce mode refuses is worse than no pilot. The sum comes from the
-        public `consumptions()` read rather than a store's private `_spent`, because this runs
-        outside any reservation and must take no lock and write nothing.
+    ) -> tuple[Charge, ...]:
+        """§4.2.1's first half: what this action *would have* been charged, charging nothing.
 
         §2.3's and §2.4.1's refusals are **reported** here rather than raised: enforce mode
         refuses those actions, so saying so is exactly what observe mode is for. They get their
         own reasons rather than `budget_exhausted`, because an operator whose pilot says "this
         would have been refused" needs to know whether the budget is too small or the action
         cannot be measured at all.
+
+        Called above the approval gate, where `_secure` computes the same thing, so the two modes
+        agree about which refusal comes first (T451).
         """
         try:
             charges = self._charges_for(action, effect_key, observation)
         except InvalidArgument:
             # Already reported by `_refuse_unmeasurable`, which blocked rather than denying.
-            return
+            return ()
         if not charges:
-            return
+            return ()
         # §4.2.1a — **the counterfactual spend, on the receipt.** The ledger is empty under
         # observation, so if the receipt does not carry what this action would have been charged,
         # nothing anywhere records it and a budget cannot be sized from an observed run. It
@@ -3302,6 +3333,29 @@ class Control:
                 for charge in charges
             )
         )
+        return charges
+
+    def _observe_spend(
+        self, action: Action, charges: tuple[Charge, ...], observation: _Observation
+    ) -> None:
+        """§4.2.1's second half: whether the budget would have refused, writing nothing.
+
+        The predicate is `check_charges`, the same function all three stores decide with, so the
+        report and the enforcement cannot drift: a pilot that said "this would have been fine"
+        about an action enforce mode refuses is worse than no pilot.
+
+        **The sum is a lock-free read** off the public `consumptions()` rather than a store's
+        private `_spent`, because this runs outside any reservation and must take no lock and
+        write nothing. It is therefore stale under concurrency, which is correct for a
+        counterfactual and would not be for a decision.
+
+        `check_charges` can also raise `InvalidArgument` for two charges on one grant and metric
+        carrying different amounts (§3.3.1). Nothing reachable produces that shape -- §2.7's
+        ancestors are distinct grants, and one grant's two budgets on one metric always agree --
+        and observe mode is not the place to raise about it if something ever does.
+        """
+        if not charges:
+            return
         now = self._clock()
 
         def spent(charge: Charge) -> int:
@@ -3329,7 +3383,6 @@ class Control:
                     "window": int(exhausted.window.total_seconds()),
                     "observed": True,
                 },
-                effect_key,
             )
         except InvalidArgument:
             return
@@ -3377,7 +3430,7 @@ class Control:
                 action,
                 {"reason": reason, "error": str(error), "observed": True},
             )
-            return error
+            return _UnmeasurableError(str(error), reason=reason)
         self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
         self._record(
             action,
@@ -3386,7 +3439,7 @@ class Control:
             self._clock(),
             error=str(error),
         )
-        return error
+        return _UnmeasurableError(str(error), reason=reason)
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
         """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.

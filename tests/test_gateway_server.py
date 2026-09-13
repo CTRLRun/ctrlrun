@@ -2064,3 +2064,83 @@ def test_a_refused_path_does_not_desynchronise_the_connection(gateway, path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+BUDGETED_AUTHORITY = """
+schema: ctrlrun.policy/v7
+authority:
+  grants:
+    - id: refunder
+      subject: { agent: "refund-agent" }
+      actions: ["mcp.acme.create_refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 20000 }
+      budgets:
+        - { metric: units, limit: 100, window: PT24H }
+"""
+
+
+@pytest.fixture
+def budgeted_client(upstream, store):
+    """A grant budgeting a metric the tool's arguments do not carry (SPEC-v0.9 §2.3)."""
+    from ctrlrun import Authority
+
+    policy = Policy.from_yaml(POLICY.replace("ctrlrun.policy/v2", "ctrlrun.policy/v7"))
+    control = Control(
+        policy, store, authority=Authority.from_yaml(BUDGETED_AUTHORITY, standalone=True)
+    )
+    config = GatewayConfig(upstream=upstream.url, alias="acme", principal_header="X-Agent", port=0)
+    forwarder = httpx_forwarder(config)
+    gateway = Gateway(config, control, forwarder)
+    server = build_server(gateway)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as opened:
+        yield opened
+    server.shutdown()
+    server.server_close()
+    forwarder.close()
+
+
+@pytest.mark.authority
+def test_an_unmeasurable_budget_is_answered_and_never_dropped(budgeted_client, upstream, store):
+    """**A dropped connection is the one thing this gateway may not do** (SPEC-v0.9 §2.3).
+
+    §2.3's refusal is an `InvalidArgument`, and `_through_control` catches eight exception types
+    and not that one, so the handler raised out of the request and the socket closed with no
+    response. An independent review found it: the client sees
+    `RemoteProtocolError: Server disconnected without sending a response`, and a client that
+    retries blindly gets nothing while the store accumulates one `ACTION_DENIED` and one `denied`
+    receipt per attempt.
+
+    The refusal is a decision about an action, so it is answered like one: `-41001`, the code
+    §11 already freezes for "not permitted to anyone in this configuration", which is exactly
+    what an action the kernel cannot measure is.
+    """
+    response = _post(
+        budgeted_client,
+        _call(arguments={"amount": 10000, "payment_id": "pi_1"}),
+        headers={"X-Agent": "refund-agent"},
+    )
+
+    assert upstream.calls == [], "fail closed: the upstream must not run"
+    body = response.json()
+    assert body["error"]["code"] == -41001, body
+    assert body["error"]["data"]["reason"] == "budget_unmeasurable", body
+    assert [str(event.type) for event in store.events()][-1] == "ACTION_DENIED"
+    assert store.receipts()[-1].decision_reason == "budget_unmeasurable"
+
+
+@pytest.mark.authority
+def test_a_retry_of_an_unmeasurable_call_is_answered_every_time(budgeted_client, upstream, store):
+    """The half that makes the drop expensive rather than merely wrong: a client retrying a
+    dropped socket gets an answer each time instead of nothing."""
+    for _ in range(3):
+        response = _post(
+            budgeted_client,
+            _call(arguments={"amount": 10000, "payment_id": "pi_1"}),
+            headers={"X-Agent": "refund-agent"},
+        )
+        assert response.json()["error"]["code"] == -41001
+    assert upstream.calls == []

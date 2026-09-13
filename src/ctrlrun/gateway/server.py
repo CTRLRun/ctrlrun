@@ -728,7 +728,7 @@ class Gateway:
         held: dict[str, Any],
         request_id: JsonRpcId,
     ) -> _Response:
-        from ..control import with_approval
+        from ..control import _UnmeasurableError, with_approval
 
         approval = None
         # SPEC-v0.3 §8.3 — the **combined** decision of §4.6, not the policy axis alone.
@@ -771,6 +771,28 @@ class Gateway:
                 ),
             )
         except ActionDenied as refused:
+            code, token, status = DENIED
+            return _json(
+                status,
+                json_rpc_error(
+                    request_id,
+                    code,
+                    token,
+                    str(refused),
+                    reason=refused.reason,
+                    action_id=action.action_id,
+                ),
+            )
+        except _UnmeasurableError as refused:
+            # SPEC-v0.9 §2.3, §2.4.1. **Its own clause, because `InvalidArgument` is not an
+            # `ActionDenied`** -- and without one this raised out of the handler and the socket
+            # closed with no response, which is the failure `_continue`'s comment below calls
+            # the one thing this library exists to prevent. An independent review found it.
+            #
+            # `-41001` and not a new code: §11 freezes it as "this action is not permitted to
+            # anyone in this configuration", and an action whose budgeted grant cannot measure
+            # it is exactly that. The kernel has already written the event and the receipt.
+            _LOG.warning("refused %s: %s", action.name, refused)
             code, token, status = DENIED
             return _json(
                 status,

@@ -957,3 +957,169 @@ def test_T439e_an_observed_receipt_for_an_unbudgeted_grant_carries_none(store, c
     )
     receipt = control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
     assert receipt.budget_charges == ()
+
+
+# --- §4.2.1: the report and the enforcement may not drift on *which* refusal ------------------
+
+
+def _both_modes(store, clock, document):
+    """One document, two Controls over separate stores: what enforce did, what observe said."""
+    enforcing = Control(
+        policy=Policy.from_yaml(document, source="<e>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(document, source="<e>"),
+    )
+    observed = document.replace("environment: prod", "environment: prod\nmode: observe")
+    watcher = InMemoryStateStore(clock=clock)
+    observing = Control(
+        policy=Policy.from_yaml(observed, source="<o>"),
+        store=watcher,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(observed, source="<o>"),
+    )
+    return enforcing, observing, watcher
+
+
+def test_T451_observe_reports_the_refusal_enforce_makes_when_a_human_would_be_asked(
+    store, clock
+) -> None:
+    """§4.2.1: "the report and the enforcement cannot drift."
+
+    T446 moved §2.3's refusal above the approval gate in enforce mode, because the action cannot
+    run whatever a human says. Observe mode's copy stayed below it, so a pilot was told a human
+    would have been asked about an action enforce refuses before anybody is asked. That is the
+    exact defect T446 fixed, surviving on the other side of the mode switch, and an independent
+    review found it.
+    """
+    document = DOC.replace("decision: allow", "decision: approve")
+    enforcing, observing, watcher = _both_modes(store, clock, document)
+    bad = Action(
+        name="payments.refund",
+        arguments={"amount": -250, "id": "1"},
+        principal=AGENT,
+        environment="prod",
+    )
+
+    with pytest.raises(InvalidArgument):
+        enforcing.execute(bad, lambda: {"ok": True}, "refund:1")
+    enforced = store.receipts()[-1].decision_reason
+
+    receipt = observing.execute(bad, lambda: {"ok": True}, "refund:1")
+
+    assert enforced == "budget_unmeasurable"
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == enforced, (
+        f"enforce refused {enforced!r} and the pilot was told {receipt.would_have.blocked_reason!r}"
+    )
+    assert "APPROVAL_REQUESTED" not in [str(e.type) for e in watcher.events()]
+
+
+def test_T452_observe_reports_the_duplicate_enforce_raises_rather_than_the_budget(
+    store, clock
+) -> None:
+    """The other direction of the same rule, and the one that says where the check belongs.
+
+    The store decides `plan_reservation` **before** `check_charges` (§3.3), so an effect that is
+    already committed raises `DuplicateEffect` and the budget is never consulted. Observe mode
+    evaluated the budget first and reported `budget_exhausted` for an action enforce mode refuses
+    as a duplicate: the operator is told to raise a limit when the real answer is that the effect
+    already happened.
+    """
+    from ctrlrun.errors import DuplicateEffect
+
+    enforcing, observing, watcher = _both_modes(store, clock, DOC)
+    # Fill the budget and commit the key, in both stores, so both refusals are live at once.
+    for control, into in ((enforcing, store), (observing, watcher)):
+        control.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+        assert into.get_effect("refund:1").state is EffectState.COMMITTED
+
+    with pytest.raises(DuplicateEffect):
+        enforcing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    receipt = observing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "duplicate", (
+        "the pilot was told the budget refused an action enforce mode refuses as a duplicate: "
+        f"{receipt.would_have.blocked_reason!r}"
+    )
+
+
+def test_T453_the_observed_sum_uses_the_same_window_the_kernel_decides_on(store, clock) -> None:
+    """§2.5 through the observe report. A mutation run found `since=now - charge.window` removable
+    with the whole suite green: the report summed the entire ledger and nothing noticed.
+
+    A pilot whose report counts spend the kernel has already forgotten says a budget would refuse
+    an action the kernel permits, which is the drift §4.2.1 exists to prevent, pointing the other
+    way.
+    """
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+    clock.advance(DAY + timedelta(seconds=1))
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("2", 250), lambda: {"ok": True}, "refund:2")
+
+    blocked = receipt.would_have.blocked_reason if receipt.would_have else None
+    assert blocked != "budget_exhausted", (
+        "the report counted a spend that has rolled out of the window, which the kernel would "
+        "not have counted"
+    )
+
+
+def test_T454_the_observed_sum_ignores_released_rows_as_the_stores_do(store, clock) -> None:
+    """§4.4 through the observe report, and the second mutation that survived: dropping
+    `released_at is None` left every test green.
+
+    All three stores' `_spent` excludes released rows, so a report that counts them diverges from
+    the decision by exactly the amount a human has already cleared. An operator who resolves an
+    effect `FAILED` and watches the pilot still claim the budget is exhausted has been told the
+    resolution did nothing.
+    """
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+    with pytest.raises(NotExecuted):
+        enforcing.execute(_action("2", 100), _boom, "refund:2")
+    assert _held(store) == 100, "the failed attempt released its charge"
+    assert len(store.consumptions()) == 2, "and the released row is still in the ledger"
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("3", 100), lambda: {"ok": True}, "refund:3")
+
+    # Counting the released row makes the sum 300 against a limit of 250, and the report would
+    # block. Excluding it, as every store's `_spent` does, makes it 200 and it does not.
+    blocked = receipt.would_have.blocked_reason if receipt.would_have else None
+    assert blocked != "budget_exhausted", "the report counted a released charge"
+
+
+def test_T455_the_observed_sum_is_per_grant(store, clock) -> None:
+    """The third: `grant_id=charge.grant_id` was removable because every test had one grant."""
+    from ctrlrun.state import Charge as _Charge
+
+    store.reserve_effect(
+        "other:1", "act_other", LEASE, (_Charge("somebody-else", "amount", 250, 250, DAY),)
+    )
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    blocked = receipt.would_have.blocked_reason if receipt.would_have else None
+    assert blocked != "budget_exhausted", "another grant's spend was counted against this one"
+
+
+def test_T456_the_observed_sum_does_report_a_budget_this_grant_really_exhausted(
+    store, clock
+) -> None:
+    """The positive control for the three above. Without it each of them passes against a report
+    that never blocks at all, which is CONTRIBUTING.md's third pattern."""
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("2", 250), lambda: {"ok": True}, "refund:2")
+
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "budget_exhausted", receipt.would_have
