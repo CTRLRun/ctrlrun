@@ -192,6 +192,33 @@ def test_codeql_does_not_gate_a_merge():
     assert "Nothing here gates a merge" in workflow
 
 
+def test_the_docs_lock_covers_the_suite_the_check_job_runs():
+    """The readiness block records what `pytest --collect-only` finds, and the Postgres tests are
+    collected only when psycopg is importable. A `docs` job installed from a lock with fewer
+    extras than the `check` job's counts a smaller suite than the one that ran, and fails the
+    audit against a number that was right.
+
+    Asserted over the **locks**, not over a `pip install -e .[...]` string in the workflow: since
+    the pinned-install change both jobs install from `requirements/*.txt` by hash, and the extras
+    live in `scripts/lock.sh`. A test reading the workflow would now read nothing.
+    """
+    root = Path(__file__).resolve().parents[1]
+
+    def distributions(lock: str) -> set[str]:
+        text = (root / "requirements" / lock).read_text(encoding="utf-8")
+        return {
+            line.split("==")[0].strip().lower()
+            for line in text.splitlines()
+            if line and not line.startswith((" ", "#", "-"))
+        }
+
+    missing = distributions("ci.txt") - distributions("docs.txt")
+    assert missing == set(), (
+        f"the docs job installs from a lock missing {sorted(missing)}, so it collects a smaller "
+        "suite than the check job runs"
+    )
+
+
 # --- community files -----------------------------------------------------------------------
 
 

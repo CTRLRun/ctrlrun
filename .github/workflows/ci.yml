@@ -306,7 +306,10 @@ jobs:
       - name: Install
         # Every extra: a runnable guide block that exports to OpenTelemetry or opens the
         # gateway's client needs the extra installed, and a block that skipped would be a
-        # sample nobody ran.
+        # sample nobody ran. `postgres` too, for a different reason: the readiness block records
+        # what `pytest --collect-only` finds, and 76 tests are collected only when psycopg is
+        # importable. `docs.txt` therefore locks the same extras `ci.txt` does, and
+        # `test_the_docs_lock_covers_the_suite_the_check_job_runs` holds the two together.
         run: |
           pip install --require-hashes -r ctrlrun/requirements/docs.txt
           pip install --no-deps --no-build-isolation -e ./ctrlrun

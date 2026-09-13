@@ -23,12 +23,17 @@ compile() {
 }
 
 extras="--extra dev --extra gateway --extra otel --extra identity"
+# `ci.txt` and `docs.txt` both take `--extra postgres`, and for different reasons. The `check`
+# job needs psycopg to run the Postgres tests; the `docs` job needs it to *collect* them, because
+# the readiness block records what `pytest --collect-only` finds and 76 tests exist only when
+# psycopg is importable. A docs lock with fewer extras counts a smaller suite than the one that
+# ran and fails the audit against a number that was right.
 # shellcheck disable=SC2086
 compile requirements/ci.txt        pyproject.toml $extras --extra postgres requirements/in/backend.in
 # shellcheck disable=SC2086
 compile requirements/adapters.txt  pyproject.toml $extras requirements/in/adapters.in requirements/in/backend.in
 # shellcheck disable=SC2086
-compile requirements/docs.txt      pyproject.toml $extras requirements/in/docs.in requirements/in/backend.in
+compile requirements/docs.txt      pyproject.toml $extras --extra postgres requirements/in/docs.in requirements/in/backend.in
 compile requirements/fuzz.txt      pyproject.toml requirements/in/backend.in
 compile requirements/build.txt     requirements/in/build.in requirements/in/backend.in
 compile requirements/atheris.txt   requirements/in/atheris.in requirements/in/backend.in
