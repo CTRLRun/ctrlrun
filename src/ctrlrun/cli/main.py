@@ -44,6 +44,8 @@ from ..receipt import (
 from ..reporting import (
     budget_document,
     budget_lines,
+    hop_document,
+    hop_lines,
     inspection_for,
     ledger_rows,
     since_boundary,
@@ -621,10 +623,19 @@ def resolve(effect_key: str, committed: bool, failed: bool, store_url: str | Non
     "grant_id",
     help="Show this grant's budgets instead: consumed, held, and what holds it.",
 )
+@click.option(
+    "--hop",
+    "hop_id",
+    help="Show this hop or delegation instead: who issued it, and what each link narrowed.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
 @STORE_URL_OPTION
 def inspect(
-    action_id: str | None, grant_id: str | None, as_json: bool, store_url: str | None
+    action_id: str | None,
+    grant_id: str | None,
+    hop_id: str | None,
+    as_json: bool,
+    store_url: str | None,
 ) -> None:
     """Show one action's whole history: proposal, decision, approval, effect, receipt.
 
@@ -635,14 +646,23 @@ def inspect(
     The third number is the one that matters at 3am. A budget that refuses while it looks
     nowhere near its limit is almost always one unresolved effect: `ctrlrun resolve` clears it.
     """
-    if (action_id is None) == (grant_id is None):
-        # §7.1 keeps both behind one command, which makes "which of the two did you mean" this
-        # command's own question. Neither names a subject; both name two.
+    given = [
+        name
+        for name, value in (("ACTION_ID", action_id), ("--grant", grant_id), ("--hop", hop_id))
+        if value
+    ]
+    if len(given) != 1:
+        # `v0.9 §7.1` keeps them behind one command, which makes "which of these did you mean"
+        # this command's own question. None names a subject; each names two.
         raise click.UsageError(
-            "give an ACTION_ID, or --grant GRANT_ID, and not both: they inspect different things"
+            "give exactly one of ACTION_ID, --grant GRANT_ID or --hop DELEGATION_ID: they "
+            "inspect different things"
         )
     if grant_id is not None:
         _inspect_grant(grant_id, as_json, store_url)
+        return
+    if hop_id is not None:
+        _inspect_hop(hop_id, as_json, store_url)
         return
     assert action_id is not None
     store = _store(store_url)
@@ -669,6 +689,35 @@ def inspect(
     approvals = _approvals_for(store, receipt, events)
     effect = _effect_of(store, receipt, events)
     for line in _inspection_lines(action_id, receipt, effect, approvals, events):
+        click.echo(line)
+
+
+def _inspect_hop(hop_id: str, as_json: bool, store_url: str | None) -> None:
+    """SPEC-v0.10 §6.2, behind `ctrlrun inspect --hop`.
+
+    Answers about a **hop or an ordinary delegation alike**, because an operator paged about a
+    refusal does not yet know which kind they have: `created_via` is rendered rather than filtered
+    on.
+    """
+    try:
+        control = _control_on(store_url)
+        authority = control._authority
+        if authority is None:
+            raise click.ClickException(
+                "this configuration has no 'authority:' section, so it holds no hops "
+                "(SPEC-v0.3 §4.1)"
+            )
+        document = hop_document(hop_id, authority, control._store)
+        if document is None:
+            # Exits non-zero with nothing on stdout, as `inspect` does for an unknown action, so
+            # a script cannot mistake "no such hop" for "a hop with no chain".
+            raise click.ClickException(f"no hop {hop_id}")
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(document, ensure_ascii=False, indent=2))
+        return
+    for line in hop_lines(document):
         click.echo(line)
 
 
