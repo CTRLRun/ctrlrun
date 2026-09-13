@@ -683,6 +683,7 @@ class StateStore(ApprovalStore, Protocol):
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         """Ledger rows, **in insertion order** (SPEC-v0.9 §3.3.3).
 
@@ -699,6 +700,11 @@ class StateStore(ApprovalStore, Protocol):
         **`grant_id` is optional**, because §7.3 has `stats` report the ledger's row count, and a
         required one would make that enumerate every grant id that ever existed, runtime
         delegations and revoked grants included, one call each.
+
+        **`effect_key` is what a resumed leg reads by.** §8.3 makes the resumed receipt the only
+        receipt an MCP multi round-trip or ACS action ever gets, so it has to report what that
+        action spent, and a gateway that restarted mid-round has nothing in memory to report it
+        from. Without this filter that read is a scan of the whole ledger per resumption.
         """
         ...
 
@@ -1321,6 +1327,7 @@ class InMemoryStateStore:
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         with self._lock:
             return tuple(
@@ -1329,6 +1336,7 @@ class InMemoryStateStore:
                 if (grant_id is None or row.grant_id == grant_id)
                 and (metric is None or row.metric == metric)
                 and (since is None or row.consumed_at >= since)
+                and (effect_key is None or row.effect_key == effect_key)
             )
 
     def begin_execution(self, effect_key: str, action_id: str) -> None:
@@ -2157,6 +2165,7 @@ class SQLiteStateStore:
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -2169,6 +2178,9 @@ class SQLiteStateStore:
         if since is not None:
             clauses.append("consumed_at >= ?")
             values.append(_iso(since))
+        if effect_key is not None:
+            clauses.append("effect_key = ?")
+            values.append(effect_key)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = (
             self._connection()

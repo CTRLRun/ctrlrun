@@ -8,6 +8,7 @@ met an eleventh.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -719,3 +720,112 @@ def test_T446_no_human_is_asked_to_approve_an_action_the_kernel_will_refuse(stor
     written = [str(event.type) for event in store.events()]
     assert "APPROVAL_REQUESTED" not in written, written
     assert "ACTION_DENIED" in written, written
+
+
+# --- §4.2's resumed leg: the only receipt an MCP or ACS action ever gets ----------------------
+
+
+def test_T447_a_resumed_leg_reports_the_charges_its_first_leg_took(store, clock) -> None:
+    """§8.3. **The resumed leg's receipt is the whole evidence for that action**, so it has to
+    say what the action spent.
+
+    `resume` never touched `_BUDGET_CHARGES`, so the field came from whatever the contextvar
+    happened to hold. A resumption in a fresh context reported no charges at all for an action
+    that had spent 100; a resumption after another `execute` in the same context reported *that
+    action's* spend. Both put a false number on the only receipt there is.
+    """
+    from ctrlrun import Suspended
+
+    control = _control(store, clock)
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(_action("1", 100), suspends, "refund:1")
+    assert _held(store) == 100
+
+    # **In a fresh context**, which is the shape a continuation exists for: `hold_continuation`
+    # carries the whole `Action` "because a resumption is *the same action*, and rehydrating it
+    # from the store is the only way a gateway that restarted mid-round can still finish one."
+    # A restarted gateway has no contextvar left, so reading one is reading nothing.
+    receipt = contextvars.Context().run(control.resume, "round-1", lambda: {"ok": True})
+    assert receipt.budget_charges == (
+        {"grant_id": "payer", "metric": "amount", "amount": 100},
+    ), receipt.budget_charges
+
+
+def test_T448_a_resumed_leg_never_reports_another_actions_charges(store, clock) -> None:
+    """The stale half, which is the one that puts a *wrong* number on a receipt rather than a
+    missing one. One `Control`, one thread, two actions: the second must not inherit the first."""
+    from ctrlrun import Suspended
+
+    control = _control(store, clock)
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(_action("1", 100), suspends, "refund:1")
+    # An unbudgeted action runs to completion in the same context, leaving its own charges set.
+    control.execute(_action("2", 25), lambda: {"ok": True}, "refund:2")
+
+    receipt = control.resume("round-1", lambda: {"ok": True})
+    amounts = [charge["amount"] for charge in receipt.budget_charges]
+    assert amounts == [100], f"the resumed leg inherited the other action's spend: {amounts}"
+
+
+def test_T449_an_unbudgeted_resumed_leg_reports_no_charges(store, clock) -> None:
+    """The other direction: a resumption must not manufacture charges either. A store with a
+    ledger and an action with no budget on its grant reports an empty tuple, not the last thing
+    the contextvar saw."""
+    from ctrlrun import Suspended
+
+    unbudgeted = DOC.replace(
+        "      budgets:\n        - {metric: amount, limit: 250, window: PT24H}\n", ""
+    )
+    control = Control(
+        policy=Policy.from_yaml(unbudgeted, source="<u>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(unbudgeted, source="<u>"),
+    )
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(_action("1", 100), suspends, "refund:1")
+    receipt = control.resume("round-1", lambda: {"ok": True})
+    assert receipt.budget_charges == ()
+
+
+def test_T450_a_resumed_leg_after_a_renewal_reports_only_its_own_attempts_charges(
+    store, clock
+) -> None:
+    """§4.3 gives a renewal a **new** charge, so an effect that failed and renewed has two rows
+    in the ledger. The resumed receipt reports the attempt it is actually on.
+
+    Without the attempt filter the receipt sums a spend that was already released with the one
+    the action is holding, and claims the action spent twice what it did.
+    """
+    from ctrlrun import Suspended
+
+    control = _control(store, clock)
+    with pytest.raises(NotExecuted):
+        control.execute(_action("1", 100), _boom, "refund:1")
+    assert _held(store) == 0, "§4.2: the failed attempt released its charge"
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(_action("1", 100), suspends, "refund:1")
+    assert len(store.consumptions()) == 2, "one row per attempt, per §4.3"
+
+    receipt = contextvars.Context().run(control.resume, "round-1", lambda: {"ok": True})
+    assert receipt.budget_charges == (
+        {"grant_id": "payer", "metric": "amount", "amount": 100},
+    ), receipt.budget_charges
+    assert receipt.attempt == 2, receipt.attempt

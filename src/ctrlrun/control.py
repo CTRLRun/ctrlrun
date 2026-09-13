@@ -1748,6 +1748,14 @@ class Control:
         held = self._store.take_continuation(continuation)
         action = held.action
         started_at, approval, compared = self._resumed_context(action, held.record.created_at)
+        # SPEC-v0.9 §10.1, read from the **ledger** rather than from the contextvar. §8.3 makes
+        # this the only receipt an MCP multi round-trip or ACS action ever gets, so it has to
+        # report what the action spent, and the two ways to get that wrong are both live: a
+        # gateway that restarted mid-round has an empty contextvar and would report no charges
+        # for an action that spent, and a gateway that ran another action in this context since
+        # the suspension would report *that* action's spend. The ledger is the record; the first
+        # leg wrote it inside the reservation's own transaction. T447, T448.
+        self._resumed_charges(held.effect_key, held.record.attempt)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -3238,6 +3246,24 @@ class Control:
                 ),
             ) from None
         return charges
+
+    def _resumed_charges(self, effect_key: str | None, attempt: int) -> None:
+        """Stamp the resumed leg's receipt with what its **first** leg charged (§10.1, §8.3).
+
+        One row per grant and metric at this attempt, in the ledger's insertion order, which
+        §3.3.3 makes identical across the three backends. A released row still counts: it says
+        what this action spent, and `released_at` is a later fact about the same spend.
+        """
+        if effect_key is None:
+            _BUDGET_CHARGES.set(())
+            return
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": row.grant_id, "metric": row.metric, "amount": row.amount}
+                for row in self._store.consumptions(effect_key=effect_key)
+                if row.attempt == attempt
+            )
+        )
 
     def _refuse_unmeasurable(
         self, action: Action, reason: str, error: InvalidArgument
