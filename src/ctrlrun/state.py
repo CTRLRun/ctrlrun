@@ -525,6 +525,28 @@ class Charge:
     limit: int
     window: timedelta
 
+    def __post_init__(self) -> None:
+        """Refuse what the loader refuses, on `Budget.__post_init__`'s rule (§2.2).
+
+        **A negative `amount` refunds the budget**: it unwinds the sum and the grant spends again,
+        which is the compensation §12 puts out of scope, reachable by anyone who can call the
+        store. §2.3 assigns the loader-side refusal to the metric value, and this is the
+        defence in depth that rule cannot give a third-party caller reaching the `StateStore`
+        directly. An independent review found the value object validating nothing while `Budget`
+        beside it validates everything.
+        """
+        for name, value in (("amount", self.amount), ("limit", self.limit)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise InvalidArgument(
+                    f"charge {self.metric!r} on {self.grant_id!r}: {name!r} must be a "
+                    f"non-negative integer, got {value!r} (SPEC-v0.9 §2.3)"
+                )
+        if not isinstance(self.window, timedelta) or self.window <= timedelta(0):
+            raise InvalidArgument(
+                f"charge {self.metric!r} on {self.grant_id!r}: 'window' must be positive, "
+                f"got {self.window!r}"
+            )
+
 
 @dataclass(frozen=True)
 class Consumption:
@@ -558,7 +580,25 @@ def check_charges(
 
     Pure, like `plan_reservation` and for the same reason: every store decides here rather than
     each deciding for itself, so the arithmetic is one function a test can reach directly.
+
+    **Two charges on the same `(grant_id, metric)` in one tuple are refused**, and an independent
+    review is why. Each charge is evaluated against the *stored* sum, so a sibling in the same
+    tuple is invisible to the predicate; and the idempotence key of §3.4 carries no window, so
+    `ON CONFLICT DO NOTHING` then silently drops all but the first row. Together that is a spend
+    the ledger never records. It happened to be harmless for the one shape §2.2 creates, a grant
+    with two budgets on one metric over two windows, because those carry equal amounts and want
+    exactly one row. Refusing the general case makes that a property rather than a coincidence,
+    and §2.7's per-ancestor charges are distinct grants, so nothing legitimate is refused.
     """
+    seen: set[tuple[str, str]] = set()
+    for charge in charges:
+        key = (charge.grant_id, charge.metric)
+        if key in seen:
+            raise InvalidArgument(
+                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation: the "
+                "predicate cannot see a sibling's amount and §3.4's key would drop the second row"
+            )
+        seen.add(key)
     for charge in charges:
         if spent(charge) + charge.amount > charge.limit:
             raise BudgetExhaustedError(charge.grant_id, charge.metric, charge.window)
@@ -635,7 +675,12 @@ class StateStore(ApprovalStore, Protocol):
         metric: str | None = None,
         since: datetime | None = None,
     ) -> tuple[Consumption, ...]:
-        """Ledger rows, newest last (SPEC-v0.9 §3.3.3).
+        """Ledger rows, **in insertion order** (SPEC-v0.9 §3.3.3).
+
+        Not "newest last": both durable backends order by the autoincrement id, and two hosts
+        with ordinary clock skew, which `v0.7 §3` models and this store warns about at open,
+        invert `consumed_at` against it. Deterministic and identical across the three backends,
+        which is what a reader needs; it is simply not a time ordering.
 
         The **read half** of §3.3's amendment, and it clears `v0.6 §9.2`'s bar the way that
         section's own example did: a second backend implementing `charges=` and nothing else would
@@ -1203,7 +1248,10 @@ class InMemoryStateStore:
             if row.grant_id == charge.grant_id
             and row.metric == charge.metric
             and row.released_at is None
-            and row.consumed_at > floor
+            # SPEC-v0.9 §2.5 — `[now - window, now]`, **closed at the floor**. An independent
+            # review found all three backends half-open here while `consumptions(since=)` was
+            # closed, so `inspect --since` would have shown a row the predicate excluded.
+            and row.consumed_at >= floor
         )
 
     def _charge_locked(
@@ -2003,7 +2051,7 @@ class SQLiteStateStore:
         row = connection.execute(
             """
             SELECT COALESCE(SUM(amount), 0) FROM budget_ledger
-             WHERE grant_id = ? AND metric = ? AND released_at IS NULL AND consumed_at > ?
+             WHERE grant_id = ? AND metric = ? AND released_at IS NULL AND consumed_at >= ?
             """,
             (charge.grant_id, charge.metric, _iso(now - charge.window)),
         ).fetchone()

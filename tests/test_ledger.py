@@ -107,15 +107,8 @@ def test_T408b_an_unbudgeted_reservation_takes_the_0_8_0_path(store, clock) -> N
 
 
 def test_T411_a_replayed_insert_does_not_double_charge(store, clock) -> None:
-    """§3.4, and `v0.6 §4.3.2` Table A1 row 2 is why: a lost `COMMIT` retries the insert once.
-
-    Driven as the retry itself, because that is the shape the table describes: the same effect
-    key, the same attempt, the same grant and metric.
-    """
+    """§3.4, and `v0.6 §4.3.2` Table A1 row 2 is why: a lost `COMMIT` retries the insert once."""
     store.reserve_effect("e1", "a", LEASE, (_charge(),))
-    # The retry Table A1 row 2 describes: the same effect key, attempt, grant and metric, written
-    # again. Driven through the store's own charge writer, because `plan_reservation` refuses a
-    # live reservation and the planner is not what this row is about.
     charges = (_charge(),)
     if hasattr(store, "_charge_locked"):
         import inspect
@@ -131,6 +124,66 @@ def test_T411_a_replayed_insert_does_not_double_charge(store, clock) -> None:
     rows = store.consumptions(grant_id="g")
     assert len(rows) == 1, f"a replayed insert double-charged: {rows}"
     assert rows[0].amount == 100
+
+
+@pytest.mark.skipif(POSTGRES_URL is None, reason="CTRLRUN_TEST_POSTGRES is not set")
+@pytest.mark.parametrize("renewal", [False, True])
+def test_T411a_an_ambiguous_commit_resolves_the_charge_with_the_reservation(
+    tmp_path, renewal: bool
+) -> None:
+    """**The branch T411 does not reach**, and an independent review found it empty.
+
+    `v0.6 §4.3.2`'s re-issue paths call `_authorize_and_reserve` again. Without `charges`
+    forwarded, the retried transaction re-inserts the reservation and **nothing else**: the
+    reservation lands, the ledger stays empty, and the effect happens while the budget never sees
+    it. That is `reserved=1, charged=0`, the exact state §3.3.0's spike named as disqualifying the
+    alternative design, reproduced inside the chosen one. It also falsified §3.3's second and
+    stated-stronger bar for touching a frozen protocol.
+
+    Driven through the real branch by making `_commit` lose the write and report itself ambiguous,
+    which is `_commit`'s own documented behaviour for a dropped connection. T411 asserts the
+    idempotence of a writer this path never called, which is why it was green throughout.
+
+    Both branches: A1 row 2 (`reinsert`) on a first attempt, A2 (`reissue`) on a renewal.
+    """
+    import uuid as _uuid
+
+    from ctrlrun.postgres import AmbiguousWrite, PostgresStateStore
+
+    schema = f"amb_{_uuid.uuid4().hex[:12]}"
+    PostgresStateStore.create_schema(POSTGRES_URL, schema)
+    store = PostgresStateStore(POSTGRES_URL, schema=schema)
+    try:
+        if renewal:
+            # A2's premise: a FAILED record, so the next reserve is a renewal.
+            store.reserve_effect("e1", "a", LEASE, (_charge(),))
+            store.begin_execution("e1", "a")
+            store.fail_effect("e1", "a", "provably not executed")
+            before = len(store.consumptions(grant_id="g"))
+        else:
+            before = 0
+
+        fired: list[int] = []
+        real = store._commit
+
+        def lose_the_commit(connection: Any) -> None:
+            if not fired:
+                fired.append(1)
+                connection.rollback()
+                raise AmbiguousWrite("the commit was lost")
+            real(connection)
+
+        store._commit = lose_the_commit  # type: ignore[method-assign]
+        store.reserve_effect("e1" if renewal else "e2", "a", LEASE, (_charge(),))
+
+        rows = store.consumptions(grant_id="g")
+        assert len(rows) == before + 1, (
+            f"the re-issue dropped the charge: reserved, ledger={rows}. "
+            "§3.3's second bar says one re-read resolves both"
+        )
+    finally:
+        store.close()
+        PostgresStateStore.drop_schema(POSTGRES_URL, schema)
 
 
 def test_T412_a_three_level_chain_charges_all_three(store, clock) -> None:
@@ -194,6 +247,26 @@ def _race_worker(args):
         # `search_path` and the migration check do not spread the workers out in time. Without
         # one the unlocked implementation "held" in four runs of four: the window was never
         # opened, which is CONTRIBUTING.md's fourth mutation pattern exactly.
+        barrier.wait()
+        made.reserve_effect(
+            f"k{index}",
+            "a",
+            timedelta(minutes=5),
+            (Charge("g", "amount", _RACE_AMOUNT, _RACE_LIMIT, timedelta(hours=24)),),
+        )
+        return "spent"
+    except BudgetExhaustedError:
+        return "refused"
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
+    finally:
+        made.close()
+
+
+def _sqlite_race_worker(args):
+    index, path, barrier = args
+    made = SQLiteStateStore(path)
+    try:
         barrier.wait()
         made.reserve_effect(
             f"k{index}",
@@ -300,3 +373,121 @@ def test_T414a_a_0_8_0_binary_refuses_the_migrated_database(tmp_path) -> None:
     finally:
         migrations_module.MIGRATIONS = real
     assert "0007_budget_ledger" in str(caught.value)
+
+
+def test_T408d_the_window_is_closed_at_the_floor(store, clock) -> None:
+    """§2.5's `[now - window, now]`, and an independent review found all three half-open.
+
+    A row at exactly `now - window` was dropping out. One comparison wide, in the permissive
+    direction, and inconsistent with `consumptions(since=)`, which is closed: `inspect --since`
+    would have shown a row the predicate had excluded.
+    """
+    store.reserve_effect("e1", "a", LEASE, (_charge(amount=250),))
+    clock.advance(DAY)  # the first row is now EXACTLY at now - window
+    with pytest.raises(BudgetExhaustedError):
+        store.reserve_effect("e2", "a", LEASE, (_charge(amount=1),))
+    clock.advance(timedelta(microseconds=1))
+    store.reserve_effect("e3", "a", LEASE, (_charge(amount=250),))
+
+
+def test_T408e_a_released_row_no_longer_counts(store, clock) -> None:
+    """The `released_at IS NULL` filter, tested **here** rather than deferred to item 5.
+
+    Item 4 ships the column, the migration and the filter; only the caller is item 5's. Reported
+    as green-but-uncaught in this item's first mutation table, and an independent review showed
+    the mutation is catchable now by setting `released_at` directly, which is the same white-box
+    reach T411 already makes into `_charge_locked`.
+    """
+    store.reserve_effect("e1", "a", LEASE, (_charge(amount=250),))
+    with pytest.raises(BudgetExhaustedError):
+        store.reserve_effect("e2", "a", LEASE, (_charge(amount=1),))
+
+    released = clock.now
+    if isinstance(store, InMemoryStateStore):
+        store._ledger = [
+            row
+            if row.effect_key != "e1"
+            else type(row)(**{**row.__dict__, "released_at": released})
+            for row in store._ledger
+        ]
+    elif isinstance(store, SQLiteStateStore):
+        connection = store._connection()
+        connection.execute(
+            "UPDATE budget_ledger SET released_at = ? WHERE effect_key = ?",
+            (released.isoformat(), "e1"),
+        )
+        connection.commit()
+    else:
+        connection = store._connection()
+        connection.execute("BEGIN")
+        store._use_schema(connection)
+        connection.execute(
+            f"UPDATE {store._q}.budget_ledger SET released_at = %s WHERE effect_key = %s",
+            (released, "e1"),
+        )
+        connection.execute("COMMIT")
+
+    store.reserve_effect("e3", "a", LEASE, (_charge(amount=250),))
+    rows = store.consumptions(grant_id="g")
+    assert len(rows) == 2
+    assert sum(row.amount for row in rows if row.released_at is None) == 250
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(POSTGRES_URL is None, reason="CTRLRUN_TEST_POSTGRES is not set")
+def test_T410_the_same_race_against_SQLite(tmp_path) -> None:
+    """§9.4's T410, which was named and not written. `BEGIN IMMEDIATE` takes the write lock
+    before the first read, so nothing further is required; this is the assertion of that."""
+    path = tmp_path / "race.db"
+    SQLiteStateStore(path).close()  # migrate once, so the children only contend on the reserve
+
+    with mp.Manager() as manager:
+        barrier = manager.Barrier(12)
+        with mp.Pool(12) as pool:
+            results = pool.map(_sqlite_race_worker, [(i, str(path), barrier) for i in range(12)])
+
+    reader = SQLiteStateStore(path)
+    try:
+        spent = sum(row.amount for row in reader.consumptions(grant_id="g"))
+    finally:
+        reader.close()
+    errors = [result for result in results if result.startswith("error")]
+    assert not errors, errors[:3]
+    assert spent <= _RACE_LIMIT, f"12 processes spent {spent} against {_RACE_LIMIT}"
+    assert results.count("spent") == _RACE_LIMIT // _RACE_AMOUNT
+
+
+@pytest.mark.parametrize(
+    ("amount", "limit", "window", "why"),
+    [
+        (-100, 250, DAY, "a negative amount REFUNDS the budget and the grant spends again"),
+        (100, -1, DAY, "a negative limit"),
+        (True, 250, DAY, "a bool amount, which is an int in Python"),
+        (1.5, 250, DAY, "a float amount, which would drift"),
+        (100, 250, timedelta(0), "a zero window"),
+        (100, 250, -DAY, "a negative window"),
+    ],
+)
+def test_T408f_a_charge_refuses_what_a_budget_refuses(amount, limit, window, why) -> None:
+    """§2.2's rule applied to the value object an independent review found validating nothing.
+
+    `Budget` beside it refuses all of these. A `StateStore` is reachable directly by a third-party
+    caller, and §3.3.1 makes the store the holder of the MUST, so this is the defence in depth the
+    loader cannot give.
+    """
+    from ctrlrun.errors import InvalidArgument
+
+    with pytest.raises(InvalidArgument):
+        Charge(grant_id="g", metric="amount", amount=amount, limit=limit, window=window)
+
+
+def test_T408g_two_charges_on_one_grant_and_metric_are_refused(store, clock) -> None:
+    """The silent-drop an independent review found: the predicate cannot see a sibling's amount,
+    and §3.4's key carries no window, so the second row vanished on conflict. A spend the ledger
+    never recorded."""
+    from ctrlrun.errors import InvalidArgument
+
+    with pytest.raises(InvalidArgument):
+        store.reserve_effect("e1", "a", LEASE, (_charge(amount=100), _charge(amount=900)))
+    assert store.get_effect("e1") is None
+    assert store.consumptions() == ()

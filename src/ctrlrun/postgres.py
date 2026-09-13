@@ -846,6 +846,7 @@ class PostgresStateStore:
                 approval_id=approval_id,
                 action_hash=action_hash,
                 lease=lease,
+                charges=charges,
             )
             return (approved.as_approval() if approved is not None else None), written
         return (approved.as_approval() if approved is not None else None), plan.reservation
@@ -859,6 +860,7 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`. Returns the
         reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
@@ -893,8 +895,24 @@ class PostgresStateStore:
             # different effect key. `v0.1 §4.2 A2` is that an approval is single-use and
             # consumed atomically with the reservation; this failed it open.
             _took(A2_REISSUE, effect_key)
+            # **`charges` travels with the re-issue, and an independent review found it missing.**
+            # Without it the retried transaction re-inserts the reservation and nothing else: the
+            # effect happens and the budget never sees it, which is `reserved=1, charged=0`, the
+            # exact state §3.3.0's spike named as disqualifying the alternative design. It also
+            # falsified §3.3's second and stated-stronger bar for touching a frozen protocol, that
+            # one re-read resolves the reservation and the charge together.
+            #
+            # Safe to replay for §3.4's reason: the unique constraint on
+            # `(effect_key, attempt, grant_id, metric)` makes a re-insert idempotent. The comments
+            # above record the same mistake being found once before, on `approval_id`.
             _, reissued = self._authorize_and_reserve(
-                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
+                approval_id,
+                action_hash,
+                effect_key,
+                reservation.action_id,
+                lease,
+                charges=charges,
+                retrying=True,
             )
             return _only(reissued, "reservation")
         _took(A2_REFUSE, effect_key)
@@ -919,6 +937,7 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means. Returns the
         reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
@@ -942,8 +961,24 @@ class PostgresStateStore:
             # and failed between the re-read and the re-issue's own read, it renews, and its
             # number is not the one first planned (SPEC-v0.7 §5.6).
             _took(A1_REINSERT, effect_key)
+            # **`charges` travels with the re-issue, and an independent review found it missing.**
+            # Without it the retried transaction re-inserts the reservation and nothing else: the
+            # effect happens and the budget never sees it, which is `reserved=1, charged=0`, the
+            # exact state §3.3.0's spike named as disqualifying the alternative design. It also
+            # falsified §3.3's second and stated-stronger bar for touching a frozen protocol, that
+            # one re-read resolves the reservation and the charge together.
+            #
+            # Safe to replay for §3.4's reason: the unique constraint on
+            # `(effect_key, attempt, grant_id, metric)` makes a re-insert idempotent. The comments
+            # above record the same mistake being found once before, on `approval_id`.
             _, reissued = self._authorize_and_reserve(
-                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
+                approval_id,
+                action_hash,
+                effect_key,
+                reservation.action_id,
+                lease,
+                charges=charges,
+                retrying=True,
             )
             return _only(reissued, "reservation")
         expected = _reserved(reservation, None, now)
@@ -1071,7 +1106,7 @@ class PostgresStateStore:
         row = connection.execute(
             f"""
             SELECT COALESCE(SUM(amount), 0) FROM {self._q}.budget_ledger
-             WHERE grant_id = %s AND metric = %s AND released_at IS NULL AND consumed_at > %s
+             WHERE grant_id = %s AND metric = %s AND released_at IS NULL AND consumed_at >= %s
             """,
             (charge.grant_id, charge.metric, now - charge.window),
         ).fetchone()
