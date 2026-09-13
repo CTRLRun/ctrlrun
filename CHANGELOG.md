@@ -35,6 +35,15 @@ reservation, which is the bite on an identifier an attacker chose. A grant permi
 **Task-bound authority.** `tasks:` narrows a grant to a unit of work, by the same `child ⊆ parent`
 rule as every other dimension. It limits blast radius; it does not detect a hijack.
 
+**What a budget is not.** It **cannot recall an action already in flight**: a rolling window changes
+what the next reserve may do and nothing about what is already reserved, so a reservation taken a
+second before the window rolls commits regardless. It counts a metric an operator named, an argument
+on the action, and is not a consequence model: nothing ranks, scores or classifies what an action
+means. It is per store, so two deployments sharing a provider account and not a store each enforce
+their own. And it is fail-closed against its own principal: an agent able to manufacture ambiguity
+can pin a budget it cannot spend, which is a denial of service against the operator's own agents and
+is the deliberate side of the trade against an agent that manufactures authority.
+
 ### Added
 
 - **Task-bound authority** (SPEC-v0.9 §6). A grant may carry `tasks:`, a unit-of-work dimension
