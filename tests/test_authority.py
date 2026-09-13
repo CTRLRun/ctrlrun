@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The `authority:` section, grants and evaluation. Build-list item 2; SPEC-v0.3 §4.
 
 The acceptance tests are T66 to T74b. Four sentences run through all of them:

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Reporting: the human report, `--json`, `--junit`, the exit codes. SPEC-v0.4 §4; T113-T117.
 
 The report is where the three rules become visible or stop being true. A count that summed the

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The soak harness. Item 8; SPEC-v0.6 §8.1.
 
 The harness lives in `research/soak/`, outside `src/` and never packaged — but **its definition

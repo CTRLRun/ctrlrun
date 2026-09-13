@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T297 to T309: entitlement from the control registry (SPEC-v0.8 §3).
 
 A control names the role that may answer an approval the decision already required. Omission is

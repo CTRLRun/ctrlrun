@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Action model, canonicalization and action_hash. SPEC-v0.1 §2; acceptance test T7."""
 
 import hashlib

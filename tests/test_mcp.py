@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Request parsing and header-body validation. Build-list item 6b; SPEC-v0.2 §6.2, §6.4, §6.6.
 
 The headers are checked; the body is believed. That is the whole of §6.4: the revision mirrors

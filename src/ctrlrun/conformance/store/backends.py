@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What a backend hands the suite, and the two that already exist. SPEC-v0.6 §2.2.
 
 `StoreBackend` is the whole of what a backend author implements to be graded. It is deliberately

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Receipt integrity. Build-list item 6; SPEC-v0.6 §6, §8 T164-T170.
 
 **The tamper test is the deliverable and it is written first** (§6.5). Everything else in this

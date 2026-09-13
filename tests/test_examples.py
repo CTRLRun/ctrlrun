@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`examples/` and the sector policy templates. Build-list item 2; SPEC-v0.2 §1.1, T31.
 
 Two halves of one promise. The scripts each run the failure they exist to demonstrate and

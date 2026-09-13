@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Effect keys and effect records. Build-list items 5 and 6; SPEC-v0.1 §5.
 
 The effect key is what duplicate protection is built on (§5.3): two attempts that resolve to

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun inspect <action_id>`. Build-list item 5; SPEC-v0.2 §5, acceptance test T18.
 
 One action's whole history in one place: what was proposed, what the policy said, which

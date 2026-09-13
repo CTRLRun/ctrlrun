@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The README's header assets: the animation, its tape, what it records, and the social preview.
 
 The GIF is a recording of the README's own "Use it in three steps" section, and a recording is a
