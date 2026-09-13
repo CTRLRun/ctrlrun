@@ -10,6 +10,7 @@ else here is the containment relation v0.3 already shipped, exercised across a b
 
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import uuid
@@ -942,3 +943,164 @@ def test_T474c_a_malformed_hop_id_is_refused_without_reaching_the_log_verbatim(t
         f"a caller-supplied id reached the evidence log at full length: {len(logged[-1])}"
     )
     assert "malformed" in logged[-1] and "4096" in logged[-1]
+
+
+@pytest.mark.authority
+def test_T483_a_hop_refusals_event_carries_the_exact_key_set_and_nothing_about_the_envelope(
+    tmp_path,
+):
+    """§3.3's table, asserted **as a set**, both rows.
+
+    The point is the negative half. A refusal may carry the id the caller already holds and the
+    name of the row that stopped it; it may never carry the patterns, the limits, the subject or
+    the expiry, because that turns each refusal into one question against the envelope and a peer
+    enumerates it one key at a time. `v0.9 §5.5` refuses the same thing when it lets a scope hash
+    reach a receipt while the scope never does.
+
+    A set and not a `in` check: `assert "actions" not in data` names one leak and passes over
+    every other. `==` is what makes a field added later go red here rather than ship.
+
+    §11 records this test asserting a key set that matched neither the prose nor the code, so the
+    two rows below are read off §3.3's table rather than off `_authority_data`.
+    """
+    from ctrlrun.control import Control
+    from ctrlrun.errors import AuthorityDenied
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    control = Control(
+        Policy.from_yaml(
+            "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n    decision: allow\n",
+            source="t",
+        ),
+        store,
+        authority=authority,
+    )
+
+    def refusal_data(**kwargs: Any) -> dict[str, Any]:
+        before = len(list(store.events()))
+        with pytest.raises(AuthorityDenied):
+            control.execute(
+                _action(**{k: v for k, v in kwargs.items() if k != "hop"}),
+                lambda: "ok",
+                hop=kwargs["hop"],
+            )
+        rows = [
+            event.data
+            for event in list(store.events())[before:]
+            if event.type is EventType.AUTHORITY_DENIED
+        ]
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    # Row one: the id names no delegation. No grant is implicated, so no grant may be described.
+    unknown = refusal_data(hop="dlg_" + "0" * 32)
+    assert set(unknown) == {"reason", "hop"}, unknown
+    assert unknown["reason"] == AUTHORITY_HOP
+    assert unknown["hop"] == "dlg_" + "0" * 32
+
+    # Row two: the delegation exists and its grant does not reach the action. One more key, the
+    # *name* of the row that stopped it, and still nothing about what the row contains.
+    live = _hop(authority, store)
+    reached = refusal_data(hop=live.delegation_id, principal=Principal(agent="someone-else"))
+    assert set(reached) == {"reason", "hop", "grant_id", "dimension"}, reached
+    assert reached["dimension"] == "subject"
+    assert reached["grant_id"] == live.delegation_id
+
+    # And the envelope itself is nowhere in either payload, by value rather than by key name.
+    envelope = json.dumps(
+        {
+            "actions": list(live.grant.actions),
+            "resources": list(live.grant.resources),
+            "environments": list(live.grant.environments),
+            "subject": live.grant.subject.agent,
+        }
+    )
+    for data in (unknown, reached):
+        rendered = json.dumps(data)
+        for fragment in ("worker", "payment:", "*"):
+            assert fragment not in rendered or fragment in str(data.get("hop", "")), (
+                f"{fragment!r} from {envelope} reached a refusal payload: {data}"
+            )
+
+
+@pytest.mark.authority
+def test_T486_a_resume_inside_an_unrelated_ambient_task_and_hop_reads_neither(tmp_path):
+    """`v0.9 §6.3.2`'s ambient-context hazard, at the hop (SPEC-v0.10 §3.4.2).
+
+    A resumed leg is decided on what its `EXECUTION_STARTED` recorded, not on whatever the
+    process happens to be inside when the resume runs. The hazard is concrete: a relay serving
+    several agents resumes a suspended leg from inside its own `Control.hop(...)` block, and a
+    resume that read the ambient value would decide agent A's suspended action against agent B's
+    envelope. It is the fail-**open** direction whenever the ambient hop is wider than the
+    recorded one.
+
+    The ambient values here are deliberately *different* from the recorded ones rather than
+    absent, so a reader that took the ambient value would produce a visibly wrong answer instead
+    of the same answer by luck. That is mutation pattern 3: a test whose two sources agree proves
+    nothing about which one was read.
+    """
+    from ctrlrun.control import _HOP, _TASK, Control
+    from ctrlrun.policy import Policy
+    from ctrlrun.receipt import Event, EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    policy = Policy.from_yaml("schema: ctrlrun.policy/v7\nactions: {}\n", source="t")
+    control = Control(policy, store, authority=authority)
+    action = _action()
+    recorded_hop = "dlg_" + "a" * 32
+    store.append_event(
+        Event(
+            type=EventType.EXECUTION_STARTED,
+            action_id=action.action_id,
+            ts=datetime.now(UTC),
+            data={"task": "refund-run:7", "hop": recorded_hop},
+        )
+    )
+
+    ambient_hop = "dlg_" + "b" * 32
+    task_token, hop_token = _TASK.set("some-other-run:99"), _HOP.set(ambient_hop)
+    try:
+        _, _, _, bound = control._resumed_context(action, datetime.now(UTC))
+    finally:
+        _TASK.reset(task_token)
+        _HOP.reset(hop_token)
+
+    assert bound.hop == recorded_hop, (
+        f"the resumed leg took the ambient hop {ambient_hop} over the one its "
+        f"EXECUTION_STARTED recorded; that decides one agent's action against another's envelope"
+    )
+    assert bound.task == "refund-run:7", "and the same for the task dimension"
+    assert bound.recorded is True
+
+    # **The case that separates a fallback from a read**, and a mutation run is what found the
+    # block above does not. A 0.10 build running with neither writes `{"task": null, "hop":
+    # null}`. Both branches above take the event's value because it is a string, so a reader
+    # that falls back to the ambient value *only when the event's is absent* passes everything
+    # so far. Here the event recorded neither, and the answer must still be neither: the leg ran
+    # under no hop, and the ambient one belongs to whoever is resuming it.
+    empty, empty_store = _authority(), _store(tmp_path, "s3.db")
+    empty_control = Control(policy, empty_store, authority=empty)
+    plain = _action()
+    empty_store.append_event(
+        Event(
+            type=EventType.EXECUTION_STARTED,
+            action_id=plain.action_id,
+            ts=datetime.now(UTC),
+            data={"task": None, "hop": None},
+        )
+    )
+
+    task_token, hop_token = _TASK.set("some-other-run:99"), _HOP.set(ambient_hop)
+    try:
+        _, _, _, neither = empty_control._resumed_context(plain, datetime.now(UTC))
+    finally:
+        _TASK.reset(task_token)
+        _HOP.reset(hop_token)
+
+    assert neither.hop is None, (
+        f"a leg that recorded no hop was resumed under the resumer's own {ambient_hop}"
+    )
+    assert neither.task is None, "and the same for the task dimension"
+    assert neither.recorded is True, "the keys were present, so this is not 0.9.0's silence"
