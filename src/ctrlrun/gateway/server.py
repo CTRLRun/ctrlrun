@@ -48,7 +48,7 @@ from ..identity import (
     IdentityProvider,
     StaticIdentityProvider,
 )
-from ..policy import OBSERVE
+from ..policy import OBSERVE, UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED
 from ..receipt import Receipt
 from .mcp import (
     ACCEPTED_REVISIONS,
@@ -120,6 +120,15 @@ UPSTREAM_AMBIGUOUS: Final = (-41010, "ctrlrun.upstream_ambiguous", 502)
 #: this configuration; `-41012` means it is not permitted to *you*. The second is worth a
 #: different message to a client and, in a multi-tenant deployment, a different alert.
 UNAUTHORIZED: Final = (-41012, "ctrlrun.unauthorized", 403)
+
+#: SPEC-v0.10 §4.5. `-41016` and **not** `-41013`: `SPEC-mcp-operator.md` §9.3 adds `-41013`
+#: `ctrlrun.not_a_human`, `-41014` and `-41015` to `v0.2 §6.10`'s table, and there is one
+#: namespace. `-41001` to `-41015` are allocated; this is the first free one.
+#:
+#: A distinct code earns its keep on `v0.3 §8.4`'s test: `-41001` means this action is not
+#: permitted to anyone, `-41012` means not to **you**, and this means not against **that
+#: server**, which a client answers differently from either.
+UPSTREAM_UNPINNED: Final = (-41016, "ctrlrun.upstream_unpinned", 403)
 
 #: §6.8 — the `_meta` key every intercepted response carries, so a client is not left
 #: guessing what CTRLRun recorded. `com.ctrlrun/` is a legal prefix under the revision's
@@ -783,7 +792,15 @@ class Gateway:
                 ),
             )
         except ActionDenied as refused:
-            code, token, status = DENIED
+            # SPEC-v0.10 §4.5 — the two upstream reasons get their own code, and this branch is
+            # **inside** the `ActionDenied` clause rather than above it, because they are
+            # `ActionDenied` reasons and not a new exception type. `v0.3 §8.4`'s ordering hazard
+            # does not arise: one type, discriminated on the reason it carries.
+            code, token, status = (
+                UPSTREAM_UNPINNED
+                if refused.reason in (UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED)
+                else DENIED
+            )
             return _json(
                 status,
                 json_rpc_error(

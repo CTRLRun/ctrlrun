@@ -138,9 +138,9 @@ jobs:
           # SPEC-v0.9 §6 moved the templates count again: G24 is N/A for a document whose
           # grants name no task, which the templates example's do not. The authority example
           # binds one, so its count is unchanged and its passing total moved 19 to 20 instead.
-          test "$AUTHORITY_NA" = "2"
+          test "$AUTHORITY_NA" = "3"
           test "$TEMPLATES" = "verified 11/11"
-          test "$TEMPLATES_NA" = "15"
+          test "$TEMPLATES_NA" = "16"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml

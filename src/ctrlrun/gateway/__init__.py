@@ -102,6 +102,10 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
         sinks=sinks,
         authority=authority,
         environment=control.environment,
+        # SPEC-v0.10 §4.3 — the gateway is the surface that holds the connection, so it is the
+        # one that can name the upstream an action is pinned against. In-process this is `None`
+        # and §4.4 refuses a pinned action there.
+        upstream=config.upstream,
     )
     forwarder = httpx_forwarder(config)
     gateway = Gateway(config, control, forwarder)
