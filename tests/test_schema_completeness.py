@@ -98,13 +98,15 @@ def test_every_field_v6_froze_is_written_by_something() -> None:
         assert document[field], f"{field} is empty in the serialized receipt"
 
 
-def test_the_guarantee_catalogue_is_G1_to_G24() -> None:
-    """`ctrlrun.guarantees/v5`. A catalogue with a stub row reads as a shipped guarantee, which is
+def test_the_guarantee_catalogue_is_contiguous_from_G1() -> None:
+    """`ctrlrun.guarantees/v6`. A catalogue with a stub row reads as a shipped guarantee, which is
     why §10.1 has item 1 move the schema once rather than three branches racing it."""
-    assert CATALOGUE == "ctrlrun.guarantees/v5", CATALOGUE
+    assert CATALOGUE == "ctrlrun.guarantees/v6", CATALOGUE
 
     ids = [entry.id for entry in GUARANTEES]
-    assert ids == [f"G{number}" for number in range(1, 25)], ids
+    # Contiguous from G1, derived from the catalogue's own length: a milestone that adds an id
+    # should not have to edit the number here, and one that leaves a GAP should go red.
+    assert ids == [f"G{number}" for number in range(1, len(GUARANTEES) + 1)], ids
     for entry in GUARANTEES:
         # A row whose title is a placeholder reads as a shipped guarantee in every report that
         # prints the catalogue, which is the failure this assertion is actually for.

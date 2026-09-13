@@ -222,6 +222,13 @@ _AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_gran
 #: the same reason: set at the one place that knows it rather than at each receipt site, because
 #: a site that forgot would stamp the **previous** action's task onto this one's evidence.
 _TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
+#: SPEC-v0.10 §2.3.2 — the hop this action is running under, set where the task is and read for
+#: the **evidence**, never for a decision. `_TASK`'s twin, and deliberately not `_suspend`'s
+#: source: `_outcome`'s own docstring says `execute` and `resume` both come through it, so on
+#: every round after the first this variable belongs to the resuming process rather than to the
+#: action. The decision path threads the hop as a parameter; a review round found what reading it
+#: here would have decided, which is an extension checked against somebody else's envelope.
+_HOP: ContextVar[str | None] = ContextVar("ctrlrun_hop")
 #: SPEC-v0.9 §5.5 — the scope hash reaches the receipt the way the task does, and is reset
 #: beside it: a refusal whose receipt carried the previous action's scope would be the same
 #: stale-evidence defect on a new field.
@@ -831,7 +838,9 @@ class Control:
         """
         return self._environment
 
-    def evaluate(self, action: Action, *, task: str | None = None) -> Evaluation:
+    def evaluate(
+        self, action: Action, *, task: str | None = None, hop: str | None = None
+    ) -> Evaluation:
         """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8).
 
         An expired principal is a `DENY` here rather than the refusal `execute` raises
@@ -862,7 +871,7 @@ class Control:
         # the public "what will happen to this action" query and it would stop answering that
         # question if it reported one axis while `execute` acted on both. It reads the store
         # to resolve delegations and still writes nothing.
-        result = self._authority_result(action, task=task)
+        result = self._authority_result(action, task=task, hop=hop)
         if result is not None and not result.passed:
             return Evaluation(Decision.DENY, result.reason)
         return self._policy.evaluate(action)
@@ -960,7 +969,12 @@ class Control:
         return (None, "")
 
     def _authority_result(
-        self, action: Action, *, task: str | None = None, evaluate_task: bool = True
+        self,
+        action: Action,
+        *,
+        task: str | None = None,
+        evaluate_task: bool = True,
+        hop: str | None = None,
     ) -> AuthorityResult | None:
         """The authority axis for this action, or `None` where there is no section (§4.1).
 
@@ -978,6 +992,7 @@ class Control:
         and §6.3.2 names it as one.
         """
         _TASK.set(task)
+        _HOP.set(hop)
         if self._authority is None:
             _AUTHORITY_GRANT_ID.set(None)
             _AUTHORITY_RESULT.set(None)
@@ -988,6 +1003,7 @@ class Control:
             store=self._store,
             task=task,
             evaluate_task=evaluate_task,
+            hop=hop,
         )
         # Only where one passed: `grant_id` is also set on a refusal, and a committed receipt
         # is the only thing this field is read on. §4.6's `min` already picked which grant of
@@ -1013,6 +1029,11 @@ class Control:
         # SPEC-v0.3 §7 — the keys that tell §5.6's rules apart. Rules 1, 3, 4, 5 and 6 all
         # report `authority_escalation`, so without these five guards would be one guard as
         # far as any reader or test could tell.
+        # SPEC-v0.10 §2.3.2 — present on every refusal of an action proposed under a hop, which
+        # is what lets §6.3 print `ctrlrun inspect --hop <id>` with the argument filled in. The id
+        # and nothing else: §3.3 refuses to describe the envelope a refusal would otherwise leak.
+        if result.hop is not None:
+            data["hop"] = result.hop
         for key in ("dimension", "missing_parent_id", "expired_parent_id", "cycle_at"):
             value = getattr(result, key)
             if value is not None:
@@ -1135,6 +1156,7 @@ class Control:
         reconcile_eagerly: bool = False,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
         task: str | None = None,
+        hop: str | None = None,
         scope: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
@@ -1273,6 +1295,7 @@ class Control:
                     provider,
                     scoper,
                     scoped,
+                    hop=hop,
                 )
             self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
             self._record(
@@ -1295,7 +1318,7 @@ class Control:
         )
         # SPEC-v0.3 §4.3.1 — the order, stated once so it can be tested: principal_expired →
         # authority → policy → approval → reservation → execution.
-        result = self._authority_result(action, task=task)
+        result = self._authority_result(action, task=task, hop=hop)
         if result is not None:
             if not result.passed:
                 if observation is not None:
@@ -1323,6 +1346,7 @@ class Control:
                         provider,
                         scoper,
                         scoped,
+                        hop=hop,
                     )
                 self._refuse_authority(action, result, started_at, effect_key)
             self._append(
@@ -1361,6 +1385,7 @@ class Control:
                     provider,
                     scoper,
                     scoped,
+                    hop=hop,
                 )
             # SPEC-v0.6 §7.2.1's third bullet: *"the refusal is recorded against the approval
             # so the history shows a grant that met a denial."* It was not. An independent
@@ -1436,6 +1461,7 @@ class Control:
                 provider,
                 scoper,
                 scoped,
+                hop=hop,
             )
         compared = _Compared()
         approval, reservation = self._secure(
@@ -1496,6 +1522,7 @@ class Control:
             reconciler,
             held_key=effect_key,
             compared=compared,
+            hop=hop,
         )
 
     # --- observe mode (SPEC-v0.3 §6) ----------------------------------------------------
@@ -1513,6 +1540,7 @@ class Control:
         preconditions: _Preconditions | None = None,
         scope: _Preconditions | None = None,
         scoped: list[str | None] | None = None,
+        hop: str | None = None,
     ) -> Receipt:
         """Run an action observe mode has finished deciding about (SPEC-v0.3 §6.2).
 
@@ -1571,6 +1599,7 @@ class Control:
             held_key=held_key,
             observation=observation,
             compared=compared,
+            hop=hop,
         )
 
     def _observe_secure(
@@ -1971,6 +2000,7 @@ class Control:
         held_key: str | None,
         observation: _Observation | None = None,
         resumed: bool = False,
+        hop: str | None = None,
         compared: _Compared | None = None,
     ) -> Receipt:
         """Run the executor and record what happened (SPEC-v0.1 §5.5).
@@ -2026,7 +2056,7 @@ class Control:
             # SPEC-v0.3 §6.2 — with no reservation held there is no lease to extend and no
             # continuation to hold, which is §6.9.3's no-effect-key path reached for a
             # different reason. `held_key` says so.
-            self._suspend(action, held_key, suspension, approval)
+            self._suspend(action, held_key, suspension, approval, hop)
             raise
         except NotExecuted as exc:
             if held_key is not None:
@@ -2181,6 +2211,7 @@ class Control:
         effect_key: str | None,
         suspension: Suspended,
         approval: Approval | None,
+        hop: str | None = None,
     ) -> None:
         """Hold the reservation open and record that it is held (SPEC-v0.2 §6.9.2).
 
@@ -2215,7 +2246,18 @@ class Control:
                 f"{action.principal.expires_at}, so the reservation is not held across the "
                 "round trip; the lease will lapse and the record becomes AMBIGUOUS"
             )
-        result = self._authority_result(action, evaluate_task=False)
+        # SPEC-v0.10 §3.4.3 — **the hop is passed in, never read from the context.** This is the
+        # one re-decision point inside an action, so without it a receiver holding any grant of
+        # its own keeps its reservation across the round trip after the hop is cut, and the
+        # sentence below about `v0.3 §5.7` becomes false for exactly the actions this check
+        # exists to cut.
+        #
+        # An earlier draft read `_HOP` here. `_outcome`'s own docstring says "`execute` and
+        # `resume` both come through here", so on every round after the first this is reached
+        # from `resume`, whose ambient context belongs to the resuming process: unset, or
+        # holding some unrelated hop that would then decide this action's extension. A review
+        # round found it, and the repair is that the caller who knows says so.
+        result = self._authority_result(action, evaluate_task=False, hop=hop)
         if result is not None and not result.passed:
             # SPEC-v0.3 §5.6.1 — an extension asks to keep holding a reservation the grant no
             # longer authorizes. Refused, and the record is deliberately not moved: the lease
@@ -4145,6 +4187,25 @@ class Control:
             )
         return opener
 
+    def hop(self, parent_id: str, grant: Grant, *, by: Principal) -> Delegation:
+        """Hand part of this authority to another agent (SPEC-v0.10 §2.2).
+
+        A hop **is** a delegation: same record, same `contained_dimension`, same chain walk, same
+        `delegation_id`. What differs is one field, `created_via="hop"`, so an operator surface can
+        answer "which of these crossed an agent boundary" and `ctrlrun scan` can say which
+        principals hold authority no hop bounds (§6.4).
+
+        **A separate method rather than `delegate(via=...)`**, because `created_via` is evidence
+        about *which surface acted* and a caller that could write it could forge that evidence:
+        API code passing `"cli"` would put a shell's fingerprint on a record no shell touched.
+        A method whose name fixes the value cannot (§9).
+
+        Every §5.3 check of `v0.3` applies unchanged, including rule 0's refusal of an expired
+        credential: a hop is the most durable thing a principal can create across a boundary, so
+        it is the last place a stale one should still work.
+        """
+        return self._delegate(parent_id, grant, by=by, via="hop")
+
     def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
         """Revoke one delegation (SPEC-v0.3 §5.7).
 
@@ -4585,6 +4646,7 @@ def protect(
     control: Control | None = None,
     preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
     task: str | None = None,
+    hop: str | None = None,
     scope: Callable[[Action], Mapping[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
@@ -4677,6 +4739,11 @@ def protect(
             )
             effect_key = resolved._resolve_effect(action, effect_template)
             bound_task = resolved._resolve_template(action, task, "task")
+            # SPEC-v0.10 §3.1 — a hop id varies per call while a decorator is applied once, so it
+            # is a template like the task, resolved from the action's arguments and refused inside
+            # the recording path by the same function. `@protect(hop="{hop}")` is how a receiving
+            # agent's protected tool takes the reference its caller passed it.
+            bound_hop = resolved._resolve_template(action, hop, "hop")
             if reconcile is not None and effect_key is None and not dangling:
                 # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
                 # may come from the policy and that is not loaded yet. A hook with no key to
@@ -4705,6 +4772,7 @@ def protect(
                     reconcile_eagerly=reconcile_eagerly,
                     preconditions=provider,
                     task=bound_task,
+                    hop=bound_hop,
                     scope=scope,
                 )
             except ApprovalRequired as pending:

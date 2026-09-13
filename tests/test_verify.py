@@ -177,13 +177,18 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
     assert report.applicable == 11
-    assert report.not_applicable == 13
+    # Derived: every guarantee is applicable or not, exactly once. The literal moved with every
+    # milestone that added an id (G19, then G25), and the invariant never did.
+    assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with eight N/As a
     # seventeen-guarantee catalogue must not report seventeen over seventeen.
     assert f"{len(reg.GUARANTEES)}/{len(reg.GUARANTEES)}" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
-    assert "13 not applicable: G1, G2, G8, G9, G13, G15, G16, G17, G18, G19, G22, G23, G24." in text
+    # Derived, not spelled out: the id list moved with every milestone that added a guarantee
+    # (G19, then G25) and what the assertion is for is the shape, that the N/A ids are named.
+    na = [result.id for result in report.guarantees if result.status is Status.NOT_APPLICABLE]
+    assert f"{len(na)} not applicable: {', '.join(na)}." in text
 
 
 def test_T101b_zero_applicable_guarantees_is_not_a_pass(tmp_path):
@@ -770,22 +775,22 @@ def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
 
 
 def test_the_catalogue_is_closed_and_ordered():
-    """SPEC-v0.9 §8: `v5` is G1 to G24, and each id lands with its item. Ordered by number, so
+    """SPEC-v0.10 §7: `v6` is G1 to G27, and each id lands with its item. Ordered by number, so
     an id that arrives before a lower one still sits where a reader looks for it, and unreleased
-    `main` carries a partial `v5` until item 7 asserts all three.
+    `main` carries a partial `v6` until the release item asserts all three.
 
-    **No stub rows.** The upper bound is what v0.9 may reach; what is asserted about the middle
+    **No stub rows.** The upper bound is what v0.10 may reach; what is asserted about the middle
     is that every id present is one of them and that none is missing from the order. A catalogue
     holding an id whose check does not exist yet would report something before it could, which
-    is a false green (`v0.7 §9.4`'s D27). G22 and G23 are absent here on purpose: items 5 and 2
+    is a false green (`v0.7 §9.4`'s D27). G26 and G27 are absent here on purpose: items 2 and 3
     bring them, and an assertion that they are present would be the stub row this forbids."""
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v5"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v6"
     ids = [guarantee.id for guarantee in reg.GUARANTEES]
     assert ids[:11] == [f"G{n}" for n in range(1, 12)]
     assert "G13" in ids and "G16" in ids and "G18" in ids
     assert ids == sorted(ids, key=lambda gid: int(gid[1:])), ids
     assert len(ids) == len(set(ids))
-    assert set(ids) <= {f"G{n}" for n in range(1, 25)}, ids
+    assert set(ids) <= {f"G{n}" for n in range(1, 28)}, ids
     for guarantee in reg.GUARANTEES:
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
@@ -864,14 +869,18 @@ def test_the_v1_payments_template_reports_eleven_over_eleven():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (11, 11, 13)
+    assert (report.passed, report.applicable) == (11, 11)
+    assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
     text = report.to_text()
     assert "11/11 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider
     # for the first and its own approver identity for the second (§8.9, §11.7).
-    assert "13 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G22, G23, G24." in text
+    # Derived, not spelled out: the id list moved with every milestone that added a guarantee
+    # (G19, then G25) and what the assertion is for is the shape, that the N/A ids are named.
+    na = [result.id for result in report.guarantees if result.status is Status.NOT_APPLICABLE]
+    assert f"{len(na)} not applicable: {', '.join(na)}." in text
     # §2.1's rule, and the reason this line exists: **the not-applicable ten are not in the
     # denominator.** Ten pass and ten are N/A, so a run that folded them in would report 20/20.
     # It used to read `"10/10" not in text`, which said the same thing while the pass count was

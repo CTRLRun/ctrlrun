@@ -137,10 +137,10 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 22/22"' in script
+    assert 'test "$AUTHORITY" = "verified 23/23"' in script
     assert 'test "$TEMPLATES" = "verified 11/11"' in script
     assert 'test "$AUTHORITY_NA" = "2"' in script
-    assert 'test "$TEMPLATES_NA" = "13"' in script
+    assert 'test "$TEMPLATES_NA" = "14"' in script
 
 
 @pytest.mark.authority
@@ -152,13 +152,17 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     templates = run(V1_PAYMENTS)
 
     assert authority.badge is not None
-    assert authority.badge["message"] == "verified 22/22"
+    # 23, not 22: SPEC-v0.10 §7.3 requires G25 to grade PASS on a shipped example, and
+    # `examples/authority/payments.yaml` is the one with a delegable grant to hop from. This
+    # pin stays a literal on purpose (it is a CI pin on a shipped example, which exists to fail
+    # when a shape changes) while the N/A counts above are derived.
+    assert authority.badge["message"] == "verified 23/23"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
     # no `max_attempts` (SPEC-v0.7 §8.9).
     assert authority.not_applicable == 2
     assert templates.badge is not None
     assert templates.badge["message"] == "verified 11/11"
-    assert templates.not_applicable == 13
+    assert templates.applicable + templates.not_applicable == len(reg.GUARANTEES)
 
 
 def test_T118_the_action_uploads_the_report_and_writes_a_job_summary():
@@ -211,7 +215,7 @@ def test_T119_the_colour_is_about_failures_and_has_no_amber_for_not_applicable(
     from ctrlrun.verify import scenarios
 
     passing = run(V1_PAYMENTS)
-    assert passing.not_applicable == 13
+    assert passing.applicable + passing.not_applicable == len(reg.GUARANTEES)
     assert passing.badge is not None
     assert passing.badge["color"] == BADGE_PASS_COLOR
 
