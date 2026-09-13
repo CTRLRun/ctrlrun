@@ -297,11 +297,24 @@ def _observe(document: Any, expected_id: Any, revision: str) -> Observed:
 
 
 class HTTPForwarder:
-    def __init__(self, upstream: str, timeout: float, httpx: Any) -> None:
+    def __init__(
+        self, upstream: str, timeout: float, httpx: Any, verify: Any | None = None
+    ) -> None:
         self.upstream = upstream
         self.timeout = timeout
         self.httpx = httpx
-        self.pooled = httpx.Client(timeout=timeout)
+        #: SPEC-v0.10 §4.3's check 3, and the only one of the three that **prevents** rather than
+        #: attributing. Where an operator pinned certificates, this is an `ssl.SSLContext` whose
+        #: only trust anchors are those certificates, so a swapped server fails the handshake
+        #: **before the first request byte**, which is what makes `v0.7 §2.3`'s `NotExecuted`
+        #: claim true of it. `None` is httpx's ordinary verification, unchanged.
+        self.verify = verify
+        self.pooled = self._client()
+
+    def _client(self) -> Any:
+        if self.verify is None:
+            return self.httpx.Client(timeout=self.timeout)
+        return self.httpx.Client(timeout=self.timeout, verify=self.verify)
 
     def close(self) -> None:
         self.pooled.close()
@@ -322,7 +335,7 @@ class HTTPForwarder:
         # may clear the environment while this one is in flight (§12.2.14).
         proxied = _through_a_proxy()
         run = _EXECUTOR_RUN.get()
-        client = self.httpx.Client(timeout=self.timeout) if owned else self.pooled
+        client = self._client() if owned else self.pooled
         try:
             with client.stream(method, self.upstream, content=body, headers=relayed) as response:
                 if run is not None:

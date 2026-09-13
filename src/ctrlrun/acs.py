@@ -98,6 +98,23 @@ class AcsControlHook:
         ask_timeout_seconds: int = DEFAULT_ASK_TIMEOUT_SECONDS,
         identity: IdentityProvider | None = None,
     ) -> None:
+        pinned = [name for name in control.policy.actions if control.policy.upstream_pin(name)]
+        if pinned:
+            # SPEC-v0.10 §4.4 — **at construction, and not at load.** ACS is advisory: the
+            # *platform* runs the tool and this hook never holds a connection to anything, so
+            # there is no observation point and nothing to pin. A load error cannot serve here,
+            # because one loader cannot know which surface will run an action and `verify` and
+            # `scan` must still read a document that pins (§7.3). `v0.3 §8.4` refuses a hook
+            # built with no identity provider the same way, for the same reason: a deployment
+            # finds out at startup rather than during an incident.
+            raise InvalidArgument(
+                f"this policy pins an upstream for {pinned[0]!r}"
+                + (f" and {len(pinned) - 1} other action(s)" if len(pinned) > 1 else "")
+                + ", and the ACS hook holds no connection to an upstream: ACS is advisory and "
+                "the platform executes, so there is nothing here to observe or pin. Take the "
+                "'upstream:' key off those entries, or front the server with 'ctrlrun gateway' "
+                "instead (SPEC-v0.10 §4.4)"
+            )
         if control.authority is not None and identity is None:
             # SPEC-v0.3 §8.4 — without a provider this hook reads `params.metadata.agent_id`
             # straight off the inbound envelope, and §4 makes the principal an authorization

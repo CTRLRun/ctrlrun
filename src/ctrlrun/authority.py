@@ -943,6 +943,44 @@ def unmatched_shape(grant: Grant, action: Action) -> str | None:
     return None
 
 
+def narrowed_dimensions(parent: Grant, child: Grant) -> tuple[str, ...]:
+    """Which of §5.4's rows `child` makes strictly stricter than `parent` (SPEC-v0.10 §6.2).
+
+    **A reporting helper. It decides nothing**, and that is the line that keeps §2.2's
+    one-relation rule intact: `contained_dimension` stays the only thing any decision calls, and a
+    build where this disagreed with it would be wrong about a rendering rather than about an
+    authorization.
+
+    It exists because `contained_dimension` computes the **complement**: the first row a child
+    *violates*, or `None` where it is contained. An operator reading a refused action's chain needs
+    the other question, *which link took the resource away*, and no name in the tree answered it.
+
+    Plural, in `DIMENSIONS` order. A hop narrowed on every dimension narrows on several at once
+    (T470), so a singular answer has no definition.
+    """
+    narrowed: list[str] = []
+    if parent.subject != child.subject:
+        narrowed.append("subject")
+    if set(parent.actions) != set(child.actions):
+        narrowed.append("actions")
+    if parent.resources != child.resources and child.resources is not None:
+        narrowed.append("resources")
+    if dict(parent.constraints) != dict(child.constraints):
+        narrowed.append("constraints")
+    if parent.environments != child.environments and child.environments is not None:
+        narrowed.append("environments")
+    if child.expires_at is not None and (
+        parent.expires_at is None or child.expires_at < parent.expires_at
+    ):
+        narrowed.append("expires_at")
+    if parent.tasks != child.tasks and child.tasks is not None:
+        narrowed.append("tasks")
+    if parent.budgets != child.budgets and child.budgets is not None:
+        narrowed.append("budgets")
+    order = {name: index for index, name in enumerate(DIMENSIONS)}
+    return tuple(sorted(narrowed, key=lambda name: order[name]))
+
+
 def contained_dimension(parent: Grant, child: Grant) -> str | None:
     """The first §5.4 row `child` violates, or `None` where it is contained on every one.
 
@@ -2342,6 +2380,7 @@ __all__ = [
     "grant_from_yaml",
     "grant_to_json",
     "matches",
+    "narrowed_dimensions",
     "new_delegation_id",
     "unmatched_shape",
     "validate_pattern",

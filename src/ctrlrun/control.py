@@ -50,6 +50,8 @@ from .approval import (
     unsatisfied,
 )
 from .authority import (
+    NO_AUTHORITY,
+    REASON_PRECEDENCE,
     RESOURCE_SEPARATOR,
     Authority,
     AuthorityResult,
@@ -101,6 +103,8 @@ from .policy import (
     OBSERVE,
     POLICY_CHANGE_ACTION,
     POLICY_UNAPPROVED,
+    UPSTREAM_MISMATCH,
+    UPSTREAM_UNVERIFIED,
     Decision,
     Evaluation,
     Policy,
@@ -109,6 +113,8 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
+    BLOCKED_APPROVAL_MISMATCH,
+    BLOCKED_APPROVAL_REASONS,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
@@ -407,9 +413,18 @@ class _Observation:
     `_observe_secure` and `_outcome`, and threading four extra values through all three would
     put the same fact in three signatures.
 
-    `block()` keeps the **first** reason, because the checks run in the order enforce mode
-    runs them and enforce mode stops at the first: a later refusal is one enforce mode would
-    never have reached.
+    **`block()` keeps the reason earliest in `DECISION_ORDER`, not the first one it is handed**
+    (SPEC-v0.10 §5). The docstring here used to say the opposite, and say it for a reason that was
+    not true: "the checks run in the order enforce mode runs them". They do not, which is what
+    `v0.9 §4.2.1b` records, and keeping the first is how observe mode came to name a refusal
+    enforce mode would not raise.
+
+    **What this does not do is move a check**, and that is the point. v0.9 aligned three cases by
+    reordering and the three reorderings produced four regressions between them (`v0.9 §13.8`).
+    The information was never missing: a probe over §4.2.1b's own second case shows observe mode
+    is handed `['no_authority', 'policy_unapproved']` and reports the first, while enforce mode
+    raises the second. Ordering the **selection** is enough, and it cannot regress a check's
+    position because it changes none.
     """
 
     __slots__ = ("blocked_reason", "decision", "reason")
@@ -424,7 +439,13 @@ class _Observation:
         self.reason = evaluation.reason
 
     def block(self, reason: str) -> None:
-        if self.blocked_reason is None:
+        """Record a refusal enforce mode would have raised, keeping the one it would raise FIRST.
+
+        A reason `DECISION_ORDER` does not name sorts last among itself and still loses to any
+        reason it does name, which is the fail-safe direction for a reason somebody adds without
+        listing it: the report stays a refusal and names something the order knows.
+        """
+        if self.blocked_reason is None or _rank(reason) < _rank(self.blocked_reason):
             self.blocked_reason = reason
 
     def frozen(self) -> _WouldHave:
@@ -665,6 +686,93 @@ BUDGET_UNKEYED: Final = "budget_unkeyed"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
 
+#: SPEC-v0.10 §5 — **the order enforce mode decides in, declared once, as data.**
+#:
+#: `control.py` has carried this sequence as a comment since v0.3 (`principal_expired ->
+#: authority -> policy -> approval -> reservation -> execution`). Making it a value is the whole
+#: of item 4: observe mode's checks do not run in this order, `_Observation.block` used to keep
+#: whichever it was handed first, and `v0.9 §4.2.1b` is the record of what that cost.
+#:
+#: **The list starts at `Control.execute`'s entry, not at `_secure`.** `policy_unapproved` is
+#: decided by `_require_approved` above authority, while `_observe_secure` is not called until
+#: several hundred lines later; an ordering beginning at `_secure` could not have covered it.
+#:
+#: **Groups, and every group that has a source is read from it.** `receipt.py`'s own comment
+#: records this set being missed twice, and says why
+#: `test_every_approval_refusal_reason_is_counted_by_stats` enumerates from `approval.py` rather
+#: than restating: *a set maintained by hand is a set the next reason is missed from.* This list
+#: was hand-written once and `attempt_ceiling` was missing from it within the hour, caught by
+#: T250. So the authority group is `REASON_PRECEDENCE` and the approval group is
+#: `BLOCKED_APPROVAL_REASONS`, both imported, and neither can drift from its owner.
+_ORDERED_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
+    (PRINCIPAL_EXPIRED,),
+    # Above authority: `v0.8 §8.4`, a policy nobody approved decides nothing, checked before
+    # anything else is decided because what follows would be decided *by* it. It is also a
+    # member of `BLOCKED_APPROVAL_REASONS`, and this explicit position is what puts it here
+    # rather than with the approval gate.
+    (POLICY_UNAPPROVED,),
+    # `v0.3 §4.3`: authority before policy, so a denial leaves no pending approval behind.
+    REASON_PRECEDENCE,
+    # SPEC-v0.10 §4.3's check 2, and `v0.9 §2.3`/§2.4.1's budget refusals: all three are above
+    # the approval gate on T446's argument, that they depend on nothing a human says.
+    (UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED),
+    (BUDGET_UNMEASURABLE, BUDGET_EXHAUSTED),
+    # SPEC-v0.7 §5.5 — and T250 asserts by name that the ceiling is recorded **before** the
+    # approval gate, which is how the hand-written version of this list was caught.
+    (BLOCKED_ATTEMPT_CEILING,),
+    (BLOCKED_APPROVAL_REQUIRED, BLOCKED_APPROVAL_MISMATCH, *sorted(BLOCKED_APPROVAL_REASONS)),
+    (SCOPE_UNAVAILABLE, OUT_OF_SCOPE),
+    (BLOCKED_DUPLICATE, BLOCKED_IN_PROGRESS, BLOCKED_AMBIGUOUS),
+)
+
+DECISION_ORDER: Final = tuple(reason for group in _ORDERED_GROUPS for reason in group)
+
+_RANKS: Final[dict[str, int]] = {}
+for _index, _group in enumerate(_ORDERED_GROUPS):
+    for _reason in _group:
+        _RANKS.setdefault(_reason, _index)
+
+#: Where a reason this list does not name sits. **The policy axis, because that is the one open
+#: vocabulary**: `v0.1 §3.2` lets a decision reason be `rule[N]` for any N, and no fixed tuple can
+#: enumerate those. Ranking them with the policy decision they are is correct rather than a
+#: fallback; every other vocabulary in the kernel is closed and belongs in a group above.
+_UNLISTED_RANK: Final = _RANKS[NO_AUTHORITY] + 1
+
+
+def _where_to_look(result: AuthorityResult) -> str:
+    """SPEC-v0.10 §6.3 — the command, with its argument filled in, never a placeholder.
+
+    **The argument is always the PRESENTED hop**, with whatever the refusal knows about the chain
+    named in the prose beside it. An earlier draft of §6.3 had `missing_parent_id` print the id it
+    names; that id is by construction the record the store could **not** read, so
+    `inspect --hop <it>` is the unknown-id path and exits non-zero. A refusal whose one suggested
+    command is guaranteed to fail is worse than no suggestion: it sends an operator to a dead end
+    and teaches them the line is noise.
+
+    `authority_revoked` gets the same treatment for the same reason, measured: `_check_chain`
+    returns no id for the revoked node, so the only id in hand is the leaf.
+
+    Nothing is suggested where there is no id, which is a principal that presented no hop and
+    holds no delegation: `inspect --hop` has no argument there and the operator's question is a
+    different one.
+    """
+    hop = result.hop or result.delegation_id
+    if hop is None:
+        return ""
+    detail = ""
+    if result.missing_parent_id is not None:
+        detail = f"; {result.missing_parent_id} in its chain could not be read"
+    elif result.expired_parent_id is not None:
+        detail = f"; {result.expired_parent_id} above it has expired"
+    return f"{detail}. ctrlrun inspect --hop {hop}"
+
+
+def _rank(reason: str) -> int:
+    """Where `reason` sits in the declared order (SPEC-v0.10 §5)."""
+    rank: int = _RANKS.get(reason, _UNLISTED_RANK)
+    return rank
+
+
 #: SPEC-v0.9 §5.5 — its own domain tag, so a scope hash can never equal a precondition
 #: fingerprint over the same mapping. That matters precisely because §5.7 permits both.
 _SCOPE_SCHEMA: Final = "ctrlrun.scope/v1"
@@ -737,6 +845,7 @@ class Control:
         environment: str | None = None,
         approver_identity: ApproverIdentity | None = None,
         require_approved_policy: bool = False,
+        upstream: str | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -758,6 +867,10 @@ class Control:
         # SPEC-v0.8 §8.4. **In code and not in the file it governs**, or the file would switch
         # off its own governance. Default false: opt in, then fail closed.
         self._require_approved_policy = require_approved_policy
+        # SPEC-v0.10 §4.3 — the upstream this deployment fronts, which only a surface holding the
+        # connection can name. The gateway passes `GatewayConfig.upstream`; in-process it is
+        # `None`, and §4.4 makes a pinned action refuse `upstream_unverified` there.
+        self._upstream = upstream
         #: Cached **only when the answer is yes** (§8.4). A negative answer is re-asked on every
         #: decision, so a long-lived process that started before the approval landed begins
         #: working the moment it lands, with no restart; the cost is one keyed read per decision
@@ -1094,7 +1207,7 @@ class Control:
             effect_key=effect_key,
         )
         raise AuthorityDenied(
-            f"{action.name} denied: {result.reason}",
+            f"{action.name} denied: {result.reason}{_where_to_look(result)}",
             reason=result.reason,
             action_id=action.action_id,
             grant_id=result.grant_id,
@@ -1684,6 +1797,11 @@ class Control:
         # SPEC-v0.9 §4.2.1 — **above the scope check, because `_secure` computes charges before
         # calling `_in_scope`.** An action that is both out of scope and unmeasurable was refused
         # `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. T458.
+        # SPEC-v0.10 §4.3, the observe-mode row: **recorded, not refused** (`v0.3 §6.2`). At the
+        # same point in the declared order as `_secure`'s, which is what §5 is about.
+        observed_upstream = self._upstream_reason(action)
+        if observed_upstream is not None:
+            observation.block(observed_upstream)
         charges = self._observe_charges(action, effect_key, observation)
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
@@ -2454,6 +2572,12 @@ class Control:
         # Assembling after the gate asks a human to approve a refund the kernel has already
         # decided to refuse, and leaves a granted approval behind for an action nothing can
         # execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape. T446.
+        # SPEC-v0.10 §4.3's check 2. **Above the approval gate**, on T446's argument: the pin
+        # depends on nothing a human says, so asking one about an action pinned to a server this
+        # process has not verified leaves a granted approval behind for a call that cannot run.
+        refused_upstream = self._upstream_reason(action)
+        if refused_upstream is not None:
+            raise self._refuse_upstream(action, refused_upstream, effect_key)
         charges = self._charges_for(action, effect_key)
         approval_id = (
             self._presented(action, effect_key, evaluation, started_at, preconditions)
@@ -3626,6 +3750,40 @@ class Control:
             error=str(error),
         )
         return _UnmeasurableError(str(error), reason=reason)
+
+    def _upstream_reason(self, action: Action) -> str | None:
+        """§4.3's check 2: is this action pinned to an upstream this process has verified?
+
+        `None` where the entry pins nothing, which is every action written before v0.10.
+
+        **In-process there is no upstream to observe, so a pinned action is refused**
+        `upstream_unverified` on every call (§4.4). That is loud, correct, and exactly what the
+        pin says the operator asked for: a pin is a claim about a server CTRLRun connects to, and
+        in-process the executor is the operator's own code holding its own connection.
+        """
+        from . import upstream as _upstream
+
+        pin = self._policy.upstream_pin(action.name)
+        if not pin:
+            return None
+        if self._upstream is None:
+            return UPSTREAM_UNVERIFIED
+        return _upstream.check(pin, self._upstream, self._policy.tool_name(action.name))
+
+    def _refuse_upstream(self, action: Action, reason: str, effect_key: str | None) -> ActionDenied:
+        """The refusal §4.5 names, recorded the way every other `ActionDenied` is."""
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason}, effect_key)
+        detail = (
+            "this process has verified no upstream for it"
+            if reason == UPSTREAM_UNVERIFIED
+            else "what this process observed is in no pinned list"
+        )
+        return ActionDenied(
+            f"{action.name}: the policy pins the upstream it authorises, and {detail} "
+            "(SPEC-v0.10 §4.3)",
+            reason=reason,
+            action_id=action.action_id,
+        )
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
         """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.

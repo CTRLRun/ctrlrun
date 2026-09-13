@@ -14,6 +14,7 @@ import hashlib
 import logging
 import operator
 import os
+import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -64,6 +65,8 @@ POLICY_SCHEMA_V6: Final = "ctrlrun.policy/v6"
 #: version moves once, here, with item 1, and item 3 fills it under the version already in
 #: place: two branches racing a schema bump is how a catalogue ends up with a stub row.
 POLICY_SCHEMA_V7: Final = "ctrlrun.policy/v7"
+#: SPEC-v0.10 §4.6 — `v8` adds one action-entry key, `upstream:`. Bumped once, by item 3.
+POLICY_SCHEMA_V8: Final = "ctrlrun.policy/v8"
 
 #: All of them, newest last, for the message an unknown schema produces. **In version order**,
 #: which `_at_least` reads: a version added out of order would make every gate below lie.
@@ -75,6 +78,7 @@ SUPPORTED_SCHEMAS: Final = (
     POLICY_SCHEMA_V5,
     POLICY_SCHEMA_V6,
     POLICY_SCHEMA_V7,
+    POLICY_SCHEMA_V8,
 )
 
 
@@ -185,10 +189,28 @@ POLICY_CHANGE_ACTION: Final = "ctrlrun.policy.change"
 #: them differently.
 POLICY_UNAPPROVED: Final = "policy_unapproved"
 
+#: SPEC-v0.10 §4.5 — the two upstream refusals, separately observable because "the server
+#: changed" and "nobody has checked" are different findings an operator fixes differently.
+#: `UPSTREAM_UNVERIFIED` is the fail-closed half and the one to get right: a pin that does
+#: nothing when nothing was observed is a pin an upstream can switch off by never being seen.
+UPSTREAM_MISMATCH: Final = "upstream_mismatch"
+UPSTREAM_UNVERIFIED: Final = "upstream_unverified"
+
 _V6_ENTRY_KEYS: Final[Mapping[str, str]] = {
     "approvals_required": (
         "an older reader would ignore the threshold and consume on the first grant, which is a "
         "deployment believing several humans answered when one did"
+    ),
+}
+
+#: SPEC-v0.10 §4.6 — the action-entry key `ctrlrun.policy/v8` adds, gated in the shape
+#: `_V4_ENTRY_KEYS` and `_V5_ENTRY_KEYS` use and **not** `require_v7`'s: that one walks
+#: `authority.grants`, because `tasks:` and `budgets:` are grant keys, and a standalone
+#: `--authority` document carries no action entries at all.
+_V8_ENTRY_KEYS: Final[Mapping[str, str]] = {
+    "upstream": (
+        "an older reader would ignore the pin and authorise the action against any server at "
+        "all, which is the whole of what the key restricts"
     ),
 }
 
@@ -202,10 +224,15 @@ _ENTRY_KEYS: Final = (
     | _V2_ENTRY_KEYS
     | frozenset(_V5_ENTRY_KEYS)
     | frozenset(_V6_ENTRY_KEYS)
+    | frozenset(_V8_ENTRY_KEYS)
 )
 
 #: And the closed key set of the `mcp` mapping, which is one key wide.
 _MCP_KEYS: Final = frozenset({"not_executed_on_error"})
+
+#: SPEC-v0.10 §4.2 — the pin's closed key set, and the shape of a `sha256:` digest.
+_UPSTREAM_KEYS: Final = frozenset({"tls_cert_sha256", "tls_cert_file", "tool_schema_sha256"})
+_SHA256: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 #: Names of `Action` fields (SPEC-v0.1 §2.1), which a condition cannot address: conditions
 #: see the action's *arguments* and nothing else (§3.2). Writing one reads like it scopes a
@@ -540,6 +567,36 @@ def _in_registry_order(cited: tuple[str, ...], order: tuple[str, ...]) -> tuple[
 
 
 @dataclass(frozen=True)
+class UpstreamPin:
+    """Which server an action entry authorises itself against (SPEC-v0.10 §4.2).
+
+    **Not folded into `McpOptions`**, which is the closest existing name: that one carries
+    claims an operator makes about their upstream's *behaviour* (`not_executed_on_error` is a
+    `NotExecuted` hint), and this carries a claim about its *identity*, which is an
+    authorization input. Merging them would put a pin inside a structure whose documented job
+    is a classifier hint.
+
+    **Two TLS keys, because a digest cannot be a trust anchor.** `certs` feeds §4.3's check 3,
+    where the pinned certificates become the connection's only trust anchors and a swapped
+    server fails the handshake; `SSLContext.load_verify_locations` takes PEM, and there is no
+    way to hand OpenSSL a hash and have it validate a chain. `cert_sha256` feeds checks 1 and 2,
+    which compare what was observed. An entry pinning by digest alone gets the first two checks
+    and not the third, which §4.2 states as a limit rather than leaving to be discovered.
+
+    The two must agree: every certificate `certs` holds hashes to a digest `cert_sha256` names,
+    checked at load. A rotation that moved only one half would fail at the handshake on a day
+    an operator believed they had prepared for.
+    """
+
+    cert_sha256: tuple[str, ...] = ()
+    certs: tuple[str, ...] = ()
+    tool_schema_sha256: str | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.cert_sha256 or self.certs or self.tool_schema_sha256)
+
+
+@dataclass(frozen=True)
 class McpOptions:
     """Per-tool assertions an operator makes about their upstream (SPEC-v0.2 §3.1, §6.8).
 
@@ -562,6 +619,8 @@ class _ActionPolicy:
     effect: str | None = None
     resource: str | None = None
     mcp: McpOptions = _DEFAULT_MCP_OPTIONS
+    #: SPEC-v0.10 §4.2 — which upstream this entry authorises itself against, or an empty pin.
+    upstream: UpstreamPin = field(default_factory=UpstreamPin)
     #: §7.3 — the control ids this action cites, which govern every rule under it.
     controls: tuple[str, ...] = ()
     #: §7.4 — which of this action's arguments carry which class of data.
@@ -897,6 +956,25 @@ class Policy:
         """The set of data labels this action's supplied arguments carry (SPEC-v0.6 §7.4)."""
         entry = self.actions.get(action.name)
         return frozenset() if entry is None else entry.data_scope(action.canonical_arguments)
+
+    def upstream_pin(self, action_name: str) -> UpstreamPin:
+        """This action's upstream pin, or an empty one (SPEC-v0.10 §4.2).
+
+        An empty pin is satisfied by anything, which is every action entry written before v0.10
+        and why they all upgrade untouched.
+        """
+        entry = self.actions.get(action_name)
+        return UpstreamPin() if entry is None else entry.upstream
+
+    def tool_name(self, action_name: str) -> str | None:
+        """The upstream tool this action routes to, for §4.2's tool-schema pin.
+
+        The action name **is** the tool name at the gateway (`v0.2 §6.6` builds the Action from
+        `params.name`), so this is the identity today and exists as a name rather than as an
+        inlined assumption: a deployment that ever mapped one to the other would change here and
+        nowhere else.
+        """
+        return action_name if action_name in self.actions else None
 
     def effect_template(self, action_name: str) -> str | None:
         """This action's `effect:` template, or `None` (SPEC-v0.2 §3.1, §11).
@@ -1468,6 +1546,55 @@ def _reject_reserved_elsewhere(actions: Mapping[str, _ActionPolicy], source: str
             )
 
 
+def _parse_upstream(value: object, where: str) -> UpstreamPin:
+    """SPEC-v0.10 §4.2. Refuse what the pin cannot mean, at load, where an operator is present.
+
+    A malformed pin is a `PolicyError` and never a pin that quietly matches nothing: a key whose
+    typo turns it off is the fail-open direction, and §4.5's whole point is that an unverified
+    upstream refuses rather than passes.
+    """
+    if value is None:
+        return UpstreamPin()
+    if not isinstance(value, Mapping):
+        raise PolicyError(f"{where}: 'upstream' must be a mapping")
+    unknown = set(value) - _UPSTREAM_KEYS
+    if unknown:
+        raise PolicyError(
+            f"{where}: unknown 'upstream' key(s) {sorted(unknown)!r}; the pin's keys are "
+            f"{sorted(_UPSTREAM_KEYS)!r} (SPEC-v0.10 §4.2)"
+        )
+    digests = value.get("tls_cert_sha256", [])
+    if isinstance(digests, str):
+        digests = [digests]
+    if not isinstance(digests, list) or not all(isinstance(item, str) for item in digests):
+        raise PolicyError(
+            f"{where}: 'upstream.tls_cert_sha256' must be a list of 'sha256:…' strings; it is a "
+            "LIST so an operator can carry the current and the next certificate across a "
+            "rotation without an outage (SPEC-v0.10 §4.2)"
+        )
+    for digest in digests:
+        if not _SHA256.match(digest):
+            raise PolicyError(
+                f"{where}: 'upstream.tls_cert_sha256' entry {digest!r} is not 'sha256:' "
+                "followed by 64 hex characters"
+            )
+    files = value.get("tls_cert_file", [])
+    if isinstance(files, str):
+        files = [files]
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+        raise PolicyError(f"{where}: 'upstream.tls_cert_file' must be a path or a list of paths")
+    schema_hash = value.get("tool_schema_sha256")
+    if schema_hash is not None and (
+        not isinstance(schema_hash, str) or not _SHA256.match(schema_hash)
+    ):
+        raise PolicyError(
+            f"{where}: 'upstream.tool_schema_sha256' must be 'sha256:' followed by 64 hex chars"
+        )
+    return UpstreamPin(
+        cert_sha256=tuple(digests), certs=tuple(files), tool_schema_sha256=schema_hash
+    )
+
+
 def _parse_entry(
     entry: object,
     where: str,
@@ -1511,7 +1638,14 @@ def _parse_entry(
                 f"{where}: {key!r}{_at_line(line_of(key))} needs 'schema: {POLICY_SCHEMA_V6}'; "
                 f"this document declares {schema!r}, and {consequence}"
             )
+    for key, consequence in _V8_ENTRY_KEYS.items():
+        if key in entry and not _at_least(schema, POLICY_SCHEMA_V8):
+            raise PolicyError(
+                f"{where}: {key!r}{_at_line(line_of(key))} needs 'schema: {POLICY_SCHEMA_V8}'; "
+                f"this document declares {schema!r}, and {consequence}"
+            )
     labels = _parse_data(entry.get("data"), where)
+    pin = _parse_upstream(entry.get("upstream"), where)
     ceiling = _parse_max_attempts(entry, where, line_of)
     required = _parse_approvals_required(entry, where, line_of)
 
@@ -1522,6 +1656,7 @@ def _parse_entry(
             effect=effect,
             resource=resource,
             mcp=mcp,
+            upstream=pin,
             controls=cited,
             data=MappingProxyType(labels),
             max_attempts=ceiling,
@@ -1539,6 +1674,7 @@ def _parse_entry(
         effect=effect,
         resource=resource,
         mcp=mcp,
+        upstream=pin,
         controls=cited,
         data=MappingProxyType(labels),
         max_attempts=ceiling,
