@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What the gateway needs from the StateStore. Build-list item 6a; SPEC-v0.2 §6.9.4, §6.10.
 
 The gateway itself is items 6b-6d. This is the kernel half it stands on, built first and on

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Exception hierarchy for the public API. SPEC-v0.1 §8."""
 
 

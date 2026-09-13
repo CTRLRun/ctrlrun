@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Credential revocation, consumed (SPEC-v0.8 §6).
 
 A verified token used to be valid until its `exp`, and this module ends that. It consumes

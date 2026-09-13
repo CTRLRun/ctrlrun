@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The portable documents `ctrlrun inspect --json` and `ctrlrun stats --json` produce.
 
 SPEC-mcp-operator.md §9.1. These lived in `ctrlrun/cli/main.py` until the operator MCP server

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Atomic reservation across processes. Build-list item 6; SPEC-v0.1 §5.3; T3, T12.
 
 The guarantee under test is E1: `reserve_effect` succeeds for at most one caller per effect

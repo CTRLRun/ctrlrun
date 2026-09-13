@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The LangGraph reference adapter. SPEC-v0.5 §3.5, §6, §7; T135, T135b, T137.
 
 Every test here drives a **real compiled graph with a real checkpointer**, and the round trip

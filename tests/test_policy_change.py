@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T353 to T370: a policy change is a protected action (SPEC-v0.8 §8).
 
 The policy is the one file that decides every other decision. v0.6 made a change **evidenced**;

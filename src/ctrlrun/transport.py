@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The `NotExecuted` classifier for `http.client` and `urllib`. SPEC-v0.7 §2.
 
 `v0.1 §5.5` gives an executor the one decision the kernel does not take: whether the remote side

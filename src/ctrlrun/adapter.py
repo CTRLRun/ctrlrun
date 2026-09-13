@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The adapter surface. Build-list item 2; SPEC-v0.5 §2, §3.
 
 An adapter exists for exactly one reason: **to route an `APPROVE` through a framework's own

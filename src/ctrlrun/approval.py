@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Approval requests, grants and providers. Build-list item 4; SPEC-v0.1 §4.
 
 An approval authorizes one exact action: it carries the `action_hash` of what a human saw,

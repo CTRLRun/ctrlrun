@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What the store suite reports. SPEC-v0.6 §2.2, §9.7.
 
 It differs from `ConformanceReport` in one field -- the subject is a backend rather than a
