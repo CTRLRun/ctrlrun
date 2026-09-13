@@ -537,7 +537,18 @@ class _ScopeRefusedError(Exception):
 class _ObservedRefusalError(Exception):
     """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
     swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
-    refusal, and a caller that could catch it could mistake an observed run for an enforced one."""
+    refusal, and a caller that could catch it could mistake an observed run for an enforced one.
+
+    **It carries the reason**, and an independent review is why it does. Without it
+    `_observe_secure` had one hardcoded `out_of_scope` for both refusals, so a deployment whose
+    scope *source was down* read a counterfactual saying the record was not theirs. Observe mode
+    exists to tell an operator what enforce mode would do; reporting the wrong category is the one
+    way it can be worse than useless.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 #: SPEC-v0.9 §5.6 — the two refusal reasons, distinct because a test asserting only the exception
@@ -1534,8 +1545,8 @@ class Control:
         # purpose is to refuse nothing.
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
-        except _ObservedRefusalError:
-            observation.block(OUT_OF_SCOPE)
+        except _ObservedRefusalError as would:
+            observation.block(would.reason)
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
@@ -3161,7 +3172,7 @@ class Control:
             action,
             {"reason": reason, "error": error, "observed": True},
         )
-        return _ObservedRefusalError()
+        return _ObservedRefusalError(reason)
 
     def _recheck(
         self,

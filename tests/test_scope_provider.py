@@ -332,3 +332,33 @@ def test_T398d_a_scope_refusal_writes_no_approval_event_and_one_denial(store, cl
         "a scope refusal must not fabricate an approval denial; no human was asked"
     )
     assert len(store.receipts()) == 1
+
+
+def test_T394a_observe_mode_reports_which_refusal_it_would_have_made(store, clock) -> None:
+    """An independent review found one hardcoded reason for both refusals.
+
+    A deployment whose scope *source was down* read a counterfactual saying the record was not
+    theirs. Observe mode exists to tell an operator what enforce mode would do, and reporting the
+    wrong category is the one way it can be worse than useless.
+    """
+    observing = Control(
+        policy=Policy.from_yaml(
+            POLICY.replace("environment: prod", "environment: prod\nmode: observe"),
+            source="<obs>",
+        ),
+        store=store,
+        clock=clock,
+        environment="prod",
+    )
+
+    def down(action: Action) -> dict[str, Any]:
+        raise RuntimeError("the scope service is down")
+
+    observing.execute(_action(), lambda: {"ok": True}, "read:1", scope=down)
+    denied = [event for event in store.events() if event.type.value == "ACTION_DENIED"]
+    assert denied and denied[-1].data["reason"] == "scope_unavailable", (
+        "a provider that failed must not be reported as an out-of-scope record"
+    )
+    receipt = store.receipts()[-1]
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "scope_unavailable"

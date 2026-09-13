@@ -754,28 +754,6 @@ this will meet.
   `requires-python` stays `>=3.11`, and mypy and ruff still check against 3.11. No library code
   changed; the one test fix is below.
 
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
-
 ### Changed
 
 - **An action entry may declare `max_attempts`, and a renewal over `FAILED` can now be bounded.**
@@ -1029,28 +1007,6 @@ policy or authority document — and both are listed below with what they did be
 - Restore consumed approval attribution and original attempt timing on resumed receipts,
   including across database reopenings and multiple suspension rounds.
 
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
-
 ### Changed
 
 - The README's first integration example runs end to end. It stopped at `ApprovalRequired` and
@@ -1202,28 +1158,6 @@ have recovered or retrying work nothing can.
 - **`docs/docs/postgres.md`** — the operator's page: connection strings, what to grant, what happens
   on failover, the one row every receipt write serializes on, and what the store does **not** do
   for you.
-
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
 
 ### Changed
 
@@ -1498,28 +1432,6 @@ exercise, not the two adapters, is what v0.5 is for.
   repetitions each, and the results are published. Read the `approval-mutation` column carefully:
   `executed_once` there does not mean the scenario went well.
 
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
-
 ### Changed
 
 - **`ctrlrun demo --help` said four scenarios and ran five**, stale since v0.3 added the
@@ -1591,28 +1503,6 @@ reading a coarser answer as though it answered a finer question.
   premise there was that a kit needs `pytest`; building it showed otherwise, and an extra with
   no dependency behind it is an install line that installs nothing. §12.1 records the change.
   `dependencies` is unchanged: `pyyaml` and `click`.
-
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
 
 ### Changed
 
@@ -1791,28 +1681,6 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   control names the delegation only where the parent's subject does not also match it; and
   G4's children are subprocesses rather than `multiprocessing`, which would re-import the
   caller's `__main__` in every child.
-
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
 
 ### Changed
 
@@ -2111,28 +1979,6 @@ a token rotation.
 - **The `identity` extra**, empty until build-list item 5 adds the JWT verifier and the `pyjwt`
   line it needs. `pip install ctrlrun` still installs nothing but `pyyaml` and `click`.
 
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
-
 ### Changed
 
 - **BREAKING: a condition naming `claims`, `issuer` or `expires_at` is refused at load**, in a
@@ -2350,28 +2196,6 @@ Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml
   suite, so there is nothing to be conformant with.
 - **`examples/`** — four standalone failure scenarios, an ACS integration example, and nine
   sector policy templates under `examples/policies/`.
-
-- **Scope providers** (SPEC-v0.9 §5). `Control.execute(scope=...)` and `@protect(scope=...)` take
-  a callable that answers what the calling principal's assigned scope is; **the kernel matches**
-  this action's resource into it, with the relation a grant's `resources:` already uses. It runs
-  **strictly before the reservation** and before the precondition recheck, so a provider that
-  hangs leaves nothing reserved and nothing executed. **G23** grades it.
-
-  This is the bite on an identifier an attacker chose: a grant permits `records.read` on
-  `customer:*`, and until now nothing had an opinion about *whose* record `customer:90210` is.
-
-  Two distinct refusals, never one: `scope_unavailable` when the provider raises, answers with the
-  wrong shape, or answers something the canonicalizer refuses; `out_of_scope` when it answered and
-  the resource is not covered. A non-callable `scope=` is `InvalidArgument`, at decoration time
-  under `@protect`.
-
-  Only the **hash** of what the provider returned reaches the receipt, under its own domain tag so
-  it can never equal a precondition fingerprint over the same mapping. A scope is a list of what a
-  principal may touch, and an evidence store is not the place to keep a second copy of it.
-
-  It **amends `SPEC-v0.7.md` §6.9**, which said v0.9's scope providers would configure the
-  precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
-  the three mechanical differences that justify it.
 
 ### Changed
 
