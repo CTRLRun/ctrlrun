@@ -384,3 +384,77 @@ authority:
     # becomes `ctrlrun-verify` (§3.4).
     assert receipt_agents == set()
     assert result.grant_id == "wildcards"
+
+
+# --- T413: a budget must not make verify report an internal error (SPEC-v0.9 §2) -------------
+
+TIGHT_BUDGET = """
+authority:
+  grants:
+    - id: head-of-support
+      subject: { agent: "head-of-support", user: "dana@example.com" }
+      actions: ["acme.refund", "acme.read"]
+      resources: ["payment:*"]
+      constraints: { amount_gte: 0, amount_lte: 500000 }
+      environments: ["production"]
+      expires_at: "2027-01-01T00:00:00Z"
+      budgets:
+        - {metric: amount, limit: 900, window: PT24H}
+"""
+
+
+def test_T413_a_budget_smaller_than_the_synthesized_vector_does_not_crash_verify(tmp_path):
+    """**A budget is a configuration fact, never a defect in verify.**
+
+    `_synthesize` picks a vector to land in a rule, and a grant whose budget is smaller than
+    that vector refuses the action before the guarantee is reached. Verify reported that as an
+    internal error, exit 3, on guarantees with nothing to do with budgets: a shipped example
+    carrying a €1,000 daily budget under a policy admitting a €100,000 refund made `ctrlrun
+    verify` fail on G1, which is about approvals. It is `_identity_the_document_needs`'s case in
+    the budget dimension, and it gets the same answer: verify sizes its own vector.
+
+    900 is under the allow band's 1000, so a fitting vector exists and the guarantee grades.
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + ACTIONS)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    assert result.status is Status.PASS, f"{result.status}: {result.reason}"
+
+
+def test_T413a_a_band_no_action_can_pay_for_is_N_A_with_a_reason_about_the_budget(tmp_path):
+    """The case where no vector fits, which is a real and reportable configuration.
+
+    A budget smaller than any single action in the approve band makes that band unreachable:
+    every action needing a human would exhaust the whole window. That is worth telling an
+    operator, and telling them the truth about it. Falling through to the grant miss reported
+    "no grant's `resources:` matches a resource verify can build" about a document whose
+    patterns matched perfectly, which is the category error `unselected`'s docstring exists
+    about, one dimension over.
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + ACTIONS)
+
+    result = _by_id(run(path, only=("G1",)))["G1"]
+
+    assert result.status is Status.NOT_APPLICABLE
+    assert result.reason.startswith(reg.NO_ACTION_FITS_THE_BUDGET), result.reason
+    assert "acme.refund" in result.reason and "head-of-support" in result.reason
+    # The reason names the action and the grant, because "a budget is in the way" without
+    # saying which one sends an operator reading a twelve-grant document by hand.
+
+
+def test_T413b_a_document_with_no_budget_selects_exactly_what_it_did_before(tmp_path):
+    """The vector is only resized when a budget would refuse it, so every document without one
+    keeps the selection it had. Without this, the fix is a change to all twenty-four scenarios
+    rather than to the documents that need it."""
+    unbudgeted = FULL_AUTHORITY.replace(
+        "      budgets:\n        - {metric: amount, limit: 500000, window: PT24H}\n", ""
+    )
+    both = []
+    for index, authority in enumerate((unbudgeted, FULL_AUTHORITY)):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        path = _write(directory, V7 + authority + ACTIONS)
+        result = _by_id(run(path, only=("G3",)))["G3"]
+        both.append((result.status, result.action, result.arguments, result.grant_id))
+    assert both[0] == both[1], both

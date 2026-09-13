@@ -275,6 +275,20 @@ NO_BUDGET_METRIC: Final = "no action verify can drive carries the metric the bud
 #: A document whose one permitted action cannot fit inside its own budget cannot exercise the
 #: hold. Legal, and almost always a mistake: the first action of the window exhausts it.
 BUDGET_CANNOT_BE_FILLED: Final = "one permitted action does not fit inside the grant's budget"
+
+#: SPEC-v0.9 §2, for `select`. Distinct from `NO_GRANT_COVERS_SELECTION` because they are
+#: unrelated facts and the operator's fix differs: one is a `resources:` pattern, the other is a
+#: budget smaller than every action in the band the scenario needs. Reported without it, a policy
+#: whose approve band starts above its grant's daily budget was told no grant's `resources:`
+#: matched, about a document whose patterns matched perfectly.
+NO_ACTION_FITS_THE_BUDGET: Final = (
+    "every action reaching this decision exceeds a budget on the grant that covers it"
+)
+BUDGET_MISS_NOTE: Final = (
+    "a budget smaller than any single action in the band makes that band unreachable: every "
+    "action needing it would exhaust the whole window. Raise the budget, or narrow the rule "
+    "that admits actions the budget cannot pay for (SPEC-v0.9 §2)"
+)
 #: SPEC-v0.9 §8.1, G23. A statement about the **document**, which is what §8.1's argument
 #: actually requires: it forbids an `N/A` about whether a *provider* is configured, because that
 #: is a fact about an operator's code. Whether any action this configuration admits carries a
@@ -370,6 +384,7 @@ CONTROL_FAILED: Final = "control failed"
 
 __all__ = [
     "BUDGET_CANNOT_BE_FILLED",
+    "BUDGET_MISS_NOTE",
     "BY_ID",
     "CANDIDATE_BOUND",
     "CATALOGUE",
@@ -394,6 +409,7 @@ __all__ = [
     "NO_DELEGABLE_GRANT",
     "NO_EFFECT_TEMPLATE",
     "NO_EXPIRES_AT",
+    "NO_ACTION_FITS_THE_BUDGET",
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
     "NO_RESOURCE_TO_SCOPE",

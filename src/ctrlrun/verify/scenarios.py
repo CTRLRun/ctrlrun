@@ -618,6 +618,7 @@ class Engine:
     def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
         #: Set by `select()` when the miss was on the authority axis (see `unselected`).
         self._grant_miss: str | None = None
+        self._budget_miss: str | None = None
         #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
         self._task: str | None = None
         self._loaded = loaded
@@ -790,6 +791,7 @@ class Engine:
         needs an action that declares one, and one verify can drive to the top of.
         """
         self._grant_miss = None
+        self._budget_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
@@ -868,6 +870,21 @@ class Engine:
             )
             if not grant.matches_shape(action) or not grant.constraints_hold(action):
                 continue
+            # SPEC-v0.9 §2, and `_identity_the_document_needs`'s precedent exactly: a shipped
+            # example declaring something the kernel enforces must not make `ctrlrun verify`
+            # exit 3 on guarantees that have nothing to do with it. A grant whose budget is
+            # smaller than the vector `_synthesize` picked refuses that action, and the refusal
+            # reached G1 as an internal error. Verify owns the vector, so verify sizes it.
+            fitted = self._fitted_to_budgets(name, arguments, decision, reason, grant, action)
+            if fitted is None:
+                # Recorded, for `unselected`'s reason. A bare `continue` here reported the
+                # *grant* miss below, so a policy whose approve band starts above its grant's
+                # daily budget was told no grant's `resources:` matched, about a document whose
+                # patterns matched perfectly. That is the category error `unselected`'s own
+                # docstring exists about, one dimension over.
+                self._budget_miss = f"{name} on grant {grant.id!r}"
+                continue
+            arguments, action = fitted
             try:
                 effect_key = self._effect_key(action)
             except CTRLRunError:
@@ -884,6 +901,66 @@ class Engine:
                 rule_reason=reason,
             )
             return selection
+        return None
+
+    def _fitted_to_budgets(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        decision: Decision,
+        reason: str,
+        grant: Grant,
+        action: Action,
+    ) -> tuple[dict[str, Any], Action] | None:
+        """Size verify's own action vector to the grant's budgets, or decline this candidate.
+
+        **Verify grades a guarantee, not the operator's budget sizing.** `_synthesize` picks a
+        vector to land in a rule, and a grant whose budget is smaller than that vector refuses
+        the action before the guarantee is reached: a €1,000 daily budget under a policy whose
+        `amount_lte` permits a €100,000 refund made `ctrlrun verify` report an internal error on
+        G1, which is about approvals. That is `_identity_the_document_needs`'s case in the budget
+        dimension, and it gets the same answer: verify supplies what the document needs.
+
+        The vector is only changed when a budget would refuse it, so every document without
+        budgets keeps the vector it had. A replacement must land in the **same rule** with the
+        same reason, because `select`'s contract is the decision it was asked for; the smallest
+        candidate is tried first, which leaves the most headroom for a scenario that acts more
+        than once. Where nothing fits, the candidate is declined and `select` moves on, so the
+        guarantee reports `N/A` with a true reason rather than failing a control leg.
+
+        G22 grades the budget itself, and reaches it through `select` like every other scenario:
+        a value that fits is exactly what its own "with room in the budget the action runs"
+        control leg needs.
+        """
+        budgets = grant.budgets or ()
+        if not budgets:
+            return arguments, action
+        for budget in budgets:
+            try:
+                value = _metric_value(action, budget.metric, grant.id)
+            except InvalidArgument:
+                # The action carries no value for this metric. §2.4.1 refuses that at execute
+                # with its own reason, and it is not a number verify can size.
+                return arguments, action
+            if value > budget.limit:
+                break
+        else:
+            return arguments, action
+        smallest = min(budget.limit for budget in budgets)
+        for candidate in (1, smallest // 8, smallest // 4, smallest // 2, smallest):
+            if candidate < 1:
+                continue
+            tried = {**arguments, budget.metric: candidate}
+            rebuilt = replace(action, arguments=tried)
+            evaluation = self.policy.evaluate(rebuilt)
+            if evaluation.decision is not decision or evaluation.reason != reason:
+                continue
+            if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
+                continue
+            if all(
+                _metric_value(rebuilt, each.metric, grant.id) <= each.limit for each in budgets
+            ):
+                return tried, rebuilt
         return None
 
     # --- the scratch store, and the Control every scenario drives -----------------------
@@ -1151,6 +1228,8 @@ class Engine:
         miss when it travelled beside the grant reason, which is the same category error the
         reason itself had.
         """
+        if self._budget_miss is not None:
+            return {"note": reg.BUDGET_MISS_NOTE}
         if self._grant_miss is not None:
             return {"note": reg.GRANT_RESOURCE_NOTE}
         return {} if note is None else {"note": note}
@@ -1164,6 +1243,8 @@ class Engine:
         cases is how `examples/authority/devops.yaml` came to be told "the policy lists no
         action" about a document listing five, on a run that exited 0.
         """
+        if self._budget_miss is not None:
+            return f"{reg.NO_ACTION_FITS_THE_BUDGET} ({self._budget_miss})"
         if self._grant_miss is None:
             return reason
         return f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
