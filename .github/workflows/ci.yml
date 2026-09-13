@@ -80,7 +80,16 @@ jobs:
       - name: check
         env:
           CTRLRUN_REQUIRE_RELEASE_FIXTURES: "1"
+          # Measured on one version only; the number is the same on every version, and the
+          # measuring is not free.
+          CTRLRUN_COVERAGE: ${{ matrix.python-version == '3.12' && '1' || '' }}
         run: ./scripts/check.sh
+
+      # CONTRIBUTING.md states the floors; this is what holds them. A drop below either one is
+      # a red check on the pull request that caused it, not a number somebody notices later.
+      - name: Coverage floors
+        if: matrix.python-version == '3.12'
+        run: python scripts/coverage_floor.py coverage.json --statements 90 --branches 80
 
   # SPEC-v0.4 §5, T118. The composite action, run against this repository's own
   # configurations, with `install: .` so it dogfoods the checkout rather than the last
