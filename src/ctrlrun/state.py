@@ -581,24 +581,33 @@ def check_charges(
     Pure, like `plan_reservation` and for the same reason: every store decides here rather than
     each deciding for itself, so the arithmetic is one function a test can reach directly.
 
-    **Two charges on the same `(grant_id, metric)` in one tuple are refused**, and an independent
-    review is why. Each charge is evaluated against the *stored* sum, so a sibling in the same
-    tuple is invisible to the predicate; and the idempotence key of §3.4 carries no window, so
-    `ON CONFLICT DO NOTHING` then silently drops all but the first row. Together that is a spend
-    the ledger never records. It happened to be harmless for the one shape §2.2 creates, a grant
-    with two budgets on one metric over two windows, because those carry equal amounts and want
-    exactly one row. Refusing the general case makes that a property rather than a coincidence,
-    and §2.7's per-ancestor charges are distinct grants, so nothing legitimate is refused.
+    **Every charge is evaluated, including several on one `(grant_id, metric)`.** That is §2.2's
+    own motivating shape: a grant with two budgets on `amount`, 100,000 a day and 500,000 a month,
+    is "the first thing an operator asks for", and it arrives here as two charges differing only
+    in `limit` and `window`. Both predicates run; §3.4's key then writes **one** row, which is
+    right, because it is one spend measured against two windows.
+
+    **What is refused is two charges on one `(grant_id, metric)` carrying different amounts.**
+    A charge is invisible to its sibling here (each is compared against the *stored* sum), and
+    §3.4's key carries no window, so differing amounts would collapse to whichever row landed
+    first and the ledger would under-record the spend. Nothing legitimate produces that: the
+    amount comes from the action's own metric value, so two budgets on one metric always agree,
+    and §2.7's per-ancestor charges are distinct grants.
+
+    An earlier version refused **any** duplicate pair, which made §2.2's shape die at execute
+    with no receipt: the loader accepted the document, observe mode reported it clean, and
+    `ctrlrun verify` could not grade it. An independent review found it.
     """
-    seen: set[tuple[str, str]] = set()
+    amounts: dict[tuple[str, str], int] = {}
     for charge in charges:
         key = (charge.grant_id, charge.metric)
-        if key in seen:
+        seen = amounts.setdefault(key, charge.amount)
+        if seen != charge.amount:
             raise InvalidArgument(
-                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation: the "
-                "predicate cannot see a sibling's amount and §3.4's key would drop the second row"
+                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation carry "
+                f"different amounts ({seen} and {charge.amount}); §3.4's key would keep one row "
+                "and the ledger would under-record the spend"
             )
-        seen.add(key)
     for charge in charges:
         if spent(charge) + charge.amount > charge.limit:
             raise BudgetExhaustedError(charge.grant_id, charge.metric, charge.window)
@@ -674,6 +683,7 @@ class StateStore(ApprovalStore, Protocol):
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         """Ledger rows, **in insertion order** (SPEC-v0.9 §3.3.3).
 
@@ -690,6 +700,11 @@ class StateStore(ApprovalStore, Protocol):
         **`grant_id` is optional**, because §7.3 has `stats` report the ledger's row count, and a
         required one would make that enumerate every grant id that ever existed, runtime
         delegations and revoked grants included, one call each.
+
+        **`effect_key` is what a resumed leg reads by.** §8.3 makes the resumed receipt the only
+        receipt an MCP multi round-trip or ACS action ever gets, so it has to report what that
+        action spent, and a gateway that restarted mid-round has nothing in memory to report it
+        from. Without this filter that read is a scan of the whole ledger per resumption.
         """
         ...
 
@@ -1281,12 +1296,38 @@ class InMemoryStateStore:
                 )
             )
 
+    def _release_locked(self, effect_key: str, state: EffectState, now: datetime) -> None:
+        """SPEC-v0.9 §4.1: **released exactly when the effect reaches `FAILED`**, held otherwise.
+
+        The ledger has no state machine of its own. `effect.py`'s `plan_reservation` is already
+        the complete table of exits from a reservation, and this one rule covers every row of
+        §4.2's nineteen: `COMMITTED` holds permanently, `AMBIGUOUS` holds until a human or a hook
+        moves it, a lapsed lease holds because no transition has occurred, and only `FAILED`
+        releases, because that is the one state in which the executor proved nothing happened.
+
+        **Keyed on the state reached, never on the call that reached it** (§4.2's warning): a
+        `fail_effect` that is *refused* because the record moved on releases nothing, and a
+        `resolve_effect(FAILED)` by a human releases even though no `fail_effect` ran.
+
+        A compare-and-set on `released_at`, never a decrement (§4.4): `v0.6 §4.3.2` Table A2 row 2
+        re-issues a lost `UPDATE` once, and a decrement would subtract twice.
+        """
+        if state is not EffectState.FAILED:
+            return
+        self._ledger = [
+            replace(row, released_at=now)
+            if row.effect_key == effect_key and row.released_at is None
+            else row
+            for row in self._ledger
+        ]
+
     def consumptions(
         self,
         *,
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         with self._lock:
             return tuple(
@@ -1295,6 +1336,7 @@ class InMemoryStateStore:
                 if (grant_id is None or row.grant_id == grant_id)
                 and (metric is None or row.metric == metric)
                 and (since is None or row.consumed_at >= since)
+                and (effect_key is None or row.effect_key == effect_key)
             )
 
     def begin_execution(self, effect_key: str, action_id: str) -> None:
@@ -1318,9 +1360,15 @@ class InMemoryStateStore:
     def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
         resolver = _approver(resolver)
         with self._lock:
+            now = self._clock()
             record = _resolvable(self._effects.get(effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._effects[effect_key] = resolved
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row. **This path does not go
+            # through `_transition`**, so the release has to be here too: a human resolving an
+            # `AMBIGUOUS` record `FAILED` is exactly the authority R2 says releases a hold, and
+            # without this the charge would be held for ever by the one act meant to free it.
+            self._release_locked(effect_key, state, now)
             return resolved
 
     def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
@@ -1389,6 +1437,12 @@ class InMemoryStateStore:
             self._effects[effect_key] = _transitioned(
                 record, state, now, result=result, error=error
             )
+            # SPEC-v0.9 §4.1. **This order is the atomicity**, and unlike the SQL stores there is
+            # no rollback to fall back on: `_checked` raising is what must leave the ledger
+            # untouched. Moving the release above it keys it on the *call* rather than the state
+            # reached, and a refused `fail_effect` then releases the hold on an `AMBIGUOUS`
+            # record, which is a manufacturable refund. T425 pins it.
+            self._release_locked(effect_key, state, now)
 
 
 class _HeldConnection:
@@ -2046,6 +2100,21 @@ class SQLiteStateStore:
         connection.commit()
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
+    def _release_locked(
+        self, connection: sqlite3.Connection, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so a re-issued `UPDATE` (`v0.6 §4.3.2`
+        Table A2 row 2) is a no-op rather than a second subtraction.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            "UPDATE budget_ledger SET released_at = ? WHERE effect_key = ? AND released_at IS NULL",
+            (_iso(now), effect_key),
+        )
+
     def _spent(self, connection: sqlite3.Connection, charge: Charge, now: datetime) -> int:
         """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
         row = connection.execute(
@@ -2096,6 +2165,7 @@ class SQLiteStateStore:
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -2108,6 +2178,9 @@ class SQLiteStateStore:
         if since is not None:
             clauses.append("consumed_at >= ?")
             values.append(_iso(since))
+        if effect_key is not None:
+            clauses.append("effect_key = ?")
+            values.append(effect_key)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = (
             self._connection()
@@ -2267,9 +2340,13 @@ class SQLiteStateStore:
         connection = self._connection()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            now = self._clock()
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN IMMEDIATE`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise
@@ -2313,6 +2390,10 @@ class SQLiteStateStore:
             self._write_effect(
                 connection, _transitioned(record, state, now, result=result, error=error)
             )
+            # SPEC-v0.9 §4.1, inside the same `BEGIN IMMEDIATE`: the ledger moves with the record
+            # or neither moves. A release in a second transaction could leave a `FAILED` effect
+            # holding its charge for ever if the process died between them.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise

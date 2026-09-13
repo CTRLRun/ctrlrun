@@ -637,6 +637,7 @@ def consumptions(
     grant_id: str | None = None,
     metric: str | None = None,
     since: datetime | None = None,
+    effect_key: str | None = None,
 ) -> tuple[Consumption, ...]: ...
 ```
 
@@ -644,6 +645,14 @@ def consumptions(
 observable, and a required `grant_id` would make that require enumerating every grant id that ever
 existed, runtime delegations and revoked grants included, one call each. `Consumption`'s fields are
 frozen in §10.
+
+**`effect_key` was added by item 5 and is recorded here rather than slipped in**, on §10's rule that
+anything not in that section is a spec amendment before it is code. §8.3 makes the resumed leg's
+receipt the only receipt an MCP multi round-trip or ACS action ever gets, so it has to report what
+that action spent; a gateway that restarted mid-round has nothing in memory to report it from, and
+the ledger is the record. Without the filter that read is a scan of the whole ledger per
+resumption. The other three filters could not serve: the question is "what did *this effect* spend",
+and a resumption knows its effect key and not which grants a chain of ancestors charged.
 
 **And the "why" of §7.2 is a join, not a column.** `get_effect(effect_key)` is already declared
 (`state.py:563`), so an un-released row's holding state is read by joining its `effect_key` through
@@ -824,8 +833,32 @@ this project documents is observe-then-enforce: an operator would hit a limit du
 entire purpose is to hit nothing.
 
 **What it does instead**: the observe report says the action *would have been* refused on a budget,
-naming the grant and the metric, exactly as it reports what a policy would have decided. That is
-worth more than a charge, because it is how an operator sizes a budget before turning it on.
+naming the grant and the metric, exactly as it reports what a policy would have decided. The
+predicate is `check_charges`, the same function all three stores enforce with, so the report and the
+enforcement cannot drift: a pilot that says "this would have been fine" about an action enforce mode
+refuses is worse than no pilot.
+
+§2.3's and §2.4.1's refusals are reported the same way, under their own reasons. Enforce mode
+refuses those actions, so saying so is what observe mode is for, and an operator needs to know
+whether the budget is too small or the action cannot be measured at all. Observe mode writes no
+`denied` receipt for them: it records what enforce mode would have done and refuses nothing.
+
+### 4.2.1a What observe mode cannot tell you about a budget
+
+An earlier draft of §4.2.1 ended "that is how an operator sizes a budget before turning it on."
+**That is not true, and the limit is worth stating rather than discovering.**
+
+Observe mode charges nothing, so the ledger it evaluates against is only ever filled by enforce-mode
+runs. A deployment observing *every* action has an empty ledger, every predicate passes, and the
+report says no budget would have refused anything, no matter how much the agent proposed to spend.
+The report is informative in a **mixed** deployment, where a new action is piloted in observe mode
+against a grant other actions are already enforcing, and that is the shape §4.2.1's test drives.
+
+Sizing a budget from an observed run needs the counterfactual spend, which observe mode does write:
+every `observed` receipt carries `budget_charges`, what the action *would have* been charged. Adding
+those up over a window is the sizing question, and it is a question for a reporting surface over
+receipts rather than for the kernel's hot path. The kernel's job here is the honest report of what
+enforcement would have done against the state that exists.
 
 ### 4.3 One effect key holds at most one charge at a time
 
@@ -1618,7 +1651,7 @@ third-party backend already imports `StateStore` from that module.
 | `task=` on `@protect` and `Control.execute` | nothing carries a unit of work today, and it cannot go on `Action` without moving every action hash in existence (§6.3.1) |
 | `task=` on `Authority.evaluate` | **amends a signature frozen in `SPEC-v0.3.md` §11**, and §10.3 records the amendment rather than slipping it in. `Authority.evaluate(action, *, now, store)` is frozen there; the task has to reach the decision, and `v0.7 §6.2`'s context variables are request-time stamps in `approval.py`, not inputs to an authority decision |
 | `task=` on `Control.evaluate` | **also amends a frozen signature** (`SPEC-v0.3.md` §11: "its signature and `Evaluation`'s two fields are unchanged"). Required by §6.3.2: without it `Control.evaluate` and `Control.execute` disagree about a task-bound grant, and `ctrlrun.adapter.needs_approval` routes through `evaluate` |
-| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only. Rows come back **in insertion order**, which is deterministic and identical across the three backends and is *not* a time ordering: host clock skew, which `v0.7 §3` models, inverts `consumed_at` against the id |
+| `consumptions()` on `StateStore` | §3.3.3: the surfaces and G22 need a read, and `charges=` is write-only. Rows come back **in insertion order**, which is deterministic and identical across the three backends and is *not* a time ordering: host clock skew, which `v0.7 §3` models, inverts `consumed_at` against the id. Its `effect_key` filter was added by item 5 for §8.3's resumed receipt, and §3.3.3 records why the other three could not serve |
 | `check_charges` | §3.3.1's predicate in one place, so three backends cannot drift on the arithmetic. Public for the same reason `plan_reservation` is: a third-party store decides with it rather than reimplementing it |
 | `Consumption` | what `consumptions()` returns: `grant_id`, `metric`, `amount`, `effect_key`, `attempt`, `consumed_at`, `released_at`. Frozen here because §3.3.3 returns it and §7.2 renders it, and a return type specified nowhere is a spec amendment waiting to happen |
 
@@ -1636,12 +1669,32 @@ shape is frozen here before any of them starts:
 |---|---|---|
 | `task` | item 1 | the task the action was bound to, or absent |
 | `scope_hash` | item 2 | `sha256:…` over the returned scope, never its content (§5.5) |
-| `budget_charges` | item 5 | which grants were charged, which metrics, how much |
+| `budget_charges` | item 5 | which grants were charged, which metrics, how much. On an `observed` receipt it is the counterfactual charge and not a spend (§4.2.1a), which `result` tells apart |
 
 Item 7 asserts every one of them is written by something before the release PR opens. This is
 `SPEC-v0.7.md` §12's D27 rule, which v0.8 ran for three items without incident.
 
 **`ctrlrun.guarantees/v5`** is G1 to G24, moved once by item 1 with G24 (§8).
+
+**`ctrlrun.budget/v1`**, added by **item 6** for §7.2, and recorded here rather than slipped in.
+Its own document rather than a key inside `ctrlrun.inspection/v2`, because that one answers about an
+**action** and this answers about a **grant**: a reader handed one would have to know which of two
+shapes it got before it could read either. §7.1's "no new command" is the surface question and a
+separate one, and `ctrlrun inspect --grant` keeps it.
+
+| Key | Holds |
+|---|---|
+| `grant_id` | the grant asked about, document grant or runtime delegation alike |
+| `at` | the instant the three numbers were read, because every one of them is a rolling-window answer and stale without it |
+| `budgets[].metric`, `.limit`, `.window_seconds` | the budget as declared. Seconds, for `_canonical_grant`'s reason in §10 |
+| `budgets[].consumed` | the un-released sum over the window: **the number that decides** (§3.3.1) |
+| `budgets[].held` | the part of it whose effects have not reached `COMMITTED` (§7.2) |
+| `budgets[].holding[]` | `effect_key`, `state`, `amount`, `attempt`, `consumed_at`: §7.2's "why", one entry per held charge. `state` is `null` where the effect record is gone, which §7.3's archiving paragraph permits |
+
+`ctrlrun.stats/v1` gains `ledger_rows` **additively** and does not move, per §7.3. It is omitted
+rather than reported as `0` on a store with no ledger: "no rows" and "this store predates budgets"
+are different facts, and a diagnostic that conflates them sends an operator looking for spend that
+was never possible.
 
 ### 10.3 Two frozen signatures amended, recorded as `v0.3 §11` requires
 
@@ -1744,3 +1797,168 @@ The four open questions this document hands the items are O1 to O4 in the build 
 answered here in the section that carries it: O1 in §3.3, O2 in §4.5, O3 in §5.2 and §5.7, O4 in
 §6.5. An item that finds one of those answers wrong stops and reports rather than working around it,
 because all four are load-bearing for a section rather than local to a function.
+
+### 13.0 What the milestone settled about itself
+
+**Every design claim this document made about its own code had to be probed, and the ones that were
+not were wrong about a third of the time.** Three adversarial review rounds ran against the drafted
+spec. Across them, *every citation* they made was accurate, and roughly three *design claims* per
+round were false. The same ratio held for the items' own reasoning and for the reviews of the
+finished code: the accurate half is always "this line says X", and the unreliable half is always
+"therefore Y happens at runtime".
+
+The rule the milestone adopted after the second round, and which §1's standing instructions now open
+with: **probe before you assert.** A ten-line script against the real objects settles in a minute
+what cross-module reasoning gets wrong one time in three. Almost every entry below was found by one.
+
+The second-order version of the same lesson, which cost more: a *test* asserting a runtime claim is
+itself a claim, and a green test is not evidence that the claim is load-bearing. Items 2, 4 and 5
+each shipped guards that nothing exercised, found only by mutating the source and watching the suite
+stay green. §9's mutation table is the milestone's answer, and it earned its place.
+
+### 13.1 Item 1: task-bound authority
+
+**A template that cannot resolve must be refused *inside* the recording path.** `@protect(task=
+"{run_id}")` with no such argument raised `EffectKeyError` outside every recorder: no
+`ACTION_PROPOSED`, no `ACTION_DENIED`, no `denied` receipt, and a caller holding a template error
+about an action nothing recorded. Probed rather than reasoned about, which is the entry: 0 events
+and 0 receipts before, `ACTION_PROPOSED` + `ACTION_DENIED` and one `denied` receipt after.
+
+`_resolve_effect`'s body became `_resolve_template` over either template, so the effect template and
+the task template cannot drift into recording different things for the same class of mistake. The
+same shape had been found once before on a store refusal escaping `_secure`'s except clauses, and
+`control.py`'s own comment records it; §6.3 carries the rule.
+
+### 13.2 Item 2: scope providers
+
+**Two refusals need two reasons, and observe mode is where that stops being pedantry.**
+`_ObservedRefusedError` carried no reason, so `_observe_secure` blocked with a hardcoded
+`out_of_scope` for both cases, and a deployment whose scope *source* was down read a counterfactual
+saying the record was not the principal's. Observe mode exists to tell an operator what enforce mode
+would do; reporting the wrong category is the one way it can be worse than useless. §5.6 carries the
+two reasons, and the same argument recurred one dimension over in item 5 (§13.5).
+
+**Three guards were green against a mutated kernel**, all of `CONTRIBUTING.md`'s first shape. The
+canonicalizer was removable because the shape guard refused the malformed input first and the hash
+never had to; the mapping guard was removable because a list reaches `dict()` inside the hash and
+raises there anyway; and observe mode had no scope test at all, so collapsing its two refusal paths
+into one was invisible. A subsumed branch may be kept for its message, on the condition that a test
+asserts which message it got, and those tests now do.
+
+### 13.3 Item 3: the budget in the document
+
+**§2.6's window axis was inverted in the drafted spec, and the review's exhaustive check is what
+established the right one.** 12,871 transitivity triples with zero non-transitive, and 2,515
+contained pairs against 300 simulated spend timelines each, with zero soundness violations:
+`child.window >= parent.window` is correct, because a *shorter* window is a higher rate and therefore
+more authority. The draft's `<=` would have accepted a child at 24× its parent's authority.
+
+**One corrupt delegation row could take down an entire deployment.** An oversized stored window
+raised `OverflowError` out of `Authority.evaluate`, and `_candidates` reads *every* delegation row on
+*every* evaluation, so one bad row denied nothing and crashed everything, for every principal and
+every action, with no event and no receipt to find it by. `OverflowError` was in neither except
+tuple. §2.4 carries the bound and the refusal; an unrelated principal's unrelated action now gets
+`authority_unreadable`.
+
+**`timedelta(seconds=True)` is a one-second window.** `_is_int` exists in this item precisely
+because `isinstance(True, int)`, and it guarded `limit` while `window` went through a cast one field
+away. The failure *grants* authority, and the loader refuses the same input, so it was a direct
+violation of §2.2's "the model refuses exactly what the loader refuses". A bool trap is not an edge
+case in a codebase that already wrote the guard once and stopped one field short.
+
+### 13.4 Item 4: the ledger
+
+**The charge was dropped on both lost-`COMMIT` re-issue branches, which falsified §3.3's own
+stronger bar for touching a frozen protocol.** `_resolve_lost_insert` and `_resolve_lost_renewal`
+call `_authorize_and_reserve` again after an ambiguous `COMMIT` and did not forward `charges` --
+neither resolver even took them. The retried transaction re-inserted the reservation and nothing
+else. Probed: `reserved=True charged=0`, and against a budget permitting one spend, driven ten
+times, 10 reservations and 0 ledger rows with a real spend of 1000 against a limit of 100.
+
+That is `reserved=1, charged=0`: the exact state §3.3.0's throwaway spike named as *disqualifying*
+the alternative design, reproduced inside the chosen one. §3.3's second bar is that one re-read
+resolves the reservation and the charge together, and it was not met until this was fixed.
+
+**A concurrency test without a barrier proves nothing, and the milestone learned it twice.** The
+item's own race test held 4/4 against a deliberately unlocked implementation: interpreter startup,
+importing the package, the connection and the migration check all happen before the contended work
+and vary by more than it does, so the processes ran one after another. With a `multiprocessing
+.Barrier` the unlocked version spends 2400 against a limit of 1000. A v0.7 test, T247, then flaked
+twice on CI in one session with its own guard reporting "nothing was contended" -- the same defect,
+in a test written a milestone earlier, fixed the same way.
+
+### 13.5 Item 5: consumption, holds and releases
+
+**§4.2's rule is keyed on the state *reached*, never on the call that tried to reach it**, and the
+mutation that proves it matters survived the entire suite before item 5's second review. Moving the
+release above the state check makes a *refused* `fail_effect` release the hold on an `AMBIGUOUS`
+record, which is a manufacturable refund and the thing the item exists to stop. It is also **not**
+an equivalent mutant only in the in-memory store: both SQL backends run the transition in one
+transaction and roll it back when the check raises, so there the order is redundant with the
+rollback, while the in-memory store mutates a dict under a lock and the order *is* the atomicity.
+The code says so now, because a future maintainer reading two of the three backends would conclude
+the ordering is arbitrary.
+
+**A refusal nobody can see is not a refusal.** §2.3's and §2.4.1's guards escaped as a bare
+`InvalidArgument` with no `ACTION_DENIED` and no receipt, leaving the one record an operator has of
+a refused action empty. They also ran *after* the approval gate, so a human could be asked to
+approve a refund the kernel had already decided to refuse, and a granted approval was left behind
+for an action nothing could execute. Both halves are §2.3's now; the exception type is unchanged,
+because neither is a budget running out.
+
+**A duplicate-charge guard killed §2.2's own motivating shape.** "Two budgets on one metric over two
+windows is the first thing an operator asks for", and it arrives as two charges differing only in
+`limit` and `window`. A guard refusing *any* duplicate `(grant_id, metric)` pair meant the loader
+accepted the document, observe mode reported it clean, `ctrlrun verify` could not grade it, and
+enforce mode died with no receipt at all. What the guard is actually for is two charges on one
+metric carrying **different amounts**, which §3.4's key would silently collapse. §3.3.1 carries both
+sentences.
+
+**The resumed leg was reporting a number from a context variable.** §8.3 makes that receipt the only
+one an MCP multi round-trip or ACS action ever gets, and `resume` never reset the variable: a
+restarted gateway reported no charges for an action that spent, and a gateway that had run another
+action since reported *that* action's spend. The ledger is the record, and it is read by effect key
+and attempt (§3.3.3). The test that caught the first half had to be written to run in a fresh
+`contextvars.Context`, because a test reusing the caller's context is testing the case that works.
+
+**§4.2.1 overclaimed, and the fix was to make the claim true rather than to soften it.** The draft
+said observe mode is "how an operator sizes a budget before turning it on". It is not: observe mode
+charges nothing, so a deployment observing every action has an empty ledger and the report says no
+budget would refuse anything, however much the agent proposes. §4.2.1a states that limit, and
+observed receipts now carry the counterfactual charge -- which a probe found to be an empty tuple,
+making the sizing path the section described impossible.
+
+### 13.6 Item 6: the operator surfaces
+
+**One word for two numbers makes two commands disagree.** §7.2 defines *held* as the part of the
+consumed sum whose effects have not committed, so `ctrlrun effects` says **spent** for a committed
+effect and **holds** for every other. A committed charge is never released, because a committed
+spend is a spend, and calling that a hold would have `effects` and `inspect --grant` reporting
+different things under the same word.
+
+**One document has one producer, and §7.3's row count proved it again.** Adding `ledger_rows` to
+`ctrlrun stats` in the CLI alone left the operator MCP server returning a different shape under the
+same `ctrlrun.stats/v1` name. `SPEC-mcp-operator §9.1` exists for this and its test caught it
+immediately; the count moved into `ctrlrun.reporting` beside every other shared shape.
+
+**A ledger row whose effect record is gone is reported held, not skipped.** §7.3 permits an operator
+to archive rows the window can no longer reach, so a store whose effects were pruned but whose
+ledger was not is reachable. Skipping such a row would **under**-report `held`, which is the one
+direction this view may not err in, because it is the direction that hides a hold from the person
+looking for it.
+
+### 13.7 What `ctrlrun verify` settled
+
+**A budget is a configuration fact, and never a defect in verify.** A grant whose budget is smaller
+than the vector `_synthesize` picked refuses the action before the guarantee is reached, and verify
+reported that as an internal error, exit 3, on guarantees with nothing to do with budgets. This is
+the third time the same shape has been found: a shipped example declaring `approvals_required: 2`
+did it, then one declaring an approver role did it, and both were fixed by having verify supply what
+the document needs. A budget gets the same answer, and verify now sizes its own action vector.
+
+Where no value fits, the guarantee is `N/A` -- and that needed its own reason rather than falling
+through to the grant miss, which told an operator that no grant's `resources:` matched, about a
+document whose patterns matched perfectly. A budget smaller than any single action in a band makes
+that band unreachable, which is worth saying in those words. §7.4's shipped example keeps a budget
+large enough that its own approve band is reachable, because a daily budget smaller than one
+permitted action is legal and almost always a mistake.

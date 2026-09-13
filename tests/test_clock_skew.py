@@ -490,7 +490,7 @@ class _MeasuresOnRefusal(_ExposesSkew):
     reservation meets an expired lease. Only `Control`'s wiring is under test here; the
     store-side re-measurement is T215's, against a real server."""
 
-    def reserve_effect(self, effect_key, action_id, lease=DEFAULT_LEASE):
+    def reserve_effect(self, effect_key, action_id, lease=DEFAULT_LEASE, charges=()):
         try:
             return super().reserve_effect(effect_key, action_id, lease)
         except AmbiguousEffect:

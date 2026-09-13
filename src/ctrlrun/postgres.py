@@ -1070,6 +1070,23 @@ class PostgresStateStore:
             with contextlib.suppress(Exception):
                 connection.close()
 
+    def _release_locked(
+        self, connection: Any, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so the re-issue of a lost `UPDATE`
+        (`v0.6 §4.3.2` Table A2 row 2) is a no-op rather than a second subtraction. A decrement
+        would not survive that branch, which is why §3.2's column is a nullable timestamp.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            f"UPDATE {self._q}.budget_ledger SET released_at = %s "
+            "WHERE effect_key = %s AND released_at IS NULL",
+            (now, effect_key),
+        )
+
     def _lock_budget_anchors(self, connection: Any, charges: tuple[Charge, ...]) -> None:
         """`SELECT ... FOR UPDATE` on one row per grant charged, **before** the sum (§3.6).
 
@@ -1142,6 +1159,7 @@ class PostgresStateStore:
         grant_id: str | None = None,
         metric: str | None = None,
         since: datetime | None = None,
+        effect_key: str | None = None,
     ) -> tuple[Consumption, ...]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -1154,6 +1172,9 @@ class PostgresStateStore:
         if since is not None:
             clauses.append("consumed_at >= %s")
             values.append(since)
+        if effect_key is not None:
+            clauses.append("effect_key = %s")
+            values.append(effect_key)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connection().cursor() as cursor:
             cursor.execute(
@@ -1439,6 +1460,11 @@ class PostgresStateStore:
                     ),
                 )
                 updated = cursor.rowcount
+            if updated == 1:
+                # SPEC-v0.9 §4.1, inside the same `BEGIN`: the ledger moves with the record or
+                # neither moves. Only where the compare-and-set actually took, so a transition
+                # that is about to be refused releases nothing.
+                self._release_locked(connection, effect_key, state, now)
             if updated != 1:
                 # The record changed between the read and the write. Re-plan through the same
                 # predicate rather than guessing.
@@ -1588,6 +1614,9 @@ class PostgresStateStore:
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
             resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved, record)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._rollback(connection)
             raise

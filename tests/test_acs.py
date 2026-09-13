@@ -764,3 +764,70 @@ def test_a_provider_that_names_nobody_is_still_answered_no_principal(store):
 
     assert answer["result"]["reason_codes"] == ["no_principal"]
     assert store.receipts() == ()
+
+
+# --- SPEC-v0.9 §2.3 at the ACS boundary: a denial, never a malformed-envelope error ---------
+
+
+def _budgeted_authority(metric="units"):
+    from ctrlrun import Authority
+
+    return Authority.from_yaml(
+        "schema: ctrlrun.policy/v7\n"
+        "authority:\n"
+        "  grants:\n"
+        "    - id: g\n"
+        '      subject: { agent: "verified-agent" }\n'
+        '      actions: ["**"]\n'
+        "      budgets:\n"
+        f"        - {{ metric: {metric}, limit: 100, window: PT24H }}\n",
+        standalone=True,
+    )
+
+
+@pytest.mark.authority
+def test_an_unmeasurable_budget_is_denied_and_not_called_a_malformed_envelope(store):
+    """**An ACS answer and the evidence may not disagree about the same action.**
+
+    §2.3's refusal is an `InvalidArgument`, and `handle`'s clause for those answers
+    `-32002 malformed envelope` with the comment "a malformed payload is not a decision about an
+    action: there is no action". For this refusal there *is* an action: the kernel has written
+    `ACTION_DENIED` and a `denied` receipt for it. An independent review found the two
+    disagreeing.
+
+    An error envelope tells the platform the Guardian could not answer, which it may act on
+    however it likes. A `deny` tells it what CTRLRun means, which is that the tool must not run.
+    The `IdentityError` clause immediately below states this rule for its own case.
+    """
+    from ctrlrun import HeaderIdentityProvider
+
+    control = Control(Policy.from_yaml(POLICY), store, authority=_budgeted_authority())
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+
+    answer = hook.handle(_call(amount=200), headers={"X-Agent": "verified-agent"})
+
+    assert "error" not in answer, answer
+    assert answer["result"]["decision"] == "deny", answer
+    assert answer["result"]["reason_codes"] == ["budget_unmeasurable"], answer
+    # And the evidence says the same thing about the same action.
+    assert [str(event.type) for event in store.events()][-1] == "ACTION_DENIED"
+    assert store.receipts()[-1].decision_reason == "budget_unmeasurable"
+
+
+@pytest.mark.authority
+def test_a_genuinely_malformed_envelope_is_still_a_protocol_error(store):
+    """The control. Narrowing the clause must not turn a real protocol fault into a decision:
+    there really is no action there, and answering `deny` would claim the kernel decided one."""
+    control = Control(Policy.from_yaml(POLICY), store, authority=_budgeted_authority())
+    from ctrlrun import HeaderIdentityProvider
+
+    hook = AcsControlHook(
+        control, prefix="acs", identity=HeaderIdentityProvider(agent_header="X-Agent")
+    )
+
+    answer = hook.handle({"jsonrpc": "2.0", "id": 1, "method": "nope"}, headers={})
+
+    assert "error" in answer, answer
+    assert store.receipts() == ()

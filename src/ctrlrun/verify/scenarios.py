@@ -61,9 +61,17 @@ from ..authority import (
     Authority,
     Grant,
     Subject,
+    _metric_value,
     contained_dimension,
 )
-from ..control import SCOPE_UNAVAILABLE, Control, context, idempotency_token, protect
+from ..control import (
+    BUDGET_EXHAUSTED,
+    SCOPE_UNAVAILABLE,
+    Control,
+    context,
+    idempotency_token,
+    protect,
+)
 from ..effect import (
     EffectRecord,
     EffectState,
@@ -610,6 +618,10 @@ class Engine:
     def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
         #: Set by `select()` when the miss was on the authority axis (see `unselected`).
         self._grant_miss: str | None = None
+        self._budget_miss: str | None = None
+        self._metric_miss: str | None = None
+        self._unmeasurable = False
+        self._declined_on_budget = False
         #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
         self._task: str | None = None
         self._loaded = loaded
@@ -782,6 +794,8 @@ class Engine:
         needs an action that declares one, and one verify can drive to the top of.
         """
         self._grant_miss = None
+        self._budget_miss = None
+        self._metric_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
@@ -807,6 +821,7 @@ class Engine:
                 if synthesized is None:
                     continue
                 arguments, reason = synthesized
+                self._declined_on_budget = False
                 selection = self._bind(name, arguments, decision, reason, grant_filter)
                 if selection is not None:
                     return selection
@@ -814,7 +829,12 @@ class Engine:
                 # caller's N/A reason can say so: a bare `None` here is indistinguishable from
                 # "no action reaches this decision", and every scenario used to resolve that
                 # ambiguity by asserting its own hardcoded sentence about the policy.
-                self._grant_miss = self._resource(name, arguments)
+                #
+                # **Unless a grant did cover it and its budget is what declined.** Recording a
+                # resource miss there put a sentence in the report that is false of the document:
+                # the pattern matched perfectly and the budget was the whole reason.
+                if not self._declined_on_budget:
+                    self._grant_miss = self._resource(name, arguments)
         return None
 
     def _bind(
@@ -860,6 +880,26 @@ class Engine:
             )
             if not grant.matches_shape(action) or not grant.constraints_hold(action):
                 continue
+            # SPEC-v0.9 §2, and `_identity_the_document_needs`'s precedent exactly: a shipped
+            # example declaring something the kernel enforces must not make `ctrlrun verify`
+            # exit 3 on guarantees that have nothing to do with it. A grant whose budget is
+            # smaller than the vector `_synthesize` picked refuses that action, and the refusal
+            # reached G1 as an internal error. Verify owns the vector, so verify sizes it.
+            self._unmeasurable = False
+            fitted = self._fitted_to_budgets(name, arguments, decision, reason, grant, action)
+            if fitted is None:
+                # Recorded, for `unselected`'s reason. A bare `continue` here reported the
+                # *grant* miss below, so a policy whose approve band starts above its grant's
+                # daily budget was told no grant's `resources:` matched, about a document whose
+                # patterns matched perfectly. That is the category error `unselected`'s own
+                # docstring exists about, one dimension over.
+                self._declined_on_budget = True
+                if self._unmeasurable:
+                    self._metric_miss = f"{name} on grant {grant.id!r}"
+                else:
+                    self._budget_miss = f"{name} on grant {grant.id!r}"
+                continue
+            arguments, action = fitted
             try:
                 effect_key = self._effect_key(action)
             except CTRLRunError:
@@ -876,6 +916,125 @@ class Engine:
                 rule_reason=reason,
             )
             return selection
+        return None
+
+    def _deciding_grant(self, action: Action) -> Grant | None:
+        """The grant `Authority.evaluate` would resolve for this action, by its own rule.
+
+        **`min(passed, key=_by_grant_id)`**, which is why this exists rather than trusting the
+        grant `_bind` happens to be iterating. An independent review found the consequence: a
+        vector resized to fit one grant's budget can fall inside a *different*, lexicographically
+        earlier grant's `constraints`, and that grant's budget was never checked. Its document
+        had `aa-narrow` at `amount_lte: 10` with `limit: 0` and `bb-broad` at
+        `amount_lte: 500000` with `limit: 900`; the resize from 100000 to 1 moved the action from
+        `bb-broad` to `aa-narrow`, and `ctrlrun verify` exited 3 on a budget it never looked at.
+
+        Document grants only, which is what `_bind` iterates: a scenario's authority comes from
+        the operator's file, and no delegation exists in a store verify has not created yet.
+        """
+        if self.authority is None:
+            return None
+        for grant_id in sorted(self.authority.grants):
+            grant = self.authority.grants[grant_id]
+            if grant.matches_shape(action) and grant.constraints_hold(action):
+                return grant
+        return None
+
+    #: How many spends of the chosen vector a scenario may take. G4's control leg runs
+    #: `PROCESSES` children on distinct keys and then contends `PROCESSES` more on one key, so
+    #: nine of them land; the margin above that is for every other scenario that acts twice.
+    _BUDGET_HEADROOM: Final = reg.PROCESSES * 2 + 2
+
+    def _fits_budgets(self, grant: Grant, action: Action, *, room: int = 1) -> bool | None:
+        """Whether every budget on this grant admits `room` spends of this action.
+
+        `None` is its own answer and not a `False`: a grant budgeting a metric the action does
+        not carry refuses **every** action it covers, for ever, and that is a fact about the
+        operator's document rather than a vector verify can size around. Returning `True` there
+        is what made `ctrlrun verify` exit 3 on §2.3's refusal instead of grading it.
+
+        **`room` is why a vector that fits can still be the wrong one.** A scenario acts more
+        than once, and a band with a *floor* cannot be shrunk below it: `amount_gte: 200` against
+        a budget of 900 leaves the synthesized vector untouched, because 200 fits, and then G4
+        reports FAIL because nine spends of 200 do not. Verify may say it could not grade a
+        configuration; it may not report the kernel broken.
+        """
+        for budget in grant.budgets or ():
+            try:
+                value = _metric_value(action, budget.metric, grant.id)
+            except InvalidArgument:
+                return None
+            if value * room > budget.limit:
+                return False
+        return True
+
+    def _fitted_to_budgets(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        decision: Decision,
+        reason: str,
+        grant: Grant,
+        action: Action,
+    ) -> tuple[dict[str, Any], Action] | None:
+        """Size verify's own action vector to the budgets that will actually decide it.
+
+        **Verify grades a guarantee, not the operator's budget sizing.** `_synthesize` picks a
+        vector to land in a rule, and a grant whose budget is smaller than that vector refuses
+        the action before the guarantee is reached: a EUR 1,000 daily budget under a policy whose
+        `amount_lte` permits a EUR 100,000 refund made `ctrlrun verify` report an internal error
+        on G1, which is about approvals. That is `_identity_the_document_needs`'s case in the
+        budget dimension, and it gets the same answer: verify supplies what the document needs.
+
+        Every candidate is checked against **the grant that would decide it**, not the grant the
+        caller is holding, because a resize can move the action between grants. The vector is
+        only changed when a budget would refuse it, so every document without budgets keeps the
+        vector it had, and a replacement must land in the same rule with the same reason because
+        `select`'s contract is the decision it was asked for.
+
+        Where nothing fits, the candidate is declined and `select` moves on, so the guarantee
+        reports `N/A` with a true reason rather than failing a control leg.
+        """
+        deciding = self._deciding_grant(action) or grant
+        verdict = self._fits_budgets(deciding, action, room=self._BUDGET_HEADROOM)
+        if verdict is True:
+            return arguments, action
+        if verdict is None:
+            # Unmeasurable: no vector helps, because the metric is absent from the action's whole
+            # shape rather than too large in this one. The caller needs to tell the two apart,
+            # because raising a limit fixes one and nothing about the other.
+            self._unmeasurable = True
+            return None
+        limits = [budget.limit for budget in (deciding.budgets or ()) if budget.limit > 0]
+        smallest = min(limits) if limits else 0
+        metric = next(iter(deciding.budgets or ())).metric
+        # **Room for a scenario that acts more than once**, not for one action. G4's control leg
+        # alone runs `PROCESSES` children on distinct keys and then contends `PROCESSES` more on
+        # one, so it needs nine spends to fit; a vector sized to `limit` exactly made its control
+        # leg pass, its contended leg find zero winners, and the guarantee report **FAIL** -- the
+        # status that means the kernel is broken -- for a budget that was merely small. Verify
+        # may say it could not grade a configuration; it may not accuse the kernel of a defect.
+        headroom = self._BUDGET_HEADROOM
+        for candidate in (1, smallest // headroom, smallest // 8, smallest // 4, smallest // 2):
+            if candidate < 1:
+                continue
+            tried = {**arguments, metric: candidate}
+            rebuilt = replace(action, arguments=tried)
+            evaluation = self.policy.evaluate(rebuilt)
+            if evaluation.decision is not decision or evaluation.reason != reason:
+                continue
+            # **Re-resolved, and it must settle on the same grant.** A resize can move the
+            # action between grants, and `_bind` is building a selection that names *this* one:
+            # a vector graded against a different grant's budget would report the wrong grant in
+            # the result and check a budget nobody will apply. Requiring the same grant subsumes
+            # re-checking its shape and constraints, because `_deciding_grant` only returns a
+            # grant that matched both.
+            settled = self._deciding_grant(rebuilt)
+            if settled is None or settled.id != grant.id:
+                continue
+            if self._fits_budgets(settled, rebuilt, room=headroom) is not True:
+                continue
+            return tried, rebuilt
         return None
 
     # --- the scratch store, and the Control every scenario drives -----------------------
@@ -1143,6 +1302,8 @@ class Engine:
         miss when it travelled beside the grant reason, which is the same category error the
         reason itself had.
         """
+        if self._budget_miss is not None or self._metric_miss is not None:
+            return {"note": reg.BUDGET_MISS_NOTE}
         if self._grant_miss is not None:
             return {"note": reg.GRANT_RESOURCE_NOTE}
         return {} if note is None else {"note": note}
@@ -1156,9 +1317,26 @@ class Engine:
         cases is how `examples/authority/devops.yaml` came to be told "the policy lists no
         action" about a document listing five, on a run that exited 0.
         """
-        if self._grant_miss is None:
+        # **Every miss that is true, not the first one found.** An independent review found the
+        # budget miss taking unconditional precedence while `select` records a grant miss for
+        # every failed candidate, so a document with one budget-blocked action and one no grant
+        # covers at all reported only the budget, and the resource miss appeared nowhere. That is
+        # the category error this docstring is about, one dimension over.
+        found = [
+            f"{reg.NO_METRIC_TO_MEASURE} ({self._metric_miss})"
+            if self._metric_miss is not None
+            else None,
+            f"{reg.NO_ACTION_FITS_THE_BUDGET} ({self._budget_miss})"
+            if self._budget_miss is not None
+            else None,
+            f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+            if self._grant_miss is not None
+            else None,
+        ]
+        stated = [line for line in found if line is not None]
+        if not stated:
             return reason
-        return f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+        return "; and ".join(stated)
 
     def na(self, gid: str, reason: str, **detail: Any) -> GuaranteeResult:
         """`not_applicable`, with the reason that made it so (§1, §2.1).
@@ -3700,6 +3878,136 @@ class Engine:
 
         try:
             return self.graded("G21", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G22: a budget held by ambiguity refuses the next reserve --------------------------
+
+    def g22(self) -> GuaranteeResult:
+        """SPEC-v0.9 §4.1, §8. **R2: ambiguity is not a refund.**
+
+        The half that matters is the hold. An `AMBIGUOUS` effect keeps its consumption until a
+        human or a hook resolves it, because otherwise an agent that can generate ambiguity can
+        generate authority, and generating ambiguity is free for any flaky integration. That is
+        the correctness hole that parked budgets for four milestones.
+
+        Both halves, `v0.4 §1.3`: the budget spends while it has room, and refuses once a held
+        charge fills it. And the release: `FAILED` gives the room back, which is the other half of
+        §4.1's single rule and the thing a kernel that simply never released would fail.
+        """
+        if self.authority is None:
+            return self.na("G22", reg.NO_AUTHORITY_SECTION)
+        budgeted = [
+            grant_id
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].budgets
+        ]
+        if not budgeted:
+            return self.na("G22", reg.NO_BUDGET)
+        selection = self.select(needs_effect=True, grant_filter=lambda g: g.id == budgeted[0])
+        if selection is None:
+            return self.na("G22", self.unselected(reg.NO_EFFECT_TEMPLATE))
+        grant = self.authority.grants[budgeted[0]]
+        budget = (grant.budgets or ())[0]
+        # Decided **before** the scenario is built, so a document that cannot exercise the hold
+        # reports `N/A` with a reason that is true of it rather than failing a control leg.
+        try:
+            per_action = _metric_value(selection.build(), budget.metric, budgeted[0])
+        except InvalidArgument:
+            return self.na("G22", reg.NO_BUDGET_METRIC)
+        if per_action == 0:
+            # **The selected action spends nothing, which grades nothing.** `select` picks the
+            # first rule a document admits, and a band beginning at zero gives an amount of zero,
+            # so the budget would never move and every assertion below would pass against a
+            # kernel that does not charge at all. Nudged to the smallest spend the same rule
+            # admits, which keeps the decision and the resource verify already validated.
+            selection = replace(
+                selection, arguments={**dict(selection.arguments), budget.metric: 1}
+            )
+            try:
+                per_action = _metric_value(selection.build(), budget.metric, budgeted[0])
+            except InvalidArgument:
+                return self.na("G22", reg.NO_BUDGET_METRIC)
+        if per_action <= 0 or per_action > budget.limit:
+            return self.na("G22", reg.BUDGET_CANNOT_BE_FILLED)
+        control, store, recorder, _ = self._control_for("G22", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = budgeted[0]
+            detail["metric"] = budget.metric
+            detail["limit"] = budget.limit
+            detail["per_action"] = per_action
+            action = selection.build()
+            charges = control._charges_for(action, selection.effect_key)
+
+            # The control: with room, it runs.
+            executor = _Executor()
+            receipt = self.execute(
+                control,
+                action,
+                executor,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and executor.calls == 1,
+                "with room in the budget the action runs",
+                f"it ended {receipt.result} after {executor.calls} executor calls",
+            )
+
+            # **One held charge for the rest of the budget**, then `AMBIGUOUS`: the state R2 is
+            # about, where nobody has said whether it happened. One reservation rather than a
+            # loop, so the scenario costs the same on a budget of 500 and one of 500,000,000; the
+            # property is the hold, not the arithmetic of filling.
+            held_key = f"{selection.effect_key}-{reg.SYNTHETIC_PREFIX}-held"
+            held_action = f"act_{reg.SYNTHETIC_PREFIX}held"
+            store.reserve_effect(
+                held_key,
+                held_action,
+                _ONE_HOUR,
+                tuple(replace(charge, amount=charge.limit - per_action) for charge in charges),
+            )
+            store.mark_ambiguous(held_key, held_action, "the outcome is unknown")
+            detail["held"] = budget.limit - per_action
+
+            later = selection.build()
+            blocked = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(control, later, blocked, f"{selection.effect_key}-next", None),
+                (ActionDenied,),
+                "ActionDenied(reason='budget_exhausted') once the budget is held",
+                "the action ran with the budget held by an unresolved effect",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == BUDGET_EXHAUSTED,
+                "ActionDenied(reason='budget_exhausted')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                blocked.calls == 0,
+                "the executor is not reached once the budget is held",
+                f"the executor was called {blocked.calls} times",
+            )
+
+            # And §4.1's other half: `FAILED` gives the room back. A kernel that never released
+            # would pass everything above.
+            #
+            # Through `resolve_effect`, which is §4.2's own row for this: the record is
+            # `AMBIGUOUS`, and `v0.1 §5.2` makes a human the only authority that moves it. That
+            # is also the shape an operator actually meets, `ctrlrun resolve`.
+            store.resolve_effect(held_key, EffectState.FAILED, "ctrlrun-verify")
+            after = _Executor()
+            freed = selection.build()
+            receipt = self.execute(control, freed, after, f"{selection.effect_key}-freed", None)
+            _expect(
+                receipt.result is ReceiptResult.COMMITTED and after.calls == 1,
+                "a `FAILED` effect releases its charge and the budget spends again",
+                f"it ended {receipt.result} after {after.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G22", selection, store, recorder, body)
         finally:
             store.close()
 

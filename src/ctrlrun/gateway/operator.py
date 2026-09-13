@@ -51,7 +51,15 @@ from ..identity import (
     IdentityProvider,
 )
 from ..receipt import Event, EventType, iso_timestamp
-from ..reporting import effect_document, inspection_for, since_boundary, stats_document
+from ..reporting import (
+    effect_document,
+    inspection_for,
+    since_boundary,
+    stats_document,
+)
+from ..reporting import (
+    ledger_rows as _ledger_rows,
+)
 from ..state import RESOLUTIONS, StateStore
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
 from .wire import (
@@ -807,8 +815,15 @@ class OperatorServer:
             for receipt in self.store.receipts()
             if boundary is None or receipt.finished_at >= boundary
         ]
-        # §9.1 — one producer for `ctrlrun.stats/v1`. T193 asserts equality with the CLI's.
-        return stats_document(counted, mode=self._control.policy.mode, boundary=boundary)
+        # §9.1 — one producer for `ctrlrun.stats/v1`. T193 asserts equality with the CLI's, and
+        # SPEC-v0.9 §7.3's row count is part of that document: a key the CLI reports and this
+        # does not is two documents under one schema name, which is what §9.1 exists to stop.
+        return stats_document(
+            counted,
+            mode=self._control.policy.mode,
+            boundary=boundary,
+            ledger_rows=_ledger_rows(self.store),
+        )
 
     # --- the write tools (§4.5) -----------------------------------------------------------
 

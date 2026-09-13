@@ -124,7 +124,14 @@ from .receipt import (
     iso_timestamp,
     new_receipt_id,
 )
-from .state import ClockSkew, SQLiteStateStore, StateStore
+from .state import (
+    BudgetExhaustedError,
+    Charge,
+    ClockSkew,
+    SQLiteStateStore,
+    StateStore,
+    check_charges,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -219,6 +226,14 @@ _TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
 #: beside it: a refusal whose receipt carried the previous action's scope would be the same
 #: stale-evidence defect on a new field.
 _SCOPE_HASH: ContextVar[str | None] = ContextVar("ctrlrun_scope_hash")
+#: SPEC-v0.9 §2.7 — the authority decision this action was allowed by, so `_secure` can assemble
+#: the charges without re-walking the chain. Set beside `_AUTHORITY_GRANT_ID` and reset with it,
+#: for the stale-evidence reason that field's own comment gives.
+_AUTHORITY_RESULT: ContextVar[AuthorityResult | None] = ContextVar("ctrlrun_authority_result")
+#: SPEC-v0.9 §10.1 — what this action charged, for the receipt. Set where the charges are
+#: assembled and reset beside the other two, for the stale-evidence reason `_AUTHORITY_GRANT_ID`'s
+#: own comment gives.
+_BUDGET_CHARGES: ContextVar[tuple[Mapping[str, Any], ...]] = ContextVar("ctrlrun_budget_charges")
 
 #: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
 #: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
@@ -534,6 +549,31 @@ class _ScopeRefusedError(Exception):
         self.denial = denial
 
 
+class _UnmeasurableError(InvalidArgument):
+    """SPEC-v0.9 §2.3 and §2.4.1's refusal, **carrying its reason to a protocol boundary**.
+
+    An `InvalidArgument` subclass and not a new type, because §2.3 pins that exception and a
+    caller's `except InvalidArgument` must keep working. What it adds is `reason`, which the
+    boundaries need and could not get from a message.
+
+    An independent review found why that matters. `gateway/server.py`'s `_through_control`
+    catches eight exception types and not `InvalidArgument`, so this refusal raised out of the
+    request handler and the **socket closed with no response** -- the one failure that file's own
+    comment calls the thing this library exists to prevent. And `acs.py` answered
+    `-32002 malformed envelope`, whose comment reads "there is no action", for an action it had
+    just written an `ACTION_DENIED` and a `denied` receipt for; the `IdentityError` clause
+    directly below it states the rule that breaks, that an answer and the evidence may not
+    disagree about the same action.
+
+    `_refuse_unmeasurable` has already written the events and the receipt, so this carries only
+    what a boundary needs to answer with.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class _ObservedRefusalError(Exception):
     """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
     swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
@@ -554,6 +594,18 @@ class _ObservedRefusalError(Exception):
 #: SPEC-v0.9 §5.6 — the two refusal reasons, distinct because a test asserting only the exception
 #: type cannot tell which guard fired. `scope_unavailable` is "the provider could not answer";
 #: `out_of_scope` is "it answered, and the record is not this principal's". G23 is the first.
+#: SPEC-v0.9 §4.5 — its own reason, because an exhausted budget, an out-of-scope record and a
+#: failing scope provider all deny the same action with the same exception type.
+BUDGET_EXHAUSTED: Final = "budget_exhausted"
+
+#: SPEC-v0.9 §2.3 and §2.4.1 refuse before anything is charged, and an independent review found
+#: both escaping as a bare `InvalidArgument`: no `ACTION_DENIED`, no receipt, nothing in the one
+#: record an operator has of a refused action. They keep that exception type, because neither is
+#: a budget running out, but they are refusals and they are recorded as refusals. Two reasons
+#: rather than one: an operator who declared a budget on an action with no `effect:` template has
+#: a different thing to fix than one whose agent proposed a negative amount.
+BUDGET_UNMEASURABLE: Final = "budget_unmeasurable"
+BUDGET_UNKEYED: Final = "budget_unkeyed"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
 
@@ -912,6 +964,7 @@ class Control:
         _TASK.set(task)
         if self._authority is None:
             _AUTHORITY_GRANT_ID.set(None)
+            _AUTHORITY_RESULT.set(None)
             return None
         result = self._authority.evaluate(
             action,
@@ -924,6 +977,7 @@ class Control:
         # is the only thing this field is read on. §4.6's `min` already picked which grant of
         # several decided, so this is that decision and not a guess about it.
         _AUTHORITY_GRANT_ID.set(result.grant_id if result.passed else None)
+        _AUTHORITY_RESULT.set(result if result.passed else None)
         return result
 
     def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
@@ -1165,11 +1219,13 @@ class Control:
         # a copy of the context at creation, so a task started after a break-glass action
         # carried that id into an unrelated refusal too.
         _AUTHORITY_GRANT_ID.set(None)
+        _AUTHORITY_RESULT.set(None)
         # SPEC-v0.9 §6.3.1 — reset beside it, for the reason the comment above gives about a
         # stale grant id: a refusal whose receipt carried the previous action's task would be the
         # same defect on a new field.
         _TASK.set(None)
         _SCOPE_HASH.set(None)
+        _BUDGET_CHARGES.set(())
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -1543,10 +1599,20 @@ class Control:
         # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
         # enforces, and a check that enforced here would refuse during the phase whose entire
         # purpose is to refuse nothing.
+        # SPEC-v0.9 §4.2.1 — **above the scope check, because `_secure` computes charges before
+        # calling `_in_scope`.** An action that is both out of scope and unmeasurable was refused
+        # `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. T458.
+        charges = self._observe_charges(action, effect_key, observation)
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
         except _ObservedRefusalError as would:
             observation.block(would.reason)
+        # The charges above were computed before the scope check, where `_secure` computes them:
+        # §2.3's and §2.4.1's refusals do not depend on anything the approval gate produces and
+        # are unconditional, so T446 moved them above it in enforce mode; observe mode's copy
+        # stayed below and told a pilot a human would have been asked about an action enforce
+        # refuses before anybody is asked. That is T446's own defect on the other side of the
+        # mode switch, and an independent review found it. T451.
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
@@ -1627,6 +1693,13 @@ class Control:
                 effect_key,
                 approval=approval,
             )
+        # SPEC-v0.9 §4.2.1 — **below the take, because the store decides in that order.**
+        # `plan_reservation` runs before `check_charges` (§3.3), so an effect that is already
+        # committed raises `DuplicateEffect` and the budget is never consulted. Reporting the
+        # budget first told an operator to raise a limit when the real answer was that the effect
+        # had already happened. The clauses above have returned by now on every refusal enforce
+        # mode would have hit first, so what reaches here is what the budget would decide. T452.
+        self._observe_spend(action, charges, observation)
         return approval, reservation
 
     def _observe_take(
@@ -1724,6 +1797,17 @@ class Control:
         held = self._store.take_continuation(continuation)
         action = held.action
         started_at, approval, compared = self._resumed_context(action, held.record.created_at)
+        # SPEC-v0.9 §10.1, read from the **ledger** rather than from the contextvar. §8.3 makes
+        # this the only receipt an MCP multi round-trip or ACS action ever gets, so it has to
+        # report what the action spent, and the two ways to get that wrong are both live: a
+        # gateway that restarted mid-round has an empty contextvar and would report no charges
+        # for an action that spent, and a gateway that ran another action in this context since
+        # the suspension would report *that* action's spend. The ledger is the record; the first
+        # leg wrote it inside the reservation's own transaction. T447, T448.
+        # In observe mode the ledger is empty by design, so it is recomputed below, after the
+        # authority result this needs exists. §4.2.1a, T457.
+        if not self._observing:
+            self._resumed_charges(held.effect_key, held.record.attempt)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -1756,6 +1840,16 @@ class Control:
                 EventType.AUTHORITY_DENIED, action, self._authority_data(result), held.effect_key
             )
             evaluation = Evaluation(Decision.DENY, result.reason)
+        if self._observing:
+            # SPEC-v0.9 §4.2.1a — **the counterfactual, recomputed.** Observe mode charges
+            # nothing, so the ledger read above has nothing to find, and §8.3 makes this the only
+            # receipt an MCP multi round-trip or ACS action ever gets. Without this, §4.2.1a's
+            # sizing sum silently under-counts exactly the deployments §8.3 is about, which is an
+            # independent review's finding and a contradiction between two sections of the spec.
+            #
+            # Enforce mode keeps the ledger read: there the row is evidence of a spend that
+            # happened, and a recomputed number would be a claim about it instead.
+            self._observe_charges(action, held.effect_key, _Observation())
         # SPEC-v0.3 §6.3 — a resumption in observe mode gets the same `observed` receipt its
         # first leg did. It is the *only* receipt an MCP multi round-trip ever gets (§8.3), so
         # a resumed leg reporting `committed` under a mode that enforces nothing would put the
@@ -2207,6 +2301,20 @@ class Control:
         may take twice, once more after a `reconcile` hook moves an `AMBIGUOUS` record, and the
         hook is a network call whose duration would otherwise sit inside the window.
         """
+        # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
+        # reconcile between them cannot change what this action spends.
+        #
+        # **Before the keyless early return below**, because §2.4.1's refusal is exactly about an
+        # action that reaches it: a budgeted grant whose action resolved no effect key spends
+        # nothing against every budget on the chain, for ever, and returning early would be the
+        # kernel declining to notice.
+        #
+        # **And before the approval gate**, because §2.3's and §2.4.1's refusals depend on nothing
+        # the gate produces and are unconditional: the action cannot run whatever a human says.
+        # Assembling after the gate asks a human to approve a refund the kernel has already
+        # decided to refuse, and leaves a granted approval behind for an action nothing can
+        # execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape. T446.
+        charges = self._charges_for(action, effect_key)
         approval_id = (
             self._presented(action, effect_key, evaluation, started_at, preconditions)
             if evaluation.decision is Decision.APPROVE
@@ -2242,8 +2350,31 @@ class Control:
                     # inserted here widens it, and a later item adding a check on this path
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
-                approval, reservation = self._take(action, approval_id, effect_key, lease)
+                approval, reservation = self._take(action, approval_id, effect_key, lease, charges)
+                # SPEC-v0.9 §10.1 — **after the store call took**, and an independent review is
+                # why. Set where the charges were computed, a refusal raised later in this loop
+                # still reached `_record` with them stamped, so a `denied` receipt claimed the
+                # action charged the very grant it was refused from spending against. A receipt
+                # asserting a spend that never happened is the one thing an evidence trail may
+                # not do.
+                _BUDGET_CHARGES.set(
+                    tuple(
+                        {
+                            "grant_id": charge.grant_id,
+                            "metric": charge.metric,
+                            "amount": charge.amount,
+                        }
+                        for charge in charges
+                    )
+                )
                 break
+            except BudgetExhaustedError as exhausted:
+                # SPEC-v0.9 §3.3.2 — **its own clause, before the `ActionDenied` one**, for the
+                # reason item 2 met first with the scope refusal: that handler appends
+                # `APPROVAL_DENIED` unconditionally, which would fabricate an approval denial for
+                # an action no human ever saw. An exception raised inside an `except` clause
+                # leaves the whole `try` rather than meeting its siblings.
+                raise self._refuse_budget(action, exhausted) from None
             except _ScopeRefusedError as refused:
                 # SPEC-v0.9 §5.6. Its own clause, **before** the `ActionDenied` one:
                 # `_refuse_scope` has already written the events and the receipt, and an
@@ -3143,6 +3274,225 @@ class Control:
         ):
             raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
 
+    def _charges_for(
+        self,
+        action: Action,
+        effect_key: str | None,
+        observation: _Observation | None = None,
+    ) -> tuple[Charge, ...]:
+        """What this action spends, one `Charge` per ancestor (SPEC-v0.9 §2.7).
+
+        **And §2.4.1's refusal, here, because this is where the effect key is finally known.**
+        A budgeted grant that reaches an action whose key resolved to `None` is refused: without
+        it an agent proposes actions carrying no `effect:` template and spends nothing against
+        every budget on the chain, for ever, which is the feature's own sharp case answered by
+        declining to play. §2.4.1 records the two probes that moved this out of the loader: a
+        loader cannot see a decorator-supplied `effect=`, and cannot run at all on the
+        standalone-authority path.
+        """
+        if self._authority is None:
+            return ()
+        result = _AUTHORITY_RESULT.get(None)
+        if result is None:
+            return ()
+        try:
+            charges = self._authority._charges_for(action, result, store=self._store)
+        except InvalidArgument as unmeasurable:
+            # §2.3. The kernel cannot measure what this action spends, so it cannot hold the
+            # grant to its budget, so it declines to run it. Recorded before it is re-raised.
+            raise self._refuse_unmeasurable(
+                action, BUDGET_UNMEASURABLE, unmeasurable, observation
+            ) from None
+        if charges and effect_key is None:
+            raise self._refuse_unmeasurable(
+                action,
+                BUDGET_UNKEYED,
+                InvalidArgument(
+                    f"{action.name}: grant {charges[0].grant_id!r} carries a budget and this "
+                    "action resolved no effect key, so nothing could be charged against it. "
+                    "Declare an `effect:` template for the action, or take the budget off the "
+                    "grant (SPEC-v0.9 §2.4.1)"
+                ),
+                observation,
+            ) from None
+        return charges
+
+    def _observe_charges(
+        self, action: Action, effect_key: str | None, observation: _Observation
+    ) -> tuple[Charge, ...]:
+        """§4.2.1's first half: what this action *would have* been charged, charging nothing.
+
+        §2.3's and §2.4.1's refusals are **reported** here rather than raised: enforce mode
+        refuses those actions, so saying so is exactly what observe mode is for. They get their
+        own reasons rather than `budget_exhausted`, because an operator whose pilot says "this
+        would have been refused" needs to know whether the budget is too small or the action
+        cannot be measured at all.
+
+        Called above the approval gate, where `_secure` computes the same thing, so the two modes
+        agree about which refusal comes first (T451).
+        """
+        try:
+            charges = self._charges_for(action, effect_key, observation)
+        except InvalidArgument:
+            # Already reported by `_refuse_unmeasurable`, which blocked rather than denying.
+            return ()
+        if not charges:
+            return ()
+        # §4.2.1a — **the counterfactual spend, on the receipt.** The ledger is empty under
+        # observation, so if the receipt does not carry what this action would have been charged,
+        # nothing anywhere records it and a budget cannot be sized from an observed run. It
+        # asserts no spend: the receipt says `observed`, and `v0.3 §6.2` makes every number on an
+        # observed receipt a counterfactual. T439d.
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": charge.grant_id, "metric": charge.metric, "amount": charge.amount}
+                for charge in charges
+            )
+        )
+        return charges
+
+    def _observe_spend(
+        self, action: Action, charges: tuple[Charge, ...], observation: _Observation
+    ) -> None:
+        """§4.2.1's second half: whether the budget would have refused, writing nothing.
+
+        The predicate is `check_charges`, the same function all three stores decide with, so the
+        report and the enforcement cannot drift: a pilot that said "this would have been fine"
+        about an action enforce mode refuses is worse than no pilot.
+
+        **The sum is a lock-free read** off the public `consumptions()` rather than a store's
+        private `_spent`, because this runs outside any reservation and must take no lock and
+        write nothing. It is therefore stale under concurrency, which is correct for a
+        counterfactual and would not be for a decision.
+
+        `check_charges` can also raise `InvalidArgument` for two charges on one grant and metric
+        carrying different amounts (§3.3.1). Nothing reachable produces that shape -- §2.7's
+        ancestors are distinct grants, and one grant's two budgets on one metric always agree --
+        and observe mode is not the place to raise about it if something ever does.
+        """
+        if not charges:
+            return
+        now = self._clock()
+
+        def spent(charge: Charge) -> int:
+            return sum(
+                row.amount
+                for row in self._store.consumptions(
+                    grant_id=charge.grant_id,
+                    metric=charge.metric,
+                    since=now - charge.window,
+                )
+                if row.released_at is None
+            )
+
+        try:
+            check_charges(charges, spent)
+        except BudgetExhaustedError as exhausted:
+            observation.block(BUDGET_EXHAUSTED)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {
+                    "reason": BUDGET_EXHAUSTED,
+                    "grant_id": exhausted.grant_id,
+                    "metric": exhausted.metric,
+                    "window": int(exhausted.window.total_seconds()),
+                    "observed": True,
+                },
+            )
+        except InvalidArgument:
+            return
+
+    def _resumed_charges(self, effect_key: str | None, attempt: int) -> None:
+        """Stamp the resumed leg's receipt with what its **first** leg charged (§10.1, §8.3).
+
+        One row per grant and metric at this attempt, in the ledger's insertion order, which
+        §3.3.3 makes identical across the three backends. A released row still counts: it says
+        what this action spent, and `released_at` is a later fact about the same spend.
+        """
+        if effect_key is None:
+            _BUDGET_CHARGES.set(())
+            return
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": row.grant_id, "metric": row.metric, "amount": row.amount}
+                for row in self._store.consumptions(effect_key=effect_key)
+                if row.attempt == attempt
+            )
+        )
+
+    def _refuse_unmeasurable(
+        self,
+        action: Action,
+        reason: str,
+        error: InvalidArgument,
+        observation: _Observation | None = None,
+    ) -> InvalidArgument:
+        """§2.3 and §2.4.1's refusals, with the events and the receipt they were missing.
+
+        Returns the error for the caller to `raise`, like `_refuse_scope`, so a reader can see
+        the control flow leaves at the call site. The message is the one the guard already wrote:
+        it names the grant, the metric and the offending value, and an operator reading the
+        receipt needs exactly that.
+        """
+        if observation is not None:
+            # `v0.3 §6.2`: observe mode records what enforce mode would have done and refuses
+            # nothing. Writing the `denied` receipt below would put a refusal it did not make in
+            # the store, alongside the `observed` receipt for the run that went ahead: two
+            # receipts for one action, disagreeing. T439c.
+            observation.block(reason)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {"reason": reason, "error": str(error), "observed": True},
+            )
+            return _UnmeasurableError(str(error), reason=reason)
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
+        self._record(
+            action,
+            Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=str(error),
+        )
+        return _UnmeasurableError(str(error), reason=reason)
+
+    def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
+        """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.
+
+        A refusal that reported how much was left would be an oracle: refused actions cost
+        nothing, so an attacker binary-searches the exact limit in a few dozen refusals and then
+        knows precisely how much authority to use without tripping it. An operator debugging at
+        3am gets the number from `inspect`, which needs the store rather than the ability to be
+        refused.
+
+        The grant named is **the one that refused**, which under §2.7 may be an ancestor rather
+        than the grant that decided: an operator whose child grant is well within its own budget
+        needs to be told the parent is not.
+        """
+        error = (
+            f"budget {exhausted.metric!r} on grant {exhausted.grant_id!r} over "
+            f"{exhausted.window} is exhausted"
+        )
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {
+                "reason": BUDGET_EXHAUSTED,
+                "grant_id": exhausted.grant_id,
+                "metric": exhausted.metric,
+                "window": int(exhausted.window.total_seconds()),
+            },
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, BUDGET_EXHAUSTED),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=error,
+        )
+        return ActionDenied(f"{action.name} denied: {error}", reason=BUDGET_EXHAUSTED)
+
     def _refuse_scope(self, action: Action, reason: str, error: str) -> _ScopeRefusedError:
         """The refusal, with its events and its receipt. Returns it for the caller to raise.
 
@@ -3401,17 +3751,27 @@ class Control:
         return data
 
     def _take(
-        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
+        self,
+        action: Action,
+        approval_id: str | None,
+        effect_key: str | None,
+        lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
-        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4)."""
+        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4).
+
+        SPEC-v0.9 §3.3: the charges ride the reservation's own transaction, which is the whole of
+        why `StateStore` was amended. The branch with no effect key passes none, because there is
+        no reservation to ride and §2.4.1 has already refused a budgeted grant that reaches it.
+        """
         if approval_id is not None and effect_key is not None:
             return self._store.consume_approval_and_reserve(
-                approval_id, action.action_hash, effect_key, action.action_id, lease
+                approval_id, action.action_hash, effect_key, action.action_id, lease, charges
             )
         if approval_id is not None:
             return self._store.consume_approval(approval_id, action.action_hash), None
         if effect_key is not None:
-            return None, self._store.reserve_effect(effect_key, action.action_id, lease)
+            return None, self._store.reserve_effect(effect_key, action.action_id, lease, charges)
         return None, None
 
     def _approver_of(self, approval_id: str | None) -> str | None:
@@ -3958,6 +4318,7 @@ class Control:
             authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             task=_TASK.get(None),
             scope_hash=_SCOPE_HASH.get(None),
+            budget_charges=_BUDGET_CHARGES.get(()),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,

@@ -9,6 +9,41 @@ any change to one appears here.
 
 ## [Unreleased]
 
+## [0.9.0] - Envelope
+
+*Undated until the tag.*
+
+Every guarantee before this one answers **whether**. A grant says `amount_lte: 5000`, and is silent
+about the thousand actions that each pass it: the authority model bounds one action and has never
+bounded an aggregate, so an agent acting entirely within its permissions can still empty an account
+one permitted refund at a time. v0.9 answers the other half: **how much, over which records, for
+which task?**
+
+Three dimensions, one rule each.
+
+**Consequence budgets.** A grant may carry `budgets:`, a metric with a limit over a rolling window,
+consumed **on reserve, inside the reservation's own transaction**, because a check on one line and a
+consumption on another is a race two processes win together. **Ambiguity is not a refund**: an
+`AMBIGUOUS` effect holds its consumption until a human or a hook resolves it, because otherwise an
+agent that can manufacture ambiguity can manufacture authority. A budget names a metric, not a
+consequence: nothing here ranks, scores or classifies an operator's actions.
+
+**Scope providers.** `scope=` answers "is this record this principal's?", strictly before the
+reservation, which is the bite on an identifier an attacker chose. A grant permits `records.read` on
+`customer:*`, and until now nothing had an opinion about whose record `customer:90210` is.
+
+**Task-bound authority.** `tasks:` narrows a grant to a unit of work, by the same `child ⊆ parent`
+rule as every other dimension. It limits blast radius; it does not detect a hijack.
+
+**What a budget is not.** It **cannot recall an action already in flight**: a rolling window changes
+what the next reserve may do and nothing about what is already reserved, so a reservation taken a
+second before the window rolls commits regardless. It counts a metric an operator named, an argument
+on the action, and is not a consequence model: nothing ranks, scores or classifies what an action
+means. It is per store, so two deployments sharing a provider account and not a store each enforce
+their own. And it is fail-closed against its own principal: an agent able to manufacture ambiguity
+can pin a budget it cannot spend, which is a denial of service against the operator's own agents and
+is the deliberate side of the trade against an agent that manufactures authority.
+
 ### Added
 
 - **Task-bound authority** (SPEC-v0.9 §6). A grant may carry `tasks:`, a unit-of-work dimension
@@ -28,6 +63,22 @@ any change to one appears here.
 
   The task reaches the authority decision and the receipt, and **never the action hash**: a field
   on `Action` would move every hash in existence and invalidate every stored approval.
+
+- **Consequence budgets, enforced** (SPEC-v0.9 §4). **G22.** A budgeted grant charges every
+  ancestor on reserve, inside the reservation's own transaction, and the ledger is released
+  exactly when the effect reaches `FAILED`.
+
+  **Ambiguity is not a refund.** An `AMBIGUOUS` effect keeps its consumption until a human or a
+  `reconcile` hook resolves it, because otherwise an agent that can generate ambiguity can
+  generate authority, and generating ambiguity is free for any flaky integration. This is the
+  correctness hole that kept budgets out of four milestones.
+
+  The refusal is `ActionDenied(reason="budget_exhausted")`, naming the grant, the metric and the
+  window, and **never the remaining balance**: refused actions cost nothing, so a refusal that
+  reported the balance is an oracle an attacker binary-searches.
+
+  `ctrlrun verify` reports **22/22** on the shipped examples, with G22, G23 and G24 all graded
+  against positive controls.
 
 - **The budget ledger, and one amendment to a frozen protocol** (SPEC-v0.9 §3). `StateStore` has
   been frozen since v0.6 and gains exactly two things: `charges=` on `reserve_effect` and
@@ -82,17 +133,47 @@ any change to one appears here.
   precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
   the three mechanical differences that justify it.
 
+- **The operator surfaces for a budget** (SPEC-v0.9 §7). **No new command.** `ctrlrun inspect`
+  gains `--grant GRANT_ID`, which reports each of that grant's budgets as three numbers:
+  **consumed**, the un-released sum over the rolling window, which is the number that decides;
+  **held**, the part of it whose effects have not committed; and **why**, the effect holding each
+  part and the state it is in.
+
+  The third is the deliverable. A budget that refuses while it looks nowhere near its limit is
+  almost always one unresolved effect, and without the third column an operator cannot get from
+  the refusal to `ctrlrun resolve`. The view prints that command with the effect key already in
+  it, because an operator retyping the key from the line above is one transcription away from
+  resolving a different effect.
+
+  `ctrlrun effects` says what each effect is holding, so `--state ambiguous` answers "what is
+  pinning this grant". It says **spent** for a committed effect and **holds** for every other,
+  because §7.2 defines held as the part that has not committed and one word for two numbers would
+  make the two commands disagree.
+
+  `ctrlrun stats` reports the ledger's row count, so growth is observable before it is a problem.
+  The ledger only grows: the kernel deletes no row, ships no retention command and has no policy
+  key that expires evidence. What §7.3 owes instead is the invariant that makes somebody else's
+  archiving safe, and it states it: rows older than the longest window on any budget of a grant
+  cannot affect any future decision.
+
+  `ctrlrun.budget/v1` is its own document rather than a key inside `ctrlrun.inspection/v2`,
+  because that one answers about an action and this answers about a grant: a reader handed one
+  would have to know which of two shapes it got. Every existing `--json` shape is unchanged, and
+  T436 asserts that rather than assuming it.
+
 ### Changed
 
 - `ctrlrun.receipt/v6` carries `scope_hash` beside `task`, and `ctrlrun.guarantees/v5` carries
   **G23** beside G24.
-- `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` on a grant is
-  refused in a `v6` document rather than ignored, because an older reader would grant the action
-  on every task. `DIMENSIONS` grows from six entries to seven, and it is exported and iterated by
-  `verify`'s G9, so a `--json` consumer counting dimensions sees seven.
+- `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` and `budgets:`
+  on a grant are refused in a `v6` document rather than ignored, because an older reader would
+  grant the action on every task and against no limit. **`DIMENSIONS` grows from six entries to
+  eight**, `tasks` and `budgets`, and it is exported and iterated by `verify`'s G9, so a `--json`
+  consumer counting dimensions sees eight.
 - The shipped `examples/authority/payments.yaml` binds its `head-of-support` grant to
-  `refund-run:*`, so the milestone's own guarantee is not `N/A` on what this repository ships.
-  The authority badge moves from `verified 19/19` to `verified 20/20`.
+  `refund-run:*` and gives it a daily budget, so the milestone's own guarantees are not `N/A` on
+  what this repository ships. The authority badge moves from `verified 19/19` to
+  `verified 22/22`, G22, G23 and G24.
 
 - `docs/SPEC-v0.9.md`, the v0.9 "Envelope" contract: consequence budgets, scope providers and
   task-bound authority, as a delta over v0.1 to v0.8. Documentation only. It specifies the
@@ -110,6 +191,63 @@ any change to one appears here.
 
   The specification amends one frozen surface: `StateStore`, frozen since `SPEC-v0.6.md` §9.2, gains
   `charges=` on the two methods that reserve. §3.3 argues it against that section's stated bar.
+
+### Stricter than 0.8.0, with what 0.8.0 did
+
+- **A 0.8.0 binary refuses a store 0.9.0 has opened.** Migration `0007_budget_ledger` adds the
+  ledger table, and an older binary opening the migrated database refuses at open, naming the
+  migration it does not know. Before: there was no `0007`. This is `SPEC-v0.6.md` §3.5's rule and
+  it makes the upgrade one-way per store: a rollback to 0.8.0 needs the database it had, because a
+  migration that only runs forwards turns a rollback into silent corruption.
+
+- **A third-party `StateStore` must implement three more things.** `charges=` on `reserve_effect`
+  and `consume_approval_and_reserve`, and a `consumptions()` read. Before: `StateStore` was frozen
+  at `SPEC-v0.6.md` §9.2 and a backend implementing every declared method was complete. A backend
+  that implements `charges=` and not the read satisfies the protocol and breaks `ctrlrun inspect`
+  and `ctrlrun verify`, which is why `SPEC-v0.9.md` §3.3 argues the read as part of the amendment
+  rather than leaving it implicit.
+
+- **`DIMENSIONS` changed value, from six entries to eight.** It is exported and `verify`'s G9
+  iterates it and prints its length, so a `--json` consumer counting dimensions sees eight. Before:
+  six. `tasks` and `budgets` are the two.
+
+- **`tasks:` and `budgets:` are refused in a `ctrlrun.policy/v6` document**, rather than ignored as
+  an unknown key would be. Before: neither key existed. An older reader that ignored them would
+  grant the action on every task and against no limit, which is the fail-open this refusal closes.
+
+- **A grant carrying a budget refuses an action that resolves no effect key.** Before: an action
+  with no `effect:` template was permitted, and it still is on any grant without a budget. With one,
+  it is refused: there is nothing to charge against, so an agent proposing such actions would spend
+  nothing against every budget on the chain for ever. `SPEC-v0.9.md` §2.4.1 records the two probes
+  that moved this out of the loader.
+
+- **A metric value that is negative, missing, or not an integer is refused**, with `ACTION_DENIED`
+  and a `denied` receipt. Before: no metric existed. A negative amount would reduce the rolling sum
+  and refill the budget, which is the compensation `SPEC-v0.9.md` §12 forbids; a missing one
+  counted as zero would turn the absence of a field into unlimited authority.
+
+- **`ctrlrun verify` sizes its own action vector to a grant's budgets.** Before: it synthesized a
+  vector to land in a rule and reported a budget refusing that action as an internal error, exit 3,
+  on guarantees with nothing to do with budgets. Where no value fits a band, the guarantee is now
+  `N/A` with a reason that names the action and the grant.
+
+### Fixed
+
+- **`resolve_effect` released no budget hold.** It does not go through `_transition`, so a human
+  resolving an `AMBIGUOUS` effect `FAILED` held its charge for ever: the one act meant to free a
+  budget was the one path that did not. Fixed in all three backends, inside the same transaction as
+  the record's own write.
+
+- **A refused receipt claimed a charge it never made.** `budget_charges` was stamped where the
+  charges were computed, so a refusal raised later in the same loop reached the receipt with them
+  set, and a `denied` receipt asserted the action charged the very grant it was refused from
+  spending against. A receipt asserting a spend that never happened is the one thing an evidence
+  trail may not do.
+
+- **An oversized stored window crashed every evaluation in the deployment.** `Authority.evaluate`
+  reads every delegation row on every evaluation, and an unreadable window raised `OverflowError`
+  out of it, so one corrupt row denied nothing and crashed everything, for every principal and
+  every action, with no event and no receipt to find it by. It is `authority_unreadable` now.
 
 ## [0.8.0] - 2026-09-12 - Oversight
 

@@ -41,13 +41,18 @@ authority:
       # the refund runs it was granted for. `ctrlrun verify` grades G24 against this grant.
       tasks: ["refund-run:*"]
       # SPEC-v0.9 §2. How much, over which metric, in how long. `amount` names an action
-      # argument and is summed; the limit is in minor units like every band above, so this is
-      # €1,000.00 of refunds in any rolling 24 hours, across this grant and every delegation
-      # beneath it (§2.7). A grant that omits `budgets:` budgets nothing, which is what the two
-      # grants below do and why they are unchanged. Nothing sums a metric yet: the ledger and
-      # the spending are later items, and `ctrlrun verify` grades G22 against this once they land.
+      # argument and is summed; the limit is in minor units like every band above.
+      #
+      # **A budget bounds the aggregate; the constraint above bounds one action.** They are
+      # different questions and the numbers should say so: `amount_lte` lets a single refund
+      # reach €100,000, and this lets the day's refunds reach €500,000 across this grant and
+      # every delegation beneath it (§2.7). A daily budget *smaller* than one permitted action
+      # is legal and almost always a mistake, because the first refund of the day exhausts it.
+      #
+      # A grant that omits `budgets:` budgets nothing, which is what the two grants below do and
+      # why they are unchanged. `ctrlrun verify` grades G22 against this one.
       budgets:
-        - { metric: amount, limit: 100000, window: PT24H }   # €1,000.00 a day
+        - { metric: amount, limit: 50000000, window: PT24H }   # €500,000.00 a day
 
     # 2. A service account that reconciles, and may never move money. It holds no `delegable`
     # key at all, which is the default and means it cannot create a delegation.

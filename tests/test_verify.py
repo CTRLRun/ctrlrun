@@ -177,13 +177,13 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
     assert report.applicable == 11
-    assert report.not_applicable == 12
+    assert report.not_applicable == 13
     text = report.to_text()
     # The fraction is passes over applicable and never the catalogue size: with eight N/As a
     # seventeen-guarantee catalogue must not report seventeen over seventeen.
     assert f"{len(reg.GUARANTEES)}/{len(reg.GUARANTEES)}" not in text
     assert f"{report.passed}/{report.applicable} declared guarantees pass." in text
-    assert "12 not applicable: G1, G2, G8, G9, G13, G15, G16, G17, G18, G19, G23, G24." in text
+    assert "13 not applicable: G1, G2, G8, G9, G13, G15, G16, G17, G18, G19, G22, G23, G24." in text
 
 
 def test_T101b_zero_applicable_guarantees_is_not_a_pass(tmp_path):
@@ -344,7 +344,7 @@ from ctrlrun.effect import DEFAULT_LEASE, EffectState, Reservation
 from ctrlrun.state import _iso
 
 
-def _always_reserves(self, effect_key, action_id, lease=DEFAULT_LEASE):
+def _always_reserves(self, effect_key, action_id, lease=DEFAULT_LEASE, charges=()):
     now = self._clock()
     connection = self._connection()
     connection.execute("BEGIN IMMEDIATE")
@@ -864,14 +864,14 @@ def test_the_v1_payments_template_reports_eleven_over_eleven():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable, report.not_applicable) == (11, 11, 12)
+    assert (report.passed, report.applicable, report.not_applicable) == (11, 11, 13)
     text = report.to_text()
     assert "11/11 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider
     # for the first and its own approver identity for the second (§8.9, §11.7).
-    assert "12 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G23, G24." in text
+    assert "13 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G22, G23, G24." in text
     # §2.1's rule, and the reason this line exists: **the not-applicable ten are not in the
     # denominator.** Ten pass and ten are N/A, so a run that folded them in would report 20/20.
     # It used to read `"10/10" not in text`, which said the same thing while the pass count was
