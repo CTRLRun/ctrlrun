@@ -137,6 +137,12 @@ prints X -- so they run in two places: on a pull request there, and from the `do
 this repository's CI against the commit you are proposing. A change to the code that makes a
 page wrong is red here.
 
+Which checkout of the documentation that job reads is decided by name: a `CTRLRun/ctrlrun-docs`
+branch called the same as yours when there is one, `main` otherwise. So a change that alters a
+docstring or a `--help` text comes with a documentation branch of the same name, regenerated
+against it (its `README.md` lists the renderers), and the two merge together, the code first.
+`main` is checked against `main`, and the pages there are expected to match it at all times.
+
 What they check:
 
 - every fenced block marked `runnable` is executed offline, with a socket guard, and must
