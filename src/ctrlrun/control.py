@@ -50,6 +50,8 @@ from .approval import (
     unsatisfied,
 )
 from .authority import (
+    NO_AUTHORITY,
+    REASON_PRECEDENCE,
     RESOURCE_SEPARATOR,
     Authority,
     AuthorityResult,
@@ -101,6 +103,7 @@ from .policy import (
     OBSERVE,
     POLICY_CHANGE_ACTION,
     POLICY_UNAPPROVED,
+    UPSTREAM_MISMATCH,
     UPSTREAM_UNVERIFIED,
     Decision,
     Evaluation,
@@ -110,6 +113,8 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
+    BLOCKED_APPROVAL_MISMATCH,
+    BLOCKED_APPROVAL_REASONS,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
@@ -408,9 +413,18 @@ class _Observation:
     `_observe_secure` and `_outcome`, and threading four extra values through all three would
     put the same fact in three signatures.
 
-    `block()` keeps the **first** reason, because the checks run in the order enforce mode
-    runs them and enforce mode stops at the first: a later refusal is one enforce mode would
-    never have reached.
+    **`block()` keeps the reason earliest in `DECISION_ORDER`, not the first one it is handed**
+    (SPEC-v0.10 §5). The docstring here used to say the opposite, and say it for a reason that was
+    not true: "the checks run in the order enforce mode runs them". They do not, which is what
+    `v0.9 §4.2.1b` records, and keeping the first is how observe mode came to name a refusal
+    enforce mode would not raise.
+
+    **What this does not do is move a check**, and that is the point. v0.9 aligned three cases by
+    reordering and the three reorderings produced four regressions between them (`v0.9 §13.8`).
+    The information was never missing: a probe over §4.2.1b's own second case shows observe mode
+    is handed `['no_authority', 'policy_unapproved']` and reports the first, while enforce mode
+    raises the second. Ordering the **selection** is enough, and it cannot regress a check's
+    position because it changes none.
     """
 
     __slots__ = ("blocked_reason", "decision", "reason")
@@ -425,7 +439,13 @@ class _Observation:
         self.reason = evaluation.reason
 
     def block(self, reason: str) -> None:
-        if self.blocked_reason is None:
+        """Record a refusal enforce mode would have raised, keeping the one it would raise FIRST.
+
+        A reason `DECISION_ORDER` does not name sorts last among itself and still loses to any
+        reason it does name, which is the fail-safe direction for a reason somebody adds without
+        listing it: the report stays a refusal and names something the order knows.
+        """
+        if self.blocked_reason is None or _rank(reason) < _rank(self.blocked_reason):
             self.blocked_reason = reason
 
     def frozen(self) -> _WouldHave:
@@ -665,6 +685,65 @@ BUDGET_UNMEASURABLE: Final = "budget_unmeasurable"
 BUDGET_UNKEYED: Final = "budget_unkeyed"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
+
+#: SPEC-v0.10 §5 — **the order enforce mode decides in, declared once, as data.**
+#:
+#: `control.py` has carried this sequence as a comment since v0.3 (`principal_expired ->
+#: authority -> policy -> approval -> reservation -> execution`). Making it a value is the whole
+#: of item 4: observe mode's checks do not run in this order, `_Observation.block` used to keep
+#: whichever it was handed first, and `v0.9 §4.2.1b` is the record of what that cost.
+#:
+#: **The list starts at `Control.execute`'s entry, not at `_secure`.** `policy_unapproved` is
+#: decided by `_require_approved` above authority, while `_observe_secure` is not called until
+#: several hundred lines later; an ordering beginning at `_secure` could not have covered it.
+#:
+#: **Groups, and every group that has a source is read from it.** `receipt.py`'s own comment
+#: records this set being missed twice, and says why
+#: `test_every_approval_refusal_reason_is_counted_by_stats` enumerates from `approval.py` rather
+#: than restating: *a set maintained by hand is a set the next reason is missed from.* This list
+#: was hand-written once and `attempt_ceiling` was missing from it within the hour, caught by
+#: T250. So the authority group is `REASON_PRECEDENCE` and the approval group is
+#: `BLOCKED_APPROVAL_REASONS`, both imported, and neither can drift from its owner.
+_ORDERED_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
+    (PRINCIPAL_EXPIRED,),
+    # Above authority: `v0.8 §8.4`, a policy nobody approved decides nothing, checked before
+    # anything else is decided because what follows would be decided *by* it. It is also a
+    # member of `BLOCKED_APPROVAL_REASONS`, and this explicit position is what puts it here
+    # rather than with the approval gate.
+    (POLICY_UNAPPROVED,),
+    # `v0.3 §4.3`: authority before policy, so a denial leaves no pending approval behind.
+    REASON_PRECEDENCE,
+    # SPEC-v0.10 §4.3's check 2, and `v0.9 §2.3`/§2.4.1's budget refusals: all three are above
+    # the approval gate on T446's argument, that they depend on nothing a human says.
+    (UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED),
+    (BUDGET_UNMEASURABLE, BUDGET_EXHAUSTED),
+    # SPEC-v0.7 §5.5 — and T250 asserts by name that the ceiling is recorded **before** the
+    # approval gate, which is how the hand-written version of this list was caught.
+    (BLOCKED_ATTEMPT_CEILING,),
+    (BLOCKED_APPROVAL_REQUIRED, BLOCKED_APPROVAL_MISMATCH, *sorted(BLOCKED_APPROVAL_REASONS)),
+    (SCOPE_UNAVAILABLE, OUT_OF_SCOPE),
+    (BLOCKED_DUPLICATE, BLOCKED_IN_PROGRESS, BLOCKED_AMBIGUOUS),
+)
+
+DECISION_ORDER: Final = tuple(reason for group in _ORDERED_GROUPS for reason in group)
+
+_RANKS: Final[dict[str, int]] = {}
+for _index, _group in enumerate(_ORDERED_GROUPS):
+    for _reason in _group:
+        _RANKS.setdefault(_reason, _index)
+
+#: Where a reason this list does not name sits. **The policy axis, because that is the one open
+#: vocabulary**: `v0.1 §3.2` lets a decision reason be `rule[N]` for any N, and no fixed tuple can
+#: enumerate those. Ranking them with the policy decision they are is correct rather than a
+#: fallback; every other vocabulary in the kernel is closed and belongs in a group above.
+_UNLISTED_RANK: Final = _RANKS[NO_AUTHORITY] + 1
+
+
+def _rank(reason: str) -> int:
+    """Where `reason` sits in the declared order (SPEC-v0.10 §5)."""
+    rank: int = _RANKS.get(reason, _UNLISTED_RANK)
+    return rank
+
 
 #: SPEC-v0.9 §5.5 — its own domain tag, so a scope hash can never equal a precondition
 #: fingerprint over the same mapping. That matters precisely because §5.7 permits both.
