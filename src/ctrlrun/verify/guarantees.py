@@ -152,6 +152,15 @@ GUARANTEES: Final = (
         ("v0.6 §7.1", "v0.8 §10 T354", "v0.8 §10 T355"),
     ),
     Guarantee(
+        "G23",
+        # 32 characters exactly, against `report._TITLE_WIDTH`. "a failing scope provider" and
+        # not "an out-of-scope record": what G23 grades is the **unavailable** half, because
+        # that is the one where a kernel could plausibly fail open by treating an unreadable
+        # scope as an empty constraint (SPEC-v0.9 §5.6, §8).
+        "a failing scope provider refuses",
+        ("v0.9 §5.6", "v0.9 §9 T388", "v0.9 §9 T390"),
+    ),
+    Guarantee(
         "G24",
         # 26 characters against `report._TITLE_WIDTH`'s 32. "grant refused" and not "action
         # refused", because what is compared is the grant's task dimension against the task the
@@ -248,6 +257,21 @@ NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 #: SPEC-v0.9 §8, G24. A statement about the operator's **document**, like every reason in this
 #: module: it says what the document does not declare, not what the kernel is not configured for.
 NO_TASKS: Final = "no grant names a task"
+#: SPEC-v0.9 §8.1, G23. A statement about the **document**, which is what §8.1's argument
+#: actually requires: it forbids an `N/A` about whether a *provider* is configured, because that
+#: is a fact about an operator's code. Whether any action this configuration admits carries a
+#: resource is a fact about their document, and a scope names resources, so an action with none
+#: can never be in one.
+NO_RESOURCE_TO_SCOPE: Final = "no action this configuration admits carries a resource"
+
+#: SPEC-v0.9 §8.1 — G23's note, printed beneath its row the way `REVOCATION_NOTE` is. Whether a
+#: deployment configures a scope provider is a fact about its own code, which verify cannot read,
+#: so verify supplies one and says so rather than reporting `N/A` about something it never saw.
+SCOPE_PROVIDER_NOTE: Final = (
+    "G23 is graded against a scope provider verify supplies: whether this deployment configures "
+    "one is a fact about its own code, which verify cannot read. The gateway and the ACS hook "
+    "cannot name a provider at all (SPEC-v0.9 §5.2.2)"
+)
 
 #: SPEC-v0.7 §8.9, G16's note, printed once beneath the table as `EFFECT_TEMPLATE_NOTE` is. G16
 #: is graded against verify's own stand-in for the operator's provider, because a provider is
@@ -351,8 +375,11 @@ __all__ = [
     "NO_EXPIRES_AT",
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
+    "NO_RESOURCE_TO_SCOPE",
+    "NO_TASKS",
     "PER_CONNECTION_BACKEND",
     "PROCESSES",
+    "SCOPE_PROVIDER_NOTE",
     "STORE_READS_APPLICATION_CLOCK",
     "SYNTHETIC_PREFIX",
     "Guarantee",

@@ -2001,6 +2001,16 @@ DISCLAIMS: dict[str, tuple[str, ...]] = {
 #: provider to recheck with, a provider that produced nothing to compare, and a 0.6 process the
 #: new one has no way to see.
 ANOTHER_SUBJECT: dict[str, tuple[str, ...]] = {
+    "docstrings": (
+        # SPEC-v0.9 §5. The subject is the **scope provider**, not the precondition recheck, and
+        # the claim is true of it in a way it is not true of the recheck: the scope fetch happens
+        # strictly before the reservation, so a provider that hangs leaves nothing reserved and
+        # nothing executed. That is a closed hole and not a narrowed window, which is precisely
+        # why this guard exists to keep the two apart. §5.8 states the window the scope provider
+        # *does* widen, and says so there rather than claiming otherwise here.
+        "It runs **strictly before the reservation** and before the precondition recheck, so a "
+        "provider that hangs can only fail closed.",
+    ),
     "CHANGELOG.md": (
         '"a moved fingerprint is refused" before the reservation, under `ctrlrun.guarantees/v3`.',
         # "fail-closed" beside the approver string `ctrlrun:precondition-not-recorded`.
@@ -2335,7 +2345,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         "ctrlrun.receipt/v3": 26,
         "ctrlrun.receipt/v4": 28,
         "ctrlrun.receipt/v5": 30,
-        "ctrlrun.receipt/v6": 31,
+        "ctrlrun.receipt/v6": 32,
         "ctrlrun.receipt/v9": 26,
         "": 25,
     }

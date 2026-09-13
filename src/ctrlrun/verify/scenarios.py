@@ -63,7 +63,7 @@ from ..authority import (
     Subject,
     contained_dimension,
 )
-from ..control import Control, context, idempotency_token, protect
+from ..control import SCOPE_UNAVAILABLE, Control, context, idempotency_token, protect
 from ..effect import (
     EffectRecord,
     EffectState,
@@ -1087,6 +1087,7 @@ class Engine:
         approval_id: str | None,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
         task: str | None = None,
+        scope: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         # SPEC-v0.9 §6.3.2 — the active selection's task unless a scenario named one, so a
         # document that binds its grant to a task does not turn every other guarantee red. G24
@@ -1096,13 +1097,13 @@ class Engine:
             task = self._task
         if approval_id is None:
             return control.execute(
-                action, executor, effect_key, preconditions=preconditions, task=task
+                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
             )
         from ..control import with_approval
 
         with with_approval(approval_id):
             return control.execute(
-                action, executor, effect_key, preconditions=preconditions, task=task
+                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
             )
 
     def refused(
@@ -3699,6 +3700,93 @@ class Engine:
 
         try:
             return self.graded("G21", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G23: a scope provider that cannot answer refuses ---------------------------------
+
+    def g23(self) -> GuaranteeResult:
+        """SPEC-v0.9 §5.6, §8, and §8.1 on why this one is never `N/A`.
+
+        A scope provider is a Python callable an operator passes at decoration or call time, so
+        no document states whether one is configured and `verify` reads a document. Rather than
+        report `N/A` for a fact it cannot observe, verify **constructs the scenario**: it wires a
+        provider that raises and grades what the kernel does, the way `v0.4 §3` has it construct
+        every other scenario.
+
+        Both halves, `v0.4 §1.3`. The positive control is a provider that answers and admits the
+        resource, without which a kernel refusing every scoped action would grade `PASS`.
+        """
+        selection = self.select()
+        if selection is None:
+            return self.na("G23", self.unselected(reg.EVERY_ACTION_DENIED))
+        # A scope names resources, so an action carrying none can never be in one (§5.6, and
+        # `v0.3 §4.4`'s rule for a grant that declares `resources:`). Where nothing this document
+        # admits has a resource, there is no scope question to grade, and saying so is a
+        # statement about the document rather than about the operator's code.
+        if selection.resource is None:
+            scoped = self.select(needs_effect=False, grant_filter=None)
+            if scoped is None or scoped.resource is None:
+                return self.na("G23", reg.NO_RESOURCE_TO_SCOPE)
+            selection = scoped
+        control, store, recorder, _ = self._control_for("G23", selection)
+        resource = selection.resource
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["resource"] = resource
+            detail["note"] = reg.SCOPE_PROVIDER_NOTE
+            # The control: a provider that answers, admitting exactly this resource.
+            answering = _Executor()
+            action = selection.build()
+            receipt = self.execute(
+                control,
+                action,
+                answering,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+                scope=lambda _action: {"resources": [str(resource)]},
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and answering.calls == 1,
+                "a provider that answers, admitting this resource, lets the action run",
+                f"it ended {receipt.result} after {answering.calls} executor calls",
+            )
+
+            def unavailable(_action: Action) -> Mapping[str, Any]:
+                raise RuntimeError(f"{reg.SYNTHETIC_PREFIX}: the scope source is unreachable")
+
+            later = selection.build()
+            blocked = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, later, blocked, selection.effect_key, None, scope=unavailable
+                ),
+                (ActionDenied,),
+                "ActionDenied(reason='scope_unavailable') when the provider raises",
+                "the action ran with no scope answer",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == SCOPE_UNAVAILABLE,
+                "ActionDenied(reason='scope_unavailable')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                blocked.calls == 0,
+                "the executor is not reached when the scope cannot be read",
+                f"the executor was called {blocked.calls} times",
+            )
+            # **Nothing reserved**, which is the half of G23 that the ordering exists for: a
+            # provider called after the reservation would leave a lease to lapse.
+            record = store.get_effect(str(selection.effect_key))
+            _expect(
+                record is None or record.state is not EffectState.RESERVED,
+                "nothing is left reserved when the scope provider fails",
+                f"the effect record is {None if record is None else record.state}",
+            )
+
+        try:
+            return self.graded("G23", selection, store, recorder, body)
         finally:
             store.close()
 

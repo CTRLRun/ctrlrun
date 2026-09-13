@@ -696,6 +696,8 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         "authority_grant_id",
         # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
         "task",
+        # SPEC-v0.9 §5.5, a `ctrlrun.receipt/v6` field.
+        "scope_hash",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")

@@ -107,6 +107,8 @@ SPEC_RECEIPT_FIELDS = (
     "authority_grant_id",
     # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
     "task",
+    # SPEC-v0.9 §5.5, a `ctrlrun.receipt/v6` field.
+    "scope_hash",
 )
 
 
