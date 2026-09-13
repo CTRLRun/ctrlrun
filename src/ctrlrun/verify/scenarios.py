@@ -957,9 +957,7 @@ class Engine:
                 continue
             if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
                 continue
-            if all(
-                _metric_value(rebuilt, each.metric, grant.id) <= each.limit for each in budgets
-            ):
+            if all(_metric_value(rebuilt, each.metric, grant.id) <= each.limit for each in budgets):
                 return tried, rebuilt
         return None
 

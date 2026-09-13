@@ -20,7 +20,13 @@ from ctrlrun.action import Action, Principal
 from ctrlrun.authority import Authority
 from ctrlrun.control import Control
 from ctrlrun.effect import EffectState
-from ctrlrun.errors import ActionDenied, InvalidArgument, NotExecuted
+from ctrlrun.errors import (
+    ActionDenied,
+    AmbiguousEffect,
+    DuplicateEffect,
+    InvalidArgument,
+    NotExecuted,
+)
 from ctrlrun.policy import Policy
 from ctrlrun.receipt import ReceiptResult
 from ctrlrun.state import Charge, InMemoryStateStore, SQLiteStateStore
@@ -483,7 +489,7 @@ def test_T422_a_lapsed_lease_another_planner_ambiguates_still_holds(store, clock
     """§4.2's row 5. The record is `AMBIGUOUS` now, and R2 applies: the charge stays."""
     store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
     clock.advance(LEASE * 2)
-    with pytest.raises(Exception):
+    with pytest.raises(AmbiguousEffect):
         store.reserve_effect("e1", "b", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
     assert store.get_effect("e1").state is EffectState.AMBIGUOUS
     assert _held(store) == 100
@@ -557,9 +563,7 @@ def test_T429_the_ceiling_refusing_after_the_reservation_was_won_releases(store,
         with pytest.raises(NotExecuted):
             control.execute(_action(), _boom, "refund:1")
     with pytest.raises(TimeoutError):
-        control.execute(
-            _action(), lambda: (_ for _ in ()).throw(TimeoutError("lost")), "refund:1"
-        )
+        control.execute(_action(), lambda: (_ for _ in ()).throw(TimeoutError("lost")), "refund:1")
     assert store.get_effect("refund:1").state is EffectState.AMBIGUOUS
     assert _held(store) == 100, "R2: the ambiguous attempt's charge is held"
 
@@ -594,7 +598,7 @@ def test_T430_begin_execution_refused_after_the_reservation_was_won_holds(store,
         return original(effect_key, action_id)
 
     store.begin_execution = refuse  # type: ignore[method-assign]
-    with pytest.raises(Exception):
+    with pytest.raises(AmbiguousEffect):
         control.execute(_action(), steal, "refund:1")
     assert taken == ["refund:1"]
     assert _held(store) == 100, "a reservation taken away is ambiguous, and R2 holds the charge"
@@ -607,7 +611,7 @@ def test_T431_mark_ambiguous_refused_moves_nothing(store, clock) -> None:
     store.begin_execution("e1", "a")
     store.commit_effect("e1", "a", {"ok": True})
     released = [row.released_at for row in store.consumptions()]
-    with pytest.raises(Exception):
+    with pytest.raises(DuplicateEffect):
         store.mark_ambiguous("e1", "a", "too late")
     assert [row.released_at for row in store.consumptions()] == released
     assert _held(store) == 100, "the record reached COMMITTED, and a committed spend is a spend"
@@ -750,9 +754,9 @@ def test_T447_a_resumed_leg_reports_the_charges_its_first_leg_took(store, clock)
     # from the store is the only way a gateway that restarted mid-round can still finish one."
     # A restarted gateway has no contextvar left, so reading one is reading nothing.
     receipt = contextvars.Context().run(control.resume, "round-1", lambda: {"ok": True})
-    assert receipt.budget_charges == (
-        {"grant_id": "payer", "metric": "amount", "amount": 100},
-    ), receipt.budget_charges
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},), (
+        receipt.budget_charges
+    )
 
 
 def test_T448_a_resumed_leg_never_reports_another_actions_charges(store, clock) -> None:
@@ -825,9 +829,9 @@ def test_T450_a_resumed_leg_after_a_renewal_reports_only_its_own_attempts_charge
     assert len(store.consumptions()) == 2, "one row per attempt, per §4.3"
 
     receipt = contextvars.Context().run(control.resume, "round-1", lambda: {"ok": True})
-    assert receipt.budget_charges == (
-        {"grant_id": "payer", "metric": "amount", "amount": 100},
-    ), receipt.budget_charges
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},), (
+        receipt.budget_charges
+    )
     assert receipt.attempt == 2, receipt.attempt
 
 
@@ -854,9 +858,7 @@ def test_T439_observe_mode_charges_nothing(store, clock) -> None:
     """
     control = _observing_control(store, clock)
     for index in range(1, 6):
-        receipt = control.execute(
-            _action(str(index), 100), lambda: {"ok": True}, f"refund:{index}"
-        )
+        receipt = control.execute(_action(str(index), 100), lambda: {"ok": True}, f"refund:{index}")
         assert receipt.result is ReceiptResult.OBSERVED
     assert store.consumptions() == (), "observe mode wrote to the ledger"
 
@@ -935,9 +937,9 @@ def test_T439d_an_observed_receipt_carries_the_charge_it_would_have_taken(store,
     control = _observing_control(store, clock)
     receipt = control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
     assert receipt.result is ReceiptResult.OBSERVED
-    assert receipt.budget_charges == (
-        {"grant_id": "payer", "metric": "amount", "amount": 100},
-    ), receipt.budget_charges
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},), (
+        receipt.budget_charges
+    )
     assert store.consumptions() == (), "the counterfactual is on the receipt, not in the ledger"
 
 
