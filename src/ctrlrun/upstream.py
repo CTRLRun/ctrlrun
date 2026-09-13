@@ -21,6 +21,7 @@ if TYPE_CHECKING:  # `ssl` is stdlib but not needed unless a deployment pins (SP
     import ssl
 
 from .action import canonical_bytes
+from .errors import InvalidArgument
 from .policy import UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED, UpstreamPin
 
 #: SPEC-v0.10 §4.2 — the tool-schema hash's domain tag. `canonical_bytes` is the one
@@ -76,6 +77,56 @@ def forget(upstream: str | None = None) -> None:
         _CERTS.pop(upstream, None)
         for key in [key for key in _TOOLS if key[0] == upstream]:
             del _TOOLS[key]
+
+
+def observe_upstream(url: str, *, verify: object | None = None, timeout: float = 10.0) -> str:
+    """Open one TLS connection to `url`, record its leaf certificate, and return the digest.
+
+    **This is §4.3's check 1, and it is what makes check 2 answerable at all.** Without it the
+    register is empty in every shipped process, so `check` answers `upstream_unverified` for ever
+    and §10's `upstream_mismatch` row describes an outcome nothing can produce. A review found
+    exactly that: the register was written only by tests and by `verify`'s own scenario.
+
+    It is the **legible** check, and the only one where the operator is present: a gateway that
+    calls this at startup fails on a console rather than on production traffic.
+
+    `verify` is the pinned `SSLContext` where §4.2's certificate half is configured, so a swapped
+    server fails this handshake too and the gateway never starts. Where only the digest half is
+    configured there is no context to build, the handshake is ordinary, and the comparison is
+    check 2's job.
+
+    A plain `http://` upstream has no certificate to observe and is left unrecorded, so a pin on
+    it stays `upstream_unverified`: a pin is a claim about a server's identity and an unencrypted
+    hop carries none.
+    """
+    import socket
+    import ssl
+    from urllib.parse import urlsplit
+
+    split = urlsplit(url)
+    if split.scheme != "https":
+        raise InvalidArgument(
+            f"{url!r} is not https, so it presents no certificate to pin against; a pin is a "
+            "claim about a server's identity and an unencrypted hop carries none "
+            "(SPEC-v0.10 §4.3)"
+        )
+    host = split.hostname or ""
+    port = split.port or 443
+    context = verify if isinstance(verify, ssl.SSLContext) else ssl.create_default_context()
+    with (
+        socket.create_connection((host, port), timeout=timeout) as raw,
+        context.wrap_socket(raw, server_hostname=host) as tls,
+    ):
+        der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise InvalidArgument(
+            f"{url!r} presented no certificate this process could read, so nothing can be "
+            "pinned against it (SPEC-v0.10 §4.3)"
+        )
+    # Keyed by the URL, because that is what `GatewayConfig.upstream` holds and what
+    # `Control._upstream` passes to `check`. A register keyed by host and read by URL is
+    # two registers.
+    return observe_certificate(url, der)
 
 
 def check(pin: UpstreamPin, upstream: str, tool: str | None = None) -> str | None:
@@ -140,6 +191,7 @@ __all__ = [
     "forget",
     "observe_certificate",
     "observe_tool_schema",
+    "observe_upstream",
     "pinned_context",
     "tool_schema_hash",
 ]

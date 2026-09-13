@@ -188,6 +188,17 @@ class ScanReport:
     vocabulary: tuple[str, ...]
     policy_path: str | None
     policy_read: bool
+    #: SPEC-v0.10 §6.4 — the principals holding a grant no hop bounds, in codepoint order.
+    #:
+    #: §2.3.2's residual is that CTRLRun cannot make a receiving agent present the hop it was
+    #: given: one holding a grant of its own can decline and act on that instead. The deployment
+    #: rule that collapses it is *an agent that only ever acts on handed-over work holds no root
+    #: grant of its own*, and without a surface that rule is advice. This is the surface.
+    #:
+    #: **It reports and does not score.** `v0.4 §3.9`'s rule that CTRLRun never grades an
+    #: operator's document holds here: a principal on this line is a fact, not a finding, and it
+    #: does not move `exit_code`.
+    root_grant_holders: tuple[str, ...] = ()
 
     @property
     def exit_code(self) -> int:
@@ -568,6 +579,7 @@ def scan(
         vocabulary=words,
         policy_path=str(policy_path) if policy_path else None,
         policy_read=policy_path is not None,
+        root_grant_holders=_root_grant_holders(policy_path),
     )
 
 
@@ -585,6 +597,26 @@ def _finding_line(finding: Finding) -> str:
     return f"  {where}  {subject}  [{finding.kind}: {finding.rule}]{detail}"
 
 
+def _root_grant_holders(policy_path: Path | None) -> tuple[str, ...]:
+    """Which principals the document grants authority no hop bounds (SPEC-v0.10 §6.4).
+
+    A **root** grant, meaning one written in the document rather than delegated at runtime: those
+    are the ones an agent holds whether or not anybody handed it work. A document with no
+    `authority:` section grants nothing and answers with nothing.
+    """
+    if policy_path is None:
+        return ()
+    from .authority import _optional_from_yaml
+
+    try:
+        authority = _optional_from_yaml(policy_path.read_text(), source=str(policy_path))
+    except Exception:
+        return ()
+    if authority is None:
+        return ()
+    return tuple(sorted({grant.subject.agent or "*" for grant in authority.grants.values()}))
+
+
 def report_lines(report: ScanReport) -> list[str]:
     """The human rendering. Every finding in the document has a line here (§5.3, T204)."""
     lines = [f"ctrlrun scan — {report.root}", ""]
@@ -594,6 +626,15 @@ def report_lines(report: ScanReport) -> list[str]:
             continue
         lines.append(f"{kind} ({len(found)})")
         lines.extend(_finding_line(finding) for finding in found)
+        lines.append("")
+    if report.root_grant_holders:
+        # SPEC-v0.10 §6.4. A fact about the document, not a finding: it does not move the exit
+        # code, and `v0.4 §3.9` is why there is no verdict attached to it.
+        lines.append(f"holds a root grant ({len(report.root_grant_holders)})")
+        lines.extend(f"  {agent}" for agent in report.root_grant_holders)
+        lines.append(
+            "  an agent that only ever acts on handed-over work holds none (SPEC-v0.10 §2.3.2)"
+        )
         lines.append("")
     if report.undetermined:
         lines.append(f"undetermined ({len(report.undetermined)})")
@@ -650,6 +691,9 @@ def report_document(report: ScanReport) -> dict[str, Any]:
             {"file": call.file, "line": call.line, "expression": call.expression}
             for call in report.undetermined
         ],
+        # SPEC-v0.10 §6.4 — a fact about the document, additive, and outside `findings` because
+        # it is not one: `v0.4 §3.9` keeps `scan` from grading an operator's choices.
+        "root_grant_holders": list(report.root_grant_holders),
         "totals": {
             "files_read": report.files_read,
             "files_excluded": report.files_excluded,

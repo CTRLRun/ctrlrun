@@ -430,7 +430,36 @@ class Gateway:
         if payload is None:
             _LOG.warning("relaying %s failed: %s", parsed.method, observed)
             return _Response(502)
+        self._observe_tools(parsed, payload)
         return _Response(status, payload, response_headers)
+
+    def _observe_tools(self, parsed: ParsedRequest, payload: bytes) -> None:
+        """Record what the upstream advertises, from the `tools/list` it just relayed.
+
+        SPEC-v0.10 §4.2: the tool-schema pin is over the **whole** advertised entry, name,
+        description and input schema together, because a description that changed is a tool whose
+        behaviour an operator has not reviewed. §4.3's check 2 compares against what this process
+        observed, and this is the only place the gateway sees it: `tools/list` is relayed rather
+        than intercepted (`v0.2 §6.3` -- it is not an action), so the observation rides the relay.
+
+        **Best effort, and never a refusal.** A malformed or absent `tools` array leaves the
+        register untouched, which leaves a pinned action `upstream_unverified`: the fail-closed
+        direction, and the same answer as never having called `tools/list` at all.
+        """
+        if parsed.method != "tools/list":
+            return
+        from ..upstream import observe_tool_schema
+
+        try:
+            document = json.loads(payload)
+            tools = document.get("result", {}).get("tools", [])
+        except (ValueError, AttributeError):
+            return
+        if not isinstance(tools, list):
+            return
+        for entry in tools:
+            if isinstance(entry, Mapping) and isinstance(entry.get("name"), str):
+                observe_tool_schema(self._config.upstream, entry["name"], entry)
 
     def relay_method(self, method: str, body: bytes, headers: Mapping[str, str]) -> _Response:
         """Relay GET/DELETE transport operations without inventing an action."""

@@ -1590,9 +1590,62 @@ def _parse_upstream(value: object, where: str) -> UpstreamPin:
         raise PolicyError(
             f"{where}: 'upstream.tool_schema_sha256' must be 'sha256:' followed by 64 hex chars"
         )
-    return UpstreamPin(
+    pin = UpstreamPin(
         cert_sha256=tuple(digests), certs=tuple(files), tool_schema_sha256=schema_hash
     )
+    _check_pin_correspondence(pin, where)
+    return pin
+
+
+def _check_pin_correspondence(pin: UpstreamPin, where: str) -> None:
+    """The two TLS halves must agree, checked at load (SPEC-v0.10 §4.2).
+
+    §4.2 measured what a half-moved rotation costs and then this check was not written, which an
+    independent review found: a document whose `tls_cert_file` still held only the old certificate
+    while `tls_cert_sha256` had both loaded cleanly and failed at the **handshake**, on the day an
+    operator believed they had prepared for. That is the outage §4.2 says the list prevents,
+    arriving one layer down.
+
+    So: every certificate `tls_cert_file` holds hashes to a digest `tls_cert_sha256` names, and a
+    path that does not exist is a load error rather than an empty trust store discovered at the
+    first connection.
+    """
+    if not pin.certs:
+        return
+    import hashlib
+    import ssl
+
+    for path in pin.certs:
+        try:
+            der_list = [
+                ssl.PEM_cert_to_DER_cert(block + "-----END CERTIFICATE-----")
+                for block in Path(path).read_text().split("-----END CERTIFICATE-----")
+                if "BEGIN CERTIFICATE" in block
+            ]
+        except OSError as unreadable:
+            raise PolicyError(
+                f"{where}: 'upstream.tls_cert_file' names {path!r}, which could not be read "
+                f"({unreadable.strerror}); a pin whose certificate is missing builds an empty "
+                "trust store and refuses every connection (SPEC-v0.10 §4.2)"
+            ) from unreadable
+        except ValueError as malformed:
+            raise PolicyError(
+                f"{where}: 'upstream.tls_cert_file' names {path!r}, which is not PEM: {malformed}"
+            ) from malformed
+        if not der_list:
+            raise PolicyError(
+                f"{where}: 'upstream.tls_cert_file' names {path!r}, which holds no certificate"
+            )
+        if not pin.cert_sha256:
+            continue
+        digests = {"sha256:" + hashlib.sha256(der).hexdigest() for der in der_list}
+        if not digests & set(pin.cert_sha256):
+            raise PolicyError(
+                f"{where}: 'upstream.tls_cert_file' {path!r} hashes to "
+                f"{sorted(digests)[0]}, which 'upstream.tls_cert_sha256' does not name. The two "
+                "halves pin the same certificates or a rotation that moves one fails at the "
+                "handshake (SPEC-v0.10 §4.2)"
+            )
 
 
 def _parse_entry(
