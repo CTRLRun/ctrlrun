@@ -51,10 +51,15 @@ jobs:
           echo "kernel=$kernel" >> "$GITHUB_OUTPUT"
           echo "publishing $target from $path"
 
+      # Reproducible: `SOURCE_DATE_EPOCH` is the tagged commit's timestamp and the sdist is
+      # normalised, so what PyPI serves is what anyone rebuilds from the tag (CONTRIBUTING.md,
+      # Releases). CI's package job checks the property on every pull request.
       - name: Build
         run: |
           pip install --require-hashes -r requirements/build.txt
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           python -m build --no-isolation --outdir dist "${{ steps.target.outputs.path }}"
+          python scripts/normalize_sdist.py dist/*.tar.gz
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
