@@ -429,7 +429,13 @@ jobs:
     # nothing to install and nothing that can be quietly uninstalled. Only git's own trailer
     # block counts, so a sentence in the body that happens to mention the trailer does not.
     # Nobody is exempt, bots included: an exemption keyed on a name or an email is a string
-    # anyone can set, and dependabot signs its commits off anyway.
+    # anyone can set. Dependabot does sign its commits off, as `support@github.com` while
+    # authoring from its noreply address, so its trailer never matches its author. The one
+    # thing about such a commit that is not a string anyone can set is GitHub's signature on
+    # it, so a sign-off under another address is accepted on that signature and on nothing
+    # else: `verification.verified` is GitHub reporting that it signed the commit itself,
+    # which only a commit made through GitHub (an App such as Dependabot, or the web editor)
+    # carries.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -441,6 +447,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           missing=0
           for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
@@ -449,10 +456,18 @@ jobs:
             # `only` restricts the output to the trailer block git itself recognises, and
             # `valueonly` leaves the `Name <email>` part; the value has to end in the author's
             # email, angle brackets included.
-            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,only)' "$sha" \
+            trailers="$(git log -1 --format='%(trailers:key=Signed-off-by,valueonly,only)' "$sha")"
+            if printf '%s\n' "$trailers" \
                 | awk -v want="<$email>" 'substr($0, length($0) - length(want) + 1) == want { found = 1 } END { exit !found }'; then
-              echo "::error::$sha ($(git log -1 --format=%s "$sha")) has no 'Signed-off-by: $name <$email>' trailer. Add one with 'git commit --amend -s', or to every commit on the branch with 'git rebase --signoff $BASE'."
-              missing=1
+              continue
             fi
+            # A sign-off under another address, on a commit GitHub signed itself. See the job
+            # comment: the signature is the only fact here that is not a string anyone can set.
+            if [ -n "$trailers" ] && [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.commit.verification.verified')" = "true" ]; then
+              echo "$sha: signed off as '$trailers' by $name <$email>; accepted on GitHub's signature"
+              continue
+            fi
+            echo "::error::$sha ($(git log -1 --format=%s "$sha")) has no 'Signed-off-by: $name <$email>' trailer. Add one with 'git commit --amend -s', or to every commit on the branch with 'git rebase --signoff $BASE'."
+            missing=1
           done
           [ "$missing" -eq 0 ]

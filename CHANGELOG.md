@@ -9,6 +9,15 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The DCO check refused every Dependabot pull request.** Dependabot signs its commits off as
+  `support@github.com` while authoring from its noreply address, so the trailer never matched
+  the author and the `dco` job was red on every update it opened, the weekly lock updates
+  included. A sign-off under another address is now accepted on exactly one fact that is not a
+  string anyone can set: GitHub's own signature on the commit, read back through the API. There
+  is still no exemption keyed on a name or an email.
+
 ### Changed
 
 - **CI installs from hashed locks.** Every `pip install` in a workflow now reads a

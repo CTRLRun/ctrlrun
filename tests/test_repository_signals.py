@@ -263,10 +263,14 @@ def test_every_pull_request_commit_is_signed_off():
     run = "\n".join(step.get("run", "") for step in job["steps"])
     assert "--no-merges" in run
     # Only git's parsed trailer block counts, so a sentence in the body that mentions the
-    # trailer cannot satisfy the check; and there is no exemption, because one keyed on a
-    # name or an email is a string anyone can set.
+    # trailer cannot satisfy the check; and there is no exemption keyed on a name or an
+    # email, because either is a string anyone can set. A sign-off under another address
+    # (Dependabot's, which signs as support@github.com) passes on one fact only: GitHub's
+    # own signature on the commit, read back from GitHub rather than from the commit.
     assert "trailers:key=Signed-off-by" in run
     assert "[bot]" not in run
+    assert "verification.verified" in run
+    assert job["steps"][-1]["env"]["GH_TOKEN"] == "${{ github.token }}"
 
 
 def test_the_citation_names_the_repository_the_version_and_the_tagline():
