@@ -109,7 +109,7 @@ def test_T113_the_summary_is_the_last_line_and_names_the_not_applicable_ids(tmp_
     # G13 is N/A on every SQLite run: SQLite has no clock of its own. G14 needs the effect
     # template this document keeps in the @protect decorator, and G15 a `max_attempts` it does
     # not declare (SPEC-v0.7 §8.9).
-    assert "12 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G23, G24." in last
+    assert "13 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G22, G23, G24." in last
     # The fraction is passes over applicable. A report with eight N/As does not say 17/17.
     assert "18/18" not in text
 
@@ -137,9 +137,9 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
         # SPEC-v0.8 item 2: G18 joins the catalogue. It is graded wherever the document sends
         # an action to approval, which the first two of these do, and `N/A` for G1's reason
         # where nothing does. So the first two gain a pass and the third gains an N/A.
-        (ALL_APPLICABLE, "16/16 declared guarantees pass. 7 not applicable"),
-        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass. 12 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 23 not applicable"),
+        (ALL_APPLICABLE, "16/16 declared guarantees pass. 8 not applicable"),
+        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass. 13 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 24 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )
@@ -454,7 +454,7 @@ def test_T116_a_run_with_several_not_applicable_still_exits_0(tmp_path, monkeypa
     result = _cli(tmp_path, WITH_NOT_APPLICABLE)
 
     assert result.exit_code == 0
-    assert "12 not applicable" in result.stdout
+    assert "13 not applicable" in result.stdout
 
 
 def test_T116_json_and_junit_can_be_combined(tmp_path, monkeypatch):

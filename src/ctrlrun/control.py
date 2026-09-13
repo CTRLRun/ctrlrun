@@ -223,6 +223,10 @@ _SCOPE_HASH: ContextVar[str | None] = ContextVar("ctrlrun_scope_hash")
 #: the charges without re-walking the chain. Set beside `_AUTHORITY_GRANT_ID` and reset with it,
 #: for the stale-evidence reason that field's own comment gives.
 _AUTHORITY_RESULT: ContextVar[AuthorityResult | None] = ContextVar("ctrlrun_authority_result")
+#: SPEC-v0.9 §10.1 — what this action charged, for the receipt. Set where the charges are
+#: assembled and reset beside the other two, for the stale-evidence reason `_AUTHORITY_GRANT_ID`'s
+#: own comment gives.
+_BUDGET_CHARGES: ContextVar[tuple[Mapping[str, Any], ...]] = ContextVar("ctrlrun_budget_charges")
 
 #: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
 #: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
@@ -1180,6 +1184,7 @@ class Control:
         # same defect on a new field.
         _TASK.set(None)
         _SCOPE_HASH.set(None)
+        _BUDGET_CHARGES.set(())
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -2222,6 +2227,14 @@ class Control:
             if evaluation.decision is Decision.APPROVE
             else None
         )
+        # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
+        # reconcile between them cannot change what this action spends.
+        #
+        # **Before the keyless early return below**, because §2.4.1's refusal is exactly about an
+        # action that reaches it: a budgeted grant whose action resolved no effect key spends
+        # nothing against every budget on the chain, for ever, and returning early would be the
+        # kernel declining to notice.
+        charges = self._charges_for(action, effect_key)
         if approval_id is None and effect_key is None:
             # SPEC-v0.6 §7.2's `ALLOW` row, which §7.2.2 step 1 quietly assumed a reservation
             # for. There is nothing to take here -- no grant to check, no key to hold -- but a
@@ -2236,9 +2249,6 @@ class Control:
             # TTL, which is the precise hazard §7.2 exists to close.
             return self._spend_unneeded_approval(action, None), None
 
-        # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
-        # reconcile between them cannot change what this action spends.
-        charges = self._charges_for(action, effect_key)
         # At most two passes: an `AMBIGUOUS` refusal may be reconciled once (SPEC-v0.2 §2.3),
         # and whatever the second attempt meets is final.
         for reconciled in (False, True):
@@ -3187,6 +3197,16 @@ class Control:
                 "`effect:` template for the action, or take the budget off the grant "
                 "(SPEC-v0.9 §2.4.1)"
             )
+        _BUDGET_CHARGES.set(
+            tuple(
+                {
+                    "grant_id": charge.grant_id,
+                    "metric": charge.metric,
+                    "amount": charge.amount,
+                }
+                for charge in charges
+            )
+        )
         return charges
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
@@ -4050,6 +4070,7 @@ class Control:
             authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
             task=_TASK.get(None),
             scope_hash=_SCOPE_HASH.get(None),
+            budget_charges=_BUDGET_CHARGES.get(()),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,

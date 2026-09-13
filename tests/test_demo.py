@@ -109,6 +109,8 @@ SPEC_RECEIPT_FIELDS = (
     "task",
     # SPEC-v0.9 §5.5, a `ctrlrun.receipt/v6` field.
     "scope_hash",
+    # SPEC-v0.9 §10.1, the third `ctrlrun.receipt/v6` field.
+    "budget_charges",
 )
 
 

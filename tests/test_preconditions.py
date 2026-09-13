@@ -2345,7 +2345,7 @@ def test_every_schema_renders_under_its_own_label_and_key_set():
         "ctrlrun.receipt/v3": 26,
         "ctrlrun.receipt/v4": 28,
         "ctrlrun.receipt/v5": 30,
-        "ctrlrun.receipt/v6": 32,
+        "ctrlrun.receipt/v6": 33,
         "ctrlrun.receipt/v9": 26,
         "": 25,
     }

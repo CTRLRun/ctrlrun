@@ -1610,6 +1610,9 @@ class PostgresStateStore:
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
             resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved, record)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._rollback(connection)
             raise

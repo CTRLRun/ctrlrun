@@ -152,6 +152,15 @@ GUARANTEES: Final = (
         ("v0.6 §7.1", "v0.8 §10 T354", "v0.8 §10 T355"),
     ),
     Guarantee(
+        "G22",
+        # 32 characters exactly, against `report._TITLE_WIDTH`. "held" and not "exhausted": what
+        # refuses the next reserve is a budget whose consumption is held by an effect nobody has
+        # resolved, and a title saying "exhausted" would describe the ordinary case and miss the
+        # one this guarantee is about (SPEC-v0.9 §8).
+        "held budget refuses next reserve",
+        ("v0.9 §4.1", "v0.9 §9 T436", "v0.9 §9 T437"),
+    ),
+    Guarantee(
         "G23",
         # 32 characters exactly, against `report._TITLE_WIDTH`. "a failing scope provider" and
         # not "an out-of-scope record": what G23 grades is the **unavailable** half, because
@@ -257,6 +266,15 @@ NO_DELEGABLE_GRANT: Final = "no grant is delegable"
 #: SPEC-v0.9 §8, G24. A statement about the operator's **document**, like every reason in this
 #: module: it says what the document does not declare, not what the kernel is not configured for.
 NO_TASKS: Final = "no grant names a task"
+#: SPEC-v0.9 §8, G22. A statement about the operator's **document**: whether any grant it declares
+#: carries a budget at all.
+NO_BUDGET: Final = "no grant carries a budget"
+#: The action verify can drive carries no value for the metric the budget names, so nothing it
+#: could run would spend against it (SPEC-v0.9 §2.3).
+NO_BUDGET_METRIC: Final = "no action verify can drive carries the metric the budget names"
+#: A document whose one permitted action cannot fit inside its own budget cannot exercise the
+#: hold. Legal, and almost always a mistake: the first action of the window exhausts it.
+BUDGET_CANNOT_BE_FILLED: Final = "one permitted action does not fit inside the grant's budget"
 #: SPEC-v0.9 §8.1, G23. A statement about the **document**, which is what §8.1's argument
 #: actually requires: it forbids an `N/A` about whether a *provider* is configured, because that
 #: is a fact about an operator's code. Whether any action this configuration admits carries a
@@ -351,6 +369,7 @@ NOT_SELECTED: Final = "not selected"
 CONTROL_FAILED: Final = "control failed"
 
 __all__ = [
+    "BUDGET_CANNOT_BE_FILLED",
     "BY_ID",
     "CANDIDATE_BOUND",
     "CATALOGUE",
@@ -369,6 +388,8 @@ __all__ = [
     "NO_APPROVER_ROLE",
     "NO_APPROVE_RULE",
     "NO_AUTHORITY_SECTION",
+    "NO_BUDGET",
+    "NO_BUDGET_METRIC",
     "NO_CEILING_DECLARED",
     "NO_DELEGABLE_GRANT",
     "NO_EFFECT_TEMPLATE",

@@ -1343,9 +1343,15 @@ class InMemoryStateStore:
     def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
         resolver = _approver(resolver)
         with self._lock:
+            now = self._clock()
             record = _resolvable(self._effects.get(effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._effects[effect_key] = resolved
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row. **This path does not go
+            # through `_transition`**, so the release has to be here too: a human resolving an
+            # `AMBIGUOUS` record `FAILED` is exactly the authority R2 says releases a hold, and
+            # without this the charge would be held for ever by the one act meant to free it.
+            self._release_locked(effect_key, state, now)
             return resolved
 
     def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
@@ -2308,9 +2314,13 @@ class SQLiteStateStore:
         connection = self._connection()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            now = self._clock()
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN IMMEDIATE`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise

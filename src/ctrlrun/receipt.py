@@ -100,7 +100,7 @@ _V5_KEYS: Final = (*_V4_KEYS, "approvers", "authority_grant_id")
 #: guarantee catalogue's own rule: a key listed here is a key `to_dict` projects, so naming one
 #: before something writes it is a `KeyError` on every receipt, which is the field-level form of
 #: a stub row. Item 7 asserts all three are present before the release.
-_V6_KEYS: Final = (*_V5_KEYS, "task", "scope_hash")
+_V6_KEYS: Final = (*_V5_KEYS, "task", "scope_hash", "budget_charges")
 _KEYS: Final = {
     _V1: _V1_KEYS,
     _V2: _V2_KEYS,
@@ -482,6 +482,11 @@ class Receipt:
     #: authorization system's state (`v0.7 §6.10`). Its own domain tag, so it can never equal a
     #: precondition fingerprint over the same mapping.
     scope_hash: str | None = None
+    #: SPEC-v0.9 §10.1: which grants this action charged, which metrics, how much. One entry per
+    #: ancestor charged (§2.7), so a reader can tell an action that spent a child's budget from
+    #: one that spent a root's. Empty where the deciding grant budgets nothing, which is every
+    #: grant written before v0.9.
+    budget_charges: tuple[Mapping[str, Any], ...] = ()
     #: The schema this receipt is written under (§6.11). A receipt this binary builds is
     #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`
     #: where it declared none, which renders with no `schema` key at all.
@@ -575,6 +580,7 @@ class Receipt:
             # predates tasks" by the schema label.
             "task": self.task,
             "scope_hash": self.scope_hash,
+            "budget_charges": [dict(charge) for charge in self.budget_charges],
         }
 
     def to_json(self) -> str:
@@ -669,6 +675,15 @@ class Receipt:
                 document.get("scope_hash")
                 if schema == _V6 and isinstance(document.get("scope_hash"), str)
                 else None
+            ),
+            budget_charges=(
+                tuple(
+                    entry
+                    for entry in document.get("budget_charges", ())
+                    if isinstance(entry, Mapping)
+                )
+                if schema == _V6 and isinstance(document.get("budget_charges"), list)
+                else ()
             ),
             schema=schema,
         )
