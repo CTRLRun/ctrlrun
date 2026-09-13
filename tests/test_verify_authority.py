@@ -671,3 +671,367 @@ def test_T413h_a_resize_never_silently_grades_a_different_rule(tmp_path):
         )
     else:
         assert result.status is Status.NOT_APPLICABLE, result.reason
+
+
+SHADOWED_DELEGABLE = """
+authority:
+  max_delegation_depth: 3
+  grants:
+    - id: aa-broad
+      subject: { agent: "zz-*" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }
+    - id: zz-parent
+      subject: { agent: "zz-agent", user: "dana@example.com" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_gte: 0, amount_lte: 10000000 }
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+      budgets:
+        - { metric: amount, limit: 1000, window: PT24H }
+"""
+
+FLOORED_ALLOW = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 50000, amount_lte: 10000000 }
+        decision: allow
+      - decision: deny
+"""
+
+TWO_METRICS = """
+authority:
+  grants:
+    - id: g1
+      subject: { agent: "payer" }
+      actions: ["pay.send"]
+      resources: ["acct:*"]
+      budgets:
+        - { metric: amount, limit: 100000, window: PT24H }
+        - { metric: tip,    limit: 100000, window: PT24H }
+
+actions:
+  pay.send:
+    effect: "pay:{ref}"
+    resource: "acct:{ref}"
+    rules:
+      - when: { amount_lte: 100000, tip_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+
+
+def test_T413i_a_grant_the_scenario_selected_is_held_to_its_budget_even_when_shadowed(tmp_path):
+    """**`select`'s `grant_filter` names the grant a scenario is about; the resolver may name
+    another.** G9 delegates from the grant it selected, so that grant's budget binds the
+    delegation whatever `Authority.evaluate` resolves for the parent action.
+
+    `_deciding_grant` answers only the resolver, so a lexicographically earlier grant carrying no
+    budget shadowed a delegable parent whose limit was fifty times smaller: the vector was left
+    at the band floor, G9 delegated, and `ctrlrun verify` exited 3 on the delegation's own
+    budget. An independent review demonstrated it.
+    """
+    path = _write(tmp_path, V7 + SHADOWED_DELEGABLE + FLOORED_ALLOW)
+
+    graded = _by_id(run(path, only=("G9", "G22")))
+
+    for gid in ("G9", "G22"):
+        assert graded[gid].status is not Status.FAIL, f"{gid}: {graded[gid].reason}"
+
+
+def test_T413j_a_grant_budgeting_two_metrics_is_graded_not_declined(tmp_path):
+    """A budget per metric is an ordinary shape, and each metric needs its own number.
+
+    The resize set the **first** budgeted metric alone, so a vector over two budgets could never
+    be brought under both and every candidate was rejected. An independent review found a
+    document where adding one `tip` budget took verify from grading thirteen guarantees to
+    grading none, **silently, with exit 0**: every guarantee reported `N/A` and an operator
+    reading that would think their configuration had been checked.
+    """
+    path = _write(tmp_path, V7 + TWO_METRICS)
+
+    graded = _by_id(run(path, only=("G3", "G4", "G22")))
+
+    for gid in ("G3", "G4", "G22"):
+        assert graded[gid].status is Status.PASS, f"{gid} was not graded: {graded[gid].reason}"
+
+
+def test_T413k_the_two_metric_vector_is_under_both_budgets(tmp_path):
+    """And the vector it picked really does satisfy both, rather than one of them twice."""
+    path = _write(tmp_path, V7 + TWO_METRICS)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    graded = dict(result.arguments or {})
+    assert graded["amount"] * 18 <= 100000, graded
+    assert graded["tip"] * 18 <= 100000, graded
+
+
+TASKED_SHADOW = """
+authority:
+  grants:
+    - id: aa-tasked
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      tasks: ["nightly-run:*"]
+    - id: bb-budgeted
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      budgets:
+        - { metric: amount, limit: 100000, window: PT24H }
+        - { metric: tokens, limit: 100000, window: PT24H }
+"""
+
+UPPER_ONLY = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+
+
+def test_T413l_the_deciding_grant_applies_every_predicate_evaluate_applies(tmp_path):
+    """`_deciding_grant` must answer the question `Authority.evaluate` answers, which means all
+    four of its predicates and not two.
+
+    Checking only `matches_shape` and `constraints_hold` returned a **task-bound** grant as the
+    decider for an action outside its task. That grant carries no budget, so its sibling's was
+    never checked, and `ctrlrun verify` exited 3 on a refusal the kernel made correctly. An
+    independent review demonstrated it.
+    """
+    path = _write(tmp_path, V7 + TASKED_SHADOW + UPPER_ONLY)
+
+    result = _by_id(run(path, only=("G22",)))["G22"]
+
+    assert result.status is not Status.FAIL, result.reason
+    assert "internal" not in str(result.reason or "").lower()
+
+
+def test_T413m_a_resize_that_moves_the_action_to_another_grant_is_rejected(tmp_path):
+    """The grant-identity guard inside the resize loop, which was the headline of the commit that
+    added it and which a mutation run found untested: deleting it left every test green.
+
+    `aa-narrow` sorts first and admits only tiny amounts; `bb-broad` is the grant the band puts
+    the action in. A candidate small enough for `bb-broad`'s budget falls inside `aa-narrow`, and
+    grading it there would report the wrong grant and check a budget nobody applies.
+    """
+    document = (
+        V7
+        + """
+authority:
+  grants:
+    - id: aa-narrow
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 10 }
+    - id: bb-broad
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 500000 }
+      budgets:
+        - { metric: amount, limit: 90000, window: PT24H }
+"""
+        + UPPER_ONLY
+    )
+    path = _write(tmp_path, document)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    assert result.status is not Status.FAIL, result.reason
+    if result.status is Status.PASS:
+        # Whatever it graded, the grant it names must be the one that actually decides it.
+        assert dict(result.arguments or {})["amount"] > 10, (
+            f"graded a vector that aa-narrow would decide: {result.arguments}"
+        )
+
+
+def test_T413n_a_budget_decline_does_not_claim_a_resource_miss(tmp_path):
+    """`select` records a grant miss for every failed candidate, so without the refinement a
+    single-grant document was told no grant's `resources:` matched about a pattern that matched
+    perfectly. A mutation run found the refinement untested."""
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + FLOORED_RULE)
+
+    result = _by_id(run(path, only=("G4",)))["G4"]
+
+    assert result.status is Status.NOT_APPLICABLE
+    assert reg.NO_GRANT_COVERS_SELECTION not in result.reason, result.reason
+    assert reg.NO_ACTION_FITS_THE_BUDGET in result.reason, result.reason
+
+
+def test_T413o_the_metric_miss_carries_the_budget_note(tmp_path):
+    """The note that tells an operator what to do about it. Its *reason* was tested; the note
+    beside it was not, and a mutation dropping it left every test green."""
+    path = _write(tmp_path, V7 + UNMEASURABLE_BUDGET + ACTIONS)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    assert result.reason.startswith(reg.NO_METRIC_TO_MEASURE), result.reason
+    assert reg.BUDGET_MISS_NOTE in str(result.detail), result.detail
+
+
+def test_T413p_an_unmeasurable_grant_does_not_mislabel_a_later_budget_miss(tmp_path):
+    """The per-candidate reset. Without it a `True` left by an earlier grant makes the next
+    action's ordinary budget miss report as a metric miss, which is a different fix entirely.
+
+    `aaa.unmeasurable` is budgeted on a metric it does not carry; `zzz.refund` is budgeted on one
+    it does and simply cannot afford. The second must be reported as what it is.
+    """
+    document = (
+        V7
+        + """
+authority:
+  grants:
+    - id: aaa-grant
+      subject: { agent: "head-of-support" }
+      actions: ["aaa.unmeasurable"]
+      resources: ["payment:*"]
+      budgets:
+        - { metric: items, limit: 900, window: PT24H }
+    - id: zzz-grant
+      subject: { agent: "head-of-support" }
+      actions: ["zzz.refund"]
+      resources: ["payment:*"]
+      budgets:
+        - { metric: amount, limit: 900, window: PT24H }
+
+actions:
+  aaa.unmeasurable:
+    effect: "u:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_lte: 100000 }
+        decision: approve
+      - decision: deny
+  zzz.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 50000, amount_lte: 100000 }
+        decision: approve
+      - decision: deny
+"""
+    )
+    path = _write(tmp_path, document)
+
+    result = _by_id(run(path, only=("G1",)))["G1"]
+
+    assert result.status is Status.NOT_APPLICABLE
+    assert reg.NO_ACTION_FITS_THE_BUDGET in result.reason, result.reason
+
+
+def test_T413q_the_result_names_the_grant_that_actually_decides_the_graded_vector(tmp_path):
+    """The grant-identity guard's real subject: **the report must not name the wrong grant.**
+
+    A resize can move the action into a lexicographically earlier grant. The budget re-check
+    below catches that when the new grant has a budget to violate; when it does not, the only
+    consequence is that the result names one grant while `Authority.evaluate` resolves another,
+    and a mutation run found nothing asserting otherwise.
+    """
+    document = (
+        V7
+        + """
+authority:
+  grants:
+    - id: aa-narrow
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 10 }
+    - id: bb-broad
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 500000 }
+      budgets:
+        - { metric: amount, limit: 90000, window: PT24H }
+"""
+        + UPPER_ONLY
+    )
+    path = _write(tmp_path, document)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    if result.status is not Status.PASS:
+        pytest.skip(f"nothing graded: {result.reason}")
+    graded = dict(result.arguments or {})
+    # Whichever grant the report names, it has to be the one that would decide this vector.
+    deciding = "aa-narrow" if graded["amount"] <= 10 else "bb-broad"
+    assert result.grant_id in (None, deciding), (
+        f"the report names {result.grant_id!r} for a vector {deciding!r} decides: {graded}"
+    )
+
+
+def test_T413r_an_earlier_grants_budget_binds_a_task_filtered_selection(tmp_path):
+    """G24 selects by task, and a grant naming **no** `tasks:` authorises every task, so an
+    earlier one still decides and its budget still binds.
+
+    Sizing the vector against only the selected grant let an earlier, tighter budget go
+    unchecked. This is the shape that makes checking the deciding grant load-bearing rather than
+    merely principled.
+    """
+    document = (
+        V7
+        + """
+authority:
+  grants:
+    - id: aa-tight
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      budgets:
+        - { metric: amount, limit: 90, window: PT24H }
+    - id: zz-tasked
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      tasks: ["refund-run:*"]
+      budgets:
+        - { metric: amount, limit: 900000, window: PT24H }
+"""
+        + UPPER_ONLY
+    )
+    path = _write(tmp_path, document)
+
+    graded = _by_id(run(path, only=("G22", "G24")))
+
+    for gid in ("G22", "G24"):
+        assert graded[gid].status is not Status.FAIL, f"{gid}: {graded[gid].reason}"
+        assert "internal" not in str(graded[gid].reason or "").lower(), graded[gid].reason
+
+
+def test_T413s_G22_grades_the_same_alone_as_it_does_in_a_full_run(tmp_path):
+    """**The milestone's headline guarantee was passing for the wrong reason.**
+
+    G22 resolved the charges it fills the budget with through `Control._charges_for`, which
+    answers from `_AUTHORITY_RESULT` -- a context variable only `execute` sets -- and it runs
+    before its own control leg. So it returned `()` whenever nothing had executed in that context
+    yet: the synthetic hold reserved nothing, the budget was never filled, and `ctrlrun verify
+    --only G22` reported **FAIL** on `examples/authority/payments.yaml`, telling an operator the
+    kernel is broken.
+
+    In a full run it got the right charges only because an earlier scenario's `execute` had left
+    its result in that variable. A guarantee that passes because of what ran before it is not
+    graded, and `--only` is the switch that shows it.
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET.replace("limit: 900", "limit: 9000") + ACTIONS)
+
+    alone = _by_id(run(path, only=("G22",)))["G22"]
+    together = _by_id(run(path))["G22"]
+
+    assert alone.status is together.status, (
+        f"alone: {alone.status} ({alone.reason}); in a full run: {together.status}"
+    )
+    assert alone.status is not Status.FAIL, alone.reason

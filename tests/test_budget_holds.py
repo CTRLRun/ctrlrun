@@ -1212,3 +1212,115 @@ def test_T458_observe_and_enforce_agree_when_an_action_is_both_out_of_scope_and_
     assert receipt.would_have.blocked_reason == enforced, (
         f"enforce refused {enforced!r} and the pilot was told {receipt.would_have.blocked_reason!r}"
     )
+
+
+# --- the second review round: four regressions on the observe and resume paths ---------------
+
+
+def test_T459_an_observed_resumed_receipt_never_carries_another_actions_charges(
+    store, clock
+) -> None:
+    """**T448's defect, reintroduced on the observe path**, on the one receipt §8.3 makes the
+    whole evidence for an MCP multi round-trip.
+
+    `execute` clears `_BUDGET_CHARGES` at its own top; `resume` has no such line and relied on
+    `_resumed_charges` to do it, and an earlier fix skipped that call in observe mode. An
+    independent review demonstrated the result: a resumed `observed` receipt for an action whose
+    own metric cannot be measured reported a charge of 700 belonging to a different effect.
+
+    The action here is unmeasurable on purpose, because that is the path that returns without
+    computing anything and so leaves whatever the contextvar held.
+    """
+    from ctrlrun import Suspended
+
+    control = _observing_control(store, clock)
+    unmeasurable = Action(
+        name="payments.refund",
+        arguments={"amount": -250, "id": "1"},
+        principal=AGENT,
+        environment="prod",
+    )
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(unmeasurable, suspends, "refund:1")
+    # A different action runs in the same context, leaving its own charges behind.
+    control.execute(_action("2", 100), lambda: {"ok": True}, "refund:2")
+
+    receipt = control.resume("round-1", lambda: {"ok": True})
+
+    assert receipt.budget_charges == (), (
+        f"the resumed receipt for {dict(receipt.arguments)} carried {receipt.budget_charges}"
+    )
+
+
+def test_T460_the_resumed_leg_records_one_denial_and_the_receipt_agrees_with_it(
+    store, clock
+) -> None:
+    """**An answer and the evidence may not disagree about the same action**, which is the rule
+    `acs.py`'s own clause states one boundary lower.
+
+    The resumed recompute was handed a throwaway `_Observation()`, so the block was discarded and
+    the event written a second time: the receipt said `decision=ALLOW, blocked_reason=None` while
+    the two `ACTION_DENIED` events beside it said the action was refused twice.
+    """
+    from ctrlrun import Suspended
+
+    control = _observing_control(store, clock)
+    unmeasurable = Action(
+        name="payments.refund",
+        arguments={"amount": -250, "id": "1"},
+        principal=AGENT,
+        environment="prod",
+    )
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(unmeasurable, suspends, "refund:1")
+    receipt = control.resume("round-1", lambda: {"ok": True})
+
+    denials = [e for e in store.events() if str(e.type) == "ACTION_DENIED"]
+    assert len(denials) == 1, [e.data.get("reason") for e in denials]
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "budget_unmeasurable", receipt.would_have
+
+
+def test_T461_the_observed_budget_refusal_names_the_effect_it_refused(store, clock) -> None:
+    """Splitting the observe check dropped `effect_key` from the one event that says which effect
+    a budget would have refused. Nothing noticed, which is why this exists."""
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    observing = _observing_control(store, clock)
+    observing.execute(_action("2", 250), lambda: {"ok": True}, "refund:2")
+
+    exhausted = [
+        event
+        for event in store.events()
+        if str(event.type) == "ACTION_DENIED" and event.data.get("reason") == "budget_exhausted"
+    ]
+    assert exhausted, "no observed budget refusal was recorded"
+    assert exhausted[-1].effect_key == "refund:2", exhausted[-1].effect_key
+
+
+def test_T462_the_unmeasurable_refusal_survives_a_pickle_as_InvalidArgument_did() -> None:
+    """`InvalidArgument` round-trips; a subclass with a keyword-only `reason` did not, because
+    the default reconstruction is `(cls, self.args)`.
+
+    Nothing in this repository pickles it, so no test would have caught it by running: verify's
+    children speak JSON over stdin. A caller fanning `Control.execute` across a
+    `ProcessPoolExecutor` lost the pool instead of catching the refusal.
+    """
+    import pickle
+
+    from ctrlrun.control import _UnmeasurableError
+
+    back = pickle.loads(pickle.dumps(_UnmeasurableError("nope", reason="budget_unkeyed")))
+
+    assert isinstance(back, InvalidArgument)
+    assert back.reason == "budget_unkeyed"
+    assert str(back) == "nope"

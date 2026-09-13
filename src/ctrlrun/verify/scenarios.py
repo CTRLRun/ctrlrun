@@ -936,8 +936,16 @@ class Engine:
             return None
         for grant_id in sorted(self.authority.grants):
             grant = self.authority.grants[grant_id]
-            if grant.matches_shape(action) and grant.constraints_hold(action):
-                return grant
+            # The same four predicates `Authority.evaluate` applies, in the same order
+            # (`authority.py:1237-1255`). **`task_holds` and `is_expired` are not optional
+            # here**: an independent review found a task-bound grant carrying no budget being
+            # returned as the decider for an action outside its task, so a sibling grant's
+            # budget was never checked and `ctrlrun verify` exited 3 on it.
+            if not grant.matches_shape(action) or not grant.constraints_hold(action):
+                continue
+            if grant.is_expired(self._t0) or not grant.task_holds(self._task):
+                continue
+            return grant
         return None
 
     #: How many spends of the chosen vector a scenario may take. G4's control leg runs
@@ -968,6 +976,46 @@ class Engine:
                 return False
         return True
 
+    def _budget_verdict(self, grants: tuple[Grant, ...], action: Action, room: int) -> bool | None:
+        """`_fits_budgets` over **every** grant that could hold this action to a budget.
+
+        Two of them, and an independent review demonstrated why both are needed.
+        `_deciding_grant` answers who `Authority.evaluate` resolves, and `select`'s own
+        `grant_filter` answers who the scenario is *about*: G9 delegates from the grant it
+        selected, so that grant's budget binds the delegation whatever the resolver says. Sizing
+        against only the resolver let a lexicographically earlier grant with no budget shadow a
+        delegable parent whose limit was 50 times smaller, and `ctrlrun verify` exited 3 on the
+        delegation's own budget.
+        """
+        seen: dict[str, Grant] = {grant.id: grant for grant in grants}
+        for grant in seen.values():
+            verdict = self._fits_budgets(grant, action, room=room)
+            if verdict is not True:
+                return verdict
+        return True
+
+    def _shrunk(
+        self, arguments: dict[str, Any], grants: tuple[Grant, ...], action: Action, divisor: int
+    ) -> dict[str, Any] | None:
+        """One vector with **every** over-limit metric brought under its own budget.
+
+        `_fitted_to_budgets` used to resize the first budgeted metric alone, so a grant with
+        budgets on two metrics was declined even when a fitting vector existed: an independent
+        review found a document where adding one `tip` budget took verify from grading thirteen
+        guarantees to grading none, silently and with exit 0. A budget per metric is an ordinary
+        shape, and each metric needs its own number.
+        """
+        tried = dict(arguments)
+        for grant in grants:
+            for budget in grant.budgets or ():
+                try:
+                    value = _metric_value(action, budget.metric, grant.id)
+                except InvalidArgument:
+                    return None
+                if value * self._BUDGET_HEADROOM > budget.limit:
+                    tried[budget.metric] = max(1, budget.limit // divisor)
+        return tried if tried != arguments else None
+
     def _fitted_to_budgets(
         self,
         name: str,
@@ -977,7 +1025,7 @@ class Engine:
         grant: Grant,
         action: Action,
     ) -> tuple[dict[str, Any], Action] | None:
-        """Size verify's own action vector to the budgets that will actually decide it.
+        """Size verify's own action vector to the budgets that will decide it.
 
         **Verify grades a guarantee, not the operator's budget sizing.** `_synthesize` picks a
         vector to land in a rule, and a grant whose budget is smaller than that vector refuses
@@ -986,17 +1034,16 @@ class Engine:
         on G1, which is about approvals. That is `_identity_the_document_needs`'s case in the
         budget dimension, and it gets the same answer: verify supplies what the document needs.
 
-        Every candidate is checked against **the grant that would decide it**, not the grant the
-        caller is holding, because a resize can move the action between grants. The vector is
-        only changed when a budget would refuse it, so every document without budgets keeps the
-        vector it had, and a replacement must land in the same rule with the same reason because
-        `select`'s contract is the decision it was asked for.
-
-        Where nothing fits, the candidate is declined and `select` moves on, so the guarantee
-        reports `N/A` with a true reason rather than failing a control leg.
+        The vector is only changed when a budget would refuse it, so every document without
+        budgets keeps the vector it had, and a replacement must land in the same rule with the
+        same reason because `select`'s contract is the decision it was asked for. Where nothing
+        fits, the candidate is declined and `select` moves on, so the guarantee reports `N/A`
+        with a true reason rather than failing a control leg.
         """
-        deciding = self._deciding_grant(action) or grant
-        verdict = self._fits_budgets(deciding, action, room=self._BUDGET_HEADROOM)
+        deciding = self._deciding_grant(action)
+        bound = (grant,) if deciding is None else (grant, deciding)
+        room = self._BUDGET_HEADROOM
+        verdict = self._budget_verdict(bound, action, room)
         if verdict is True:
             return arguments, action
         if verdict is None:
@@ -1005,34 +1052,25 @@ class Engine:
             # because raising a limit fixes one and nothing about the other.
             self._unmeasurable = True
             return None
-        limits = [budget.limit for budget in (deciding.budgets or ()) if budget.limit > 0]
-        smallest = min(limits) if limits else 0
-        metric = next(iter(deciding.budgets or ())).metric
-        # **Room for a scenario that acts more than once**, not for one action. G4's control leg
-        # alone runs `PROCESSES` children on distinct keys and then contends `PROCESSES` more on
-        # one, so it needs nine spends to fit; a vector sized to `limit` exactly made its control
-        # leg pass, its contended leg find zero winners, and the guarantee report **FAIL** -- the
-        # status that means the kernel is broken -- for a budget that was merely small. Verify
-        # may say it could not grade a configuration; it may not accuse the kernel of a defect.
-        headroom = self._BUDGET_HEADROOM
-        for candidate in (1, smallest // headroom, smallest // 8, smallest // 4, smallest // 2):
-            if candidate < 1:
+        for divisor in (room, 8, 4, 2, 1):
+            tried = self._shrunk(arguments, bound, action, divisor)
+            if tried is None:
                 continue
-            tried = {**arguments, metric: candidate}
             rebuilt = replace(action, arguments=tried)
             evaluation = self.policy.evaluate(rebuilt)
             if evaluation.decision is not decision or evaluation.reason != reason:
                 continue
-            # **Re-resolved, and it must settle on the same grant.** A resize can move the
-            # action between grants, and `_bind` is building a selection that names *this* one:
-            # a vector graded against a different grant's budget would report the wrong grant in
-            # the result and check a budget nobody will apply. Requiring the same grant subsumes
-            # re-checking its shape and constraints, because `_deciding_grant` only returns a
-            # grant that matched both.
+            # **Re-resolved, and it must settle on the same grant.** A resize can move the action
+            # between grants, and `_bind` is building a selection that names *this* one: a vector
+            # graded against a different grant's budget would report the wrong grant in the
+            # result and check a budget nobody will apply.
             settled = self._deciding_grant(rebuilt)
-            if settled is None or settled.id != grant.id:
+            if settled is not None and settled.id != grant.id and deciding is not None:
                 continue
-            if self._fits_budgets(settled, rebuilt, room=headroom) is not True:
+            if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
+                continue
+            after = (grant,) if settled is None else (grant, settled)
+            if self._budget_verdict(after, rebuilt, room) is not True:
                 continue
             return tried, rebuilt
         return None
@@ -3938,7 +3976,27 @@ class Engine:
             detail["limit"] = budget.limit
             detail["per_action"] = per_action
             action = selection.build()
-            charges = control._charges_for(action, selection.effect_key)
+            # **Resolved here, not read out of a context variable.** `Control._charges_for`
+            # answers from `_AUTHORITY_RESULT`, which only `execute` sets, and this runs before
+            # the control leg. It therefore returned `()` whenever nothing had executed in this
+            # context yet, the synthetic hold below reserved nothing, the budget was never
+            # filled, and G22 reported **FAIL** -- the kernel is broken -- on the shipped
+            # example under `ctrlrun verify --only G22`.
+            #
+            # In a full run it returned the right charges only because a previous scenario's
+            # `execute` had left its own result in that variable, so this guarantee was passing
+            # for a reason that had nothing to do with it. That is the false green this
+            # repository keeps finding, on the guarantee that proves budgets work at all.
+            assert self.authority is not None  # `budgeted` is non-empty, so there is one
+            resolved = self.authority.evaluate(
+                action, now=control._clock(), store=store, task=selection.task
+            )
+            charges = self.authority._charges_for(action, resolved, store=store)
+            _expect_control(
+                bool(charges),
+                "the selected action charges the budgeted grant",
+                f"no charge resolved for {selection.action} on {budgeted[0]}: {resolved.reason}",
+            )
 
             # The control: with room, it runs.
             executor = _Executor()
