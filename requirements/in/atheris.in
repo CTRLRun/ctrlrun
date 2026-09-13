@@ -1,0 +1,3 @@
+# The fuzzing campaign in fuzz.yml. Installed after the seed-corpus gate, on purpose: the gate
+# must not depend on a toolchain that can fail to install.
+atheris

@@ -53,7 +53,7 @@ jobs:
 
       - name: Build
         run: |
-          python -m pip install --upgrade pip build twine packaging
+          pip install --require-hashes -r requirements/build.txt
           python -m build --outdir dist "${{ steps.target.outputs.path }}"
 
       - name: Metadata renders on PyPI
@@ -101,11 +101,13 @@ jobs:
         if: steps.target.outputs.kernel == 'true'
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
-          cd /tmp/sdist
           # With the extras: without them the gateway, ACS, elicitation and OTel modules
           # skip, and this gate guards an upload to a version number that can never be
-          # reused. It should be no weaker than the one on main.
-          pip install ".[dev,gateway,otel,identity]"
+          # reused. It should be no weaker than the one on main, so it installs from the
+          # same hashed lock.
+          pip install --require-hashes -r requirements/ci.txt
+          cd /tmp/sdist
+          pip install --no-deps -e .
           pytest -q
 
       - name: The quick start works from the wheel
