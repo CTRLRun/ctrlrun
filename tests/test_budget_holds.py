@@ -829,3 +829,129 @@ def test_T450_a_resumed_leg_after_a_renewal_reports_only_its_own_attempts_charge
         {"grant_id": "payer", "metric": "amount", "amount": 100},
     ), receipt.budget_charges
     assert receipt.attempt == 2, receipt.attempt
+
+
+# --- §4.2.1: observe mode charges nothing, and says what would have been refused --------------
+
+OBSERVE_DOC = DOC.replace("environment: prod", "environment: prod\nmode: observe")
+
+
+def _observing_control(store, clock) -> Control:
+    return Control(
+        policy=Policy.from_yaml(OBSERVE_DOC, source="<o>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(OBSERVE_DOC, source="<o>"),
+    )
+
+
+def test_T439_observe_mode_charges_nothing(store, clock) -> None:
+    """§4.2.1, first half. `v0.3 §6.2`'s observe mode enforces nothing and records what it would
+    have done. A budget consumed there would be the one check in the kernel that enforced under
+    observation: the run would refuse at the limit while claiming to be observing, and the
+    counterfactual an operator adopts observe mode to get would be wrong.
+    """
+    control = _observing_control(store, clock)
+    for index in range(1, 6):
+        receipt = control.execute(
+            _action(str(index), 100), lambda: {"ok": True}, f"refund:{index}"
+        )
+        assert receipt.result is ReceiptResult.OBSERVED
+    assert store.consumptions() == (), "observe mode wrote to the ledger"
+
+
+def test_T439a_observe_mode_reports_the_budget_that_would_have_refused(store, clock) -> None:
+    """§4.2.1, second half, and the half that did not exist. The report says the action *would
+    have been* refused on a budget, naming the grant and the metric, exactly as it reports what a
+    policy would have decided.
+
+    The shape that reaches it is a **mixed** deployment: the ledger carries enforced spend, and a
+    new action is being piloted in observe mode against the same grant. §4.2.1a says why a
+    deployment observing everything reports nothing here.
+    """
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("2", 100), lambda: {"ok": True}, "refund:2")
+
+    assert receipt.result is ReceiptResult.OBSERVED, "it ran: observe mode refuses nothing"
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "budget_exhausted", receipt.would_have
+    assert store.consumptions() == store.consumptions(grant_id="payer")
+    assert len(store.consumptions()) == 1, "the observed run charged nothing of its own"
+
+
+def test_T439b_observe_mode_reports_nothing_when_the_budget_has_room(store, clock) -> None:
+    """The negative. Without it T439a passes for a `block` that fires unconditionally."""
+    enforcing = _control(store, clock)
+    enforcing.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+
+    observing = _observing_control(store, clock)
+    receipt = observing.execute(_action("2", 100), lambda: {"ok": True}, "refund:2")
+    blocked = receipt.would_have.blocked_reason if receipt.would_have else None
+    assert blocked != "budget_exhausted", blocked
+
+
+def test_T439c_an_unmeasurable_action_under_observation_reports_and_denies_nothing(
+    store, clock
+) -> None:
+    """§2.3 and §2.4.1 under `v0.3 §6.2`. Enforce mode refuses these, so observe mode's job is to
+    say so, and its job is equally to write no `denied` receipt while doing it.
+
+    Routing them through `_refuse_unmeasurable` unguarded would have observe mode record a
+    refusal it did not make, on top of the `observed` receipt for the run that went ahead: two
+    receipts for one action, disagreeing.
+    """
+    control = _observing_control(store, clock)
+    receipt = control.execute(
+        Action(
+            name="payments.refund",
+            arguments={"amount": -250, "id": "1"},
+            principal=AGENT,
+            environment="prod",
+        ),
+        lambda: {"ok": True},
+        "refund:1",
+    )
+    assert receipt.result is ReceiptResult.OBSERVED, "observe mode refuses nothing"
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == "budget_unmeasurable", receipt.would_have
+    assert [r.result for r in store.receipts()] == [ReceiptResult.OBSERVED], store.receipts()
+    assert store.consumptions() == ()
+
+
+def test_T439d_an_observed_receipt_carries_the_charge_it_would_have_taken(store, clock) -> None:
+    """§4.2.1a. The counterfactual spend, which is the number a budget is sized from.
+
+    A probe found observed receipts carrying an empty tuple, which made §4.2.1a's sizing path
+    impossible: the ledger is empty under observation, so if the receipts do not carry what the
+    action would have been charged, nothing anywhere records it.
+
+    It is not a claim that anything was spent. The receipt says `observed`, the ledger is empty,
+    and `v0.3 §6.2` makes every number on an observed receipt a counterfactual.
+    """
+    control = _observing_control(store, clock)
+    receipt = control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+    assert receipt.result is ReceiptResult.OBSERVED
+    assert receipt.budget_charges == (
+        {"grant_id": "payer", "metric": "amount", "amount": 100},
+    ), receipt.budget_charges
+    assert store.consumptions() == (), "the counterfactual is on the receipt, not in the ledger"
+
+
+def test_T439e_an_observed_receipt_for_an_unbudgeted_grant_carries_none(store, clock) -> None:
+    """The negative, so T439d cannot pass for a field that is always populated."""
+    unbudgeted = OBSERVE_DOC.replace(
+        "      budgets:\n        - {metric: amount, limit: 250, window: PT24H}\n", ""
+    )
+    control = Control(
+        policy=Policy.from_yaml(unbudgeted, source="<u>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(unbudgeted, source="<u>"),
+    )
+    receipt = control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+    assert receipt.budget_charges == ()

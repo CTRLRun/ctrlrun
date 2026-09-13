@@ -124,7 +124,14 @@ from .receipt import (
     iso_timestamp,
     new_receipt_id,
 )
-from .state import BudgetExhaustedError, Charge, ClockSkew, SQLiteStateStore, StateStore
+from .state import (
+    BudgetExhaustedError,
+    Charge,
+    ClockSkew,
+    SQLiteStateStore,
+    StateStore,
+    check_charges,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -1587,6 +1594,11 @@ class Control:
                     if required > 1 and self._approver_identity is None
                     else BLOCKED_APPROVAL_REQUIRED
                 )
+        # SPEC-v0.9 §4.2.1 — **the report, and nothing written.** Observe mode charges nothing,
+        # so this evaluates §3.3.1's predicate against the ledger as it stands and records what
+        # would have happened. Charging here would be the one check in the kernel that enforced
+        # under observation: the run would refuse at the limit while claiming to be observing.
+        self._observe_budget(action, effect_key, observation)
         if approval_id is None and effect_key is None:
             return None, None
         try:
@@ -3212,7 +3224,12 @@ class Control:
         ):
             raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
 
-    def _charges_for(self, action: Action, effect_key: str | None) -> tuple[Charge, ...]:
+    def _charges_for(
+        self,
+        action: Action,
+        effect_key: str | None,
+        observation: _Observation | None = None,
+    ) -> tuple[Charge, ...]:
         """What this action spends, one `Charge` per ancestor (SPEC-v0.9 §2.7).
 
         **And §2.4.1's refusal, here, because this is where the effect key is finally known.**
@@ -3233,7 +3250,9 @@ class Control:
         except InvalidArgument as unmeasurable:
             # §2.3. The kernel cannot measure what this action spends, so it cannot hold the
             # grant to its budget, so it declines to run it. Recorded before it is re-raised.
-            raise self._refuse_unmeasurable(action, BUDGET_UNMEASURABLE, unmeasurable) from None
+            raise self._refuse_unmeasurable(
+                action, BUDGET_UNMEASURABLE, unmeasurable, observation
+            ) from None
         if charges and effect_key is None:
             raise self._refuse_unmeasurable(
                 action,
@@ -3244,8 +3263,76 @@ class Control:
                     "Declare an `effect:` template for the action, or take the budget off the "
                     "grant (SPEC-v0.9 §2.4.1)"
                 ),
+                observation,
             ) from None
         return charges
+
+    def _observe_budget(
+        self, action: Action, effect_key: str | None, observation: _Observation
+    ) -> None:
+        """SPEC-v0.9 §4.2.1's report: what a budget *would have* refused, charging nothing.
+
+        The predicate is `check_charges`, the same function all three stores decide with, so the
+        report and the enforcement cannot drift: a pilot that said "this would have been fine"
+        about an action enforce mode refuses is worse than no pilot. The sum comes from the
+        public `consumptions()` read rather than a store's private `_spent`, because this runs
+        outside any reservation and must take no lock and write nothing.
+
+        §2.3's and §2.4.1's refusals are **reported** here rather than raised: enforce mode
+        refuses those actions, so saying so is exactly what observe mode is for. They get their
+        own reasons rather than `budget_exhausted`, because an operator whose pilot says "this
+        would have been refused" needs to know whether the budget is too small or the action
+        cannot be measured at all.
+        """
+        try:
+            charges = self._charges_for(action, effect_key, observation)
+        except InvalidArgument:
+            # Already reported by `_refuse_unmeasurable`, which blocked rather than denying.
+            return
+        if not charges:
+            return
+        # §4.2.1a — **the counterfactual spend, on the receipt.** The ledger is empty under
+        # observation, so if the receipt does not carry what this action would have been charged,
+        # nothing anywhere records it and a budget cannot be sized from an observed run. It
+        # asserts no spend: the receipt says `observed`, and `v0.3 §6.2` makes every number on an
+        # observed receipt a counterfactual. T439d.
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": charge.grant_id, "metric": charge.metric, "amount": charge.amount}
+                for charge in charges
+            )
+        )
+        now = self._clock()
+
+        def spent(charge: Charge) -> int:
+            return sum(
+                row.amount
+                for row in self._store.consumptions(
+                    grant_id=charge.grant_id,
+                    metric=charge.metric,
+                    since=now - charge.window,
+                )
+                if row.released_at is None
+            )
+
+        try:
+            check_charges(charges, spent)
+        except BudgetExhaustedError as exhausted:
+            observation.block(BUDGET_EXHAUSTED)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {
+                    "reason": BUDGET_EXHAUSTED,
+                    "grant_id": exhausted.grant_id,
+                    "metric": exhausted.metric,
+                    "window": int(exhausted.window.total_seconds()),
+                    "observed": True,
+                },
+                effect_key,
+            )
+        except InvalidArgument:
+            return
 
     def _resumed_charges(self, effect_key: str | None, attempt: int) -> None:
         """Stamp the resumed leg's receipt with what its **first** leg charged (§10.1, §8.3).
@@ -3266,7 +3353,11 @@ class Control:
         )
 
     def _refuse_unmeasurable(
-        self, action: Action, reason: str, error: InvalidArgument
+        self,
+        action: Action,
+        reason: str,
+        error: InvalidArgument,
+        observation: _Observation | None = None,
     ) -> InvalidArgument:
         """§2.3 and §2.4.1's refusals, with the events and the receipt they were missing.
 
@@ -3275,6 +3366,18 @@ class Control:
         it names the grant, the metric and the offending value, and an operator reading the
         receipt needs exactly that.
         """
+        if observation is not None:
+            # `v0.3 §6.2`: observe mode records what enforce mode would have done and refuses
+            # nothing. Writing the `denied` receipt below would put a refusal it did not make in
+            # the store, alongside the `observed` receipt for the run that went ahead: two
+            # receipts for one action, disagreeing. T439c.
+            observation.block(reason)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {"reason": reason, "error": str(error), "observed": True},
+            )
+            return error
         self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
         self._record(
             action,

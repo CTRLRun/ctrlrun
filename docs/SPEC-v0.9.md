@@ -824,8 +824,32 @@ this project documents is observe-then-enforce: an operator would hit a limit du
 entire purpose is to hit nothing.
 
 **What it does instead**: the observe report says the action *would have been* refused on a budget,
-naming the grant and the metric, exactly as it reports what a policy would have decided. That is
-worth more than a charge, because it is how an operator sizes a budget before turning it on.
+naming the grant and the metric, exactly as it reports what a policy would have decided. The
+predicate is `check_charges`, the same function all three stores enforce with, so the report and the
+enforcement cannot drift: a pilot that says "this would have been fine" about an action enforce mode
+refuses is worse than no pilot.
+
+§2.3's and §2.4.1's refusals are reported the same way, under their own reasons. Enforce mode
+refuses those actions, so saying so is what observe mode is for, and an operator needs to know
+whether the budget is too small or the action cannot be measured at all. Observe mode writes no
+`denied` receipt for them: it records what enforce mode would have done and refuses nothing.
+
+### 4.2.1a What observe mode cannot tell you about a budget
+
+An earlier draft of §4.2.1 ended "that is how an operator sizes a budget before turning it on."
+**That is not true, and the limit is worth stating rather than discovering.**
+
+Observe mode charges nothing, so the ledger it evaluates against is only ever filled by enforce-mode
+runs. A deployment observing *every* action has an empty ledger, every predicate passes, and the
+report says no budget would have refused anything, no matter how much the agent proposed to spend.
+The report is informative in a **mixed** deployment, where a new action is piloted in observe mode
+against a grant other actions are already enforcing, and that is the shape §4.2.1's test drives.
+
+Sizing a budget from an observed run needs the counterfactual spend, which observe mode does write:
+every `observed` receipt carries `budget_charges`, what the action *would have* been charged. Adding
+those up over a window is the sizing question, and it is a question for a reporting surface over
+receipts rather than for the kernel's hot path. The kernel's job here is the honest report of what
+enforcement would have done against the state that exists.
 
 ### 4.3 One effect key holds at most one charge at a time
 
