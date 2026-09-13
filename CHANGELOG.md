@@ -130,13 +130,15 @@ any change to one appears here.
 
 - `ctrlrun.receipt/v6` carries `scope_hash` beside `task`, and `ctrlrun.guarantees/v5` carries
   **G23** beside G24.
-- `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` on a grant is
-  refused in a `v6` document rather than ignored, because an older reader would grant the action
-  on every task. `DIMENSIONS` grows from six entries to seven, and it is exported and iterated by
-  `verify`'s G9, so a `--json` consumer counting dimensions sees seven.
+- `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` and `budgets:`
+  on a grant are refused in a `v6` document rather than ignored, because an older reader would
+  grant the action on every task and against no limit. **`DIMENSIONS` grows from six entries to
+  eight**, `tasks` and `budgets`, and it is exported and iterated by `verify`'s G9, so a `--json`
+  consumer counting dimensions sees eight.
 - The shipped `examples/authority/payments.yaml` binds its `head-of-support` grant to
-  `refund-run:*`, so the milestone's own guarantee is not `N/A` on what this repository ships.
-  The authority badge moves from `verified 19/19` to `verified 20/20`.
+  `refund-run:*` and gives it a daily budget, so the milestone's own guarantees are not `N/A` on
+  what this repository ships. The authority badge moves from `verified 19/19` to
+  `verified 22/22`, G22, G23 and G24.
 
 - `docs/SPEC-v0.9.md`, the v0.9 "Envelope" contract: consequence budgets, scope providers and
   task-bound authority, as a delta over v0.1 to v0.8. Documentation only. It specifies the
