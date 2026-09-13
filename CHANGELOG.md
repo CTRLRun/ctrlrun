@@ -53,6 +53,8 @@ any change to one appears here.
 
 ### Changed
 
+- `ctrlrun.receipt/v6` carries `scope_hash` beside `task`, and `ctrlrun.guarantees/v5` carries
+  **G23** beside G24.
 - `ctrlrun.policy/v7`, `ctrlrun.receipt/v6` and `ctrlrun.guarantees/v5`. `tasks:` on a grant is
   refused in a `v6` document rather than ignored, because an older reader would grant the action
   on every task. `DIMENSIONS` grows from six entries to seven, and it is exported and iterated by
