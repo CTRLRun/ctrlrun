@@ -240,9 +240,18 @@ own grants*. It was never a statement about a set that contains somebody else's 
    the two things that are true of the hop rather than of the chain:
    - the id names no delegation at all, in which case `data.hop` is the presented id and there is
      nothing else to say;
-   - the delegation exists but its grant does not `matches_shape` the action, in which case
+   - the delegation exists but its grant does not match the action's shape, in which case
      `data.hop` names it and **`data.dimension`** names which of `subject`, `actions`, `resources`
      or `environments` failed.
+
+   **`matches_shape` cannot supply that dimension and §9 therefore carries a name for it.**
+   `Grant.matches_shape` (`authority.py:534`) returns a `bool` and returns `False` at the first of
+   the four that fails, so the information exists on the stack and is thrown away. The addition is
+   `unmatched_shape(grant, action) -> str | None`, returning the first failing row in the order
+   above, with **`matches_shape` reimplemented as `unmatched_shape(...) is None`** so there is one
+   implementation and not two that agree today. This is `contained_dimension`'s shape applied to
+   the other half of `v0.3 §4.3`'s `iff`, and §2.2's no-second-relation rule is the reason it is
+   done this way round rather than by a second walk in `evaluate`.
 
 3. **Every refusal the chain produces keeps the reason it already has**: `authority_revoked` for a
    revoked link, `authority_expired` for an expired hop, `authority_escalation` with
@@ -1338,6 +1347,7 @@ One justification per row. Anything not here is a spec amendment before it is co
 | `data.hop` and `data.task` on `EXECUTION_STARTED` | §3.4.2. The event's `data` is `{}` today (`control.py:1487`, `control.py:1561`); it becomes the durable binding `_resumed_context` reads back, which is what lets a resumed leg be evaluated on both dimensions instead of skipping them |
 | `AUTHORITY_HOP` (`"authority_hop"`) | a presented hop that names no live delegation addressed to this principal is not any existing reason: it is not `no_authority`, which means nothing matched, and not `authority_escalation`, which means a chain step failed. §2.3.2 rule 3 forbids using it as a bucket for either |
 | `UpstreamPin`, and `upstream` on an action entry | §4.2. `McpOptions` (`policy.py:543`) carries per-tool assertions an operator makes about their upstream and is the closest existing name; it holds claims about **behaviour** (`not_executed_on_error`) and this holds claims about **identity**, and merging them would put an authorization input in a structure whose documented job is a `NotExecuted` hint |
+| `unmatched_shape(grant, action)` | §2.3.2 rule 2. `matches_shape` (`authority.py:534`) answers **whether** a grant covers an action and discards **which** of subject, actions, resources or environments failed, which is the value `data.dimension` has to carry. `matches_shape` becomes a call to it, so the two cannot drift |
 | `narrowed_dimensions(parent, child)` | §6.2. `contained_dimension` answers which row a child **violates**; no name in the tree answers which rows it **narrows**, which is what an operator reading a chain needs. A reporting helper that decides nothing, so §2.2's one-relation rule is untouched |
 | `UPSTREAM_MISMATCH`, `UPSTREAM_UNVERIFIED` | §4.5. Two reasons, separately observable, because "the server changed" and "nobody has checked" are different findings and an operator fixes them differently |
 | `ssl_context=` on `ctrlrun.gateway.transport.request` | §4.3's check 3 cannot be implemented without it: `request` builds its client as `httpx.Client(timeout=timeout, follow_redirects=False)` (`gateway/transport.py:155`) and accepts no context, no verify argument and no client. A module-level default is refused rather than omitted: one context set globally pins every caller of this module to one certificate, and the gateway fronts one upstream while the ACS hook and in-process callers share the module |
