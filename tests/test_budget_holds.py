@@ -330,3 +330,183 @@ def test_T412b_every_ancestor_is_charged_through_a_real_chain(store, clock) -> N
     with pytest.raises(ActionDenied) as caught:
         control.execute(_action("2", 200), lambda: {"ok": True}, "refund:2")
     assert caught.value.reason == "budget_exhausted"
+
+
+def test_T443_a_refused_receipt_records_no_charge(store, clock) -> None:
+    """SPEC-v0.9 §10.1, and an independent review found the receipt lying.
+
+    `budget_charges` was stamped where the charges were computed, which is before `_take`
+    attempts the transaction that applies them. Every refusal raised later in `_secure`'s loop
+    then reached `_record` with them set, so a `denied` receipt claimed the action charged the
+    very grant it was refused from spending against.
+
+    **A receipt asserting a spend that never happened is the one thing an evidence trail may not
+    do**, and it is worse than an absent field, because a reader has no way to tell it apart from
+    a real one.
+    """
+    control = _control(store, clock)
+    control.execute(_action("1", 250), lambda: {"ok": True}, "refund:1")
+    with pytest.raises(ActionDenied):
+        control.execute(_action("2", 100), lambda: {"ok": True}, "refund:2")
+
+    committed = [r for r in store.receipts() if r.result is ReceiptResult.COMMITTED]
+    denied = [r for r in store.receipts() if r.result is ReceiptResult.DENIED]
+    assert [dict(c) for c in committed[0].budget_charges] == [
+        {"grant_id": "payer", "metric": "amount", "amount": 250}
+    ]
+    assert denied[0].budget_charges == (), (
+        "a refused action charged nothing; its receipt must not say otherwise"
+    )
+
+
+def test_T406a_two_budgets_on_one_metric_is_the_shape_SS2_2_exists_for(store, clock) -> None:
+    """§2.2's own motivating shape, which an earlier duplicate guard killed at execute.
+
+    "Two budgets on one metric over two windows is the first thing an operator asks for." It
+    arrives as two charges differing only in `limit` and `window`: both predicates run, §3.4's
+    key writes **one** row, because it is one spend measured against two windows.
+
+    An independent review found the previous guard refusing any duplicate pair, so the loader
+    accepted the document, observe mode reported it clean, `ctrlrun verify` could not grade it,
+    and enforce mode died with no receipt and no event.
+    """
+    text = DOC.replace(
+        "        - {metric: amount, limit: 250, window: PT24H}",
+        "        - {metric: amount, limit: 250, window: PT24H}\n"
+        "        - {metric: amount, limit: 5000, window: P30D}",
+    )
+    control = Control(
+        policy=Policy.from_yaml(text, source="<two>"),
+        store=store,
+        clock=clock,
+        environment="prod",
+        authority=Authority.from_yaml(text, source="<two>"),
+    )
+    control.execute(_action("1", 100), lambda: {"ok": True}, "refund:1")
+    control.execute(_action("2", 100), lambda: {"ok": True}, "refund:2")
+    assert len(store.consumptions()) == 2, "one row per spend, not one per budget"
+    # The daily budget binds first, and its window is the one named.
+    with pytest.raises(ActionDenied) as caught:
+        control.execute(_action("3", 100), lambda: {"ok": True}, "refund:3")
+    assert caught.value.reason == "budget_exhausted"
+    # And the monthly one still holds after the daily window rolls.
+    clock.advance(DAY + timedelta(seconds=1))
+    for index in range(3, 31):
+        try:
+            control.execute(_action(str(index), 100), lambda: {"ok": True}, f"refund:{index}")
+        except ActionDenied:
+            break
+        clock.advance(DAY + timedelta(seconds=1))
+    held = sum(row.amount for row in store.consumptions() if row.released_at is None)
+    assert held <= 5000, f"the monthly budget was exceeded: {held}"
+
+
+def test_T406b_two_charges_on_one_metric_with_different_amounts_are_refused(store, clock) -> None:
+    """The hazard the guard is actually for: §3.4's key carries no window, so differing amounts
+    would collapse to whichever row landed first and the ledger would under-record the spend."""
+    with pytest.raises(InvalidArgument):
+        store.reserve_effect(
+            "e1",
+            "a",
+            LEASE,
+            (
+                Charge("payer", "amount", 100, 250, DAY),
+                Charge("payer", "amount", 900, 5000, timedelta(days=30)),
+            ),
+        )
+    assert store.consumptions() == ()
+
+
+# --- §4.2's rows that had no test, and the mutant that survived without them ------------------
+
+
+def test_T425_the_release_is_keyed_on_the_state_reached_not_the_call(store, clock) -> None:
+    """**§4.2's warning paragraph, and the mutant that survived the whole suite without it.**
+
+    An independent review moved `_release_locked` above the state check, so the release keyed on
+    the *call* rather than the state reached, and all 42 tests passed. It is not an equivalent
+    mutant: a `fail_effect` that is **refused** because the record moved on then releases the hold
+    on an `AMBIGUOUS` record, which is the manufacturable refund this whole item exists to stop.
+
+    "The release is keyed on the record reaching `FAILED`, never on the call that tried to put it
+    there."
+    """
+    from ctrlrun.errors import AmbiguousEffect
+
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    store.begin_execution("e1", "a")
+    # The record moves on under the attempt: a human, or another process, declares it ambiguous.
+    store.mark_ambiguous("e1", "a", "the outcome is unknown")
+    assert _held(store) == 100
+
+    with pytest.raises(AmbiguousEffect):
+        store.fail_effect("e1", "a", "the executor says it did not happen")
+
+    assert _held(store) == 100, (
+        "a REFUSED fail_effect released the hold: the release is keyed on the call, not the "
+        "state reached, and somebody may have committed this effect"
+    )
+
+
+def test_T423_a_suspension_holds_its_charge(store, clock) -> None:
+    """§4.2's suspension row. A continuation extends the lease; no transition, so no release.
+
+    A suspension is the one state that can outlive a whole budget window, so "held in every other
+    state" is load-bearing here: an elicitation that sits for a day must not let the same grant
+    spend its daily limit twice.
+    """
+    action = _action()
+    store.reserve_effect("e1", action.action_id, LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    store.begin_execution("e1", action.action_id)
+    store.hold_continuation(action, "e1", "cont-1", clock.now + timedelta(hours=1))
+    assert _held(store) == 100
+    clock.advance(DAY + timedelta(seconds=1))
+    assert _held(store) == 100, "a suspension outliving its window must still hold its charge"
+
+
+def test_T424_begin_execution_moves_nothing_in_the_ledger(store, clock) -> None:
+    """§4.2's `begin_execution` row. Listed because the table claims completeness."""
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    before = [(row.effect_key, row.released_at) for row in store.consumptions()]
+    store.begin_execution("e1", "a")
+    assert [(row.effect_key, row.released_at) for row in store.consumptions()] == before
+
+
+def test_T422_a_lapsed_lease_another_planner_ambiguates_still_holds(store, clock) -> None:
+    """§4.2's row 5. The record is `AMBIGUOUS` now, and R2 applies: the charge stays."""
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    clock.advance(LEASE * 2)
+    with pytest.raises(Exception):
+        store.reserve_effect("e1", "b", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    assert store.get_effect("e1").state is EffectState.AMBIGUOUS
+    assert _held(store) == 100
+
+
+def test_T427_a_refused_commit_releases_nothing(store, clock) -> None:
+    """§4.2's `commit_effect` refused row: §4.1 over the state actually reached."""
+    from ctrlrun.errors import AmbiguousEffect
+
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    store.begin_execution("e1", "a")
+    store.mark_ambiguous("e1", "a", "unknown")
+    with pytest.raises(AmbiguousEffect):
+        store.commit_effect("e1", "a", {"ok": True})
+    assert _held(store) == 100
+
+
+def test_T428_a_human_resolving_FAILED_mid_flight_releases_and_the_call_does_not(
+    store, clock
+) -> None:
+    """The sub-case the review named: a human resolves `FAILED` while an attempt runs, so the
+    charge is **already released** and the refused call releases nothing further."""
+    from ctrlrun.errors import CTRLRunError
+
+    store.reserve_effect("e1", "a", LEASE, (Charge("payer", "amount", 100, 250, DAY),))
+    store.begin_execution("e1", "a")
+    store.mark_ambiguous("e1", "a", "unknown")
+    store.resolve_effect("e1", EffectState.FAILED, "ada@example.com")
+    assert _held(store) == 0
+    released = [row.released_at for row in store.consumptions()]
+    with pytest.raises(CTRLRunError):
+        store.fail_effect("e1", "a", "the executor says so too")
+    assert [row.released_at for row in store.consumptions()] == released

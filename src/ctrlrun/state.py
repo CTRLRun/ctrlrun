@@ -581,24 +581,33 @@ def check_charges(
     Pure, like `plan_reservation` and for the same reason: every store decides here rather than
     each deciding for itself, so the arithmetic is one function a test can reach directly.
 
-    **Two charges on the same `(grant_id, metric)` in one tuple are refused**, and an independent
-    review is why. Each charge is evaluated against the *stored* sum, so a sibling in the same
-    tuple is invisible to the predicate; and the idempotence key of §3.4 carries no window, so
-    `ON CONFLICT DO NOTHING` then silently drops all but the first row. Together that is a spend
-    the ledger never records. It happened to be harmless for the one shape §2.2 creates, a grant
-    with two budgets on one metric over two windows, because those carry equal amounts and want
-    exactly one row. Refusing the general case makes that a property rather than a coincidence,
-    and §2.7's per-ancestor charges are distinct grants, so nothing legitimate is refused.
+    **Every charge is evaluated, including several on one `(grant_id, metric)`.** That is §2.2's
+    own motivating shape: a grant with two budgets on `amount`, 100,000 a day and 500,000 a month,
+    is "the first thing an operator asks for", and it arrives here as two charges differing only
+    in `limit` and `window`. Both predicates run; §3.4's key then writes **one** row, which is
+    right, because it is one spend measured against two windows.
+
+    **What is refused is two charges on one `(grant_id, metric)` carrying different amounts.**
+    A charge is invisible to its sibling here (each is compared against the *stored* sum), and
+    §3.4's key carries no window, so differing amounts would collapse to whichever row landed
+    first and the ledger would under-record the spend. Nothing legitimate produces that: the
+    amount comes from the action's own metric value, so two budgets on one metric always agree,
+    and §2.7's per-ancestor charges are distinct grants.
+
+    An earlier version refused **any** duplicate pair, which made §2.2's shape die at execute
+    with no receipt: the loader accepted the document, observe mode reported it clean, and
+    `ctrlrun verify` could not grade it. An independent review found it.
     """
-    seen: set[tuple[str, str]] = set()
+    amounts: dict[tuple[str, str], int] = {}
     for charge in charges:
         key = (charge.grant_id, charge.metric)
-        if key in seen:
+        seen = amounts.setdefault(key, charge.amount)
+        if seen != charge.amount:
             raise InvalidArgument(
-                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation: the "
-                "predicate cannot see a sibling's amount and §3.4's key would drop the second row"
+                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation carry "
+                f"different amounts ({seen} and {charge.amount}); §3.4's key would keep one row "
+                "and the ledger would under-record the spend"
             )
-        seen.add(key)
     for charge in charges:
         if spent(charge) + charge.amount > charge.limit:
             raise BudgetExhaustedError(charge.grant_id, charge.metric, charge.window)
