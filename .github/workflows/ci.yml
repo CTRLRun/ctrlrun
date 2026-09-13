@@ -433,10 +433,26 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `SOURCE_DATE_EPOCH` is the commit's own timestamp, so a wheel built from this commit by
+      # anyone, anywhere, with the backend the lock names, is the same bytes. The sdist needs
+      # `scripts/normalize_sdist.py` for what setuptools records from the scratch directory
+      # (copy times, uid, filesystem order). The step after builds a second time and compares:
+      # "reproducible" is a claim until something checks it.
       - name: Build
         run: |
           pip install --require-hashes -r requirements/build.txt
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           python -m build --no-isolation
+          python scripts/normalize_sdist.py dist/*.tar.gz
+
+      - name: The build is reproducible
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python -m build --no-isolation --outdir /tmp/again
+          python scripts/normalize_sdist.py /tmp/again/*.tar.gz
+          (cd dist && sha256sum ./*) > /tmp/first.sha256
+          (cd /tmp/again && sha256sum ./*) | diff /tmp/first.sha256 -
+          echo "both builds produced:"; cat /tmp/first.sha256
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
