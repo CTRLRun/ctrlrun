@@ -74,7 +74,9 @@ from .errors import (
 from .migrations import migrate
 from .receipt import RECEIPT_SCHEMA, Event, EventType, Receipt, _document_hash, _stored_receipt
 from .state import (
+    Charge,
     ClockSkew,
+    Consumption,
     DelegationRecord,
     HeldContinuation,
     _action_from_json,
@@ -97,6 +99,7 @@ from .state import (
     _roles_json,
     _transitioned,
     _utc_now,
+    check_charges,
 )
 
 _RESERVED: Final = frozenset({EffectState.RESERVED})
@@ -735,9 +738,15 @@ class PostgresStateStore:
     # --- reservation (SPEC-v0.6 §4.2) ---------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -747,9 +756,10 @@ class PostgresStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -767,6 +777,7 @@ class PostgresStateStore:
         action_id: str | None,
         lease: timedelta,
         *,
+        charges: tuple[Charge, ...] = (),
         retrying: bool = False,
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both, in ONE transaction.
@@ -790,10 +801,23 @@ class PostgresStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(connection, effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1, §3.6 — **the lock, then the sum, then the insert, all inside this
+            # `BEGIN`**. READ COMMITTED does not serialise a sum and an insert, and this is not a
+            # theoretical gap: the spike raced 24 processes against a budget permitting ten spends
+            # and the unlocked version overspent 1200 against a limit of 1000 in three runs of
+            # four. `postgres.py`'s own comment about eight authorised refunds is the same bug,
+            # already found once in this file.
+            if charges:
+                self._lock_budget_anchors(connection, charges)
+                check_charges(charges, lambda charge: self._spent(connection, charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(connection, plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(connection, approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(
+                    connection, charges, str(effect_key), plan.reservation.attempt, now
+                )
         except AmbiguousWrite:
             raise
         except BaseException:
@@ -1010,6 +1034,111 @@ class PostgresStateStore:
         finally:
             with contextlib.suppress(Exception):
                 connection.close()
+
+    def _lock_budget_anchors(self, connection: Any, charges: tuple[Charge, ...]) -> None:
+        """`SELECT ... FOR UPDATE` on one row per grant charged, **before** the sum (§3.6).
+
+        This is the mechanism the spike measured rather than the one that read best. Twenty-four
+        processes racing a budget permitting exactly ten spends, four runs:
+
+        - sum then insert, no lock: **1200, 1000, 1200, 1200** against a limit of 1000
+        - this: **1000, 1000, 1000, 1000**
+        - `SERIALIZABLE`: 800, 600, 600, 800, with **zero** clean refusals
+
+        `SERIALIZABLE` holds the limit and is still wrong for an operator: it under-spends by 20
+        to 40 percent and turns every refusal into a `SerializationFailure`, where §4.5 promises a
+        denial naming the grant, the metric and the window.
+
+        **Per grant, not per store**, so two budgets on two grants do not serialise against each
+        other. Ordered by grant id, because two transactions taking the same two anchors in
+        opposite orders is a deadlock, and a budget that deadlocks under load is a budget an
+        operator turns off.
+        """
+        anchors = sorted({charge.grant_id for charge in charges})
+        for grant_id in anchors:
+            connection.execute(
+                f"INSERT INTO {self._q}.budget_anchor (grant_id) VALUES (%s) "
+                "ON CONFLICT DO NOTHING",
+                (grant_id,),
+            )
+            connection.execute(
+                f"SELECT grant_id FROM {self._q}.budget_anchor WHERE grant_id = %s FOR UPDATE",
+                (grant_id,),
+            )
+
+    def _spent(self, connection: Any, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
+        row = connection.execute(
+            f"""
+            SELECT COALESCE(SUM(amount), 0) FROM {self._q}.budget_ledger
+             WHERE grant_id = %s AND metric = %s AND released_at IS NULL AND consumed_at > %s
+            """,
+            (charge.grant_id, charge.metric, now - charge.window),
+        ).fetchone()
+        return int(row[0])
+
+    def _charge_locked(
+        self,
+        connection: Any,
+        charges: tuple[Charge, ...],
+        effect_key: str,
+        attempt: int,
+        now: datetime,
+    ) -> None:
+        """One row per charge, idempotent on the unique key (SPEC-v0.9 §3.4).
+
+        `ON CONFLICT DO NOTHING`, because `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once
+        and an unconstrained append would double-charge precisely when a network is misbehaving.
+        """
+        for charge in charges:
+            connection.execute(
+                f"""
+                INSERT INTO {self._q}.budget_ledger
+                    (grant_id, metric, amount, effect_key, attempt, consumed_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (effect_key, attempt, grant_id, metric) DO NOTHING
+                """,
+                (charge.grant_id, charge.metric, charge.amount, effect_key, attempt, now),
+            )
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+    ) -> tuple[Consumption, ...]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if grant_id is not None:
+            clauses.append("grant_id = %s")
+            values.append(grant_id)
+        if metric is not None:
+            clauses.append("metric = %s")
+            values.append(metric)
+        if since is not None:
+            clauses.append("consumed_at >= %s")
+            values.append(since)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection().cursor() as cursor:
+            cursor.execute(
+                "SELECT grant_id, metric, amount, effect_key, attempt, consumed_at, released_at"
+                f" FROM {self._q}.budget_ledger{where} ORDER BY id",
+                values,
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            Consumption(
+                grant_id=row[0],
+                metric=row[1],
+                amount=int(row[2]),
+                effect_key=row[3],
+                attempt=int(row[4]),
+                consumed_at=row[5],
+                released_at=row[6],
+            )
+            for row in rows
+        )
 
     def _reserve_locked(
         self, connection: Any, reservation: Reservation, renews: bool, now: datetime
