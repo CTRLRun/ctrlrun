@@ -619,6 +619,8 @@ class Engine:
         #: Set by `select()` when the miss was on the authority axis (see `unselected`).
         self._grant_miss: str | None = None
         self._budget_miss: str | None = None
+        self._metric_miss: str | None = None
+        self._unmeasurable = False
         #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
         self._task: str | None = None
         self._loaded = loaded
@@ -792,6 +794,7 @@ class Engine:
         """
         self._grant_miss = None
         self._budget_miss = None
+        self._metric_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
@@ -875,6 +878,7 @@ class Engine:
             # exit 3 on guarantees that have nothing to do with it. A grant whose budget is
             # smaller than the vector `_synthesize` picked refuses that action, and the refusal
             # reached G1 as an internal error. Verify owns the vector, so verify sizes it.
+            self._unmeasurable = False
             fitted = self._fitted_to_budgets(name, arguments, decision, reason, grant, action)
             if fitted is None:
                 # Recorded, for `unselected`'s reason. A bare `continue` here reported the
@@ -882,7 +886,10 @@ class Engine:
                 # daily budget was told no grant's `resources:` matched, about a document whose
                 # patterns matched perfectly. That is the category error `unselected`'s own
                 # docstring exists about, one dimension over.
-                self._budget_miss = f"{name} on grant {grant.id!r}"
+                if self._unmeasurable:
+                    self._metric_miss = f"{name} on grant {grant.id!r}"
+                else:
+                    self._budget_miss = f"{name} on grant {grant.id!r}"
                 continue
             arguments, action = fitted
             try:
@@ -903,6 +910,45 @@ class Engine:
             return selection
         return None
 
+    def _deciding_grant(self, action: Action) -> Grant | None:
+        """The grant `Authority.evaluate` would resolve for this action, by its own rule.
+
+        **`min(passed, key=_by_grant_id)`**, which is why this exists rather than trusting the
+        grant `_bind` happens to be iterating. An independent review found the consequence: a
+        vector resized to fit one grant's budget can fall inside a *different*, lexicographically
+        earlier grant's `constraints`, and that grant's budget was never checked. Its document
+        had `aa-narrow` at `amount_lte: 10` with `limit: 0` and `bb-broad` at
+        `amount_lte: 500000` with `limit: 900`; the resize from 100000 to 1 moved the action from
+        `bb-broad` to `aa-narrow`, and `ctrlrun verify` exited 3 on a budget it never looked at.
+
+        Document grants only, which is what `_bind` iterates: a scenario's authority comes from
+        the operator's file, and no delegation exists in a store verify has not created yet.
+        """
+        if self.authority is None:
+            return None
+        for grant_id in sorted(self.authority.grants):
+            grant = self.authority.grants[grant_id]
+            if grant.matches_shape(action) and grant.constraints_hold(action):
+                return grant
+        return None
+
+    def _fits_budgets(self, grant: Grant, action: Action) -> bool | None:
+        """Whether every budget on this grant admits this action. `None` if one cannot be read.
+
+        `None` is its own answer and not a `False`: a grant budgeting a metric the action does
+        not carry refuses **every** action it covers, for ever, and that is a fact about the
+        operator's document rather than a vector verify can size around. Returning `True` there
+        is what made `ctrlrun verify` exit 3 on §2.3's refusal instead of grading it.
+        """
+        for budget in grant.budgets or ():
+            try:
+                value = _metric_value(action, budget.metric, grant.id)
+            except InvalidArgument:
+                return None
+            if value > budget.limit:
+                return False
+        return True
+
     def _fitted_to_budgets(
         self,
         name: str,
@@ -912,53 +958,59 @@ class Engine:
         grant: Grant,
         action: Action,
     ) -> tuple[dict[str, Any], Action] | None:
-        """Size verify's own action vector to the grant's budgets, or decline this candidate.
+        """Size verify's own action vector to the budgets that will actually decide it.
 
         **Verify grades a guarantee, not the operator's budget sizing.** `_synthesize` picks a
         vector to land in a rule, and a grant whose budget is smaller than that vector refuses
-        the action before the guarantee is reached: a €1,000 daily budget under a policy whose
-        `amount_lte` permits a €100,000 refund made `ctrlrun verify` report an internal error on
-        G1, which is about approvals. That is `_identity_the_document_needs`'s case in the budget
-        dimension, and it gets the same answer: verify supplies what the document needs.
+        the action before the guarantee is reached: a EUR 1,000 daily budget under a policy whose
+        `amount_lte` permits a EUR 100,000 refund made `ctrlrun verify` report an internal error
+        on G1, which is about approvals. That is `_identity_the_document_needs`'s case in the
+        budget dimension, and it gets the same answer: verify supplies what the document needs.
 
-        The vector is only changed when a budget would refuse it, so every document without
-        budgets keeps the vector it had. A replacement must land in the **same rule** with the
-        same reason, because `select`'s contract is the decision it was asked for; the smallest
-        candidate is tried first, which leaves the most headroom for a scenario that acts more
-        than once. Where nothing fits, the candidate is declined and `select` moves on, so the
-        guarantee reports `N/A` with a true reason rather than failing a control leg.
+        Every candidate is checked against **the grant that would decide it**, not the grant the
+        caller is holding, because a resize can move the action between grants. The vector is
+        only changed when a budget would refuse it, so every document without budgets keeps the
+        vector it had, and a replacement must land in the same rule with the same reason because
+        `select`'s contract is the decision it was asked for.
 
-        G22 grades the budget itself, and reaches it through `select` like every other scenario:
-        a value that fits is exactly what its own "with room in the budget the action runs"
-        control leg needs.
+        Where nothing fits, the candidate is declined and `select` moves on, so the guarantee
+        reports `N/A` with a true reason rather than failing a control leg.
         """
-        budgets = grant.budgets or ()
-        if not budgets:
+        deciding = self._deciding_grant(action) or grant
+        verdict = self._fits_budgets(deciding, action)
+        if verdict is True:
             return arguments, action
-        for budget in budgets:
-            try:
-                value = _metric_value(action, budget.metric, grant.id)
-            except InvalidArgument:
-                # The action carries no value for this metric. §2.4.1 refuses that at execute
-                # with its own reason, and it is not a number verify can size.
-                return arguments, action
-            if value > budget.limit:
-                break
-        else:
-            return arguments, action
-        smallest = min(budget.limit for budget in budgets)
-        for candidate in (1, smallest // 8, smallest // 4, smallest // 2, smallest):
-            if candidate < 1:
+        if verdict is None:
+            # Unmeasurable: no vector helps, because the metric is absent from the action's whole
+            # shape rather than too large in this one. The caller needs to tell the two apart,
+            # because raising a limit fixes one and nothing about the other.
+            self._unmeasurable = True
+            return None
+        limits = [budget.limit for budget in (deciding.budgets or ()) if budget.limit > 0]
+        smallest = min(limits) if limits else 0
+        metric = next(iter(deciding.budgets or ())).metric
+        # **Room for a scenario that acts more than once**, not for one action. G4's control leg
+        # alone runs `PROCESSES` children on distinct keys and then contends `PROCESSES` more on
+        # one, so it needs nine spends to fit; a vector sized to `limit` exactly made its control
+        # leg pass, its contended leg find zero winners, and the guarantee report **FAIL** -- the
+        # status that means the kernel is broken -- for a budget that was merely small. Verify
+        # may say it could not grade a configuration; it may not accuse the kernel of a defect.
+        headroom = reg.PROCESSES * 2 + 2
+        for candidate in (1, smallest // headroom, smallest // 8, smallest // 4, smallest // 2):
+            if candidate < 1 or candidate * headroom > smallest:
                 continue
-            tried = {**arguments, budget.metric: candidate}
+            tried = {**arguments, metric: candidate}
             rebuilt = replace(action, arguments=tried)
             evaluation = self.policy.evaluate(rebuilt)
             if evaluation.decision is not decision or evaluation.reason != reason:
                 continue
             if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
                 continue
-            if all(_metric_value(rebuilt, each.metric, grant.id) <= each.limit for each in budgets):
-                return tried, rebuilt
+            # **Re-resolved**, because the resize may have moved the action to another grant.
+            settled = self._deciding_grant(rebuilt)
+            if settled is None or self._fits_budgets(settled, rebuilt) is not True:
+                continue
+            return tried, rebuilt
         return None
 
     # --- the scratch store, and the Control every scenario drives -----------------------
@@ -1226,7 +1278,7 @@ class Engine:
         miss when it travelled beside the grant reason, which is the same category error the
         reason itself had.
         """
-        if self._budget_miss is not None:
+        if self._budget_miss is not None or self._metric_miss is not None:
             return {"note": reg.BUDGET_MISS_NOTE}
         if self._grant_miss is not None:
             return {"note": reg.GRANT_RESOURCE_NOTE}
@@ -1241,11 +1293,26 @@ class Engine:
         cases is how `examples/authority/devops.yaml` came to be told "the policy lists no
         action" about a document listing five, on a run that exited 0.
         """
-        if self._budget_miss is not None:
-            return f"{reg.NO_ACTION_FITS_THE_BUDGET} ({self._budget_miss})"
-        if self._grant_miss is None:
+        # **Every miss that is true, not the first one found.** An independent review found the
+        # budget miss taking unconditional precedence while `select` records a grant miss for
+        # every failed candidate, so a document with one budget-blocked action and one no grant
+        # covers at all reported only the budget, and the resource miss appeared nowhere. That is
+        # the category error this docstring is about, one dimension over.
+        found = [
+            f"{reg.NO_METRIC_TO_MEASURE} ({self._metric_miss})"
+            if self._metric_miss is not None
+            else None,
+            f"{reg.NO_ACTION_FITS_THE_BUDGET} ({self._budget_miss})"
+            if self._budget_miss is not None
+            else None,
+            f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+            if self._grant_miss is not None
+            else None,
+        ]
+        stated = [line for line in found if line is not None]
+        if not stated:
             return reason
-        return f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+        return "; and ".join(stated)
 
     def na(self, gid: str, reason: str, **detail: Any) -> GuaranteeResult:
         """`not_applicable`, with the reason that made it so (§1, §2.1).

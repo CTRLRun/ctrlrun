@@ -413,13 +413,31 @@ def test_T413_a_budget_smaller_than_the_synthesized_vector_does_not_crash_verify
     verify` fail on G1, which is about approvals. It is `_identity_the_document_needs`'s case in
     the budget dimension, and it gets the same answer: verify sizes its own vector.
 
-    900 is under the allow band's 1000, so a fitting vector exists and the guarantee grades.
+    **And the vector is actually resized**, which an independent review found this test was not
+    checking. Against `ACTIONS` the allow band is `amount_gte: 0, amount_lte: 1000` and
+    `_synthesize` picks `amount: 0`, which is under any budget, so the original form of this test
+    passed against a kernel that resized nothing: it was green on the commit before the feature.
+    The rule below is upper-bound only, so the synthesized vector is the band maximum and a
+    budget under it has to move it.
     """
-    path = _write(tmp_path, V7 + TIGHT_BUDGET + ACTIONS)
+    upper_bound_only = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + upper_bound_only)
 
     result = _by_id(run(path, only=("G3",)))["G3"]
 
     assert result.status is Status.PASS, f"{result.status}: {result.reason}"
+    graded = dict(result.arguments or {})
+    assert graded["amount"] != 100000, "the band maximum was used unchanged"
+    assert 0 < graded["amount"] <= 900, graded
 
 
 def test_T413a_a_band_no_action_can_pay_for_is_N_A_with_a_reason_about_the_budget(tmp_path):
@@ -458,3 +476,119 @@ def test_T413b_a_document_with_no_budget_selects_exactly_what_it_did_before(tmp_
         result = _by_id(run(path, only=("G3",)))["G3"]
         both.append((result.status, result.action, result.arguments, result.grant_id))
     assert both[0] == both[1], both
+
+
+UNMEASURABLE_BUDGET = TIGHT_BUDGET.replace("metric: amount", "metric: items")
+
+TWO_ACTIONS = (
+    ACTIONS
+    + """  zzz.wire:
+    effect: "wire:{payment_id}"
+    resource: "ledger:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 100000 }
+        decision: approve
+      - decision: deny
+"""
+)
+
+
+def test_T413c_a_budget_naming_a_metric_no_action_carries_is_graded_not_crashed(tmp_path):
+    """§2.3 through verify. A grant budgeting `items` where every action carries `amount`
+    refuses **every** action it covers, for ever, and `ctrlrun verify` reported that as an
+    internal error, exit 3, on guarantees with nothing to do with budgets.
+
+    It is also a **different fix** from a budget that is merely small, so it gets its own reason:
+    told "exceeds a budget", an operator raises a limit that was never the problem.
+    """
+    path = _write(tmp_path, V7 + UNMEASURABLE_BUDGET + ACTIONS)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    assert result.status is Status.NOT_APPLICABLE, f"{result.status}: {result.reason}"
+    assert result.reason.startswith(reg.NO_METRIC_TO_MEASURE), result.reason
+    assert "acme.refund" in result.reason
+
+
+def test_T413d_a_budget_miss_does_not_hide_a_grant_miss(tmp_path):
+    """`select` records a grant miss for **every** failed candidate, so an unconditional
+    precedence for the budget meant a document with one budget-blocked action and one action no
+    grant covers at all reported only the budget. The resource miss appeared nowhere.
+
+    That is the category error `unselected`'s own docstring exists about, one dimension over, and
+    an independent review found it. Both facts are true of the document, so both are stated.
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + TWO_ACTIONS)
+
+    result = _by_id(run(path, only=("G1",)))["G1"]
+
+    assert result.status is Status.NOT_APPLICABLE
+    assert reg.NO_ACTION_FITS_THE_BUDGET in result.reason, result.reason
+    assert reg.NO_GRANT_COVERS_SELECTION in result.reason, result.reason
+
+
+def test_T413e_a_resize_never_moves_the_action_onto_an_unchecked_grant(tmp_path):
+    """**The resize can change which grant decides**, and that grant's budget was never looked
+    at. `Authority.evaluate` resolves `min(passed, key=grant_id)`, so a vector shrunk to fit one
+    grant's budget can fall inside a lexicographically earlier grant's `constraints`.
+
+    An independent review demonstrated it: shrinking 100000 to 1 moved the action from
+    `bb-broad` to `aa-narrow`, whose budget is zero, and verify exited 3 on a budget it had
+    never checked.
+    """
+    document = (
+        V7
+        + """
+authority:
+  grants:
+    - id: aa-narrow
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 10 }
+      budgets:
+        - {metric: amount, limit: 0, window: PT24H}
+    - id: bb-broad
+      subject: { agent: "head-of-support" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      constraints: { amount_lte: 500000 }
+      budgets:
+        - {metric: amount, limit: 900000, window: PT24H}
+"""
+        + """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+    )
+    path = _write(tmp_path, document)
+
+    graded = _by_id(run(path, only=("G3", "G4")))
+
+    for gid in ("G3", "G4"):
+        assert graded[gid].status is not Status.FAIL, (
+            f"{gid} reported the kernel broken for a configuration reason: {graded[gid].reason}"
+        )
+
+
+def test_T413f_a_resized_vector_leaves_room_for_a_scenario_that_acts_more_than_once(tmp_path):
+    """G4's control leg runs eight children on distinct keys and then contends eight more on
+    one, so it needs nine spends to fit. A vector sized to the limit exactly made its control
+    leg pass, its contended leg find zero winners, and the guarantee report **FAIL**.
+
+    **Verify may say it could not grade a configuration; it may not accuse the kernel of a
+    defect.** The candidates are required to leave that much room, and where none does the
+    guarantee is `N/A`.
+    """
+    tight = TIGHT_BUDGET.replace("limit: 900", "limit: 40")
+    path = _write(tmp_path, V7 + tight + ACTIONS)
+
+    result = _by_id(run(path, only=("G4",)))["G4"]
+
+    assert result.status is not Status.FAIL, result.reason

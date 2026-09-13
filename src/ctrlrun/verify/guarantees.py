@@ -284,6 +284,13 @@ BUDGET_CANNOT_BE_FILLED: Final = "one permitted action does not fit inside the g
 NO_ACTION_FITS_THE_BUDGET: Final = (
     "every action reaching this decision exceeds a budget on the grant that covers it"
 )
+
+#: SPEC-v0.9 §2.3, and a **different fix** from the one above: the grant budgets a metric its
+#: actions do not carry, so no vector helps and every action it covers is refused for ever.
+#: Reported as "exceeds a budget" it sent an operator to raise a limit that was never the problem.
+NO_METRIC_TO_MEASURE: Final = (
+    "a budget on the grant that covers it names a metric the action does not carry"
+)
 BUDGET_MISS_NOTE: Final = (
     "a budget smaller than any single action in the band makes that band unreachable: every "
     "action needing it would exhaust the whole window. Raise the budget, or narrow the rule "
@@ -412,6 +419,7 @@ __all__ = [
     "NO_EXPIRES_AT",
     "NO_GRANT_COVERS_SELECTION",
     "NO_GRANT_MATCHES",
+    "NO_METRIC_TO_MEASURE",
     "NO_RESOURCE_TO_SCOPE",
     "NO_TASKS",
     "PER_CONNECTION_BACKEND",
