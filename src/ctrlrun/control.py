@@ -1801,7 +1801,10 @@ class Control:
         # for an action that spent, and a gateway that ran another action in this context since
         # the suspension would report *that* action's spend. The ledger is the record; the first
         # leg wrote it inside the reservation's own transaction. T447, T448.
-        self._resumed_charges(held.effect_key, held.record.attempt)
+        # In observe mode the ledger is empty by design, so it is recomputed below, after the
+        # authority result this needs exists. §4.2.1a, T457.
+        if not self._observing:
+            self._resumed_charges(held.effect_key, held.record.attempt)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -1834,6 +1837,16 @@ class Control:
                 EventType.AUTHORITY_DENIED, action, self._authority_data(result), held.effect_key
             )
             evaluation = Evaluation(Decision.DENY, result.reason)
+        if self._observing:
+            # SPEC-v0.9 §4.2.1a — **the counterfactual, recomputed.** Observe mode charges
+            # nothing, so the ledger read above has nothing to find, and §8.3 makes this the only
+            # receipt an MCP multi round-trip or ACS action ever gets. Without this, §4.2.1a's
+            # sizing sum silently under-counts exactly the deployments §8.3 is about, which is an
+            # independent review's finding and a contradiction between two sections of the spec.
+            #
+            # Enforce mode keeps the ledger read: there the row is evidence of a spend that
+            # happened, and a recomputed number would be a claim about it instead.
+            self._observe_charges(action, held.effect_key, _Observation())
         # SPEC-v0.3 §6.3 — a resumption in observe mode gets the same `observed` receipt its
         # first leg did. It is the *only* receipt an MCP multi round-trip ever gets (§8.3), so
         # a resumed leg reporting `committed` under a mode that enforces nothing would put the

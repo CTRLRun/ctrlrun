@@ -1123,3 +1123,54 @@ def test_T456_the_observed_sum_does_report_a_budget_this_grant_really_exhausted(
 
     assert receipt.would_have is not None
     assert receipt.would_have.blocked_reason == "budget_exhausted", receipt.would_have
+
+
+def test_T457_an_observed_resumed_leg_carries_the_counterfactual_too(store, clock) -> None:
+    """§4.2.1a and §8.3 together, and they contradicted each other.
+
+    §4.2.1a says every `observed` receipt carries `budget_charges`, and makes summing them the
+    way an operator sizes a budget. §8.3 says the resumed receipt is the **only** receipt an MCP
+    multi round-trip or ACS action ever gets. But `_resumed_charges` reads the ledger, and under
+    observation the ledger is empty by design, so exactly the deployments §8.3 is about
+    contributed nothing to the sum. An independent review found the two texts disagreeing.
+
+    Enforce mode still reads the ledger, because there the ledger is the record of a real spend.
+    """
+    from ctrlrun import Suspended
+
+    observing = _observing_control(store, clock)
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        observing.execute(_action("1", 100), suspends, "refund:1")
+    assert store.consumptions() == (), "observe mode charged nothing, as it must not"
+
+    receipt = contextvars.Context().run(observing.resume, "round-1", lambda: {"ok": True})
+
+    assert receipt.result is ReceiptResult.OBSERVED
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},), (
+        receipt.budget_charges
+    )
+    assert store.consumptions() == (), "and still charged nothing"
+
+
+def test_T457a_an_enforced_resumed_leg_still_reads_the_ledger(store, clock) -> None:
+    """The control. Observe mode computing its counterfactual must not make enforce mode compute
+    one too: there the ledger is the record of a spend that really happened, and a recomputed
+    number would be a claim rather than evidence."""
+    from ctrlrun import Suspended
+
+    control = _control(store, clock)
+
+    def suspends() -> Any:
+        raise Suspended("round-1")
+
+    with pytest.raises(Suspended):
+        control.execute(_action("1", 100), suspends, "refund:1")
+
+    receipt = contextvars.Context().run(control.resume, "round-1", lambda: {"ok": True})
+
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},)
+    assert len(store.consumptions()) == 1, "and the row it read is the one the first leg wrote"

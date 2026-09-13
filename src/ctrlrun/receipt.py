@@ -486,6 +486,12 @@ class Receipt:
     #: ancestor charged (§2.7), so a reader can tell an action that spent a child's budget from
     #: one that spent a root's. Empty where the deciding grant budgets nothing, which is every
     #: grant written before v0.9.
+    #:
+    #: **On an `observed` receipt it is a counterfactual, not a spend** (§4.2.1a). Observe mode
+    #: charges nothing and its ledger stays empty, so this carries what the action *would have*
+    #: been charged, which is the number a budget is sized from before it is turned on. `result`
+    #: is what tells the two apart, and `v0.3 §6.2` makes every number on an observed receipt a
+    #: counterfactual; a consumer summing these to measure real spend must filter on it.
     budget_charges: tuple[Mapping[str, Any], ...] = ()
     #: The schema this receipt is written under (§6.11). A receipt this binary builds is
     #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`

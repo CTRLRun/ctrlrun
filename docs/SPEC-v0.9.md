@@ -1669,7 +1669,7 @@ shape is frozen here before any of them starts:
 |---|---|---|
 | `task` | item 1 | the task the action was bound to, or absent |
 | `scope_hash` | item 2 | `sha256:…` over the returned scope, never its content (§5.5) |
-| `budget_charges` | item 5 | which grants were charged, which metrics, how much |
+| `budget_charges` | item 5 | which grants were charged, which metrics, how much. On an `observed` receipt it is the counterfactual charge and not a spend (§4.2.1a), which `result` tells apart |
 
 Item 7 asserts every one of them is written by something before the release PR opens. This is
 `SPEC-v0.7.md` §12's D27 rule, which v0.8 ran for three items without incident.

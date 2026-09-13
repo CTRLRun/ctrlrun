@@ -621,6 +621,7 @@ class Engine:
         self._budget_miss: str | None = None
         self._metric_miss: str | None = None
         self._unmeasurable = False
+        self._declined_on_budget = False
         #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
         self._task: str | None = None
         self._loaded = loaded
@@ -820,6 +821,7 @@ class Engine:
                 if synthesized is None:
                     continue
                 arguments, reason = synthesized
+                self._declined_on_budget = False
                 selection = self._bind(name, arguments, decision, reason, grant_filter)
                 if selection is not None:
                     return selection
@@ -827,7 +829,12 @@ class Engine:
                 # caller's N/A reason can say so: a bare `None` here is indistinguishable from
                 # "no action reaches this decision", and every scenario used to resolve that
                 # ambiguity by asserting its own hardcoded sentence about the policy.
-                self._grant_miss = self._resource(name, arguments)
+                #
+                # **Unless a grant did cover it and its budget is what declined.** Recording a
+                # resource miss there put a sentence in the report that is false of the document:
+                # the pattern matched perfectly and the budget was the whole reason.
+                if not self._declined_on_budget:
+                    self._grant_miss = self._resource(name, arguments)
         return None
 
     def _bind(
@@ -886,6 +893,7 @@ class Engine:
                 # daily budget was told no grant's `resources:` matched, about a document whose
                 # patterns matched perfectly. That is the category error `unselected`'s own
                 # docstring exists about, one dimension over.
+                self._declined_on_budget = True
                 if self._unmeasurable:
                     self._metric_miss = f"{name} on grant {grant.id!r}"
                 else:
@@ -932,20 +940,31 @@ class Engine:
                 return grant
         return None
 
-    def _fits_budgets(self, grant: Grant, action: Action) -> bool | None:
-        """Whether every budget on this grant admits this action. `None` if one cannot be read.
+    #: How many spends of the chosen vector a scenario may take. G4's control leg runs
+    #: `PROCESSES` children on distinct keys and then contends `PROCESSES` more on one key, so
+    #: nine of them land; the margin above that is for every other scenario that acts twice.
+    _BUDGET_HEADROOM: Final = reg.PROCESSES * 2 + 2
+
+    def _fits_budgets(self, grant: Grant, action: Action, *, room: int = 1) -> bool | None:
+        """Whether every budget on this grant admits `room` spends of this action.
 
         `None` is its own answer and not a `False`: a grant budgeting a metric the action does
         not carry refuses **every** action it covers, for ever, and that is a fact about the
         operator's document rather than a vector verify can size around. Returning `True` there
         is what made `ctrlrun verify` exit 3 on §2.3's refusal instead of grading it.
+
+        **`room` is why a vector that fits can still be the wrong one.** A scenario acts more
+        than once, and a band with a *floor* cannot be shrunk below it: `amount_gte: 200` against
+        a budget of 900 leaves the synthesized vector untouched, because 200 fits, and then G4
+        reports FAIL because nine spends of 200 do not. Verify may say it could not grade a
+        configuration; it may not report the kernel broken.
         """
         for budget in grant.budgets or ():
             try:
                 value = _metric_value(action, budget.metric, grant.id)
             except InvalidArgument:
                 return None
-            if value > budget.limit:
+            if value * room > budget.limit:
                 return False
         return True
 
@@ -977,7 +996,7 @@ class Engine:
         reports `N/A` with a true reason rather than failing a control leg.
         """
         deciding = self._deciding_grant(action) or grant
-        verdict = self._fits_budgets(deciding, action)
+        verdict = self._fits_budgets(deciding, action, room=self._BUDGET_HEADROOM)
         if verdict is True:
             return arguments, action
         if verdict is None:
@@ -995,20 +1014,25 @@ class Engine:
         # leg pass, its contended leg find zero winners, and the guarantee report **FAIL** -- the
         # status that means the kernel is broken -- for a budget that was merely small. Verify
         # may say it could not grade a configuration; it may not accuse the kernel of a defect.
-        headroom = reg.PROCESSES * 2 + 2
+        headroom = self._BUDGET_HEADROOM
         for candidate in (1, smallest // headroom, smallest // 8, smallest // 4, smallest // 2):
-            if candidate < 1 or candidate * headroom > smallest:
+            if candidate < 1:
                 continue
             tried = {**arguments, metric: candidate}
             rebuilt = replace(action, arguments=tried)
             evaluation = self.policy.evaluate(rebuilt)
             if evaluation.decision is not decision or evaluation.reason != reason:
                 continue
-            if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
-                continue
-            # **Re-resolved**, because the resize may have moved the action to another grant.
+            # **Re-resolved, and it must settle on the same grant.** A resize can move the
+            # action between grants, and `_bind` is building a selection that names *this* one:
+            # a vector graded against a different grant's budget would report the wrong grant in
+            # the result and check a budget nobody will apply. Requiring the same grant subsumes
+            # re-checking its shape and constraints, because `_deciding_grant` only returns a
+            # grant that matched both.
             settled = self._deciding_grant(rebuilt)
-            if settled is None or self._fits_budgets(settled, rebuilt) is not True:
+            if settled is None or settled.id != grant.id:
+                continue
+            if self._fits_budgets(settled, rebuilt, room=headroom) is not True:
                 continue
             return tried, rebuilt
         return None

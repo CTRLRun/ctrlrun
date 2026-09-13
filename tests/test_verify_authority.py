@@ -554,7 +554,7 @@ authority:
       resources: ["payment:*"]
       constraints: { amount_lte: 500000 }
       budgets:
-        - {metric: amount, limit: 900000, window: PT24H}
+        - {metric: amount, limit: 90000, window: PT24H}
 """
         + """
 actions:
@@ -586,9 +586,88 @@ def test_T413f_a_resized_vector_leaves_room_for_a_scenario_that_acts_more_than_o
     defect.** The candidates are required to leave that much room, and where none does the
     guarantee is `N/A`.
     """
-    tight = TIGHT_BUDGET.replace("limit: 900", "limit: 40")
-    path = _write(tmp_path, V7 + tight + ACTIONS)
+    upper_bound_only = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + upper_bound_only)
 
     result = _by_id(run(path, only=("G4",)))["G4"]
 
     assert result.status is not Status.FAIL, result.reason
+    if result.status is Status.PASS:
+        graded = dict(result.arguments or {})
+        # Nine spends have to fit inside 900, so a vector of 900, or of 450, would not do.
+        assert graded["amount"] * 18 <= 900, graded
+
+
+FLOORED_RULE = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 100, amount_lte: 100000 }
+        decision: allow
+      - decision: deny
+"""
+
+TWO_ALLOW_BANDS = """
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { amount_gte: 1000, amount_lte: 100000 }
+        decision: allow
+      - when: { amount_lte: 999 }
+        decision: allow
+      - decision: deny
+"""
+
+
+def test_T413g_a_band_whose_floor_leaves_no_headroom_is_N_A_and_never_FAIL(tmp_path):
+    """The headroom rule, on the document where it is load-bearing.
+
+    Where the rule admits `1`, the first candidate is tiny and headroom never binds. It binds
+    when the band has a **floor**: the smallest in-rule value here is 100, nine of which is 900,
+    and G4 needs nine. A ladder without the headroom requirement picks 112 and the contended leg
+    finds zero winners, which the guarantee reports as FAIL.
+
+    **Verify may say it could not grade a configuration. It may not report the kernel broken.**
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + FLOORED_RULE)
+
+    result = _by_id(run(path, only=("G4",)))["G4"]
+
+    assert result.status is not Status.FAIL, result.reason
+    if result.status is Status.PASS:
+        assert dict(result.arguments or {})["amount"] * 18 <= 900, result.arguments
+
+
+def test_T413h_a_resize_never_silently_grades_a_different_rule(tmp_path):
+    """`select`'s contract is the decision **and the rule** it was asked for.
+
+    Two bands reach `allow` here. `_synthesize` picks the upper one, and every value small
+    enough for the budget lands in the lower one, which is a different rule with a different
+    reason. Checking only the decision would let verify grade a rule nobody selected and report
+    it under the first band's name.
+
+    So the honest answer is that no vector fits, and the guarantee is `N/A`.
+    """
+    path = _write(tmp_path, V7 + TIGHT_BUDGET + TWO_ALLOW_BANDS)
+
+    result = _by_id(run(path, only=("G3",)))["G3"]
+
+    if result.status is Status.PASS:
+        assert dict(result.arguments or {})["amount"] >= 1000, (
+            f"verify graded a band it was not asked for: {result.arguments}"
+        )
+    else:
+        assert result.status is Status.NOT_APPLICABLE, result.reason
