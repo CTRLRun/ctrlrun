@@ -1166,6 +1166,10 @@ _V7_GRANT_KEYS: Final[Mapping[str, str]] = {
         "an older reader would ignore the binding and authorise the grant on every task, which "
         "is the whole of what the key restricts"
     ),
+    "budgets": (
+        "an older reader would ignore the limit and let the grant spend without bound, which is "
+        "the whole of what the key restricts"
+    ),
 }
 
 

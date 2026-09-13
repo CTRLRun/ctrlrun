@@ -219,6 +219,15 @@ def _delegable_child(parent) -> str:
         }
     if parent.expires_at is not None:
         document["expires_at"] = parent.expires_at.isoformat()
+    if parent.budgets is not None:
+        document["budgets"] = [
+            {
+                "metric": budget.metric,
+                "limit": budget.limit,
+                "window": f"PT{int(budget.window.total_seconds())}S",
+            }
+            for budget in parent.budgets
+        ]
     if parent.tasks is not None:
         # SPEC-v0.9 §6.2 — one more dimension under the same structural rule this docstring
         # states. A helper that restated five of six would silently stop being "every dimension

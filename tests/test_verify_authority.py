@@ -60,6 +60,8 @@ authority:
       delegable: true
       expires_at: "2027-01-01T00:00:00Z"
       tasks: ["refund-run:*"]
+      budgets:
+        - {metric: amount, limit: 500000, window: PT24H}
 """
 
 #: Grants that name actions the policy does not list: nothing is authorized, which is a
