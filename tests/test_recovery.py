@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Recovery on restart. Build-list item 5; SPEC-v0.6 §5, §8 T159-T163.
 
 What a process finds when it comes back, and what it is allowed to conclude. The answer to the

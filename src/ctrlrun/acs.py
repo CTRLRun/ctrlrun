@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """An ACS control hook backed by CTRLRun. Ships in `ctrlrun[gateway]`.
 
 Read against the Agent Control Standard v0.1.0 schemas in

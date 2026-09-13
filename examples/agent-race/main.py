@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Two agents, one effect: the second one loses, and loses before the remote is touched.
 
 Both agents are doing the right thing. They resolve the same effect key, `refund:txn_123`,

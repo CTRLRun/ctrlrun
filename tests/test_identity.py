@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Principal, IdentityProvider and the environment. Build-list item 1; SPEC-v0.3 §2, §3.
 
 The acceptance tests are T60 to T65d. Two rules run through all of them and are worth stating

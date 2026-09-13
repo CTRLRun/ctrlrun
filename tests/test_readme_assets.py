@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The README's header assets: the demo animation, its tape, and the social preview.
 
 The GIF is a recording of `ctrlrun demo`'s first two scenarios, and a recording is a claim about

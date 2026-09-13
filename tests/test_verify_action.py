@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The composite action, the badge and `https://ctrlrun.dev/docs/verify`. SPEC-v0.4 §5; T118-T120.
 
 The badge is the shortest sentence this project makes, and the one most likely to be read

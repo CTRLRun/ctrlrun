@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.2 §6.8, and nothing else. Build-list item 6b; acceptance test T24.
 
 This is the table the gateway exists for, and its asymmetry MUST NOT be inverted: the only

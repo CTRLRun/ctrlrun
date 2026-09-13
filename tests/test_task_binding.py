@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T379 to T387: task-bound authority (SPEC-v0.9 §6).
 
 One more containment dimension, attenuated by the same `child ⊆ parent` rule as every other.

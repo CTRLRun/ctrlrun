@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Attempt numbers never repeat, on Postgres. Item 3a; SPEC-v0.7 §5.6, §8.3a (T246, T246b).
 
 Two properties, and at 0.6.1 neither held on Postgres: **no two reservations of one key carry the

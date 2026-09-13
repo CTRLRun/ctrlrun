@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What was observed about an upstream, and whether it matches the pin. SPEC-v0.10 §4.
 
 **Per process, by construction.** §4.3's check 2 answers from what *this* process has seen, which

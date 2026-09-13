@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The store conformance suite. Build-list item 1; SPEC-v0.6 §2.
 
 It runs **this repository's own acceptance tests** -- the cases of `v0.1 §7`, `v0.2 §10` and

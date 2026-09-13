@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Suspension and resumption. Build-list item 6d; SPEC-v0.2 §6.9 via the kernel.
 
 Suspension is modelled the way v0.1 models "nothing happened": an explicit opt-in signal an

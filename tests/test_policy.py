@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Policy loading and rule evaluation. SPEC-v0.1 §3; acceptance test T6 (policy half)."""
 
 import json

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Observe mode and `ctrlrun stats`. Build-list item 4; SPEC-v0.3 §6.
 
 The acceptance tests are T82 to T87. Four sentences run through all of them:

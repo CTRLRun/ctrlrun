@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The repository's trust signals, as assertions rather than intentions.
 
 A visitor decides in thirty seconds whether an unknown project is safe to put in front of
@@ -238,8 +240,20 @@ def test_the_community_files_exist_and_say_what_they_must():
         # The contribution agreement is the DCO and nothing more; the file has to say so.
         "Developer Certificate of Origin",
         "git commit -s",
+        # The written policies the best-practices criteria point at, each by its heading.
+        "## Coding standards",
+        "## Code review",
+        "new functionality MUST arrive with\ntests",
     ):
         assert phrase in contributing, phrase
+
+    governance = (REPO_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")
+    for phrase in ("## Decisions", "## Roles", "## Continuity", "@arpanghoshal", "@rohanrkamath"):
+        assert phrase in governance, phrase
+
+    security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    for phrase in ("## Response process", "72 hours", "Security Advisory", "Credit"):
+        assert phrase in security, phrase
 
     conduct = (REPO_ROOT / "CODE_OF_CONDUCT.md").read_text(encoding="utf-8")
     assert "Contributor Covenant" in conduct
@@ -658,3 +672,30 @@ def test_coverage_floor_names_the_number_that_slipped(tmp_path):
     )
     assert slipped.returncode == 1
     assert slipped.stderr.strip() == "coverage_floor: below the floor: branches"
+
+
+# --- every source file says who holds it and under what licence -------------------------------
+
+_SOURCE_DIRS = ("src", "tests", "fuzz", "scripts", "adapters", "examples")
+_COPYRIGHT_LINE = "# SPDX-FileCopyrightText: 2026 The CTRLRun contributors"
+_LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
+
+
+def test_every_source_file_carries_its_copyright_and_license():
+    """The licence is in `LICENSE` and the copyright is the contributors'; a file copied out of
+    this tree on its own says both at the top, in the SPDX form a tool can read. A shebang, where
+    there is one, stays on line one, and the two tags follow it."""
+    missing: list[str] = []
+    checked = 0
+    for directory in _SOURCE_DIRS:
+        for path in sorted((REPO_ROOT / directory).rglob("*")):
+            if path.suffix not in (".py", ".sh") or not path.is_file():
+                continue
+            checked += 1
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if lines and lines[0].startswith("#!"):
+                lines = lines[1:]
+            if lines[:2] != [_COPYRIGHT_LINE, _LICENSE_LINE]:
+                missing.append(str(path.relative_to(REPO_ROOT)))
+    assert checked > 100, checked
+    assert not missing, "\n".join(missing)

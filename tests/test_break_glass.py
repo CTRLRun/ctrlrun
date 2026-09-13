@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T326 to T339: break-glass as a grant, never a flag (SPEC-v0.8 §5).
 
 Parametrised over the three stores for the same reason every authority test is: an envelope is

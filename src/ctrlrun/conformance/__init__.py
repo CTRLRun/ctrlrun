@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The adapter conformance kit. Build-list item 3; SPEC-v0.5 §5.
 
 It runs **this repository's own acceptance tests** -- the suites of `v0.1 §7` and `v0.3 §10` --
