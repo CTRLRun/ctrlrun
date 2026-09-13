@@ -1044,7 +1044,7 @@ def test_T413s_G22_grades_the_same_alone_as_it_does_in_a_full_run(tmp_path):
     assert alone.status is not Status.FAIL, alone.reason
 
 
-@pytest.mark.parametrize("gid", ["G22", "G23", "G24", "G25"])
+@pytest.mark.parametrize("gid", ["G22", "G23", "G24", "G25", "G26", "G27"])
 def test_T413t_a_v09_guarantee_grades_the_same_alone_as_in_a_full_run(gid, tmp_path):
     """The invariant G22 broke, over every guarantee v0.9 and v0.10 added.
 

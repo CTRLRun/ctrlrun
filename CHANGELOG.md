@@ -7,6 +7,68 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [0.10.0] — Multi-agent
+
+One question: when one agent hands work to another, what does the second one hold?
+
+### Added
+
+- **A hop: authority that crosses an agent boundary.** A hop is `SPEC-v0.3.md` §5's delegation over
+  a boundary the kernel does not control, and almost nothing about it is new machinery. The same
+  `contained_dimension` decides it, over all eight dimensions, at creation and again at every
+  evaluation. The same `delegation_id` names it. `SPEC-v0.9.md` §2.7's walk charges it, so a
+  consumption under a hop costs the **issuer** and every ancestor to the root.
+
+  **One rule is new, and it is the whole of what v0.10 adds: an action proposed under a hop is
+  evaluated against that hop's grant alone, with no fallback.** Before it, `Authority.evaluate`
+  passed on any matching grant, so a receiving agent holding a grant of its own was authorised by
+  that one, the hop was never consulted, and the issuer's budget paid nothing. Which way it went
+  turned on how two identifiers sorted.
+
+- `Control.hop(parent_id, grant, *, by, action_id=None)`, `hop=` on `@protect`, `Control.execute`
+  and `Control.evaluate`, and `hop` in the metadata the gateway and the ACS hook already carry.
+- **`ctrlrun.receipt/v7`** adds `hop`: the hop an action ran **under**, never the one it created.
+- **`ctrlrun.policy/v8`** adds `upstream:` on an action entry, pinning the server an action
+  authorises itself against by certificate or by the hash of its advertised tool schema.
+- **`ctrlrun.guarantees/v6`**: G25 `a hop narrows or it is refused`, G26 `a hop is named on both
+  sides`, G27 `a swapped upstream is denied`.
+- `ctrlrun inspect --hop` emits `ctrlrun.hop/v1`: who issued a hop, and **which dimensions each
+  link narrowed**, which is the question an operator paged at 3am actually has.
+- `ctrlrun scan` names the principals holding a grant no hop bounds. It reports and does not score.
+
+### Changed
+
+Every behaviour below is **stricter** than 0.9.0, with what it did before.
+
+- **An action presented with a hop is decided against that hop alone.** Before: every grant the
+  principal held was a candidate and the narrowest-sorting one decided. An action presented with
+  **no** hop is decided exactly as 0.9.0 decided it, which is why every existing deployment
+  upgrades untouched.
+- **A resumed leg is evaluated on the task and the hop.** Before (`v0.9 §6.3.2`), the task
+  dimension was not evaluated on a resumed leg at all, because the rehydrated action carried none;
+  `EXECUTION_STARTED` now carries both and `_resumed_context` reads them back. A leg suspended by
+  **0.9.0** carries neither and is evaluated exactly as 0.9.0 evaluated it, or every action in
+  flight across the upgrade would be denied.
+- **A lease extension is decided against the hop the first leg held**, on every round. Before, and
+  briefly during this milestone, a receiver holding a grant of its own kept its reservation across
+  a round trip after the hop was cut.
+- **Observe mode reports the refusal enforce mode would raise.** Before (`v0.9 §4.2.1b`), it
+  reported whichever refusal it reached first, which was not always the same one.
+- **A policy that pins an upstream refuses an action the process has not verified one for.**
+  Before, no such key existed. In-process there is no upstream to observe, so a pinned action
+  refuses on every call; the ACS hook refuses such a policy at construction.
+
+### The upgrade, and the one irreversible thing
+
+`0007_budget_ledger` is still the last migration: receipts and events are stored as whole JSON
+documents and `created_via` is already `TEXT`, so v0.10 needs no schema change.
+
+**The irreversible step is creating the first hop, not installing 0.10.0.** `CreatedVia` is a closed
+vocabulary and `Authority._candidates` reads every delegation row before filtering any of them, so a
+0.9.x binary meeting one `created_via='hop'` row answers `authority_unreadable` for **every action in
+the deployment**, not just that delegation. Fail-closed, and a deployment that stops. A deployment
+that installs 0.10.0 and creates no hop can still roll back.
+
 ## [Unreleased]
 
 ### Added

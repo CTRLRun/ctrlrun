@@ -114,7 +114,16 @@ def observe_upstream(url: str, *, verify: object | None = None, timeout: float =
         )
     host = split.hostname or ""
     port = split.port or 443
-    context = verify if isinstance(verify, ssl.SSLContext) else ssl.create_default_context()
+    if isinstance(verify, ssl.SSLContext):
+        context = verify
+    else:
+        context = ssl.create_default_context()
+        # Stated rather than inherited. `create_default_context` has set this floor since 3.10,
+        # but a floor that is only a default is one a future release or a system-wide OpenSSL
+        # configuration can lower, and this handshake is where §4.3's check 3 decides whether the
+        # gateway starts. A pin observed over TLS 1.0 would be a pin on whatever the downgrade
+        # negotiated with.
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
     with (
         socket.create_connection((host, port), timeout=timeout) as raw,
         context.wrap_socket(raw, server_hostname=host) as tls,

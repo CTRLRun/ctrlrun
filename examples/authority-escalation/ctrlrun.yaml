@@ -4,7 +4,7 @@
 # `authority:` needs `ctrlrun.policy/v3`: a reader that ignored the section would run every
 # action with no authority check at all, and the schema string is the only thing standing
 # between those two outcomes.
-schema: ctrlrun.policy/v3
+schema: ctrlrun.policy/v8
 
 authority:
   # How deep a chain may go. The default is 3; it is stated here because a reader deciding
@@ -15,6 +15,16 @@ authority:
     # A human's own authority: €100,000 of refunds, and the right to delegate a narrower
     # slice of it. `delegable: true` requires an `expires_at` — authority that can mint more
     # authority and never lapses is the one shape this model refuses to write down.
+    # SPEC-v0.10 §4, §7.3. The grant that covers the pinned action below, so `ctrlrun verify`
+    # can grade G27 against this document rather than report it `N/A`. No `constraints:`,
+    # because a payout carries no `amount` for one to compare and a constraint whose argument is
+    # absent never holds (`v0.1 §3.2`), which would leave the grant matching nothing.
+    - id: payouts
+      subject: { agent: "payout-agent" }
+      actions: ["stripe.payout"]
+      resources: ["payout:*"]
+      environments: ["production"]
+
     - id: head-of-support
       subject: { agent: "head-of-support", user: "dana@example.com" }
       actions: ["stripe.refund"]
@@ -37,3 +47,28 @@ actions:
       - when: { amount_gte: 0, amount_lte: 1000000 }     # to €10,000.00 — a human decides
         decision: approve
       - decision: deny
+
+  # SPEC-v0.10 §4. **Which server this action authorises itself against.** A grant says who may
+  # propose an action; this says which upstream the action may be sent to, so a swapped MCP
+  # server behind the same name, or a tool whose schema moved under an approved action name, is
+  # a DENY rather than an authorised call to something nobody reviewed.
+  #
+  # The honest slice of `ASI04` and nothing more: CTRLRun decides actions and never inspects a
+  # package, a model, a registry or a build.
+  #
+  # **This entry is here to be read and graded, and `main.py` does not call it**, which is the
+  # one thing about it that needs saying out loud. §4.4: pinning is enforced by the surface that
+  # holds the connection, which is `ctrlrun gateway`. In-process there is no upstream to observe,
+  # so an action that pins one refuses on every in-process call with `upstream_unverified`. That
+  # is correct and it is loud, and it is not a demo. Front this policy with
+  # `ctrlrun gateway --upstream https://your-mcp-server` and the pin is checked three ways:
+  # at startup, at the decision, and at the TLS handshake.
+  stripe.payout:
+    effect: "payout:{payout_id}"
+    resource: "payout:{payout_id}"
+    decision: approve
+    upstream:
+      # Replace with your server's leaf certificate digest. A LIST, so the current and the next
+      # certificate can both be named across a rotation without an outage (§4.2).
+      tls_cert_sha256:
+        - "sha256:0000000000000000000000000000000000000000000000000000000000000000"

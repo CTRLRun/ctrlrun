@@ -11,7 +11,7 @@ authors:
   - family-names: Ghoshal
     given-names: Arpan
     email: contact@arpanghoshal.com
-version: 0.9.0
+version: 0.10.0
 repository-code: https://github.com/CTRLRun/ctrlrun
 url: https://github.com/CTRLRun/ctrlrun
 license: Apache-2.0
