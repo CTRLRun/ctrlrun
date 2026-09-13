@@ -28,6 +28,7 @@
   <a href="https://ctrlrun.dev/docs/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
   <a href="https://ctrlrun.dev/docs/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://www.bestpractices.dev/projects/14615"><img src="https://www.bestpractices.dev/projects/14615/badge" alt="OpenSSF Best Practices"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=B8730A" alt="License"></a>
 </p>
 <!-- end generated -->
@@ -274,7 +275,7 @@ grades the transport classifier.
 | **One effect, once** — One logical effect happens at most once, across threads, processes and hosts. | yes | yes | yes |
 | **Unknown is not failed** — An unknown outcome is AMBIGUOUS, never FAILED, and blocks a blind retry. | yes | yes | yes |
 | **Fail closed** — An unknown action, a missing policy or a missing principal is denied. | yes | yes | yes |
-| **Authority and delegation** — With authority on, every principal needs a grant, and delegation cannot widen one. | yes | yes | yes |
+| **Authority and delegation** — Every principal needs a grant, delegation cannot widen one, and a grant bounds the total. | yes | yes | yes |
 | **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
 <!-- end generated -->
 

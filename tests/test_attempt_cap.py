@@ -22,8 +22,11 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import uuid
 from contextlib import contextmanager
@@ -819,6 +822,24 @@ CHILD = textwrap.dedent("""
     control = Control(Policy.from_yaml(job["policy"]), store)
     dispatches = []
 
+    # **A filesystem barrier, so the children actually contend.**
+    # Feeding every child before waiting on any was not enough: interpreter startup, the import
+    # of ctrlrun, the connection and the migration check all happen first and vary by more than
+    # the work does, so six processes routinely ran one after another and this test's own
+    # `_overlapping` guard reported it honestly, twice in one session on CI.
+    #
+    # Everything expensive is above this line. Each child announces itself, then spins until
+    # every sibling has, so they enter the contended section together. Bounded, because a test
+    # that hangs says nothing (SPEC-v0.4 §3.6): past the deadline a child proceeds alone and the
+    # `_overlapping` assertion is what then fails, which is the honest outcome.
+    if job.get("gate"):
+        open(os.path.join(job["gate"], "%d.ready" % os.getpid()), "w").close()
+        _deadline = time.time() + 30
+        while time.time() < _deadline:
+            if len(os.listdir(job["gate"])) >= job["children"]:
+                break
+            time.sleep(0.005)
+
     @protect("stripe.refund", effect="refund:{payment_id}", control=control)
     def refund(payment_id, amount):
         dispatches.append(1)
@@ -885,6 +906,7 @@ def test_T247_no_more_than_N_dispatches_across_separate_processes():
     schema = f"cap_{uuid.uuid4().hex[:12]}"
     PostgresStateStore.create_schema(POSTGRES_URL, schema)
     payment_id = f"txn_{uuid.uuid4().hex[:12]}"
+    gate = pathlib.Path(tempfile.mkdtemp(prefix="ctrlrun-t247-"))
     job = {
         "src": REPO_SRC,
         "url": POSTGRES_URL,
@@ -892,6 +914,8 @@ def test_T247_no_more_than_N_dispatches_across_separate_processes():
         "policy": ALLOW_CEILING_3,
         "payment_id": payment_id,
         "rounds": 8,
+        "gate": str(gate),
+        "children": 6,
     }
     children = [
         subprocess.Popen(
@@ -925,6 +949,7 @@ def test_T247_no_more_than_N_dispatches_across_separate_processes():
             if child.poll() is None:  # pragma: no cover - only on a wedged child
                 child.kill()
         PostgresStateStore.drop_schema(POSTGRES_URL, schema)
+        shutil.rmtree(gate, ignore_errors=True)
 
     total = sum(result["dispatches"] for result in results)
     assert total <= 3, f"the ceiling of 3 admitted {total} dispatches: {results}"
@@ -1626,7 +1651,7 @@ def _verify(tmp_path, document, *, only):
 def test_T252_G15_is_in_the_catalogue():
     from ctrlrun.verify import guarantees as reg
 
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v5"
     assert "G15" in reg.BY_ID
     assert "v0.1 §5.4" in reg.BY_ID["G15"].descends_from
 

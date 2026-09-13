@@ -48,11 +48,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install
+        # Every dependency by hash from `requirements/ci.txt`, then the checkout itself with
+        # `--no-deps` and against the backend that lock carries (`requirements/in/backend.in`):
+        # what this job resolves is what `scripts/lock.sh` wrote down and somebody reviewed, not
+        # what PyPI happened to serve this morning. The gateway's tests need its
+        # extra; T30 still proves `import ctrlrun` does not touch it, in a subprocess, whether
+        # or not it happens to be installed here.
         run: |
-          python -m pip install --upgrade pip
-          # The gateway's tests need its extra; T30 still proves `import ctrlrun` does not
-          # touch it, in a subprocess, whether or not it happens to be installed here.
-          pip install -e ".[dev,gateway,otel,identity,postgres]"
+          pip install --require-hashes -r requirements/ci.txt
+          pip install --no-deps --no-build-isolation -e .
 
       # A claim about the environment is worth nothing until something checks it: if the
       # service failed to start, the Postgres tests would silently skip and the backend
@@ -120,13 +124,23 @@ jobs:
           set -eu
           echo "authority: $AUTHORITY ($AUTHORITY_NA not applicable)"
           echo "templates: $TEMPLATES ($TEMPLATES_NA not applicable)"
-          test "$AUTHORITY" = "verified 14/14"
+          test "$AUTHORITY" = "verified 22/22"
           # G13 is N/A on SQLite, the action's default store: SQLite has no clock of its own
           # to diverge from; G15 is N/A because neither document declares `max_attempts`.
           # G16 is graded on both: verify brings its own precondition provider (SPEC-v0.7 §8.9).
+          # G17 is N/A on both since v0.8 item 3: neither document names an
+          # `approver_role`, which is a statement about what the operator wrote
+          # (SPEC-v0.8 §3.5, §11.7). G18 is graded since item 2, which supplies its
+          # own approver identity: whether
+          # an operator configured one is a fact about their application and never an N/A
+          # reason here (SPEC-v0.8 §11.7). Both counts moved by one when it landed.
+          #
+          # SPEC-v0.9 §6 moved the templates count again: G24 is N/A for a document whose
+          # grants name no task, which the templates example's do not. The authority example
+          # binds one, so its count is unchanged and its passing total moved 19 to 20 instead.
           test "$AUTHORITY_NA" = "2"
-          test "$TEMPLATES" = "verified 8/8"
-          test "$TEMPLATES_NA" = "8"
+          test "$TEMPLATES" = "verified 11/11"
+          test "$TEMPLATES_NA" = "13"
           test -s verify-badge.json
           test -s verify-report.json
           test -s verify-report.xml
@@ -228,10 +242,9 @@ jobs:
         # test must be this checkout, so its dependencies are installed on the line above and
         # the adapters are installed against it.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,gateway,otel,identity]"
-          pip install langgraph langchain langchain-openai openai-agents
-          pip install --no-deps -e adapters/langgraph -e adapters/openai-agents
+          pip install --require-hashes -r requirements/adapters.txt
+          pip install --no-deps --no-build-isolation -e .
+          pip install --no-deps --no-build-isolation -e adapters/langgraph -e adapters/openai-agents
 
       # The frameworks are installed, so a skip here is a failure and not a configuration.
       # `-p no:randomly` is not used and no marker is filtered: this is the whole of both files.
@@ -293,14 +306,13 @@ jobs:
       - name: Install
         # Every extra: a runnable guide block that exports to OpenTelemetry or opens the
         # gateway's client needs the extra installed, and a block that skipped would be a
-        # sample nobody ran. `postgres` too, and for a different reason: the readiness block
-        # records what `pytest --collect-only` finds, and 76 of the tests exist only when
-        # psycopg is importable. The same extras as `check`, so this job counts the suite
-        # that job runs; `test_the_docs_job_installs_the_extras_the_check_job_runs` holds it.
+        # sample nobody ran. `postgres` too, for a different reason: the readiness block records
+        # what `pytest --collect-only` finds, and 76 tests are collected only when psycopg is
+        # importable. `docs.txt` therefore locks the same extras `ci.txt` does, and
+        # `test_the_docs_lock_covers_the_suite_the_check_job_runs` holds the two together.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e "./ctrlrun[dev,gateway,otel,identity,postgres]"
-          pip install griffe pyyaml
+          pip install --require-hashes -r ctrlrun/requirements/docs.txt
+          pip install --no-deps --no-build-isolation -e ./ctrlrun
 
       # `_core.py` raises when it cannot find the library, so this prints a path or the job
       # stops here. A documentation check that ran against no source would be green and
@@ -388,8 +400,8 @@ jobs:
 
       - name: Build
         run: |
-          python -m pip install --upgrade pip build twine
-          python -m build
+          pip install --require-hashes -r requirements/build.txt
+          python -m build --no-isolation
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
@@ -399,8 +411,9 @@ jobs:
         # packaging it downstream. This is the guard; MANIFEST.in is the fix.
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
+          pip install --require-hashes -r requirements/ci.txt
           cd /tmp/sdist
-          pip install ".[dev,gateway,otel,identity]"
+          pip install --no-deps --no-build-isolation -e .
           pytest -q
 
       - name: The quick start works from the wheel
@@ -411,3 +424,53 @@ jobs:
           timeout 60 /tmp/qs/bin/ctrlrun demo
           /tmp/qs/bin/ctrlrun init
           test -f ctrlrun.yaml
+
+  dco:
+    # Every commit on a pull request carries a `Signed-off-by:` trailer naming its author's
+    # email: the Developer Certificate of Origin, per CONTRIBUTING.md. A shell loop rather than
+    # the DCO app, so the rule lives in the repository, pinned like everything else, with
+    # nothing to install and nothing that can be quietly uninstalled. Only git's own trailer
+    # block counts, so a sentence in the body that happens to mention the trailer does not.
+    # Nobody is exempt, bots included: an exemption keyed on a name or an email is a string
+    # anyone can set. Dependabot does sign its commits off, as `support@github.com` while
+    # authoring from its noreply address, so its trailer never matches its author. The one
+    # thing about such a commit that is not a string anyone can set is GitHub's signature on
+    # it, so a sign-off under another address is accepted on that signature and on nothing
+    # else: `verification.verified` is GitHub reporting that it signed the commit itself,
+    # which only a commit made through GitHub (an App such as Dependabot, or the web editor)
+    # carries.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Every commit is signed off by its author
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          missing=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            name="$(git log -1 --format=%an "$sha")"
+            email="$(git log -1 --format=%ae "$sha")"
+            # `only` restricts the output to the trailer block git itself recognises, and
+            # `valueonly` leaves the `Name <email>` part; the value has to end in the author's
+            # email, angle brackets included.
+            trailers="$(git log -1 --format='%(trailers:key=Signed-off-by,valueonly,only)' "$sha")"
+            if printf '%s\n' "$trailers" \
+                | awk -v want="<$email>" 'substr($0, length($0) - length(want) + 1) == want { found = 1 } END { exit !found }'; then
+              continue
+            fi
+            # A sign-off under another address, on a commit GitHub signed itself. See the job
+            # comment: the signature is the only fact here that is not a string anyone can set.
+            if [ -n "$trailers" ] && [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.commit.verification.verified')" = "true" ]; then
+              echo "$sha: signed off as '$trailers' by $name <$email>; accepted on GitHub's signature"
+              continue
+            fi
+            echo "::error::$sha ($(git log -1 --format=%s "$sha")) has no 'Signed-off-by: $name <$email>' trailer. Add one with 'git commit --amend -s', or to every commit on the branch with 'git rebase --signoff $BASE'."
+            missing=1
+          done
+          [ "$missing" -eq 0 ]

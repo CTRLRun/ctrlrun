@@ -109,9 +109,9 @@ def test_T113_the_summary_is_the_last_line_and_names_the_not_applicable_ids(tmp_
     # G13 is N/A on every SQLite run: SQLite has no clock of its own. G14 needs the effect
     # template this document keeps in the @protect decorator, and G15 a `max_attempts` it does
     # not declare (SPEC-v0.7 §8.9).
-    assert "8 not applicable: G3, G4, G5, G8, G9, G13, G14, G15." in last
-    # The fraction is passes over applicable. A report with eight N/As does not say 14/14.
-    assert "14/14" not in text
+    assert "13 not applicable: G3, G4, G5, G8, G9, G13, G14, G15, G17, G19, G22, G23, G24." in last
+    # The fraction is passes over applicable. A report with eight N/As does not say 17/17.
+    assert "18/18" not in text
 
 
 def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
@@ -134,9 +134,12 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
-        (ALL_APPLICABLE, "12/12 declared guarantees pass. 4 not applicable"),
-        (WITH_NOT_APPLICABLE, "8/8 declared guarantees pass. 8 not applicable"),
-        (EMPTY, "0/0 declared guarantees pass. 16 not applicable"),
+        # SPEC-v0.8 item 2: G18 joins the catalogue. It is graded wherever the document sends
+        # an action to approval, which the first two of these do, and `N/A` for G1's reason
+        # where nothing does. So the first two gain a pass and the third gains an N/A.
+        (ALL_APPLICABLE, "16/16 declared guarantees pass. 8 not applicable"),
+        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass. 13 not applicable"),
+        (EMPTY, "0/0 declared guarantees pass. 24 not applicable"),
     ],
     ids=["passing", "some-na", "all-na"],
 )
@@ -186,7 +189,7 @@ def test_T114_the_document_matches_the_schema_field_for_field(tmp_path):
 
     assert set(document) == TOP_LEVEL
     assert document["schema"] == REPORT_SCHEMA == "ctrlrun.verify/v1"
-    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v3"
+    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v5"
     assert set(document["policy"]) == {"path", "sha256", "schema", "mode", "actions"}
     assert document["authority"] is None
     assert document["store"] == {"backend": "sqlite", "scratch": True}
@@ -440,14 +443,18 @@ def test_T116_exit_3_for_an_internal_error(tmp_path, monkeypatch):
     assert "internal error" in result.stderr
 
 
-def test_T116_a_run_with_eight_not_applicable_still_exits_0(tmp_path, monkeypatch):
-    """N/A never changes the exit code by itself."""
+def test_T116_a_run_with_several_not_applicable_still_exits_0(tmp_path, monkeypatch):
+    """N/A never changes the exit code by itself.
+
+    The count moves whenever the catalogue grows a guarantee this document cannot exercise, so
+    it is read off the report rather than pinned: what T116 is about is the exit code.
+    """
     monkeypatch.chdir(tmp_path)
 
     result = _cli(tmp_path, WITH_NOT_APPLICABLE)
 
     assert result.exit_code == 0
-    assert "8 not applicable" in result.stdout
+    assert "13 not applicable" in result.stdout
 
 
 def test_T116_json_and_junit_can_be_combined(tmp_path, monkeypatch):

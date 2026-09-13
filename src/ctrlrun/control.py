@@ -8,6 +8,7 @@ what happened. SPEC-v0.1 §8 freezes the names here.
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import logging
 import os
@@ -19,23 +20,46 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn, ParamSpec, TypeVar, cast
+from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
-from .action import Action, Principal
+from .action import Action, Principal, canonical_bytes
 from .approval import (
+    APPROVAL_UNRECORDED,
+    APPROVALS_UNVERIFIABLE,
+    APPROVER_IS_REQUESTER,
+    APPROVER_UNENTITLED,
+    APPROVER_UNVERIFIED,
     DEFAULT_APPROVAL_TTL,
     Approval,
     ApprovalProvider,
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    ApprovalVerdict,
+    ApproverIdentity,
     LocalApprovalProvider,
+    RequiredRole,
+    VerifiedApprover,
     _precondition_at_request,
     _precondition_fingerprint,
+    _required_roles,
     check_consumable,
+    entitled_controls,
     policy_in_force,
+    roles_held,
+    unsatisfied,
 )
-from .authority import Authority, AuthorityResult, Delegation, Grant, _optional_from_yaml
+from .authority import (
+    RESOURCE_SEPARATOR,
+    Authority,
+    AuthorityResult,
+    BreakGlassEnvelope,
+    CreatedVia,
+    Delegation,
+    Grant,
+    _optional_from_yaml,
+    matches,
+)
 from .effect import (
     _EXECUTOR_RUN,
     COMMITTED_EFFECT,
@@ -75,6 +99,8 @@ from .identity import IdentityContext, IdentityProvider
 from .policy import (
     DEFAULT_ENVIRONMENT,
     OBSERVE,
+    POLICY_CHANGE_ACTION,
+    POLICY_UNAPPROVED,
     Decision,
     Evaluation,
     Policy,
@@ -83,11 +109,11 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
-    BLOCKED_APPROVAL_MISMATCH,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
     BLOCKED_IN_PROGRESS,
+    KNOWN_RECEIPT_SCHEMAS,
     Event,
     EventSink,
     EventType,
@@ -98,7 +124,14 @@ from .receipt import (
     iso_timestamp,
     new_receipt_id,
 )
-from .state import ClockSkew, SQLiteStateStore, StateStore
+from .state import (
+    BudgetExhaustedError,
+    Charge,
+    ClockSkew,
+    SQLiteStateStore,
+    StateStore,
+    check_charges,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -180,6 +213,55 @@ class _Invocation:
 
 
 _CONTEXT: ContextVar[_Invocation] = ContextVar("ctrlrun_context")
+#: SPEC-v0.8 §5.4 — the grant that decided the action being recorded, for the receipt. A
+#: context variable rather than an argument threaded through `_record`'s dozen call sites,
+#: on the precedent of `_PRESENTED_APPROVAL` beneath it: `Control` is shared across calls and
+#: holds no per-call state, and a context variable is per-call by construction.
+_AUTHORITY_GRANT_ID: ContextVar[str | None] = ContextVar("ctrlrun_authority_grant_id")
+#: SPEC-v0.9 §6.3.1 — the task reaches the receipt the way `authority_grant_id` does, and for
+#: the same reason: set at the one place that knows it rather than at each receipt site, because
+#: a site that forgot would stamp the **previous** action's task onto this one's evidence.
+_TASK: ContextVar[str | None] = ContextVar("ctrlrun_task")
+#: SPEC-v0.9 §5.5 — the scope hash reaches the receipt the way the task does, and is reset
+#: beside it: a refusal whose receipt carried the previous action's scope would be the same
+#: stale-evidence defect on a new field.
+_SCOPE_HASH: ContextVar[str | None] = ContextVar("ctrlrun_scope_hash")
+#: SPEC-v0.9 §2.7 — the authority decision this action was allowed by, so `_secure` can assemble
+#: the charges without re-walking the chain. Set beside `_AUTHORITY_GRANT_ID` and reset with it,
+#: for the stale-evidence reason that field's own comment gives.
+_AUTHORITY_RESULT: ContextVar[AuthorityResult | None] = ContextVar("ctrlrun_authority_result")
+#: SPEC-v0.9 §10.1 — what this action charged, for the receipt. Set where the charges are
+#: assembled and reset beside the other two, for the stale-evidence reason `_AUTHORITY_GRANT_ID`'s
+#: own comment gives.
+_BUDGET_CHARGES: ContextVar[tuple[Mapping[str, Any], ...]] = ContextVar("ctrlrun_budget_charges")
+
+#: SPEC-v0.8 §8.2.1, §11.2. How the policy-change flow says that this `ctrlrun.policy.change`
+#: is one it built. **Package-internal on purpose**, beside `_granting_principal`, and it
+#: carries the same residual §2.5.1 concedes: an application inside the process can call a
+#: private function, so the claim is not "nothing else can propose one". It is **"nothing
+#: outside the flow proposes one by accident, and the shipped surfaces are its only setters"**.
+#: §8.6's property does not rest on this gate, which is why narrowing it costs nothing.
+#: SPEC-v0.8 §8.4 — the effect key a policy approval is recorded under. Reserved on the
+#: **resolved** key in `execute`, not only on the template at load: the key is expanded from
+#: arguments an agent supplies, and a check on the template alone is defeated by one
+#: placeholder.
+_POLICY_EFFECT_PREFIX: Final = "policy:"
+
+_POLICY_CHANGE_IN_FLIGHT: ContextVar[bool] = ContextVar(
+    "ctrlrun_policy_change_in_flight", default=False
+)
+
+
+@contextmanager
+def _policy_change_in_flight() -> Iterator[None]:
+    """Mark the `ctrlrun.policy.change` built inside this block as the flow's own (§8.2.1)."""
+    token = _POLICY_CHANGE_IN_FLIGHT.set(True)
+    try:
+        yield
+    finally:
+        _POLICY_CHANGE_IN_FLIGHT.reset(token)
+
+
 _PRESENTED_APPROVAL: ContextVar[str] = ContextVar("ctrlrun_approval")
 
 #: SPEC-v0.7 §4.3. The token of the attempt whose executor is running, and nothing else. Set
@@ -363,19 +445,29 @@ class _Compared:
     failure by its type name, never its message: a provider that put the balance it read into
     its exception would otherwise carry raw state into the evidence through the one field
     nobody thought to check (§6.5).
+
+    SPEC-v0.8 §2.5 adds `approvers` to it, because it is already the per-call scratch the
+    presenting pass fills and the receipt reads: the alternative was a second `get_approval`
+    per receipt, on a path that has just read the record.
     """
 
-    __slots__ = ("at_recheck", "at_request", "error")
+    __slots__ = ("approvers", "at_recheck", "at_request", "error", "unentitled")
 
     def __init__(self, at_request: str | None = None) -> None:
         self.at_request = at_request
         self.at_recheck: str | None = None
         self.error: str | None = None
+        self.approvers: tuple[VerifiedApprover, ...] = ()
+        #: SPEC-v0.8 §3.7 — the required role an approver did not hold, so the event can name the
+        #: control as well as the reason.
+        self.unentitled: RequiredRole | None = None
 
     def reset(self) -> None:
         self.at_request = None
         self.at_recheck = None
         self.error = None
+        self.approvers = ()
+        self.unentitled = None
 
     def data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -439,6 +531,130 @@ def _hash_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+class _ScopeRefusedError(Exception):
+    """SPEC-v0.9 §5.6's refusal, carried out of `_secure`'s loop without meeting its handlers.
+
+    **Not an `ActionDenied` subclass, and that is the whole point.** `_secure`'s `except
+    ActionDenied` appends `APPROVAL_DENIED` unconditionally, so a scope refusal raised as one
+    fabricates an approval denial for an action no human ever saw, and records `ACTION_DENIED`
+    twice. `SPEC-v0.9 §3.3.2` names this hazard for the budget refusal a later item adds; it is
+    the same handler and the same defect, found here first by reading the events a refusal wrote.
+
+    `_refuse_scope` has already written the events and the receipt, so this carries only the
+    public error the caller should see.
+    """
+
+    def __init__(self, denial: ActionDenied) -> None:
+        super().__init__(str(denial))
+        self.denial = denial
+
+
+class _UnmeasurableError(InvalidArgument):
+    """SPEC-v0.9 §2.3 and §2.4.1's refusal, **carrying its reason to a protocol boundary**.
+
+    An `InvalidArgument` subclass and not a new type, because §2.3 pins that exception and a
+    caller's `except InvalidArgument` must keep working. What it adds is `reason`, which the
+    boundaries need and could not get from a message.
+
+    An independent review found why that matters. `gateway/server.py`'s `_through_control`
+    catches eight exception types and not `InvalidArgument`, so this refusal raised out of the
+    request handler and the **socket closed with no response** -- the one failure that file's own
+    comment calls the thing this library exists to prevent. And `acs.py` answered
+    `-32002 malformed envelope`, whose comment reads "there is no action", for an action it had
+    just written an `ACTION_DENIED` and a `denied` receipt for; the `IdentityError` clause
+    directly below it states the rule that breaks, that an answer and the evidence may not
+    disagree about the same action.
+
+    `_refuse_unmeasurable` has already written the events and the receipt, so this carries only
+    what a boundary needs to answer with.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Keep this picklable, because `InvalidArgument` is.
+
+        The default reconstruction is `(cls, self.args)`, and this `__init__` takes `reason`
+        keyword-only, so unpickling raised `TypeError` and a caller fanning `Control.execute`
+        across a `ProcessPoolExecutor` lost the pool instead of catching the refusal. Nothing
+        in this repository pickles it -- verify's children speak JSON over stdin -- so an
+        independent review found it by probing the type rather than by a failing run.
+        """
+        return (_rebuild_unmeasurable, (str(self), self.reason))
+
+
+def _rebuild_unmeasurable(message: str, reason: str) -> _UnmeasurableError:
+    """Module-level so `pickle` can find it by name."""
+    return _UnmeasurableError(message, reason=reason)
+
+
+class _ObservedRefusalError(Exception):
+    """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
+    swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
+    refusal, and a caller that could catch it could mistake an observed run for an enforced one.
+
+    **It carries the reason**, and an independent review is why it does. Without it
+    `_observe_secure` had one hardcoded `out_of_scope` for both refusals, so a deployment whose
+    scope *source was down* read a counterfactual saying the record was not theirs. Observe mode
+    exists to tell an operator what enforce mode would do; reporting the wrong category is the one
+    way it can be worse than useless.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: SPEC-v0.9 §5.6 — the two refusal reasons, distinct because a test asserting only the exception
+#: type cannot tell which guard fired. `scope_unavailable` is "the provider could not answer";
+#: `out_of_scope` is "it answered, and the record is not this principal's". G23 is the first.
+#: SPEC-v0.9 §4.5 — its own reason, because an exhausted budget, an out-of-scope record and a
+#: failing scope provider all deny the same action with the same exception type.
+BUDGET_EXHAUSTED: Final = "budget_exhausted"
+
+#: SPEC-v0.9 §2.3 and §2.4.1 refuse before anything is charged, and an independent review found
+#: both escaping as a bare `InvalidArgument`: no `ACTION_DENIED`, no receipt, nothing in the one
+#: record an operator has of a refused action. They keep that exception type, because neither is
+#: a budget running out, but they are refusals and they are recorded as refusals. Two reasons
+#: rather than one: an operator who declared a budget on an action with no `effect:` template has
+#: a different thing to fix than one whose agent proposed a negative amount.
+BUDGET_UNMEASURABLE: Final = "budget_unmeasurable"
+BUDGET_UNKEYED: Final = "budget_unkeyed"
+SCOPE_UNAVAILABLE: Final = "scope_unavailable"
+OUT_OF_SCOPE: Final = "out_of_scope"
+
+#: SPEC-v0.9 §5.5 — its own domain tag, so a scope hash can never equal a precondition
+#: fingerprint over the same mapping. That matters precisely because §5.7 permits both.
+_SCOPE_SCHEMA: Final = "ctrlrun.scope/v1"
+
+#: §5.4 — the key the provider answers under. A scope is a set of resource patterns, matched
+#: with the relation `authority.py` already uses for a grant's `resources:`.
+_SCOPE_RESOURCES: Final = "resources"
+
+
+def _checked_scope(scope: object, where: str) -> _Preconditions | None:
+    """SPEC-v0.9 §5.6's third row, and `v0.7 §6.2`'s rule for a non-callable `preconditions=`."""
+    if scope is not None and not callable(scope):
+        raise InvalidArgument(
+            f"{where}: scope must be a callable taking the Action and returning a mapping "
+            f"with {_SCOPE_RESOURCES!r}, not {type(scope).__name__}"
+        )
+    return cast("_Preconditions | None", scope)
+
+
+def _scope_hash(scope: Mapping[str, Any]) -> str:
+    """`"sha256:" + hex(SHA-256(canonical_bytes({schema, scope})))` (SPEC-v0.9 §5.5).
+
+    Through `canonical_bytes` and nothing else, so `v0.1 §2.3`'s float rejection and the
+    non-string-key refusal are inherited rather than re-argued: a scope hashed over a float
+    would drift. Whatever it raises is the caller's to turn into `scope_unavailable`.
+    """
+    document = {"schema": _SCOPE_SCHEMA, "scope": dict(scope)}
+    return "sha256:" + hashlib.sha256(canonical_bytes(document)).hexdigest()
+
+
 def _checked_preconditions(preconditions: object, where: str) -> _Preconditions | None:
     """`None`, or a callable (SPEC-v0.7 §6.2). Anything else is a wiring bug, refused at the
     door: at decoration time for `@protect`, before any evidence for `execute`."""
@@ -479,6 +695,8 @@ class Control:
         identity: IdentityProvider | None = None,
         authority: Authority | None = None,
         environment: str | None = None,
+        approver_identity: ApproverIdentity | None = None,
+        require_approved_policy: bool = False,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -492,6 +710,22 @@ class Control:
         self._suspend_timeout = _checked_lease(suspend_timeout, "Control(suspend_timeout=...)")
         self._identity = identity
         self._authority = authority
+        #: SPEC-v0.8 §2.3: opt in, then fail closed. `None` is 0.7.0 exactly; anything else
+        #: makes an approval consumable only where the row carries a verified approver (§2.7).
+        #: `Control` never *resolves* one: it never grants an approval, so what it does with
+        #: this is check what the granting surface recorded (§1.4 item 1).
+        self._approver_identity = approver_identity
+        # SPEC-v0.8 §8.4. **In code and not in the file it governs**, or the file would switch
+        # off its own governance. Default false: opt in, then fail closed.
+        self._require_approved_policy = require_approved_policy
+        #: Cached **only when the answer is yes** (§8.4). A negative answer is re-asked on every
+        #: decision, so a long-lived process that started before the approval landed begins
+        #: working the moment it lands, with no restart; the cost is one keyed read per decision
+        #: while a deployment is unapproved, which is the state where nothing is running anyway.
+        #: A positive answer is cached for this `Control`'s life, because a COMMITTED effect
+        #: does not become uncommitted through any path this kernel offers -- which is also
+        #: §8.6's residual: deleting the row underneath a running process does not stop it.
+        self._policy_approved = False
         #: SPEC-v0.6 §7.1's *"both are folded into the one canonical structure before hashing"*.
         #: `Policy` cannot see a separately-loaded `Authority` and this can, so the hash every
         #: receipt and every approval request carries is composed here. Where the authority came
@@ -570,6 +804,16 @@ class Control:
         return self._identity
 
     @property
+    def require_approved_policy(self) -> bool:
+        """Does this deployment refuse to decide under a policy nobody approved? (§8.4.)"""
+        return self._require_approved_policy
+
+    @property
+    def approver_identity(self) -> ApproverIdentity | None:
+        """How this deployment verifies who answered an approval, or `None` (SPEC-v0.8 §2.3)."""
+        return self._approver_identity
+
+    @property
     def authority(self) -> Authority | None:
         """The grants this Control evaluates against, if any (SPEC-v0.3 §4.1).
 
@@ -587,7 +831,7 @@ class Control:
         """
         return self._environment
 
-    def evaluate(self, action: Action) -> Evaluation:
+    def evaluate(self, action: Action, *, task: str | None = None) -> Evaluation:
         """Decide an action. No side effects: nothing is recorded (SPEC-v0.1 §8).
 
         An expired principal is a `DENY` here rather than the refusal `execute` raises
@@ -602,6 +846,10 @@ class Control:
         can put an approval in front of a human for an attempt `execute` will then refuse, and a
         gateway pre-check can report `approve` for the same attempt. The cost is a wasted answer,
         never an execution: nothing here writes, and every ceiling refusal happens in `execute`.
+
+        **`task` is SPEC-v0.9 §6**, and it is here as well as on `execute` because §6.3.2 requires
+        the two to agree: `ctrlrun.adapter.needs_approval` routes through this method, and an
+        `evaluate` blind to the task would report `ALLOW` for an action `execute` refuses.
         """
         # SPEC-v0.3 §4.3.1 — the environment obeys §2.5 on *every* row of that table, and
         # `evaluate` is one. Read-only, so this refuses rather than denies: an Action from
@@ -614,16 +862,139 @@ class Control:
         # the public "what will happen to this action" query and it would stop answering that
         # question if it reported one axis while `execute` acted on both. It reads the store
         # to resolve delegations and still writes nothing.
-        result = self._authority_result(action)
+        result = self._authority_result(action, task=task)
         if result is not None and not result.passed:
             return Evaluation(Decision.DENY, result.reason)
         return self._policy.evaluate(action)
 
-    def _authority_result(self, action: Action) -> AuthorityResult | None:
-        """The authority axis for this action, or `None` where there is no section (§4.1)."""
+    def _require_approved(
+        self,
+        action: Action,
+        *,
+        evaluation: Evaluation | None,
+        started_at: datetime,
+        effect_key: str | None,
+    ) -> None:
+        """Refuse every decision under a policy nobody approved (SPEC-v0.8 §8.4).
+
+        **A keyed read, not a scan.** `get_effect(f"policy:{hash}")` is on the frozen protocol
+        and is O(1) on both shipped stores; `receipts()` could only answer this by returning
+        every receipt in the store, parsed, on the first decision of every process. It is the
+        same key the proposal reserved, so the two cannot drift.
+
+        **Two rules, and the second is what closes §8.6's obvious escape.** There must be a
+        committed effect at that key, *and* the policy in force must declare
+        `ctrlrun.policy.change` with `decision: approve`. Without the second an administrator
+        writes a policy whose change rule is `allow`; installing it still needs an approval
+        under the old policy, and the moment it is installed the deployment stops deciding
+        anything, with the refusal naming the key.
+        """
+        if not self._require_approved_policy:
+            return
+        if self._observing:
+            # SPEC-v0.3 §6.2, and §11.1's own reason table, which lists `policy_unapproved` as
+            # a `would_have.blocked_reason` value this code could never produce. Observe mode
+            # **records** what enforce mode would have refused and does not refuse; raising
+            # here made an observe-mode deployment stop, which is the one thing observe mode
+            # exists not to do. The caller records it: `_observe_secure` reads what this
+            # returns rather than catching an exception, because an exception out of here
+            # would have to be caught in four places.
+            return
+        # **SPEC-v0.8 §8.2.1, and an independent review found this exemption too wide.** The
+        # policy change is exempt from the *effect* check, because the proposal is how a policy
+        # becomes approved and gating it on an approved policy is a bootstrap that cannot
+        # complete. It is **not** exempt from the declaration check: an earlier build returned
+        # here before that ran, so a policy whose change rule was `allow` proposed a *different*
+        # policy with no approval at all, committed the marker, and the successor then decided
+        # normally -- approved by nobody. §8.6's property was false in exactly the case §8.2.1
+        # exists to close.
+        #
+        # Exactly one action, matched by name and never by prefix: `ctrlrun.policy.changes` is
+        # a different action and is refused with everything else (T360).
+        exempt_from_marker = action.name == POLICY_CHANGE_ACTION
+        if self._policy_approved and not exempt_from_marker:
+            return
+        reason, detail = self._policy_approval_state(skip_marker=exempt_from_marker)
+        if reason is None:
+            if not exempt_from_marker:
+                # Never cached from the exempt path: that answer did not read the marker, and
+                # caching it would mark the deployment approved because a proposal ran.
+                self._policy_approved = True
+            return
+        _LOG.warning("%s: %s", action.name, detail)
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason}, effect_key)
+        self._record(
+            action,
+            evaluation if evaluation is not None else Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            started_at,
+            error=detail,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(detail, reason=reason, action_id=action.action_id)
+
+    def _policy_approval_state(self, *, skip_marker: bool = False) -> tuple[str | None, str]:
+        """`(None, "")` where this policy is approved, else the reason and what to say.
+
+        `skip_marker` is the policy change's own exemption and covers **only** the committed
+        effect: the declaration rule applies to it like everything else (§8.2.1).
+        """
+        entry = self._policy.actions.get(POLICY_CHANGE_ACTION)
+        if entry is None or POLICY_CHANGE_ACTION not in self._policy.approving_actions():
+            return (
+                POLICY_UNAPPROVED,
+                f"this deployment requires an approved policy, and the policy in force does "
+                f"not declare {POLICY_CHANGE_ACTION!r} with 'decision: approve'. A policy that "
+                "cannot send its own change to a human decides nothing (SPEC-v0.8 §8.2.1)",
+            )
+        if skip_marker:
+            return (None, "")
+        record = self._store.get_effect(f"policy:{self._policy_hash}")
+        if record is None or record.state is not EffectState.COMMITTED:
+            return (
+                POLICY_UNAPPROVED,
+                f"this deployment requires an approved policy and nobody approved "
+                f"{self._policy_hash}. Propose it with 'ctrlrun policy propose --file "
+                "<this policy>' and have it approved (SPEC-v0.8 §8.4)",
+            )
+        return (None, "")
+
+    def _authority_result(
+        self, action: Action, *, task: str | None = None, evaluate_task: bool = True
+    ) -> AuthorityResult | None:
+        """The authority axis for this action, or `None` where there is no section (§4.1).
+
+        SPEC-v0.8 §5.4: it also remembers which grant decided, for the receipt. Here rather
+        than at the four call sites, because a site that forgot would produce a receipt whose
+        `authority_grant_id` was the **previous** action's, and a stale id on the evidence is
+        worse than none. Set on every call, including to `None`, for the same reason.
+
+        **SPEC-v0.9 §6.3.2: `evaluate_task=False` on two of the four call sites.** `resume` and
+        a lease extension both rehydrate an action from the store, which carries no task (§6.3.1
+        keeps it off `Action`), so evaluating the dimension there would deny every resumed leg
+        under a task-bound grant, on what the comment above `resume`'s own call calls the only
+        receipt an MCP multi round-trip ever gets. It is not `v0.3 §5.6.1`'s evaluated-and-
+        recorded, which would still put `AUTHORITY_DENIED` on that receipt; it is a third mode,
+        and §6.3.2 names it as one.
+        """
+        _TASK.set(task)
         if self._authority is None:
+            _AUTHORITY_GRANT_ID.set(None)
+            _AUTHORITY_RESULT.set(None)
             return None
-        return self._authority.evaluate(action, now=self._clock(), store=self._store)
+        result = self._authority.evaluate(
+            action,
+            now=self._clock(),
+            store=self._store,
+            task=task,
+            evaluate_task=evaluate_task,
+        )
+        # Only where one passed: `grant_id` is also set on a refusal, and a committed receipt
+        # is the only thing this field is read on. §4.6's `min` already picked which grant of
+        # several decided, so this is that decision and not a guess about it.
+        _AUTHORITY_GRANT_ID.set(result.grant_id if result.passed else None)
+        _AUTHORITY_RESULT.set(result if result.passed else None)
+        return result
 
     def _authority_data(self, result: AuthorityResult) -> dict[str, Any]:
         """SPEC-v0.3 §7 — the ids travel here, and never in `decision_reason`.
@@ -763,6 +1134,8 @@ class Control:
         reconcile: Callable[[str], ReconcileOutcome] | None = None,
         reconcile_eagerly: bool = False,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+        task: str | None = None,
+        scope: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
         """Decide, run and record one action. Returns the receipt for its terminal state.
 
@@ -778,6 +1151,22 @@ class Control:
         `reconcile` asks the remote what happened to an effect whose outcome is unknown, and
         is the only authority besides a human that may move a record out of `AMBIGUOUS`
         (SPEC-v0.2 §2.2). It runs at most once per call.
+
+        `task` is the unit of work this call is part of (SPEC-v0.9 §6). It is the **resolved**
+        task id, like `effect_key` beside it and unlike `@protect`'s `task=`, which is a template.
+        A grant naming `tasks` refuses a call that names none (§6.4); a grant naming none accepts
+        any (§6.5), which is why every 0.8.0 caller is unchanged. It reaches the authority
+        decision and **never the action hash**: §6.3.1 argues that at length, and the short form
+        is that a field on `Action` would move every action hash in existence.
+
+        `scope` answers whether this action's resource is in the calling principal's assigned
+        scope (SPEC-v0.9 §5). It is called with the `Action` and returns a mapping carrying a
+        `resources` list; **the kernel matches**, with the relation a grant's `resources:` uses.
+        It runs **strictly before the reservation** and before the precondition recheck, so a
+        provider that hangs can only fail closed. A provider that raises, answers with the wrong
+        shape, or answers something the canonicalizer refuses denies the action
+        `scope_unavailable`; a resource the scope does not cover denies it `out_of_scope`. Only
+        the hash of what it returned reaches the receipt, never the scope itself.
 
         `preconditions` reads the state an approval depends on (SPEC-v0.7 §6). It is called
         with the `Action` and returns a mapping, which is hashed through `canonical_bytes` and
@@ -797,12 +1186,62 @@ class Control:
         self._report_clock_skew()
         if effect_key is not None and not effect_key:
             raise InvalidArgument("effect_key must be a non-empty string or None")
+        if (
+            effect_key is not None
+            and effect_key.startswith(_POLICY_EFFECT_PREFIX)
+            and not _POLICY_CHANGE_IN_FLIGHT.get()
+        ):
+            # **SPEC-v0.8 §8.2.1, on the RESOLVED key, which is where the guard belongs.**
+            # The loader refuses a template that literally begins `policy:`, and an
+            # independent review showed that closes almost nothing: the key that reaches
+            # `commit_effect` is expanded from arguments an agent supplies, so
+            # `effect: "{scheme}:{ref}"` with `scheme="policy"` mints the marker of an
+            # approved policy from an ordinary action, `"{p}olicy:{ref}"` evades the
+            # literal check outright, and `execute(action, executor, "policy:<hash>")`
+            # needs no template at all because `effect_key` is a public parameter.
+            #
+            # One rule on the resolved key closes all three. The loader check stays as a
+            # convenience that names the mistake at load time; **this** is the guard.
+            raise InvalidArgument(
+                f"an effect key beginning {_POLICY_EFFECT_PREFIX!r} is reserved: it is "
+                "what records that a policy hash was approved, so an action able to "
+                "commit one could approve a policy nobody reviewed (SPEC-v0.8 §8.2.1). "
+                f"This call asked for {effect_key!r}"
+            )
         provider = _checked_preconditions(preconditions, "execute(preconditions=...)")
+        scoper = _checked_scope(scope, "execute(scope=...)")
+        scoped: list[str | None] = []
         self._check_environment(action)
         held = self._lease if lease is None else _checked_lease(lease, "execute(lease=...)")
         reconciler = _reconciler(reconcile, reconcile_eagerly, "execute")
 
         started_at = self._clock()
+        if action.name == POLICY_CHANGE_ACTION and not _POLICY_CHANGE_IN_FLIGHT.get():
+            # SPEC-v0.8 §8.2.1. The reserved name is the flow's, and an ordinary caller
+            # reaching it would be proposing a policy change without one. Refused before
+            # anything is evaluated or recorded, because there is nothing here to decide: the
+            # action is well-formed and simply is not this caller's to build.
+            raise InvalidArgument(
+                f"{POLICY_CHANGE_ACTION!r} is reserved for the policy-change flow "
+                "(SPEC-v0.8 §8.2.1). Propose a policy with 'ctrlrun policy propose --file "
+                "<new.yaml>', which builds this action and marks it as the flow's own"
+            )
+        # SPEC-v0.8 §5.4. **Cleared at the top of the call, not only set at the authority
+        # gate.** §4.3.1 puts `principal_expired` first, so `execute` records a denied receipt
+        # *before* `_authority_result` runs; with only the gate setting this, that receipt
+        # carried the **previous** action's grant id. An independent review demonstrated it: a
+        # committed action under a break-glass grant, then a refusal for a lapsed credential,
+        # and the refusal's receipt named the grant that never decided it. Async tasks inherit
+        # a copy of the context at creation, so a task started after a break-glass action
+        # carried that id into an unrelated refusal too.
+        _AUTHORITY_GRANT_ID.set(None)
+        _AUTHORITY_RESULT.set(None)
+        # SPEC-v0.9 §6.3.1 — reset beside it, for the reason the comment above gives about a
+        # stale grant id: a refusal whose receipt carried the previous action's task would be the
+        # same defect on a new field.
+        _TASK.set(None)
+        _SCOPE_HASH.set(None)
+        _BUDGET_CHARGES.set(())
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
         # Every branch below reads it to choose between refusing and recording.
         observation = _Observation() if self._observing else None
@@ -832,6 +1271,8 @@ class Control:
                     reconciler,
                     held,
                     provider,
+                    scoper,
+                    scoped,
                 )
             self._append(EventType.ACTION_DENIED, action, {"reason": PRINCIPAL_EXPIRED}, effect_key)
             self._record(
@@ -845,9 +1286,16 @@ class Control:
                 f"{action.name}: the principal's credential expired at "
                 f"{action.principal.expires_at}"
             )
+        # SPEC-v0.8 §8.4: **a policy nobody approved decides nothing**, and that is checked
+        # before anything else is decided, because what follows would be decided *by* it. The
+        # policy-change action itself is exempt by name: the proposal is how a policy becomes
+        # approved, so gating it on an approved policy is the bootstrap that cannot complete.
+        self._require_approved(
+            action, evaluation=None, started_at=started_at, effect_key=effect_key
+        )
         # SPEC-v0.3 §4.3.1 — the order, stated once so it can be tested: principal_expired →
         # authority → policy → approval → reservation → execution.
-        result = self._authority_result(action)
+        result = self._authority_result(action, task=task)
         if result is not None:
             if not result.passed:
                 if observation is not None:
@@ -873,6 +1321,8 @@ class Control:
                         reconciler,
                         held,
                         provider,
+                        scoper,
+                        scoped,
                     )
                 self._refuse_authority(action, result, started_at, effect_key)
             self._append(
@@ -909,6 +1359,8 @@ class Control:
                     reconciler,
                     held,
                     provider,
+                    scoper,
+                    scoped,
                 )
             # SPEC-v0.6 §7.2.1's third bullet: *"the refusal is recorded against the approval
             # so the history shows a grant that met a denial."* It was not. An independent
@@ -982,10 +1434,21 @@ class Control:
                 reconciler,
                 held,
                 provider,
+                scoper,
+                scoped,
             )
         compared = _Compared()
         approval, reservation = self._secure(
-            action, evaluation, started_at, effect_key, held, reconciler, provider, compared
+            action,
+            evaluation,
+            started_at,
+            effect_key,
+            held,
+            reconciler,
+            provider,
+            compared,
+            scoper,
+            scoped,
         )
         attempt = 1 if reservation is None else reservation.attempt
         # SPEC-v0.7 §5.5 — the check, on the attempt number the store **assigned**, after the
@@ -1048,6 +1511,8 @@ class Control:
         reconciler: _Reconciler,
         lease: timedelta,
         preconditions: _Preconditions | None = None,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> Receipt:
         """Run an action observe mode has finished deciding about (SPEC-v0.3 §6.2).
 
@@ -1059,7 +1524,15 @@ class Control:
         """
         compared = _Compared()
         approval, reservation = self._observe_secure(
-            action, evaluation, effect_key, lease, observation, preconditions, compared
+            action,
+            evaluation,
+            effect_key,
+            lease,
+            observation,
+            preconditions,
+            compared,
+            scope,
+            scoped,
         )
         held_key = None if reservation is None else effect_key
         attempt = 1 if reservation is None else reservation.attempt
@@ -1109,6 +1582,8 @@ class Control:
         observation: _Observation,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Attempt what `_secure` takes, record every refusal, and hold nothing it lost.
 
@@ -1127,11 +1602,49 @@ class Control:
           there is nothing being unblocked — and the hook's `"committed"` answer would move a
           record a human may still be adjudicating.
         """
+        # SPEC-v0.8 §8.4 in observe mode: **recorded, not refused.** `_require_approved` stands
+        # aside while observing, and this is where an operator piloting the requirement learns
+        # that enforce mode would deny every action under a policy nobody approved -- which is
+        # the single thing they are running observe mode to find out.
+        if self._require_approved_policy and action.name != POLICY_CHANGE_ACTION:
+            reason, _ = self._policy_approval_state()
+            if reason is not None:
+                observation.block(reason)
+        # SPEC-v0.9 §5.2.2's observe row. The provider **runs**, so its hash reaches the receipt
+        # and an operator sizing a scope before turning it on sees what would have happened; the
+        # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
+        # enforces, and a check that enforced here would refuse during the phase whose entire
+        # purpose is to refuse nothing.
+        # SPEC-v0.9 §4.2.1 — **above the scope check, because `_secure` computes charges before
+        # calling `_in_scope`.** An action that is both out of scope and unmeasurable was refused
+        # `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. T458.
+        charges = self._observe_charges(action, effect_key, observation)
+        try:
+            self._in_scope(action, scope, scoped, enforcing=False)
+        except _ObservedRefusalError as would:
+            observation.block(would.reason)
+        # The charges above were computed before the scope check, where `_secure` computes them:
+        # §2.3's and §2.4.1's refusals do not depend on anything the approval gate produces and
+        # are unconditional, so T446 moved them above it in enforce mode; observe mode's copy
+        # stayed below and told a pilot a human would have been asked about an action enforce
+        # refuses before anybody is asked. That is T446's own defect on the other side of the
+        # mode switch, and an independent review found it. T451.
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
             if approval_id is None:
-                observation.block(BLOCKED_APPROVAL_REQUIRED)
+                # SPEC-v0.8 §4.2, §11.1. **The threshold refusal reaches observe mode too**,
+                # and it reached it nowhere: `_refuse_unverifiable` lives in `_presented`,
+                # which observe mode never calls, so a deployment piloting a two-approver
+                # policy with no approver identity was told `approval_required` -- that a human
+                # would have been asked. Enforce mode denies every one of those actions before
+                # anybody is asked, and reporting which is the one thing observe mode is for.
+                required = self._policy.approvals_required(action.name)
+                observation.block(
+                    APPROVALS_UNVERIFIABLE
+                    if required > 1 and self._approver_identity is None
+                    else BLOCKED_APPROVAL_REQUIRED
+                )
         if approval_id is None and effect_key is None:
             return None, None
         try:
@@ -1155,7 +1668,15 @@ class Control:
             # A *presented* approval that does not authorize this action. §6.2 lists
             # `ApprovalMismatch` among the exceptions observe mode does not raise, so it is
             # recorded and the action runs; the approval is left unconsumed either way.
-            observation.block(BLOCKED_APPROVAL_MISMATCH)
+            #
+            # **The reason and not the constant, which is a behaviour change SPEC-v0.8 §4.1
+            # argues for rather than a side effect of item 2.** This recorded
+            # `approval_mismatch` for every mismatch, so an operator reading an observe-mode
+            # report could not tell a moved precondition from an approver who may not answer.
+            # Recording the specific reason for the approver refusals alone would leave a
+            # vocabulary nobody can explain, so every mismatch now records its own reason. The
+            # values are the ones `_secure` raises, and §11.1's table lists them.
+            observation.block(mismatch.reason)
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
@@ -1188,6 +1709,16 @@ class Control:
                 effect_key,
                 approval=approval,
             )
+        # SPEC-v0.9 §4.2.1 — **below the take, because the store decides in that order.**
+        # `plan_reservation` runs before `check_charges` (§3.3), so an effect that is already
+        # committed raises `DuplicateEffect` and the budget is never consulted. Reporting the
+        # budget first told an operator to raise a limit when the real answer was that the effect
+        # had already happened. T452.
+        #
+        # Not every earlier refusal returns before this: the scope block and the approval gate
+        # record and carry on. `_observe_spend` skips itself once anything has blocked, which is
+        # what keeps the report to the one refusal enforce mode would have raised.
+        self._observe_spend(action, charges, observation, effect_key)
         return approval, reservation
 
     def _observe_take(
@@ -1198,6 +1729,8 @@ class Control:
         lease: timedelta,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Observe mode's `_take`: **check the grant, never spend it** (SPEC-v0.6 §7.2.3).
 
@@ -1222,12 +1755,18 @@ class Control:
         grant is spent.
         """
         if approval_id is not None:
+            found = self._store.get_approval(approval_id)
             verdict = check_consumable(
-                self._store.get_approval(approval_id),
+                found,
                 approval_id,
                 action.action_hash,
                 self._clock(),
             )
+            # SPEC-v0.8 §4.1: observe mode records what enforce mode would have done, and
+            # enforce mode refuses a self-approval. This path never calls `_recheck`, so the
+            # check is made here too or the row §4.1 describes does not exist. Before the
+            # verdict's own refusal, on the same order `_recheck` uses.
+            self._check_approver(action, approval_id, found, compared, verdict)
             if verdict.refusal is not None:
                 raise verdict.refusal
             # `as_approval()` and not a hand-built `Approval`: one construction, so observe
@@ -1277,6 +1816,23 @@ class Control:
         held = self._store.take_continuation(continuation)
         action = held.action
         started_at, approval, compared = self._resumed_context(action, held.record.created_at)
+        # SPEC-v0.9 §10.1, read from the **ledger** rather than from the contextvar. §8.3 makes
+        # this the only receipt an MCP multi round-trip or ACS action ever gets, so it has to
+        # report what the action spent, and the two ways to get that wrong are both live: a
+        # gateway that restarted mid-round has an empty contextvar and would report no charges
+        # for an action that spent, and a gateway that ran another action in this context since
+        # the suspension would report *that* action's spend. The ledger is the record; the first
+        # leg wrote it inside the reservation's own transaction. T447, T448.
+        # **Unconditional, because this call is also the reset.** `execute` clears
+        # `_BUDGET_CHARGES` at its own top (§6.3.1's reason: a refusal carrying the previous
+        # action's numbers); `resume` has no such line, so skipping this in observe mode left the
+        # contextvar holding whatever the last action in this context had put there. An
+        # independent review demonstrated the consequence: a resumed `observed` receipt for an
+        # action whose own metric could not be measured reported a charge of 700 belonging to a
+        # different effect. That is T448's defect on the observe path, on the one receipt §8.3
+        # makes the whole evidence for an MCP multi round-trip. In observe mode the ledger is
+        # empty by design, so this sets `()` and §4.2.1a's counterfactual is computed below.
+        self._resumed_charges(held.effect_key, held.record.attempt)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -1296,7 +1852,7 @@ class Control:
         # SPEC-v0.3 §5.6.1 gives authority the same treatment, and for a sharper reason: this
         # is the *only* receipt an MCP multi round-trip or ACS action ever gets (§8.3), so a
         # receipt reporting a bare policy reason would be the whole evidence for that action.
-        result = self._authority_result(action)
+        result = self._authority_result(action, evaluate_task=False)
         if result is None:
             evaluation = self._policy.evaluate(action)
         elif result.passed:
@@ -1309,6 +1865,21 @@ class Control:
                 EventType.AUTHORITY_DENIED, action, self._authority_data(result), held.effect_key
             )
             evaluation = Evaluation(Decision.DENY, result.reason)
+        if self._observing:
+            # SPEC-v0.9 §4.2.1a — **the counterfactual, recomputed.** Observe mode charges
+            # nothing, so the ledger read above has nothing to find, and §8.3 makes this the only
+            # receipt an MCP multi round-trip or ACS action ever gets. Without this, §4.2.1a's
+            # sizing sum silently under-counts exactly the deployments §8.3 is about, which is an
+            # independent review's finding and a contradiction between two sections of the spec.
+            #
+            # Enforce mode keeps the ledger read: there the row is evidence of a spend that
+            # happened, and a recomputed number would be a claim about it instead.
+            #
+            # Computed below, once the **real** observation exists. It used to be handed a
+            # throwaway `_Observation()`, which swallowed the block: the resumed receipt then
+            # said `decision=ALLOW, blocked_reason=None` for an action enforce mode refuses,
+            # while the two `ACTION_DENIED` events beside it said otherwise.
+            pass
         # SPEC-v0.3 §6.3 — a resumption in observe mode gets the same `observed` receipt its
         # first leg did. It is the *only* receipt an MCP multi round-trip ever gets (§8.3), so
         # a resumed leg reporting `committed` under a mode that enforces nothing would put the
@@ -1320,6 +1891,9 @@ class Control:
             observation.decided(evaluation)
             if evaluation.decision is Decision.DENY:
                 observation.block(evaluation.reason)
+            # §4.2.1a's counterfactual, on the real observation and announcing nothing: the
+            # first leg already wrote this action's `ACTION_DENIED`.
+            self._observe_charges(action, held.effect_key, observation, announce=False)
         # SPEC-v0.7 §6.8: **no recheck on a resumed leg**, for `v0.6 §7.2.3`'s reason. The
         # approval was consumed on the first leg, after that leg's recheck, and refusing here
         # would strand a reservation the remote may already be acting on. The receipt says so:
@@ -1375,6 +1949,12 @@ class Control:
             # An approval consumed before this event carried the comparison, or by a path that
             # compared nothing: the record still says what it was requested with.
             compared.at_request = record.request.precondition_fingerprint
+        if record is not None:
+            # SPEC-v0.8 §2.5: who answered, recovered from the row for the same reason. **The
+            # resumed leg's receipt is the only receipt an MCP multi round-trip or an ACS action
+            # ever gets** (`SPEC-mcp-operator.md` §8.3), so without this the approvers reach the
+            # evidence on every action except the ones that get exactly one receipt.
+            compared.approvers = record.approvers
         return started, approval, compared
 
     def _outcome(
@@ -1635,7 +2215,7 @@ class Control:
                 f"{action.principal.expires_at}, so the reservation is not held across the "
                 "round trip; the lease will lapse and the record becomes AMBIGUOUS"
             )
-        result = self._authority_result(action)
+        result = self._authority_result(action, evaluate_task=False)
         if result is not None and not result.passed:
             # SPEC-v0.3 §5.6.1 — an extension asks to keep holding a reservation the grant no
             # longer authorizes. Refused, and the record is deliberately not moved: the lease
@@ -1690,6 +2270,20 @@ class Control:
         would have said about it — and unlike a call outside `context()` (§2.1) there is a
         principal here, so the refusal belongs in the evidence log.
         """
+        return self._resolve_template(action, template, "effect")
+
+    def _resolve_template(self, action: Action, template: str | None, what: str) -> str | None:
+        """`_resolve_effect`'s body, over either template `@protect` resolves.
+
+        **SPEC-v0.9 §6.3.1's task template goes through here, and an independent review is why.**
+        `@protect(task="{run_id}")` with no such argument raised `EffectKeyError` past every
+        recording path: no `ACTION_PROPOSED`, no `ACTION_DENIED`, no denied receipt, and a caller
+        handed a template error about an action nothing recorded. That is the shape
+        `control.py`'s own round-two comment records finding once before, on a store refusal.
+
+        One function rather than two, so the effect template and the task template cannot drift
+        into recording different things for the same class of mistake.
+        """
         if template is None:
             return None
         started_at = self._clock()
@@ -1700,7 +2294,7 @@ class Control:
             self._append(
                 EventType.ACTION_DENIED,
                 action,
-                {"reason": UNRESOLVED_EFFECT, "effect": template, "error": str(exc)},
+                {"reason": UNRESOLVED_EFFECT, what: template, "error": str(exc)},
             )
             # SPEC: §6.1 — a receipt needs a decision and the policy never rendered one, so
             # the fail-closed value is recorded: denied, for a reason that is not a rule.
@@ -1725,6 +2319,8 @@ class Control:
         reconciler: _Reconciler,
         preconditions: _Preconditions | None,
         compared: _Compared,
+        scope: _Preconditions | None = None,
+        scoped: list[str | None] | None = None,
     ) -> tuple[Approval | None, Reservation | None]:
         """Take everything this action needs before it may run: the grant, and the key.
 
@@ -1738,6 +2334,20 @@ class Control:
         may take twice, once more after a `reconcile` hook moves an `AMBIGUOUS` record, and the
         hook is a network call whose duration would otherwise sit inside the window.
         """
+        # SPEC-v0.9 §2.7 — every ancestor charged, assembled once and passed to both passes so a
+        # reconcile between them cannot change what this action spends.
+        #
+        # **Before the keyless early return below**, because §2.4.1's refusal is exactly about an
+        # action that reaches it: a budgeted grant whose action resolved no effect key spends
+        # nothing against every budget on the chain, for ever, and returning early would be the
+        # kernel declining to notice.
+        #
+        # **And before the approval gate**, because §2.3's and §2.4.1's refusals depend on nothing
+        # the gate produces and are unconditional: the action cannot run whatever a human says.
+        # Assembling after the gate asks a human to approve a refund the kernel has already
+        # decided to refuse, and leaves a granted approval behind for an action nothing can
+        # execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape. T446.
+        charges = self._charges_for(action, effect_key)
         approval_id = (
             self._presented(action, effect_key, evaluation, started_at, preconditions)
             if evaluation.decision is Decision.APPROVE
@@ -1761,14 +2371,51 @@ class Control:
         # and whatever the second attempt meets is final.
         for reconciled in (False, True):
             try:
+                # SPEC-v0.9 §5.3, §5.7 — **before the recheck and before every `_take`**. It is
+                # in the loop and not above it because the `reconcile` hook between the two
+                # passes is a network call, and a scope fetched before it would be compared
+                # against a world that moved while it ran. §5.8 states what this costs the
+                # precondition's own window, which is that it now contains this call.
+                self._in_scope(action, scope, scoped)
                 if approval_id is not None:
                     # **Immediately before `_take`, and nothing between them.** The window this
                     # narrows is the time from the provider's fetch to the store call; anything
                     # inserted here widens it, and a later item adding a check on this path
                     # (the attempt ceiling, §5.5) belongs before this line or after `_take`.
                     self._recheck(action, approval_id, preconditions, compared)
-                approval, reservation = self._take(action, approval_id, effect_key, lease)
+                approval, reservation = self._take(action, approval_id, effect_key, lease, charges)
+                # SPEC-v0.9 §10.1 — **after the store call took**, and an independent review is
+                # why. Set where the charges were computed, a refusal raised later in this loop
+                # still reached `_record` with them stamped, so a `denied` receipt claimed the
+                # action charged the very grant it was refused from spending against. A receipt
+                # asserting a spend that never happened is the one thing an evidence trail may
+                # not do.
+                _BUDGET_CHARGES.set(
+                    tuple(
+                        {
+                            "grant_id": charge.grant_id,
+                            "metric": charge.metric,
+                            "amount": charge.amount,
+                        }
+                        for charge in charges
+                    )
+                )
                 break
+            except BudgetExhaustedError as exhausted:
+                # SPEC-v0.9 §3.3.2 — **its own clause, before the `ActionDenied` one**, for the
+                # reason item 2 met first with the scope refusal: that handler appends
+                # `APPROVAL_DENIED` unconditionally, which would fabricate an approval denial for
+                # an action no human ever saw. An exception raised inside an `except` clause
+                # leaves the whole `try` rather than meeting its siblings.
+                raise self._refuse_budget(action, exhausted) from None
+            except _ScopeRefusedError as refused:
+                # SPEC-v0.9 §5.6. Its own clause, **before** the `ActionDenied` one:
+                # `_refuse_scope` has already written the events and the receipt, and an
+                # exception raised inside an `except` clause leaves the whole `try` rather than
+                # meeting its siblings. Routed through `except ActionDenied` instead, this would
+                # append `APPROVAL_DENIED` for an action no human saw and a second
+                # `ACTION_DENIED` (§3.3.2's hazard, the same handler).
+                raise refused.denial from None
             except AmbiguousEffect as refused:
                 # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
                 # when an expired lease is declared AMBIGUOUS, and the report belongs beside this
@@ -2236,6 +2883,14 @@ class Control:
         action is suspended awaiting a human, which is not a terminal state (§6.1). The
         `APPROVAL_REQUESTED` event is the evidence.
         """
+        # SPEC-v0.8 §4.2: a threshold above one in a deployment that verifies nobody has no
+        # referent for "distinct principals": the count could never move, or distinctness would
+        # fall back to the string §4.1 forbids. Denied here, before a human is asked, because
+        # asking somebody to answer a request that can never be completed spends their attention
+        # on nothing (`v0.3 §4.3`'s argument for refusing before the approval gate).
+        required = self._policy.approvals_required(action.name)
+        if required > 1 and self._approver_identity is None:
+            self._refuse_unverifiable(action, evaluation, started_at, effect_key, required)
         presented = _PRESENTED_APPROVAL.get(None)
         if presented is not None:
             return presented
@@ -2250,8 +2905,24 @@ class Control:
         # `Control` is the only object holding both a policy and a provider, and the provider
         # protocol takes neither, so it travels the way a presented approval does. The
         # fingerprint travels beside it, by the same route and for the same reason.
+        # SPEC-v0.8 §3.3: which controls the evaluation that sent this action to approval cited,
+        # and what role each demands. Built here rather than on `Policy`, because `Control` is
+        # the only object that holds both the evaluation and the registry, and §11.1 freezes no
+        # accessor for it.
+        roles = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in evaluation.controls
+            )
+            if control is not None and control.approver_role
+        )
         try:
-            with policy_in_force(self._policy_hash), _precondition_at_request(fingerprint):
+            with (
+                policy_in_force(self._policy_hash),
+                _precondition_at_request(fingerprint),
+                _required_roles(roles, self._policy.approvals_required(action.name)),
+            ):
                 request = self._approvals.request(action, self._approval_ttl)
         except Exception:
             if fingerprint is not None:
@@ -2277,7 +2948,16 @@ class Control:
             effect_key,
             approval_id=request.request_id,
         )
-        if fingerprint is not None and not self._recorded(request, fingerprint):
+        # **Asked whenever anything was pinned**, not only for a fingerprint. The earlier
+        # spelling was `if fingerprint is not None`, which meant a deployment with no
+        # preconditions at all -- the common one -- never read the row back, and so never saw a
+        # threshold or a role list that failed to reach it.
+        missing = (
+            self._unpinned(request, fingerprint, roles, required)
+            if fingerprint is not None or roles or required > 1
+            else None
+        )
+        if missing is not None:
             # SPEC-v0.7 §6.4: **never a skip**, and without this it was one. A provider that
             # builds its own `ApprovalRequest` (`build_request` is package-internal) and a store
             # that does not persist the column both leave an approval that was requested with a
@@ -2285,7 +2965,7 @@ class Control:
             # names no provider, is 0.6.1's path: consumed with nothing compared. The request
             # pass is where that is visible, so it is where it is refused.
             self._refuse_unrecorded_request(
-                action, evaluation, started_at, effect_key, request, fingerprint
+                action, evaluation, started_at, effect_key, request, fingerprint, missing
             )
         raise ApprovalRequired(
             f"{action.name} requires approval: run 'ctrlrun approve {request.request_id}', "
@@ -2293,6 +2973,37 @@ class Control:
             request_id=request.request_id,
             action_id=action.action_id,
         )
+
+    def _refuse_unverifiable(
+        self,
+        action: Action,
+        evaluation: Evaluation,
+        started_at: datetime,
+        effect_key: str | None,
+        required: int,
+    ) -> None:
+        """§4.2's refusal: `approvals_required` above one, and nobody to count (§12).
+
+        Not a load error: the policy is loadable and correct, and what is missing is the
+        `Control` it was deployed in, which the loader cannot see.
+        """
+        message = (
+            f"{action.name}: 'approvals_required: {required}' needs an approver identity, and "
+            "this deployment names none; distinct principals cannot be counted where nobody is "
+            "verified (SPEC-v0.8 §4.2)"
+        )
+        self._append(
+            EventType.ACTION_DENIED, action, {"reason": APPROVALS_UNVERIFIABLE}, effect_key
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, APPROVALS_UNVERIFIABLE, evaluation.controls),
+            ReceiptResult.DENIED,
+            started_at,
+            error=message,
+            effect_key=effect_key,
+        )
+        raise ActionDenied(message, reason=APPROVALS_UNVERIFIABLE, action_id=action.action_id)
 
     def _refuse_unfetched_request(
         self,
@@ -2335,8 +3046,14 @@ class Control:
         )
         raise ActionDenied(message, reason=_PRECONDITION_UNAVAILABLE, action_id=action.action_id)
 
-    def _recorded(self, request: ApprovalRequest, fingerprint: str) -> bool:
-        """Did the fingerprint reach the record a later presentation will read? (§6.4)
+    def _unpinned(
+        self,
+        request: ApprovalRequest,
+        fingerprint: str | None,
+        roles: tuple[RequiredRole, ...],
+        required: int,
+    ) -> str | None:
+        """What the kernel pinned and the stored row does not carry, or `None` (§6.4, §4.5).
 
         **The read-back, and only the read-back.** An earlier build also compared the returned
         `ApprovalRequest`, and the review found that guard subsumed: a presentation reads the
@@ -2347,9 +3064,37 @@ class Control:
         rather than defence (`CONTRIBUTING.md`, the first of the four shapes of a false green).
 
         One `get_approval`, on the request pass only.
+
+        **Three fields, not one, and the two new ones are v0.8's.** `v0.7 §6.4` wrote this for
+        the precondition fingerprint and named both ways of losing it: a provider that builds
+        its own `ApprovalRequest`, and a store that does not persist the column. Items 3 and 4
+        pin the required roles and the threshold by exactly the same route, and an independent
+        review found that both were lost in exactly the same two ways, with no refusal anywhere:
+        a row pinning `required_roles=()` satisfies `unsatisfied` trivially, and a row pinning
+        `approvals_required=1` grants on one yes. An action then executed under a policy
+        demanding two approvals from a named role, approved once by somebody holding no role.
+
+        So the read-back covers every field this method pins. A row missing any of them cannot
+        be compared against what was in force, and `v0.7 §6.4`'s rule is that such a request is
+        refused where it is visible rather than skipped.
         """
         record = self._store.get_approval(request.request_id)
-        return record is not None and record.request.precondition_fingerprint == fingerprint
+        if record is None:
+            return "the request was not recorded at all"
+        stored = record.request
+        if fingerprint is not None and stored.precondition_fingerprint != fingerprint:
+            return "the precondition fingerprint"
+        if stored.required_roles != roles:
+            return (
+                f"the roles the cited controls require ({[role.control for role in roles]}); "
+                f"the row carries {[role.control for role in stored.required_roles]}"
+            )
+        if stored.approvals_required != required:
+            return (
+                f"the threshold of {required} approvals; the row carries "
+                f"{stored.approvals_required}"
+            )
+        return None
 
     def _refuse_unrecorded_request(
         self,
@@ -2358,7 +3103,8 @@ class Control:
         started_at: datetime,
         effect_key: str | None,
         request: ApprovalRequest,
-        fingerprint: str,
+        fingerprint: str | None,
+        missing: str,
     ) -> NoReturn:
         """Refuse, and leave nothing behind that another path could spend (SPEC-v0.7 §6.4).
 
@@ -2375,16 +3121,23 @@ class Control:
         """
         withdrawn = self._withdraw(request)
         compared = _Compared()
-        compared.at_recheck = fingerprint
+        if fingerprint is not None:
+            compared.at_recheck = fingerprint
+        # The fingerprint keeps its own reason, because `precondition_missing` is in the
+        # vocabulary `v0.7` froze and every reader of an older receipt reads it that way. What
+        # items 3 and 4 pin gets its own, for the reason every refusal here does: a test that
+        # asserts a status cannot tell which guard ran.
+        reason = _PRECONDITION_MISSING if fingerprint is not None else APPROVAL_UNRECORDED
         outcome = (
             f"the request is withdrawn ({withdrawn})"
             if withdrawn in _WITHDRAWALS
             else f"the request could not be withdrawn ({withdrawn})"
         )
         _LOG.warning(
-            "%s: the precondition fingerprint was not recorded with approval request %s, so %s "
-            "and the action is refused (SPEC-v0.7 §6.4)",
+            "%s: %s was not recorded with approval request %s, so %s and the action is refused "
+            "(SPEC-v0.7 §6.4, SPEC-v0.8 §4.5)",
             action.name,
+            missing,
             request.request_id,
             outcome,
         )
@@ -2392,7 +3145,8 @@ class Control:
             EventType.APPROVAL_INVALIDATED,
             action,
             {
-                "reason": _PRECONDITION_MISSING,
+                "reason": reason,
+                "missing": missing,
                 "action_hash": action.action_hash,
                 "withdrawn": withdrawn,
                 **compared.data(),
@@ -2403,14 +3157,13 @@ class Control:
         self._append(
             EventType.ACTION_DENIED,
             action,
-            {"reason": _PRECONDITION_MISSING},
+            {"reason": reason},
             effect_key,
             approval_id=request.request_id,
         )
         message = (
-            f"{action.name}: the precondition fingerprint was not recorded with approval "
-            f"request {request.request_id}, so no presentation of it could compare anything; "
-            f"{outcome}"
+            f"{action.name}: {missing} was not recorded with approval request "
+            f"{request.request_id}, so no presentation of it could compare anything; {outcome}"
         )
         self._record(
             action,
@@ -2422,7 +3175,7 @@ class Control:
             effect_key=effect_key,
             compared=compared,
         )
-        raise ActionDenied(message, reason=_PRECONDITION_MISSING, action_id=action.action_id)
+        raise ActionDenied(message, reason=reason, action_id=action.action_id)
 
     def _withdraw(self, request: ApprovalRequest) -> str:
         """Make a request nobody may answer, with the methods a store already has (§6.4).
@@ -2489,6 +3242,351 @@ class Control:
             )
             return None
 
+    def _in_scope(
+        self,
+        action: Action,
+        scope: _Preconditions | None,
+        seen: list[str | None] | None,
+        *,
+        enforcing: bool = True,
+    ) -> None:
+        """SPEC-v0.9 §5: fetch the principal's scope and match this action's resource into it.
+
+        **Strictly before the reservation, before every `_take`** (§5.3), and before `_recheck`
+        (§5.7): `out_of_scope` says the principal never had the right to the record and
+        `precondition_changed` says the record moved, and an operator handed the second when the
+        first is true goes looking for a race that is not there.
+
+        The ordering is the safety argument and not a preference. After the reservation, a
+        provider that hangs leaves a lease to lapse and an `AMBIGUOUS` record nobody can resolve:
+        a *scope check* would have manufactured the state it exists to prevent (`v0.7 §6.2`).
+
+        Called twice where `_secure` takes twice, for `v0.7 §6.2`'s reason: the `reconcile` hook
+        between them is a network call whose duration would otherwise sit inside the window.
+        Idempotent from the caller's side, and `seen` keeps the hash the first call computed so
+        the receipt records one answer rather than the last.
+        """
+        if scope is None:
+            return
+        # SPEC-v0.9 §5.2.2's observe row: the provider **runs**, so its hash reaches the receipt
+        # and an operator sizing a scope before turning it on sees what would have happened, and
+        # it refuses nothing. `v0.3 §6.2` is the rule: observe mode records rather than enforces,
+        # and a check that enforced under observation would refuse during the phase whose whole
+        # purpose is to refuse nothing.
+        refuse = self._refuse_scope if enforcing else self._would_refuse_scope
+        try:
+            answered = scope(action)
+            if not isinstance(answered, Mapping):
+                raise TypeError(
+                    f"a scope provider returns a mapping, not {type(answered).__name__}"
+                )
+            digest = _scope_hash(answered)
+        except Exception as exc:
+            # **Every failure the provider can produce, not two of them** (§5.6): it raised, it
+            # answered with the wrong shape, or it answered something the canonicalizer refuses.
+            # All three are "the scope could not be read", which is fail-closed, and none of them
+            # is `out_of_scope`, which is a statement that it *was* read.
+            raise refuse(action, SCOPE_UNAVAILABLE, str(exc)) from exc
+        if seen is not None:
+            seen.append(digest)
+        _SCOPE_HASH.set(digest)
+        patterns = answered.get(_SCOPE_RESOURCES)
+        if not isinstance(patterns, (list, tuple)) or not all(
+            isinstance(one, str) for one in patterns
+        ):
+            raise refuse(
+                action,
+                SCOPE_UNAVAILABLE,
+                f"the scope carries no usable {_SCOPE_RESOURCES!r} list",
+            )
+        # §4.4's rule for a grant that declares `resources:`, applied here for the same reason:
+        # an action carrying no resource does not match a scope that names them, and treating it
+        # as in-scope would make the check optional for any caller who omitted the field.
+        if action.resource is None or not any(
+            matches(pattern, action.resource, separator=RESOURCE_SEPARATOR) for pattern in patterns
+        ):
+            raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
+
+    def _charges_for(
+        self,
+        action: Action,
+        effect_key: str | None,
+        observation: _Observation | None = None,
+        announce: bool = True,
+    ) -> tuple[Charge, ...]:
+        """What this action spends, one `Charge` per ancestor (SPEC-v0.9 §2.7).
+
+        **And §2.4.1's refusal, here, because this is where the effect key is finally known.**
+        A budgeted grant that reaches an action whose key resolved to `None` is refused: without
+        it an agent proposes actions carrying no `effect:` template and spends nothing against
+        every budget on the chain, for ever, which is the feature's own sharp case answered by
+        declining to play. §2.4.1 records the two probes that moved this out of the loader: a
+        loader cannot see a decorator-supplied `effect=`, and cannot run at all on the
+        standalone-authority path.
+        """
+        if self._authority is None:
+            return ()
+        result = _AUTHORITY_RESULT.get(None)
+        if result is None:
+            return ()
+        try:
+            charges = self._authority._charges_for(action, result, store=self._store)
+        except InvalidArgument as unmeasurable:
+            # §2.3. The kernel cannot measure what this action spends, so it cannot hold the
+            # grant to its budget, so it declines to run it. Recorded before it is re-raised.
+            raise self._refuse_unmeasurable(
+                action, BUDGET_UNMEASURABLE, unmeasurable, observation, announce
+            ) from None
+        if charges and effect_key is None:
+            raise self._refuse_unmeasurable(
+                action,
+                BUDGET_UNKEYED,
+                InvalidArgument(
+                    f"{action.name}: grant {charges[0].grant_id!r} carries a budget and this "
+                    "action resolved no effect key, so nothing could be charged against it. "
+                    "Declare an `effect:` template for the action, or take the budget off the "
+                    "grant (SPEC-v0.9 §2.4.1)"
+                ),
+                observation,
+                announce,
+            ) from None
+        return charges
+
+    def _observe_charges(
+        self,
+        action: Action,
+        effect_key: str | None,
+        observation: _Observation,
+        announce: bool = True,
+    ) -> tuple[Charge, ...]:
+        """§4.2.1's first half: what this action *would have* been charged, charging nothing.
+
+        §2.3's and §2.4.1's refusals are **reported** here rather than raised: enforce mode
+        refuses those actions, so saying so is exactly what observe mode is for. They get their
+        own reasons rather than `budget_exhausted`, because an operator whose pilot says "this
+        would have been refused" needs to know whether the budget is too small or the action
+        cannot be measured at all.
+
+        Called above the approval gate, where `_secure` computes the same thing, so the two modes
+        agree about which refusal comes first (T451).
+        """
+        # **Cleared first, on every path.** Returning early without touching it left the
+        # previous action's charges on this action's receipt, which is the defect above.
+        _BUDGET_CHARGES.set(())
+        try:
+            charges = self._charges_for(action, effect_key, observation, announce)
+        except InvalidArgument:
+            # Already reported by `_refuse_unmeasurable`, which blocked rather than denying.
+            return ()
+        if not charges:
+            return ()
+        # §4.2.1a — **the counterfactual spend, on the receipt.** The ledger is empty under
+        # observation, so if the receipt does not carry what this action would have been charged,
+        # nothing anywhere records it and a budget cannot be sized from an observed run. It
+        # asserts no spend: the receipt says `observed`, and `v0.3 §6.2` makes every number on an
+        # observed receipt a counterfactual. T439d.
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": charge.grant_id, "metric": charge.metric, "amount": charge.amount}
+                for charge in charges
+            )
+        )
+        return charges
+
+    def _observe_spend(
+        self,
+        action: Action,
+        charges: tuple[Charge, ...],
+        observation: _Observation,
+        effect_key: str | None = None,
+    ) -> None:
+        """§4.2.1's second half: whether the budget would have refused, writing nothing.
+
+        The predicate is `check_charges`, the same function all three stores decide with, so the
+        report and the enforcement cannot drift **on the arithmetic** (§4.2.1b states what is not
+        promised about *which* refusal is named): a pilot that said "this would have been fine"
+        about an action enforce mode refuses is worse than no pilot.
+
+        **The sum is a lock-free read** off the public `consumptions()` rather than a store's
+        private `_spent`, because this runs outside any reservation and must take no lock and
+        write nothing. It is therefore stale under concurrency, which is correct for a
+        counterfactual and would not be for a decision.
+
+        **Skipped once something else has blocked.** Enforce mode raises at the first refusal and
+        never reaches the budget; observe mode runs every check, so without this it wrote a
+        `budget_exhausted` event for an action enforce mode refuses out of scope, and an operator
+        reading the log saw a refusal that would never have happened. An earlier version of this
+        docstring claimed the clauses above had already returned by then, which was not true of
+        the scope block or the approval gate.
+
+        `check_charges` can also raise `InvalidArgument` for two charges on one grant and metric
+        carrying different amounts (§3.3.1). Nothing reachable produces that shape -- §2.7's
+        ancestors are distinct grants, and one grant's two budgets on one metric always agree --
+        and observe mode is not the place to raise about it if something ever does.
+        """
+        if not charges or observation.blocked_reason is not None:
+            return
+        now = self._clock()
+
+        def spent(charge: Charge) -> int:
+            return sum(
+                row.amount
+                for row in self._store.consumptions(
+                    grant_id=charge.grant_id,
+                    metric=charge.metric,
+                    since=now - charge.window,
+                )
+                if row.released_at is None
+            )
+
+        try:
+            check_charges(charges, spent)
+        except BudgetExhaustedError as exhausted:
+            observation.block(BUDGET_EXHAUSTED)
+            self._append(
+                EventType.ACTION_DENIED,
+                action,
+                {
+                    "reason": BUDGET_EXHAUSTED,
+                    "grant_id": exhausted.grant_id,
+                    "metric": exhausted.metric,
+                    "window": int(exhausted.window.total_seconds()),
+                    "observed": True,
+                },
+                # Splitting this method dropped the key, so the one event that names which
+                # effect the budget refused stopped naming it. Nothing noticed.
+                effect_key,
+            )
+        except InvalidArgument:
+            return
+
+    def _resumed_charges(self, effect_key: str | None, attempt: int) -> None:
+        """Stamp the resumed leg's receipt with what its **first** leg charged (§10.1, §8.3).
+
+        One row per grant and metric at this attempt, in the ledger's insertion order, which
+        §3.3.3 makes identical across the three backends. A released row still counts: it says
+        what this action spent, and `released_at` is a later fact about the same spend.
+        """
+        if effect_key is None:
+            _BUDGET_CHARGES.set(())
+            return
+        _BUDGET_CHARGES.set(
+            tuple(
+                {"grant_id": row.grant_id, "metric": row.metric, "amount": row.amount}
+                for row in self._store.consumptions(effect_key=effect_key)
+                if row.attempt == attempt
+            )
+        )
+
+    def _refuse_unmeasurable(
+        self,
+        action: Action,
+        reason: str,
+        error: InvalidArgument,
+        observation: _Observation | None = None,
+        announce: bool = True,
+    ) -> InvalidArgument:
+        """§2.3 and §2.4.1's refusals, with the events and the receipt they were missing.
+
+        Returns the error for the caller to `raise`, like `_refuse_scope`, so a reader can see
+        the control flow leaves at the call site. The message is the one the guard already wrote:
+        it names the grant, the metric and the offending value, and an operator reading the
+        receipt needs exactly that.
+        """
+        if observation is not None:
+            # `v0.3 §6.2`: observe mode records what enforce mode would have done and refuses
+            # nothing. Writing the `denied` receipt below would put a refusal it did not make in
+            # the store, alongside the `observed` receipt for the run that went ahead: two
+            # receipts for one action, disagreeing. T439c.
+            observation.block(reason)
+            if announce:
+                # **Not on a resumed leg**: its first leg already wrote this event for this
+                # action, and a second one made the evidence say the action was denied twice
+                # while the receipt beside it said `ALLOW`. An independent review found the two
+                # disagreeing, which is what `acs.py`'s clause forbids one boundary lower.
+                self._append(
+                    EventType.ACTION_DENIED,
+                    action,
+                    {"reason": reason, "error": str(error), "observed": True},
+                )
+            return _UnmeasurableError(str(error), reason=reason)
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": str(error)})
+        self._record(
+            action,
+            Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=str(error),
+        )
+        return _UnmeasurableError(str(error), reason=reason)
+
+    def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
+        """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.
+
+        A refusal that reported how much was left would be an oracle: refused actions cost
+        nothing, so an attacker binary-searches the exact limit in a few dozen refusals and then
+        knows precisely how much authority to use without tripping it. An operator debugging at
+        3am gets the number from `inspect`, which needs the store rather than the ability to be
+        refused.
+
+        The grant named is **the one that refused**, which under §2.7 may be an ancestor rather
+        than the grant that decided: an operator whose child grant is well within its own budget
+        needs to be told the parent is not.
+        """
+        error = (
+            f"budget {exhausted.metric!r} on grant {exhausted.grant_id!r} over "
+            f"{exhausted.window} is exhausted"
+        )
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {
+                "reason": BUDGET_EXHAUSTED,
+                "grant_id": exhausted.grant_id,
+                "metric": exhausted.metric,
+                "window": int(exhausted.window.total_seconds()),
+            },
+        )
+        self._record(
+            action,
+            Evaluation(Decision.DENY, BUDGET_EXHAUSTED),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=error,
+        )
+        return ActionDenied(f"{action.name} denied: {error}", reason=BUDGET_EXHAUSTED)
+
+    def _refuse_scope(self, action: Action, reason: str, error: str) -> _ScopeRefusedError:
+        """The refusal, with its events and its receipt. Returns it for the caller to raise.
+
+        Returned rather than raised so the call site reads `raise self._refuse_scope(...)` and a
+        reader can see the control flow leaves there: an exception raised inside a helper is a
+        `return` a linter cannot see.
+        """
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason, "error": error})
+        self._record(
+            action,
+            Evaluation(Decision.DENY, reason),
+            ReceiptResult.DENIED,
+            self._clock(),
+            error=error,
+        )
+        return _ScopeRefusedError(ActionDenied(f"{action.name} denied: {reason}", reason=reason))
+
+    def _would_refuse_scope(self, action: Action, reason: str, error: str) -> _ObservedRefusalError:
+        """Observe mode's counterpart: record what would have happened, and refuse nothing.
+
+        Returns a sentinel the caller raises, which `_observe_secure` catches. A `None` return
+        would make `_in_scope`'s `raise` a type error and a separate code path in `_in_scope`
+        would be the flag through it that `_observe_secure`'s own docstring argues against.
+        """
+        self._append(
+            EventType.ACTION_DENIED,
+            action,
+            {"reason": reason, "error": error, "observed": True},
+        )
+        return _ObservedRefusalError(reason)
+
     def _recheck(
         self,
         action: Action,
@@ -2526,14 +3624,122 @@ class Control:
         compared.reset()
         record = self._store.get_approval(approval_id)
         stored = None if record is None else record.request.precondition_fingerprint
+        compared.at_request = stored
+        # **One verdict, from one clock read**, reused by the approver gate below and by the
+        # precondition path's raise (SPEC-v0.8 §2.4.1). Two reads a tick apart could produce a
+        # gate that says "not lapsed" followed by a raise that says `expired`, which is the
+        # divergence `v0.7 §12.5` reversed.
+        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
+        # SPEC-v0.8 §2.4: **the early return is gone.** It returned here whenever no provider
+        # was named and the record carried no fingerprint, which is every deployment that does
+        # not use `v0.7 §6`, and an approver check added after it would have been dead on that
+        # path, green, and invisible to a mutation table.
+        self._check_approver(action, approval_id, record, compared, verdict)
         if preconditions is None and stored is None:
             return
-        compared.at_request = stored
-        verdict = check_consumable(record, approval_id, action.action_hash, self._clock())
         if verdict.refusal is not None:
             raise verdict.refusal
         assert record is not None  # a verdict with no refusal carries its record
         self._compare(action, record, preconditions, compared)
+
+    def _check_approver(
+        self,
+        action: Action,
+        approval_id: str,
+        record: ApprovalRecord | None,
+        compared: _Compared,
+        verdict: ApprovalVerdict,
+    ) -> None:
+        """Who answered, and whether they may have (SPEC-v0.8 §2.7, §4.1).
+
+        **Gated on a record that is `granted` and that this clock does not consider lapsed**
+        (§2.4.1). Everything else is left to the store, unchanged, and the reason is four rows
+        long: a denied approval carries no verified approver, so an ungated check would refuse
+        it `approver_unverified` and a human's no would stop appearing in the evidence as a no;
+        a consumed one is `G2`'s replayed approval and a moved hash is `G1`, both of which would
+        lose their reason; and a lapsed grant would lose `APPROVAL_EXPIRED` **and the store's
+        own lapse write**, because that write happens inside `_take` and a refusal raised here
+        never reaches it.
+
+        The gate is the `check_consumable` verdict `_recheck` computed, the pure function
+        `v0.1 §4.2` froze: no second implementation of a frozen rule, no second clock read, and
+        the store still decides expiry and may disagree.
+
+        **The lapsed row is checked and not skipped**, which is the difference between this and
+        the version an independent review broke twice: first by skipping it, which was fail-open
+        under clock skew, and then by deferring it past `_take`, which closed that and left a
+        consumed grant and a reservation nothing releases. The comment below carries the cost.
+        """
+        if record is not None:
+            # Recorded whatever this deployment checks, so a receipt says who answered even
+            # where no approver identity is configured and nothing was refused.
+            compared.approvers = record.approvers
+        if self._approver_identity is None:
+            return
+        if verdict.record is None and not verdict.expire:
+            # Denied, consumed, hash-moved, pending, unknown: the store's reason wins and this
+            # check stands aside, because an ungated refusal would report an approver problem
+            # for a human's no, for `G1`'s moved hash and for `G2`'s replayed approval.
+            return
+        # **`verdict.expire` is the lapsed row, and it is checked rather than skipped.** It means
+        # granted, hash matching, and past its expiry by *this* clock, which is the one case where
+        # `check_consumable` refuses a record the approver checks can still read. Skipping it was
+        # fail-open: the store keeps its own clock, so where this host ran ahead the checks stood
+        # aside and `consume_approval_and_reserve` then consumed the grant happily, and a
+        # self-approval committed under a twenty-minute skew.
+        #
+        # What it costs to check it here instead: a grant that is **both** lapsed and refused on
+        # approver grounds reports the approver reason rather than `expired`, so that row keeps no
+        # `APPROVAL_EXPIRED` event and no lapse write. The grant is unusable either way,
+        # `check_consumable` refuses it at every later presentation, and a lapsed grant whose
+        # approver is fine still reports `expired` with its event and the store's own write,
+        # because the check passes and `_take` decides. §2.4.1 carries the table.
+        assert record is not None
+        self._refuse_approver(
+            action, approval_id, record.approvers, compared, record.request.required_roles
+        )
+
+    def _refuse_approver(
+        self,
+        action: Action,
+        approval_id: str,
+        approvers: tuple[VerifiedApprover, ...],
+        compared: _Compared,
+        required: tuple[RequiredRole, ...] = (),
+    ) -> None:
+        """§2.7, §3.6 and §4.1's refusals, over whatever the row recorded."""
+        if not approvers:
+            raise ApprovalMismatch(
+                f"approval {approval_id} carries no verified approver, and this deployment "
+                "names an approver identity; the approval is left granted",
+                reason=APPROVER_UNVERIFIED,
+                approval_id=approval_id,
+            )
+        for approver in approvers:
+            # SPEC-v0.8 §3.6: **each** approver satisfies **every** required role. A control that
+            # says who may answer is not satisfied by a committee in which one member could, which
+            # is why this is inside the loop and `unsatisfied` is all-of rather than any-of.
+            missing = unsatisfied(required, approver.entitled)
+            if missing is not None:
+                compared.unentitled = missing
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by an approver who does not hold the "
+                    f"role {missing.role!r} required by control {missing.control!r}; the approval "
+                    "is left granted",
+                    reason=APPROVER_UNENTITLED,
+                    approval_id=approval_id,
+                )
+        requester = (action.principal.agent, action.principal.user)
+        for approver in approvers:
+            if approver.principal == requester:
+                # §4.1: on the resolved principal and never on the string, which is why two
+                # grants whose `approver` strings differ are still one principal here.
+                raise ApprovalMismatch(
+                    f"approval {approval_id} was granted by {approver.agent!r}, which is the "
+                    "principal that requested the action; the approval is left granted",
+                    reason=APPROVER_IS_REQUESTER,
+                    approval_id=approval_id,
+                )
 
     def _compare(
         self,
@@ -2596,22 +3802,39 @@ class Control:
         """`APPROVAL_INVALIDATED`'s data: the reason, and for a precondition refusal the two
         fingerprints it compared, hashes only, and the provider's failure by type (§6.2)."""
         data: dict[str, Any] = {"reason": mismatch.reason, "action_hash": action.action_hash}
+        # SPEC-v0.8 §3.7: an entitlement refusal names the control and the role on the event as
+        # well as in the message, because an operator reading the evidence should not have to
+        # parse a sentence to find out which written expectation was not met. By the carrier the
+        # precondition hashes already travel on, so no error type grows a keyword (§11.2).
+        if mismatch.reason == APPROVER_UNENTITLED and compared.unentitled is not None:
+            data["control"] = compared.unentitled.control
+            data["role"] = compared.unentitled.role
         if mismatch.reason in _PRECONDITION_REASONS:
             data.update(compared.data())
         return data
 
     def _take(
-        self, action: Action, approval_id: str | None, effect_key: str | None, lease: timedelta
+        self,
+        action: Action,
+        approval_id: str | None,
+        effect_key: str | None,
+        lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
-        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4)."""
+        """Consume the approval, reserve the effect, or both at once (SPEC-v0.1 §4.2 A4).
+
+        SPEC-v0.9 §3.3: the charges ride the reservation's own transaction, which is the whole of
+        why `StateStore` was amended. The branch with no effect key passes none, because there is
+        no reservation to ride and §2.4.1 has already refused a budgeted grant that reaches it.
+        """
         if approval_id is not None and effect_key is not None:
             return self._store.consume_approval_and_reserve(
-                approval_id, action.action_hash, effect_key, action.action_id, lease
+                approval_id, action.action_hash, effect_key, action.action_id, lease, charges
             )
         if approval_id is not None:
             return self._store.consume_approval(approval_id, action.action_hash), None
         if effect_key is not None:
-            return None, self._store.reserve_effect(effect_key, action.action_id, lease)
+            return None, self._store.reserve_effect(effect_key, action.action_id, lease, charges)
         return None, None
 
     def _approver_of(self, approval_id: str | None) -> str | None:
@@ -2639,6 +3862,289 @@ class Control:
         """
         return self._delegate(parent_id, grant, by=by, via="api")
 
+    def _propose_policy(
+        self,
+        candidate: Policy,
+        *,
+        authority: Authority | None = None,
+        approval_id: str | None = None,
+    ) -> Receipt:
+        """Propose a policy change as an ordinary action (SPEC-v0.8 §8.2, §8.3).
+
+        Ordinary action hash, ordinary effect key, ordinary events, ordinary receipt -- which
+        is why §8 adds no event type: `v0.1 §6.2`'s vocabulary already describes a proposal, an
+        approval request, a grant, a consumption and a commit, which is the whole life of a
+        policy change. So §2, §3 and §4 apply without a second path: an unverifiable approver
+        is refused, an unentitled one is refused, a proposer approving their own change is
+        refused, and M-of-N counts.
+
+        **`to` is computed the way the `Control` that will enforce it computes its own hash**,
+        with that authority and that environment substituted (§8.2). `hash_with_authority` folds
+        both in, so the same file in `staging` and in `prod` hashes differently and an approval
+        is per deployment. That is what an operator wants, it is not obvious, and T353 pins it.
+
+        Private, like `_delegate` and `_break_glass`: §11.1 adds the CLI group and no public
+        `Control` method.
+        """
+        if self._observing:
+            # **SPEC-v0.8 §8.4, and an independent review found this open.** Observe mode
+            # requests no approval and still reserves and commits, so a proposal made while
+            # observing minted a real marker with nobody having answered anything -- and
+            # observe-then-enforce is the documented adoption path, so every hash proposed
+            # during the observe phase was silently pre-approved for the enforce phase.
+            #
+            # Refused rather than silently skipped: an operator who ran the command deserves
+            # to know it did nothing, and a proposal that looked like it worked and left no
+            # approval is worse than one that did not run.
+            raise InvalidArgument(
+                "a policy change cannot be proposed under 'mode: observe'. Observe mode "
+                "enforces nothing and asks nobody, so the approval it recorded would mark the "
+                "hash approved with no human having answered, and the enforce-mode deployment "
+                "that follows would find it already approved (SPEC-v0.8 §8.4)"
+            )
+        target = hash_with_authority(candidate, authority, self._environment)
+        action = Action(
+            name=POLICY_CHANGE_ACTION,
+            arguments={"from": self._policy_hash, "to": target},
+            principal=self._principal_for_proposal(),
+            resource="policy",
+            environment=self._environment,
+        )
+
+        def _installed() -> dict[str, str]:
+            # The "execution" of a policy change is the fact that it was approved: nothing is
+            # written to disk here, because installing the file is the operator's act and this
+            # kernel does not edit an operator's policy. What the committed effect records is
+            # that this hash was approved, which is exactly what §8.4 reads back.
+            return {"approved": target}
+
+        with _policy_change_in_flight():
+            if approval_id is None:
+                return self.execute(action, _installed, f"policy:{target}")
+            with with_approval(approval_id):
+                return self.execute(action, _installed, f"policy:{target}")
+
+    def _principal_for_proposal(self) -> Principal:
+        """Who is proposing, resolved as any other principal is (§8.2)."""
+        found = _CONTEXT.get(None)
+        if found is not None:
+            return found.principal
+        resolved = (
+            None
+            if self._identity is None
+            else self._identity.resolve(
+                IdentityContext(action=POLICY_CHANGE_ACTION, environment=self._environment)
+            )
+        )
+        if resolved is None:
+            raise IdentityError(
+                "a policy change has a proposer, and nothing resolved one. Run inside "
+                "ctrlrun.context(agent=..., user=...), or configure an identity provider "
+                "(SPEC-v0.8 §8.2)"
+            )
+        return resolved
+
+    def _replay_policy(self, candidate: Policy, *, limit: int) -> list[dict[str, Any]]:
+        """What the last `limit` receipts would decide under `candidate` (SPEC-v0.8 §8.5).
+
+        **Writes nothing, executes nothing, reserves nothing**, and reports *what changes*:
+        never safer, riskier, too permissive, a score or a grade. `v0.4 §3.9`'s rule for
+        `verify` applied here, because a replay that scored an operator's document would be the
+        same claim in a new costume.
+
+        A receipt whose action cannot be rebuilt is **named and skipped**, never counted as
+        unchanged, on the distinction `v0.6 §3.2` draws for an unknown schema version.
+        """
+        if limit < 1:
+            # §8.5 and the project's rule: refuse the unparseable rather than answer it.
+            # `--last 0` printed "no recorded decision changes", which reads as "this policy
+            # changes nothing" for an input that read nothing.
+            raise InvalidArgument(
+                f"--last must be at least 1, got {limit}. A replay over no receipts reports no "
+                "change, which reads as a verdict about the policy rather than about the input"
+            )
+        rows: list[dict[str, Any]] = []
+        receipts = list(self._store.receipts())[-limit:]
+        for receipt in receipts:
+            rebuilt = _action_from_receipt(receipt, self._environment)
+            if rebuilt is None:
+                rows.append(
+                    {
+                        "receipt_id": receipt.receipt_id,
+                        "action": receipt.action,
+                        "skipped": (
+                            f"schema {receipt.schema!r} is not one this binary reads"
+                            if receipt.schema not in KNOWN_RECEIPT_SCHEMAS
+                            else "this receipt does not carry what an action is rebuilt from"
+                        ),
+                    }
+                )
+                continue
+            before = self._policy.evaluate(rebuilt)
+            after = candidate.evaluate(rebuilt)
+            if before.decision is after.decision and before.reason == after.reason:
+                continue
+            rows.append(
+                {
+                    "receipt_id": receipt.receipt_id,
+                    "action": receipt.action,
+                    "from": {"decision": str(before.decision), "reason": before.reason},
+                    "to": {"decision": str(after.decision), "reason": after.reason},
+                }
+            )
+        return rows
+
+    def _break_glass(self, envelope_id: str, grant: Grant, *, reason: str = "") -> Delegation:
+        """Open a break-glass grant beneath a declared envelope (SPEC-v0.8 §5.3).
+
+        There is no flag. What this creates is an ordinary delegation: recorded, bounded by the
+        envelope on every dimension `contained_dimension` knows, expiring, revocable and
+        attenuable, and named on the receipt of every action taken under it. A setting that
+        skipped a check would have none of those five properties, which is the whole argument
+        of §5.1.
+
+        **The opener is a verified principal and never an assertion, and there is no parameter
+        that says otherwise.** An earlier build took `by: Principal | None`, which was an
+        unauthenticated way to assert an opener *and the roles it holds*: passing a principal
+        whose claims carried the envelope's role opened it in a deployment whose provider
+        resolved somebody else entirely. `§11.2` keeps `_granting_principal` package-internal
+        for exactly that reason, and a public `by=` was the same hole with a docstring. The
+        opener is whoever the `ApproverIdentity` resolves, and a deployment that names none
+        cannot open one at all.
+
+        **Private, like `_delegate`.** `§11.2` adds no public `Control` method in v0.8; the
+        surface item 5 adds is the CLI command, which calls this the way `ctrlrun delegate`
+        calls `_delegate`.
+
+        `reason` is free text on the `DELEGATION_CREATED` event. The kernel does not interpret
+        it, exactly as it does not interpret `source:`.
+        """
+        authority = self._require_authority("break-glass")
+        envelope = authority.envelopes.get(envelope_id)
+        opener = self._opener_for(envelope_id, envelope)
+        now = self._clock()
+        try:
+            planned = authority.plan_break_glass(
+                envelope_id, grant, by=opener, store=self._store, now=now
+            )
+        except IdentityError:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {"reason": PRINCIPAL_EXPIRED, "parent_id": envelope_id},
+            )
+            raise
+        except AuthorityEscalation as escalation:
+            data: dict[str, Any] = {"reason": escalation.reason, "parent_id": envelope_id}
+            if escalation.dimension is not None:
+                data["dimension"] = escalation.dimension
+            self._append_delegation(EventType.DELEGATION_REJECTED, data)
+            raise
+        self._store.put_delegation(planned.to_record())
+        self._append_delegation(
+            EventType.DELEGATION_CREATED,
+            {
+                "delegation_id": planned.delegation_id,
+                "parent_id": planned.parent_id,
+                "depth": planned.depth,
+                "created_by_agent": opener.agent,
+                "created_by_user": opener.user,
+                "created_via": "break-glass",
+                "reason": reason,
+            },
+        )
+        _LOG.warning(
+            "break-glass %s opened beneath %s by %s until %s: %s",
+            planned.delegation_id,
+            envelope_id,
+            opener.agent,
+            planned.grant.expires_at,
+            reason or "no reason given",
+        )
+        return planned
+
+    def _opener_for(self, envelope_id: str, envelope: BreakGlassEnvelope | None) -> Principal:
+        """Who is opening this envelope, and may they? (SPEC-v0.8 §5.3.1.)
+
+        Rule 4 does not apply to an envelope: its subject names the agents a break-glass grant
+        may be **for**, and the opener is a human. What gates the opener is the envelope's
+        `controls:`, whose `approver_role` this checks against the roles the opener holds.
+
+        An unknown envelope is left to `plan_break_glass` to refuse, so `--envelope` naming an
+        ordinary grant gets §5.3.1's message rather than one about a missing configuration.
+        """
+        identity = self._approver_identity
+        if identity is None:
+            raise InvalidArgument(
+                "opening a break-glass envelope needs an approver identity: the envelope names "
+                "the controls that gate who may open it, and with nobody resolved there is no "
+                "principal to check them against. Build the Control with "
+                "approver_identity=ApproverIdentity(provider, roles_claim=...) "
+                "(SPEC-v0.8 §5.3.1). Note that `Control.from_file`, which is what the CLI "
+                "builds, wires none: see SPEC-v0.8 §14.5, which records that as open"
+            )
+        opener = identity.resolve(
+            IdentityContext(action="ctrlrun.break-glass", environment=self.environment)
+        )
+        if opener is None:
+            raise IdentityError(
+                "the approver identity resolved nobody, so this break-glass envelope has no "
+                "opener to check against its controls (SPEC-v0.8 §5.3.1)"
+            )
+        if envelope is None:
+            return opener
+        # **Every cited control must resolve and must name a role.** Elsewhere a control that
+        # names no `approver_role` gates nobody (§3.5), and that is right where the citation is
+        # on an *action*: the control is documentation and the approval decides. Here the
+        # citation **is** the gate, so the same rule reads the opposite way -- a typo in an
+        # envelope's `controls:` silently admitted any verified principal, which an independent
+        # review demonstrated with one transposed letter. `Authority.from_yaml` parses the
+        # section without a registry to check against, so it is checked here, where both are.
+        unresolved = [
+            identifier
+            for identifier in envelope.controls
+            if (control := self._policy.controls.get(identifier)) is None
+            or not control.approver_role
+        ]
+        if unresolved:
+            raise InvalidArgument(
+                f"break-glass envelope {envelope_id!r} cites {unresolved}, which "
+                + (
+                    "name no control in this policy's registry"
+                    if any(self._policy.controls.get(name) is None for name in unresolved)
+                    else "declare no 'approver_role'"
+                )
+                + ". An envelope's controls are what gate who may open it, so a citation that "
+                "resolves to nothing would gate nobody (SPEC-v0.8 §5.3.1)"
+            )
+        required = tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self._policy.controls.get(identifier))
+                for identifier in envelope.controls
+            )
+            if control is not None and control.approver_role
+        )
+        held = roles_held(opener, identity.roles_claim)
+        missing = unsatisfied(required, entitled_controls(required, held))
+        if missing is not None:
+            self._append_delegation(
+                EventType.DELEGATION_REJECTED,
+                {
+                    "reason": APPROVER_UNENTITLED,
+                    "parent_id": envelope_id,
+                    "control": missing.control,
+                    "role": missing.role,
+                },
+            )
+            raise AuthorityEscalation(
+                f"{opener.agent!r} does not hold the role {missing.role!r} required by control "
+                f"{missing.control!r}, which gates who may open {envelope_id!r} "
+                "(SPEC-v0.8 §5.3.1)",
+                reason=APPROVER_UNENTITLED,
+                parent_id=envelope_id,
+            )
+        return opener
+
     def revoke(self, delegation_id: str, *, by: str | None = None) -> None:
         """Revoke one delegation (SPEC-v0.3 §5.7).
 
@@ -2663,7 +4169,7 @@ class Control:
         )
 
     def _delegate(
-        self, parent_id: str, grant: Grant, *, by: Principal, via: Literal["api", "cli"]
+        self, parent_id: str, grant: Grant, *, by: Principal, via: CreatedVia
     ) -> Delegation:
         """The one implementation behind `Control.delegate` and `ctrlrun delegate`.
 
@@ -2866,6 +4372,16 @@ class Control:
         # both new fields null, which is what makes "would_have present on every observed run
         # and absent on every refused one" true in both directions.
         receipt = Receipt(
+            # SPEC-v0.8 §5.4 — which grant let this through, on **every** action decided by
+            # authority and not only under break-glass. `AuthorityResult.grant_id` already
+            # reaches the events; what nothing did was put it on the receipt, so answering
+            # "what did this grant let through" meant joining events by hand. A field that
+            # existed only under break-glass would be one nothing exercises on the ordinary
+            # path, and so one nobody would notice breaking.
+            authority_grant_id=_AUTHORITY_GRANT_ID.get(None),
+            task=_TASK.get(None),
+            scope_hash=_SCOPE_HASH.get(None),
+            budget_charges=_BUDGET_CHARGES.get(()),
             receipt_id=new_receipt_id(),
             action_id=action.action_id,
             action=action.name,
@@ -2896,6 +4412,10 @@ class Control:
             # there was none.
             precondition_at_request=None if compared is None else compared.at_request,
             precondition_at_recheck=None if compared is None else compared.at_recheck,
+            # SPEC-v0.8 §2.5: what §2 verified reaches the evidence, or the milestone records
+            # nothing. Read from the row rather than from the `Approval`, which carries only the
+            # string `v0.1 §4.1` froze.
+            approvers=() if compared is None else compared.approvers,
         )
         # The store assigns `seq`, `prev_hash` and `hash` (SPEC-v0.6 §6.2, §6.3), so what goes
         # to the sinks and back to the caller is the **chained** receipt. Handing the unchained
@@ -3064,6 +4584,8 @@ def protect(
     reconcile_eagerly: bool = False,
     control: Control | None = None,
     preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+    task: str | None = None,
+    scope: Callable[[Action], Mapping[str, Any]] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Bind a function to an action name: every call becomes a decided, recorded Action.
 
@@ -3092,6 +4614,16 @@ def protect(
     provider = _checked_preconditions(preconditions, f"protect({name!r}, preconditions=...)")
     _check_template(name, "effect", effect)
     _check_template(name, "resource", resource)
+    # SPEC-v0.9 §6.3.1. A **template** over the call's arguments, like `effect` and `resource`
+    # above and unlike `Control.execute`'s `task=`, which takes the resolved id. A decorator
+    # whose task could only be a literal would be unusable for the thing a task is: a run id
+    # that changes per call. The operator declares the template; nothing here infers a task
+    # from an argument it was not pointed at, which is the line §6.3 draws.
+    _check_template(name, "task", task)
+    # SPEC-v0.9 §5.6's third row: **at decoration time** for `@protect`, which is `v0.7 §6.2`'s
+    # rule for a non-callable `preconditions=`. A misconfiguration an operator hears about at
+    # import is one they fix before an agent runs, not during.
+    _checked_scope(scope, f"protect({name!r}, scope=...)")
     held = None if lease is None else _checked_lease(lease, f"protect({name!r}, lease=...)")
     _reconciler(reconcile, reconcile_eagerly, f"protect({name!r}")
 
@@ -3144,6 +4676,7 @@ def protect(
                 environment=resolved.environment,
             )
             effect_key = resolved._resolve_effect(action, effect_template)
+            bound_task = resolved._resolve_template(action, task, "task")
             if reconcile is not None and effect_key is None and not dangling:
                 # SPEC-v0.2 §2.1 — not a decoration-time error, because the effect template
                 # may come from the policy and that is not loaded yet. A hook with no key to
@@ -3171,6 +4704,8 @@ def protect(
                     reconcile=reconcile,
                     reconcile_eagerly=reconcile_eagerly,
                     preconditions=provider,
+                    task=bound_task,
+                    scope=scope,
                 )
             except ApprovalRequired as pending:
                 if not wait:
@@ -3244,6 +4779,29 @@ def _warn_template_mismatch(
         decorated,
         from_policy,
     )
+
+
+def _action_from_receipt(receipt: Receipt, environment: str) -> Action | None:
+    """Rebuild the action a receipt records, or `None` where it cannot be (SPEC-v0.8 §8.5).
+
+    **The schema is checked first**, which §8.5 names ("a schema the binary does not know") and
+    an earlier build did not implement: `Receipt.from_dict` does not raise on an unknown one, so
+    a receipt written by a later version rebuilt fine and was silently **graded** -- counted as
+    unchanged, or reported as changed, on fields this binary may be reading wrongly. `v0.6 §3.2`
+    draws the same distinction for a store row: skipped is not the same as unchanged.
+    """
+    if receipt.schema not in KNOWN_RECEIPT_SCHEMAS:
+        return None
+    try:
+        return Action(
+            name=receipt.action,
+            arguments=dict(receipt.arguments),
+            principal=receipt.principal,
+            resource=receipt.resource,
+            environment=receipt.environment or environment,
+        )
+    except (InvalidArgument, TypeError, ValueError):
+        return None
 
 
 def _reconciler(reconcile: object, reconcile_eagerly: object, where: str) -> _Reconciler:

@@ -352,7 +352,25 @@ def handle_inbound(
         # get to weaken it: `grant_approval` refuses a record that is consumed, denied or
         # expired, so a replay arriving *after* consumption cannot resurrect anything.
         if decision == "grant":
-            store.grant_approval(path_request_id, approver)
+            # SPEC-v0.8 §4.4: `None` is **recorded and still short of N**, not a failure. 200
+            # either way, because the answer was recorded either way, and the body says which:
+            # a sender told a flat "ok" for an answer that moved nothing has been told the
+            # opposite of what happened.
+            granted = store.grant_approval(path_request_id, approver)
+            if granted is None:
+                after = store.get_approval(path_request_id)
+                recorded = 0 if after is None else len(after.approvers)
+                needed = 1 if after is None else after.request.approvals_required
+                if recorded == 0:
+                    # §2.6 and §4.5: this endpoint resolves nobody, so its answer carries no
+                    # verified approver and counts toward no threshold. "recorded: 0 of 2"
+                    # alone reads as a bug in the count rather than a fact about this door.
+                    return 200, (
+                        f"recorded: {recorded} of {needed} approvals; this endpoint verifies "
+                        "no approver, so its answer counts toward no threshold "
+                        "(SPEC-v0.8 §2.6)"
+                    )
+                return 200, f"recorded: {recorded} of {needed} approvals"
         else:
             store.deny_approval(path_request_id, approver)
     except CTRLRunError as refused:

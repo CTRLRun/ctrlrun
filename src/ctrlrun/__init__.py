@@ -16,8 +16,10 @@ from .approval import (
     Approval,
     ApprovalProvider,
     ApprovalRequest,
+    ApproverIdentity,
     LocalApprovalProvider,
     ScriptedApprovalProvider,
+    VerifiedApprover,
 )
 from .authority import Authority, AuthorityResult, Delegation, Grant, Subject
 from .control import Control, context, idempotency_token, protect, with_approval
@@ -63,6 +65,7 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalRequired",
     "ApprovalTimeout",
+    "ApproverIdentity",
     "Authority",
     "AuthorityDenied",
     "AuthorityEscalation",
@@ -105,6 +108,7 @@ __all__ = [
     "StaticIdentityProvider",
     "Subject",
     "Suspended",
+    "VerifiedApprover",
     "WebhookApprovalProvider",
     "action_hash",
     "banner",

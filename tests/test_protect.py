@@ -689,6 +689,17 @@ def test_receipt_json_has_exactly_the_specified_fields(control, store):
         # only, and `null` here because nothing asked for a precondition.
         "precondition_at_request",
         "precondition_at_recheck",
+        # SPEC-v0.8 §11.3: `ctrlrun.receipt/v5` adds the two, and the whole shape is
+        # frozen before item 2 writes it, so `authority_grant_id` is present and null
+        # until item 5 fills it.
+        "approvers",
+        "authority_grant_id",
+        # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
+        "task",
+        # SPEC-v0.9 §5.5, a `ctrlrun.receipt/v6` field.
+        "scope_hash",
+        # SPEC-v0.9 §10.1, the third `ctrlrun.receipt/v6` field.
+        "budget_charges",
     }
     assert document["schema"] == RECEIPT_SCHEMA
     assert document["receipt_id"].startswith("ctr_")

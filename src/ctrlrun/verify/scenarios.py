@@ -42,9 +42,18 @@ from typing import Any, Final
 from uuid import uuid4
 
 from ..action import Action, Principal
-from ..approval import DEFAULT_APPROVAL_TTL, ApprovalStatus, LocalApprovalProvider
+from ..approval import (
+    DEFAULT_APPROVAL_TTL,
+    ApprovalStatus,
+    ApproverIdentity,
+    LocalApprovalProvider,
+    RequiredRole,
+    _granting_principal,
+    _required_roles,
+)
 from ..authority import (
     AUTHORITY_EXPIRED,
+    AUTHORITY_TASK,
     CONTAINMENT,
     DEEP_WILDCARD,
     DIMENSIONS,
@@ -52,9 +61,17 @@ from ..authority import (
     Authority,
     Grant,
     Subject,
+    _metric_value,
     contained_dimension,
 )
-from ..control import Control, context, idempotency_token, protect
+from ..control import (
+    BUDGET_EXHAUSTED,
+    SCOPE_UNAVAILABLE,
+    Control,
+    context,
+    idempotency_token,
+    protect,
+)
 from ..effect import (
     EffectRecord,
     EffectState,
@@ -72,10 +89,20 @@ from ..errors import (
     CTRLRunError,
     DuplicateEffect,
     InvalidArgument,
+    MissingDependency,
     NotExecuted,
     PolicyError,
 )
-from ..policy import Condition, Decision, Policy, _ActionPolicy, _Rule, discover_policy_path
+from ..identity import IdentityContext
+from ..policy import (
+    POLICY_CHANGE_ACTION,
+    Condition,
+    Decision,
+    Policy,
+    _ActionPolicy,
+    _Rule,
+    discover_policy_path,
+)
 from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
     Event,
@@ -104,6 +131,13 @@ _LOG = logging.getLogger(__name__)
 #: Who verify records as the author of the approvals it grants itself (§3.5). Not a person,
 #: and named so no reader of the evidence mistakes it for one.
 APPROVER: Final = "ctrlrun-verify"
+
+#: SPEC-v0.8 §11.7: the approver identity G18 grades against. Verify builds its own scenarios,
+#: so it supplies the provider too; what it grades is the kernel's refusal, never whether the
+#: operator configured one, which is a fact about a constructor call and not about a document.
+#:
+#: Not `StaticIdentityProvider`: that one warns, by design (`v0.3 §3.3`), and a passing verify
+#: run writes no kernel warning to stderr. `_VerifyApproverProvider`, below, is what it uses.
 
 #: §3.6 — the base instant where no grant carries an `expires_at`.
 FALLBACK_T0: Final = datetime(2026, 1, 1, tzinfo=UTC)
@@ -518,6 +552,24 @@ class _Selection:
     grant: Grant | None = None
     rule_reason: str = ""
 
+    @property
+    def task(self) -> str | None:
+        """A concrete task the selected grant admits, or `None` where it names none.
+
+        SPEC-v0.9 §6.3.2 puts `ctrlrun.verify.run` on the "supplies one" row of `v0.3 §4.3.1`'s
+        table, and it has to: once a document names `tasks:` on the grant a scenario selects,
+        **every** scenario driving that grant needs a task or the kernel refuses it
+        `authority_task`, and twenty guarantees would report a defect that is the document's
+        binding working exactly as written.
+
+        Derived from the document's own pattern rather than invented, for `_from_pattern`'s
+        reason: a literal that happened not to match would make every control leg fail for a
+        reason that is not the kernel's.
+        """
+        if self.grant is None or not self.grant.tasks:
+            return None
+        return str(_from_pattern(self.grant.tasks[0]))
+
     def build(self) -> Action:
         return Action(
             name=self.action,
@@ -546,6 +598,16 @@ def _from_pattern(pattern: str | None) -> str | None:
     return pattern
 
 
+@dataclass(frozen=True)
+class _VerifyApproverProvider:
+    """An `IdentityProvider` answering one principal, for G18's own scenario (SPEC-v0.8 §11.7)."""
+
+    principal: Principal
+
+    def resolve(self, context: IdentityContext) -> Principal | None:
+        return self.principal
+
+
 class Engine:
     """Derives and runs the scenarios for one configuration (§3).
 
@@ -556,6 +618,12 @@ class Engine:
     def __init__(self, loaded: _Loaded, scratch: Path, store_url: str | None = None) -> None:
         #: Set by `select()` when the miss was on the authority axis (see `unselected`).
         self._grant_miss: str | None = None
+        self._budget_miss: str | None = None
+        self._metric_miss: str | None = None
+        self._unmeasurable = False
+        self._declined_on_budget = False
+        #: SPEC-v0.9 §6.3.2 — the active selection's task; see `_control_for`.
+        self._task: str | None = None
         self._loaded = loaded
         self._scratch = scratch
         self._store_url = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
@@ -706,6 +774,8 @@ class Engine:
         needs_effect: bool = False,
         needs_renewal: bool = False,
         needs_ceiling: bool = False,
+        needs_approver_role: bool = False,
+        needs_threshold: bool = False,
         ceiling_bound: int | None = None,
         grant_filter: Callable[[Grant], bool] | None = None,
         mutation: Mapping[str, Any] | None = None,
@@ -724,11 +794,23 @@ class Engine:
         needs an action that declares one, and one verify can drive to the top of.
         """
         self._grant_miss = None
+        self._budget_miss = None
+        self._metric_miss = None
         for name in sorted(self.policy.actions):
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
             ceiling = self.policy.max_attempts(name)
             if needs_renewal and ceiling is not None and ceiling < 2:
+                continue
+            if needs_approver_role and not self._roles_for(name):
+                # SPEC-v0.8 §3.5, for G17: an action whose cited controls name no role gates
+                # nobody, so it cannot exercise the refusal, and picking it would make G17's
+                # `N/A` reason a statement about this selection rather than about the document.
+                continue
+            if needs_threshold and self.policy.approvals_required(name) < 2:
+                # SPEC-v0.8 §4.2, for G19: an action that takes one yes has no count to get
+                # wrong. Selecting it would make G19's `N/A` reason a statement about this
+                # selection rather than about the document, which is §11.7's rule.
                 continue
             if needs_ceiling and ceiling is None:
                 continue
@@ -739,6 +821,7 @@ class Engine:
                 if synthesized is None:
                     continue
                 arguments, reason = synthesized
+                self._declined_on_budget = False
                 selection = self._bind(name, arguments, decision, reason, grant_filter)
                 if selection is not None:
                     return selection
@@ -746,7 +829,12 @@ class Engine:
                 # caller's N/A reason can say so: a bare `None` here is indistinguishable from
                 # "no action reaches this decision", and every scenario used to resolve that
                 # ambiguity by asserting its own hardcoded sentence about the policy.
-                self._grant_miss = self._resource(name, arguments)
+                #
+                # **Unless a grant did cover it and its budget is what declined.** Recording a
+                # resource miss there put a sentence in the report that is false of the document:
+                # the pattern matched perfectly and the budget was the whole reason.
+                if not self._declined_on_budget:
+                    self._grant_miss = self._resource(name, arguments)
         return None
 
     def _bind(
@@ -792,6 +880,26 @@ class Engine:
             )
             if not grant.matches_shape(action) or not grant.constraints_hold(action):
                 continue
+            # SPEC-v0.9 §2, and `_identity_the_document_needs`'s precedent exactly: a shipped
+            # example declaring something the kernel enforces must not make `ctrlrun verify`
+            # exit 3 on guarantees that have nothing to do with it. A grant whose budget is
+            # smaller than the vector `_synthesize` picked refuses that action, and the refusal
+            # reached G1 as an internal error. Verify owns the vector, so verify sizes it.
+            self._unmeasurable = False
+            fitted = self._fitted_to_budgets(name, arguments, decision, reason, grant, action)
+            if fitted is None:
+                # Recorded, for `unselected`'s reason. A bare `continue` here reported the
+                # *grant* miss below, so a policy whose approve band starts above its grant's
+                # daily budget was told no grant's `resources:` matched, about a document whose
+                # patterns matched perfectly. That is the category error `unselected`'s own
+                # docstring exists about, one dimension over.
+                self._declined_on_budget = True
+                if self._unmeasurable:
+                    self._metric_miss = f"{name} on grant {grant.id!r}"
+                else:
+                    self._budget_miss = f"{name} on grant {grant.id!r}"
+                continue
+            arguments, action = fitted
             try:
                 effect_key = self._effect_key(action)
             except CTRLRunError:
@@ -808,6 +916,163 @@ class Engine:
                 rule_reason=reason,
             )
             return selection
+        return None
+
+    def _deciding_grant(self, action: Action) -> Grant | None:
+        """The grant `Authority.evaluate` would resolve for this action, by its own rule.
+
+        **`min(passed, key=_by_grant_id)`**, which is why this exists rather than trusting the
+        grant `_bind` happens to be iterating. An independent review found the consequence: a
+        vector resized to fit one grant's budget can fall inside a *different*, lexicographically
+        earlier grant's `constraints`, and that grant's budget was never checked. Its document
+        had `aa-narrow` at `amount_lte: 10` with `limit: 0` and `bb-broad` at
+        `amount_lte: 500000` with `limit: 900`; the resize from 100000 to 1 moved the action from
+        `bb-broad` to `aa-narrow`, and `ctrlrun verify` exited 3 on a budget it never looked at.
+
+        Document grants only, which is what `_bind` iterates: a scenario's authority comes from
+        the operator's file, and no delegation exists in a store verify has not created yet.
+        """
+        if self.authority is None:
+            return None
+        for grant_id in sorted(self.authority.grants):
+            grant = self.authority.grants[grant_id]
+            # The same four predicates `Authority.evaluate` applies, in the same order
+            # (`authority.py:1237-1255`). **`task_holds` and `is_expired` are not optional
+            # here**: an independent review found a task-bound grant carrying no budget being
+            # returned as the decider for an action outside its task, so a sibling grant's
+            # budget was never checked and `ctrlrun verify` exited 3 on it.
+            if not grant.matches_shape(action) or not grant.constraints_hold(action):
+                continue
+            if grant.is_expired(self._t0) or not grant.task_holds(self._task):
+                continue
+            return grant
+        return None
+
+    #: How many spends of the chosen vector a scenario may take. G4's control leg runs
+    #: `PROCESSES` children on distinct keys and then contends `PROCESSES` more on one key, so
+    #: nine of them land; the margin above that is for every other scenario that acts twice.
+    _BUDGET_HEADROOM: Final = reg.PROCESSES * 2 + 2
+
+    def _fits_budgets(self, grant: Grant, action: Action, *, room: int = 1) -> bool | None:
+        """Whether every budget on this grant admits `room` spends of this action.
+
+        `None` is its own answer and not a `False`: a grant budgeting a metric the action does
+        not carry refuses **every** action it covers, for ever, and that is a fact about the
+        operator's document rather than a vector verify can size around. Returning `True` there
+        is what made `ctrlrun verify` exit 3 on §2.3's refusal instead of grading it.
+
+        **`room` is why a vector that fits can still be the wrong one.** A scenario acts more
+        than once, and a band with a *floor* cannot be shrunk below it: `amount_gte: 200` against
+        a budget of 900 leaves the synthesized vector untouched, because 200 fits, and then G4
+        reports FAIL because nine spends of 200 do not. Verify may say it could not grade a
+        configuration; it may not report the kernel broken.
+        """
+        for budget in grant.budgets or ():
+            try:
+                value = _metric_value(action, budget.metric, grant.id)
+            except InvalidArgument:
+                return None
+            if value * room > budget.limit:
+                return False
+        return True
+
+    def _budget_verdict(self, grants: tuple[Grant, ...], action: Action, room: int) -> bool | None:
+        """`_fits_budgets` over **every** grant that could hold this action to a budget.
+
+        Two of them, and an independent review demonstrated why both are needed.
+        `_deciding_grant` answers who `Authority.evaluate` resolves, and `select`'s own
+        `grant_filter` answers who the scenario is *about*: G9 delegates from the grant it
+        selected, so that grant's budget binds the delegation whatever the resolver says. Sizing
+        against only the resolver let a lexicographically earlier grant with no budget shadow a
+        delegable parent whose limit was 50 times smaller, and `ctrlrun verify` exited 3 on the
+        delegation's own budget.
+        """
+        seen: dict[str, Grant] = {grant.id: grant for grant in grants}
+        for grant in seen.values():
+            verdict = self._fits_budgets(grant, action, room=room)
+            if verdict is not True:
+                return verdict
+        return True
+
+    def _shrunk(
+        self, arguments: dict[str, Any], grants: tuple[Grant, ...], action: Action, divisor: int
+    ) -> dict[str, Any] | None:
+        """One vector with **every** over-limit metric brought under its own budget.
+
+        `_fitted_to_budgets` used to resize the first budgeted metric alone, so a grant with
+        budgets on two metrics was declined even when a fitting vector existed: an independent
+        review found a document where adding one `tip` budget took verify from grading thirteen
+        guarantees to grading none, silently and with exit 0. A budget per metric is an ordinary
+        shape, and each metric needs its own number.
+        """
+        tried = dict(arguments)
+        for grant in grants:
+            for budget in grant.budgets or ():
+                try:
+                    value = _metric_value(action, budget.metric, grant.id)
+                except InvalidArgument:
+                    return None
+                if value * self._BUDGET_HEADROOM > budget.limit:
+                    tried[budget.metric] = max(1, budget.limit // divisor)
+        return tried if tried != arguments else None
+
+    def _fitted_to_budgets(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        decision: Decision,
+        reason: str,
+        grant: Grant,
+        action: Action,
+    ) -> tuple[dict[str, Any], Action] | None:
+        """Size verify's own action vector to the budgets that will decide it.
+
+        **Verify grades a guarantee, not the operator's budget sizing.** `_synthesize` picks a
+        vector to land in a rule, and a grant whose budget is smaller than that vector refuses
+        the action before the guarantee is reached: a EUR 1,000 daily budget under a policy whose
+        `amount_lte` permits a EUR 100,000 refund made `ctrlrun verify` report an internal error
+        on G1, which is about approvals. That is `_identity_the_document_needs`'s case in the
+        budget dimension, and it gets the same answer: verify supplies what the document needs.
+
+        The vector is only changed when a budget would refuse it, so every document without
+        budgets keeps the vector it had, and a replacement must land in the same rule with the
+        same reason because `select`'s contract is the decision it was asked for. Where nothing
+        fits, the candidate is declined and `select` moves on, so the guarantee reports `N/A`
+        with a true reason rather than failing a control leg.
+        """
+        deciding = self._deciding_grant(action)
+        bound = (grant,) if deciding is None else (grant, deciding)
+        room = self._BUDGET_HEADROOM
+        verdict = self._budget_verdict(bound, action, room)
+        if verdict is True:
+            return arguments, action
+        if verdict is None:
+            # Unmeasurable: no vector helps, because the metric is absent from the action's whole
+            # shape rather than too large in this one. The caller needs to tell the two apart,
+            # because raising a limit fixes one and nothing about the other.
+            self._unmeasurable = True
+            return None
+        for divisor in (room, 8, 4, 2, 1):
+            tried = self._shrunk(arguments, bound, action, divisor)
+            if tried is None:
+                continue
+            rebuilt = replace(action, arguments=tried)
+            evaluation = self.policy.evaluate(rebuilt)
+            if evaluation.decision is not decision or evaluation.reason != reason:
+                continue
+            # **Re-resolved, and it must settle on the same grant.** A resize can move the action
+            # between grants, and `_bind` is building a selection that names *this* one: a vector
+            # graded against a different grant's budget would report the wrong grant in the
+            # result and check a budget nobody will apply.
+            settled = self._deciding_grant(rebuilt)
+            if settled is not None and settled.id != grant.id and deciding is not None:
+                continue
+            if not grant.matches_shape(rebuilt) or not grant.constraints_hold(rebuilt):
+                continue
+            after = (grant,) if settled is None else (grant, settled)
+            if self._budget_verdict(after, rebuilt, room) is not True:
+                continue
+            return tried, rebuilt
         return None
 
     # --- the scratch store, and the Control every scenario drives -----------------------
@@ -835,20 +1100,102 @@ class Engine:
         )
         return control, store, recorder, moving
 
+    def _roles_for(self, action_name: str) -> tuple[RequiredRole, ...]:
+        """The roles this action's cited controls require (SPEC-v0.8 §3.3), by name.
+
+        Off the entry's own citations rather than an evaluation, so it can be asked before a
+        selection exists: `§3.5`'s question is whether the **document** gates anything.
+        """
+        entry = self.policy.actions.get(action_name)
+        cited = () if entry is None else entry.controls
+        return tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self.policy.controls.get(identifier)) for identifier in cited
+            )
+            if control is not None and control.approver_role
+        )
+
+    def _required_roles(self, selection: _Selection) -> tuple[RequiredRole, ...]:
+        """The roles this selection's decision would pin on a request (SPEC-v0.8 §3.3).
+
+        Read from the same evaluation `Control` reads, so verify grades what the deployment would
+        do rather than a rule of its own.
+        """
+        evaluation = self.policy.evaluate(selection.build())
+        return tuple(
+            RequiredRole(control=identifier, role=control.approver_role)
+            for identifier, control in (
+                (identifier, self.policy.controls.get(identifier))
+                for identifier in evaluation.controls
+            )
+            if control is not None and control.approver_role
+        )
+
+    def _identity_the_document_needs(self) -> ApproverIdentity | None:
+        """An approver identity where the **document** cannot be exercised without one (§11.7).
+
+        SPEC-v0.8 §4.2 denies `approvals_required` above 1 in a deployment that verifies
+        nobody, before a human is asked. That refusal is correct and it reaches every scenario,
+        not only the ones about M-of-N: a shipped example declaring a threshold made
+        `ctrlrun verify` exit 3 with an internal error on guarantees that have nothing to do
+        with approvals. So where the document asks for a threshold or names an approver role,
+        verify supplies one, exactly as §11.7 says it does for G17 and G18 -- and the reason is
+        the same, that whether the operator configured one is a fact about their code.
+
+        Where the document asks for neither, this returns `None` and every scenario keeps the
+        0.7.0 shape, so a guarantee is graded against the deployment shape it was written for.
+        """
+        needs = any(
+            self.policy.approvals_required(name) > 1 or self._roles_for(name)
+            for name in self.policy.actions
+        )
+        if not needs:
+            return None
+        return ApproverIdentity(
+            _VerifyApproverProvider(self._verify_approver(0)), roles_claim=_VERIFY_ROLES_CLAIM
+        )
+
     def _control_for(
-        self, gid: str, selection: _Selection, *, clock: _Clock | None = None
+        self,
+        gid: str,
+        selection: _Selection,
+        *,
+        clock: _Clock | None = None,
+        approver_identity: ApproverIdentity | None = None,
+        require_approved_policy: bool = False,
+        declares_change: bool = False,
     ) -> tuple[Control, StateStore, _Recorder, _Clock]:
         moving = clock if clock is not None else _Clock(self._t0)
         store, _ = self._store_for(gid, moving)
         recorder = _Recorder()
+        # SPEC-v0.9 §6.3.2. Set here rather than threaded through thirty call sites, and set on
+        # every call including to `None`, for `_AUTHORITY_GRANT_ID`'s reason in `control.py`: a
+        # scenario that inherited the previous one's task would drive the wrong grant.
+        self._task = selection.task
+        # SPEC-v0.8 §8.4, for G21. **The document must declare its own change as an approval**,
+        # or `_policy_approval_state` short-circuits on the declaration branch and the effect
+        # branch -- which is what G21's title is about -- is never exercised. An independent
+        # review demonstrated it: with the effect check deleted, G21 still passed.
+        policy = self.policy
+        if declares_change and POLICY_CHANGE_ACTION not in policy.actions:
+            policy = policy.with_action(POLICY_CHANGE_ACTION, {"decision": "approve"})
         control = Control(
-            self.policy,
+            policy,
             store,
             LocalApprovalProvider(store, clock=moving),
             clock=moving,
             sinks=[recorder],
             authority=self.authority,
             environment=selection.environment,
+            # SPEC-v0.8 §11.7: verify configures the approver identity it grades against, and
+            # only where a scenario asks for one. Every other scenario keeps the 0.7.0 shape,
+            # which is what keeps `ctrlrun verify` green on a deployment that verifies nobody.
+            approver_identity=approver_identity or self._identity_the_document_needs(),
+            # SPEC-v0.8 §11.7, for G21: verify sets the flag for its own scenario and says so
+            # in a note. Every other scenario keeps the 0.7.0 shape, so a guarantee that did
+            # not ask for it is graded against the deployment shape it was written for.
+            require_approved_policy=require_approved_policy,
         )
         return control, store, recorder, moving
 
@@ -863,9 +1210,70 @@ class Engine:
         """
         if selection.decision is not Decision.APPROVE:
             return None
-        request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
-        store.grant_approval(request.request_id, APPROVER)
+        # SPEC-v0.8 §3, §4: the document may pin roles and a threshold, and a request built
+        # here rather than through `Control._presented` pins neither. Both are read from the
+        # policy and applied, so a document using either is graded rather than crashing verify.
+        roles = self._roles_for(selection.action)
+        needed = self.policy.approvals_required(selection.action)
+        with _required_roles(roles, needed):
+            request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+        # **As many distinct principals as the document asks for.** An earlier build granted
+        # once with no verified approver, so a shipped example declaring `approvals_required: 2`
+        # made `ctrlrun verify` exit 3 with an internal error on guarantees that have nothing to
+        # do with M-of-N -- which is what an operator with a threshold in their policy would
+        # have met.
+        self._grant_to_threshold(
+            store,
+            request.request_id,
+            selection.action,
+            entitled=[role.control for role in roles],
+        )
         return request.request_id
+
+    def _grant_to_threshold(
+        self,
+        store: StateStore,
+        request_id: str,
+        action_name: str,
+        *,
+        principal: Principal | None = None,
+        entitled: Sequence[str] = (),
+    ) -> None:
+        """Grant as many distinct verified approvers as this action's threshold asks for.
+
+        SPEC-v0.8 §4.2. A scenario that granted once against a document declaring
+        `approvals_required: 2` left the record `pending` and reported its own guarantee as
+        failing for a reason that has nothing to do with it -- which is how G16 and G17 came to
+        fail on the shipped example the moment it declared a threshold.
+
+        `principal` pins the first approver where a scenario cares who answered (G17 and G18
+        both do); the rest are distinct by index.
+        """
+        # **The request's pinned threshold, not the policy's.** They are the same where the
+        # request was built through `Control._presented`, and differ where a scenario built one
+        # itself -- and the store enforces the pinned one, so reading the policy here granted
+        # twice against a row that needed once and met "already granted".
+        record = store.get_approval(request_id)
+        needed = max(1, record.request.approvals_required if record is not None else 1)
+        for index in range(needed):
+            who = (
+                principal if index == 0 and principal is not None else self._verify_approver(index)
+            )
+            with _granting_principal(who, entitled=entitled):
+                store.grant_approval(request_id, f"{APPROVER}-{index}")
+
+    def _verify_approver(self, index: int) -> Principal:
+        """One of verify's own approvers, distinct by index (§4.2, §11.7).
+
+        `SYNTHETIC_PREFIX`-named, so a principal that ever appeared where it should not have is
+        recognizable on sight, and never the requester: §4.1 refuses a self-approval and a
+        scenario that tripped over it would be grading G18 by accident.
+        """
+        return Principal(
+            agent=f"{reg.SYNTHETIC_PREFIX}-approver-{index}",
+            user=f"{reg.SYNTHETIC_PREFIX}-approver-{index}@example.invalid",
+            issuer=f"https://{reg.SYNTHETIC_PREFIX}.example",
+        )
 
     def execute(
         self,
@@ -875,13 +1283,25 @@ class Engine:
         effect_key: str | None,
         approval_id: str | None,
         preconditions: Callable[[Action], Mapping[str, Any]] | None = None,
+        task: str | None = None,
+        scope: Callable[[Action], Mapping[str, Any]] | None = None,
     ) -> Receipt:
+        # SPEC-v0.9 §6.3.2 — the active selection's task unless a scenario named one, so a
+        # document that binds its grant to a task does not turn every other guarantee red. G24
+        # is the one scenario that passes its own, because its whole subject is the off-task
+        # refusal.
+        if task is None:
+            task = self._task
         if approval_id is None:
-            return control.execute(action, executor, effect_key, preconditions=preconditions)
+            return control.execute(
+                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
+            )
         from ..control import with_approval
 
         with with_approval(approval_id):
-            return control.execute(action, executor, effect_key, preconditions=preconditions)
+            return control.execute(
+                action, executor, effect_key, preconditions=preconditions, task=task, scope=scope
+            )
 
     def refused(
         self,
@@ -920,6 +1340,8 @@ class Engine:
         miss when it travelled beside the grant reason, which is the same category error the
         reason itself had.
         """
+        if self._budget_miss is not None or self._metric_miss is not None:
+            return {"note": reg.BUDGET_MISS_NOTE}
         if self._grant_miss is not None:
             return {"note": reg.GRANT_RESOURCE_NOTE}
         return {} if note is None else {"note": note}
@@ -933,9 +1355,26 @@ class Engine:
         cases is how `examples/authority/devops.yaml` came to be told "the policy lists no
         action" about a document listing five, on a run that exited 0.
         """
-        if self._grant_miss is None:
+        # **Every miss that is true, not the first one found.** An independent review found the
+        # budget miss taking unconditional precedence while `select` records a grant miss for
+        # every failed candidate, so a document with one budget-blocked action and one no grant
+        # covers at all reported only the budget, and the resource miss appeared nowhere. That is
+        # the category error this docstring is about, one dimension over.
+        found = [
+            f"{reg.NO_METRIC_TO_MEASURE} ({self._metric_miss})"
+            if self._metric_miss is not None
+            else None,
+            f"{reg.NO_ACTION_FITS_THE_BUDGET} ({self._budget_miss})"
+            if self._budget_miss is not None
+            else None,
+            f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+            if self._grant_miss is not None
+            else None,
+        ]
+        stated = [line for line in found if line is not None]
+        if not stated:
             return reason
-        return f"{reg.NO_GRANT_COVERS_SELECTION} ({self._grant_miss!r})"
+        return "; and ".join(stated)
 
     def na(self, gid: str, reason: str, **detail: Any) -> GuaranteeResult:
         """`not_applicable`, with the reason that made it so (§1, §2.1).
@@ -1369,6 +1808,13 @@ class Engine:
                         "user": selection.principal.user,
                         "resource": selection.resource,
                         "effect_key": key,
+                        # SPEC-v0.9 §6.3.2 — the children cross a process boundary, so the task
+                        # travels in the payload rather than in `self._task`, which is this
+                        # process's. Without it G4's eight children are refused `authority_task`
+                        # under any document whose grant names a task, and the *control* leg
+                        # fails: eight processes that never ran, reported green by a guarantee
+                        # about concurrency.
+                        "task": selection.task,
                         "approval_id": approval_id,
                         "counter_dir": str(counters),
                         "result_dir": str(results),
@@ -1582,7 +2028,10 @@ class Engine:
             # everything, and the report would say so in green.
             if selection is not None:
                 detail["control"] = "an action this configuration admits reaches a decision"
-                evaluation = control.evaluate(selection.build())
+                # SPEC-v0.9 §6.3.2 — `Control.evaluate` takes the task for the reason that
+                # section gives: it must agree with `execute`, and a control leg that asked
+                # without one would report DENY for a document whose grant names a task.
+                evaluation = control.evaluate(selection.build(), task=selection.task)
                 _expect_control(
                     evaluation.decision is not Decision.DENY,
                     f"{selection.action} evaluates to something other than a denial",
@@ -1636,7 +2085,11 @@ class Engine:
 
         fake.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
         fake.__name__ = "ctrlrun_verify_action"
-        decorated: Callable[..., Any] = protect(selection.action, control=control)(fake)
+        # SPEC-v0.9 §6.3.2 — `@protect` is `Control.execute`'s other door, and a document that
+        # binds its grant to a task refuses every call through it without one.
+        decorated: Callable[..., Any] = protect(
+            selection.action, control=control, task=selection.task
+        )(fake)
         return decorated
 
     def g7(self) -> GuaranteeResult:
@@ -1687,7 +2140,17 @@ class Engine:
                     # §3.5 — verify grants its own approval, through the call
                     # `ctrlrun approve` makes, and the report says so.
                     detail["approved_by_verify"] = True
-                    store.grant_approval(pending.request_id, APPROVER)
+                    # Through the threshold helper, which records a **verified** approver.
+                    # Where the document asks for a role or a threshold, verify configures an
+                    # approver identity (§11.7), and from that moment a grant carrying no
+                    # verified approver is refused `approver_unverified` -- so a raw
+                    # `grant_approval` here failed G7 for a reason about G17.
+                    self._grant_to_threshold(
+                        store,
+                        pending.request_id,
+                        selection.action,
+                        entitled=[role.control for role in self._roles_for(selection.action)],
+                    )
                     from ..control import with_approval
 
                     with with_approval(pending.request_id):
@@ -2923,7 +3386,12 @@ class Engine:
                 "an action that requires approval ran without one",
             )
             request_id = str(getattr(asked, "request_id", ""))
-            store.grant_approval(request_id, APPROVER)
+            self._grant_to_threshold(
+                store,
+                request_id,
+                selection.action,
+                entitled=[role.control for role in self._roles_for(selection.action)],
+            )
 
             world["state"] = f"{reg.SYNTHETIC_PREFIX}-the-state-it-moved-to"
             executor = _Executor()
@@ -2985,6 +3453,795 @@ class Engine:
         finally:
             store.close()
 
+    # --- G17: an unentitled approver is refused -------------------------------------------
+
+    def g17(self) -> GuaranteeResult:
+        """SPEC-v0.8 §3.6, §11.7. Graded where the document names an approver role.
+
+        **The `N/A` reason is about the document**, which is what `verify/guarantees.py` requires
+        of every reason in it: a policy whose cited controls name no `approver_role` gates nobody,
+        which is §3.5's answer and a true statement about what the operator wrote. Whether that
+        operator configured an approver identity is a fact about their application, which verify
+        cannot see and which it therefore supplies for itself (§11.7).
+
+        Both halves, `v0.4 §1.3`. The observable: an approval recorded without the control's role
+        is refused, and the refusal names the control. The control: the same action, approved by
+        an approver the role covers, commits. A check that refused every approval would pass the
+        first and fail the second.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,), needs_approver_role=True)
+        if selection is None:
+            # **Over the whole document, not over one selection.** `select` is deterministic by
+            # codepoint, so on a document with two approve rules where the ungated one sorts
+            # first, asking about that one alone would report "no cited control names an
+            # approver role" of a document that gates entitlement. `v0.7 §8.9` makes an untrue
+            # `N/A` reason a false green, and every reason here is a statement about the
+            # operator's document.
+            if self.select(decisions=(Decision.APPROVE,)) is None:
+                return self.na("G17", self.unselected(reg.NO_APPROVE_RULE))
+            return self.na("G17", reg.NO_APPROVER_ROLE)
+        roles = self._required_roles(selection)
+        wanted = roles[0]
+        approver = Principal(
+            agent=f"{selection.principal.agent}-approver",
+            user=selection.principal.user,
+            issuer=selection.principal.issuer,
+        )
+        identity = ApproverIdentity(_VerifyApproverProvider(approver))
+        control, store, recorder, _ = self._control_for(
+            "G17", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["required_role"] = f"{wanted.control}:{wanted.role}"
+            action = selection.build()
+            # **Through the pinning route, not straight from the provider.** `_REQUIRED_ROLES` is
+            # set inside `Control._presented`, so a request built from `control.approvals.request`
+            # pins nothing, `unsatisfied((), ...)` refuses nothing, and this scenario would FAIL
+            # on every document that gates anything while passing on the shipped examples, which
+            # are `N/A`. §14.3 records the same lesson for the operator tests; verify's own
+            # scenario is where it was not applied.
+            with _required_roles(roles, self.policy.approvals_required(selection.action)):
+                request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            # Recorded entitled for nothing, which is what a surface that verified the credential
+            # and found no role records (§3.8).
+            self._grant_to_threshold(
+                store, request.request_id, selection.action, principal=approver
+            )
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='approver_unentitled')",
+                "an action ran under an approval nobody was recorded as entitled to give",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "approver_unentitled",
+                "ApprovalMismatch(reason='approver_unentitled')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            _expect(
+                _named_event(recorder, EventType.APPROVAL_INVALIDATED, reason="approver_unentitled")
+                and any(
+                    event.data.get("control") == wanted.control
+                    for event in recorder.events
+                    if event.type is EventType.APPROVAL_INVALIDATED
+                ),
+                f"APPROVAL_INVALIDATED naming control {wanted.control!r}",
+                f"events were {recorder.types()}",
+            )
+
+            with _required_roles(roles, self.policy.approvals_required(selection.action)):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            self._grant_to_threshold(
+                store,
+                second.request_id,
+                selection.action,
+                principal=approver,
+                entitled=[role.control for role in roles],
+            )
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, approved by an entitled approver, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G17", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G18: an approver who is the requester is refused ---------------------------------
+
+    def g18(self) -> GuaranteeResult:
+        """SPEC-v0.8 §4.1, §11.7. Graded wherever the document sends an action to approval.
+
+        **Verify supplies the approver identity, and that is the point.** Whether the operator
+        configured one is a fact about a constructor call in their application, which verify
+        cannot see and which `verify/guarantees.py` forbids as an `N/A` reason: every reason
+        there is a statement about the operator's *document*. So the `N/A` here is the one G1
+        and G2 already use, that no action requires approval, and it is true of the document.
+
+        Both halves, `v0.4 §1.3`'s rule. The observable: an approval granted by the principal
+        that requested the action is refused, and the executor is not reached. The control: the
+        same action, approved by a different principal, commits. A check that refused every
+        approval would pass the first and fail the second.
+
+        **The strings differ and the principals are the same**, which is what makes this a test
+        of §4.1's comparison rather than of a string. Both grants carry `APPROVER` as the
+        `approver` string; what differs is the principal the grant recorded.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,))
+        if selection is None:
+            return self.na("G18", self.unselected(reg.NO_APPROVE_RULE))
+        requester = selection.principal
+        identity = ApproverIdentity(_VerifyApproverProvider(requester))
+        control, store, recorder, _ = self._control_for(
+            "G18", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            action = selection.build()
+            detail["approved_by_verify"] = True
+            detail["approver_identity"] = "supplied by verify (SPEC-v0.8 §11.7)"
+            request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            self._grant_to_threshold(
+                store, request.request_id, selection.action, principal=requester
+            )
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='approver_is_requester')",
+                "an action ran under an approval granted by the principal that requested it",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "approver_is_requester",
+                "ApprovalMismatch(reason='approver_is_requester')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            record = store.get_approval(request.request_id)
+            _expect(
+                record is not None and record.status is ApprovalStatus.GRANTED,
+                "the approval is left granted and not consumed",
+                f"the approval is {None if record is None else record.status}",
+            )
+            _expect(
+                _named_event(
+                    recorder, EventType.APPROVAL_INVALIDATED, reason="approver_is_requester"
+                ),
+                "APPROVAL_INVALIDATED with reason 'approver_is_requester'",
+                f"events were {recorder.types()}",
+            )
+
+            # The control: a different principal, the same approver string, and it commits.
+            other = Principal(
+                agent=f"{requester.agent}-approver", user=requester.user, issuer=requester.issuer
+            )
+            pinned = self._roles_for(selection.action)
+            with _required_roles(pinned, self.policy.approvals_required(selection.action)):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            self._grant_to_threshold(
+                store,
+                second.request_id,
+                selection.action,
+                principal=other,
+                entitled=[role.control for role in pinned],
+            )
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, approved by a different principal, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G18", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G19: one principal counts once ---------------------------------------------------
+
+    def g19(self) -> GuaranteeResult:
+        """SPEC-v0.8 §4.2, §11.7. Graded where the document asks for more than one approval.
+
+        **The `N/A` reason is about the document**: an action that takes one yes has no count to
+        get wrong, which is a true statement about what the operator wrote and not a claim about
+        a deployment verify cannot see (§11.7).
+
+        Both halves, `v0.4 §1.3`. The observable: one principal answers twice, through two doors
+        and under two different approver strings, and the action is still refused as `pending`.
+        The control: N distinct principals answer and it commits. A count that never reached N
+        would pass the first and fail the second, and a count that moved on the duplicate would
+        fail the first, which is why neither half is evidence alone.
+
+        The two grants carry **different `approver` strings**, because a scenario in which the
+        strings match proves only that the row was deduplicated on a string, and §4.2's rule is
+        about the resolved principal.
+        """
+        selection = self.select(decisions=(Decision.APPROVE,), needs_threshold=True)
+        if selection is None:
+            # Over the whole document, exactly as G17 does it: a document with an ungated
+            # approve rule sorting before a gated one would otherwise report the threshold
+            # reason about a document that does name one.
+            if self.select(decisions=(Decision.APPROVE,)) is None:
+                return self.na("G19", self.unselected(reg.NO_APPROVE_RULE))
+            return self.na("G19", reg.NO_M_OF_N)
+        needed = self.policy.approvals_required(selection.action)
+        roles = self._required_roles(selection)
+        entitled = [role.control for role in roles]
+        approvers = tuple(
+            Principal(
+                agent=f"{selection.principal.agent}-approver-{index}",
+                user=selection.principal.user,
+                issuer=selection.principal.issuer,
+            )
+            for index in range(1, needed + 1)
+        )
+        identity = ApproverIdentity(_VerifyApproverProvider(approvers[0]))
+        control, store, recorder, _ = self._control_for(
+            "G19", selection, approver_identity=identity
+        )
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["approved_by_verify"] = True
+            detail["approvals_required"] = needed
+            action = selection.build()
+            # Through the pinning route: `_APPROVALS_REQUIRED` is read inside `build_request`,
+            # so a request built outside `Control._presented` would pin 1 and this scenario
+            # would grade a threshold the document does not ask for (§14.3).
+            with _required_roles(roles, needed):
+                request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+            for door in ("mcp-operator", "cli"):
+                with _granting_principal(approvers[0], entitled=entitled):
+                    store.grant_approval(request.request_id, f"{door}:{APPROVER}")
+            record = store.get_approval(request.request_id)
+            _expect(
+                record is not None and len(record.approvers) == 1,
+                "one principal answering twice is recorded once",
+                f"the row carries {0 if record is None else len(record.approvers)} approvers",
+            )
+            _expect(
+                record is not None and record.status is ApprovalStatus.PENDING,
+                f"the request is still pending at 1 of {needed}",
+                f"the request is {None if record is None else record.status}",
+            )
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, action, executor, selection.effect_key, request.request_id
+                ),
+                (ApprovalMismatch,),
+                "ApprovalMismatch(reason='pending')",
+                "an action ran on a count one principal reached alone",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "pending",
+                "ApprovalMismatch(reason='pending')",
+                f"ApprovalMismatch(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+
+            # The control: N distinct principals, and the same action commits.
+            with _required_roles(roles, needed):
+                second = control.approvals.request(selection.build(), DEFAULT_APPROVAL_TTL)
+            for index, approver in enumerate(approvers, start=1):
+                with _granting_principal(approver, entitled=entitled):
+                    store.grant_approval(second.request_id, f"{APPROVER}-{index}")
+            committed = _Executor()
+            receipt = self.execute(
+                control, action, committed, selection.effect_key, second.request_id
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                f"the same action, approved by {needed} distinct principals, commits",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G19", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G20: a credential revoked before its exp is refused -------------------------------
+
+    def g20(self) -> GuaranteeResult:
+        """SPEC-v0.8 §6.4, §11.7. Graded with a **note**, never `N/A`.
+
+        Whether this deployment configures a revocation feed is a fact about a constructor call
+        in its own code, which no document verify reads can state, and `verify/guarantees.py`
+        forbids an `N/A` reason that is not about the operator's document. So verify supplies a
+        feed, grades the kernel's behaviour under it, and the note says exactly that.
+
+        Both halves, `v0.4 §1.3`. The observable: a verified credential with a **future `exp`**,
+        revoked by a consumed event, is refused at resolution. The control: an unrevoked
+        credential from the same issuer, in the same run, resolves. A provider that refused
+        every credential would pass the first and fail the second, and a feed that refuses
+        everything is not a feed.
+
+        It grades `ctrlrun.revocation` directly rather than through an action, because §6.4 is
+        explicit that the refusal happens at resolution and writes nothing: there is no receipt
+        to assert and no event, and a scenario that drove an action would be asserting the
+        absence of evidence through two layers that do not produce any.
+        """
+        selection = self.select()
+        if selection is None:
+            return self.na("G20", self.unselected(reg.NO_ACTIONS))
+        try:
+            from ..revocation import FileRevocationFeed
+        except MissingDependency as absent:
+            # `ctrlrun[identity]` is an extra, and a guarantee verify cannot exercise because a
+            # dependency is missing is `N/A` with that as its reason -- a statement about this
+            # installation, which §11.7 permits where a statement about the document would be
+            # false.
+            return self.na("G20", str(absent).split(";")[0])
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["note"] = reg.REVOCATION_NOTE
+            detail["feed_supplied_by_verify"] = True
+            issuer = f"https://{reg.SYNTHETIC_PREFIX}.example"
+            revoked, unrevoked = f"{reg.SYNTHETIC_PREFIX}-revoked", f"{reg.SYNTHETIC_PREFIX}-live"
+            path = self._scratch / "revocations.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "iss": issuer,
+                        "jti": f"{reg.SYNTHETIC_PREFIX}-set",
+                        "events": {
+                            "https://schemas.openid.net/secevent/caep/event-type/session-revoked": {
+                                "subject": {"format": "iss_sub", "iss": issuer, "sub": revoked}
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            feed = FileRevocationFeed(path, issuers=[issuer])
+
+            _expect(
+                feed.revoked(issuer=issuer, subject=revoked, token_id=None),
+                "the revoked credential is reported revoked",
+                "the feed reported it live, so a revoked credential would be admitted",
+            )
+            _expect_control(
+                not feed.revoked(issuer=issuer, subject=unrevoked, token_id=None),
+                "an unrevoked credential from the same issuer is not",
+                "the feed reported every credential revoked, which is not a feed",
+            )
+            _expect(
+                not feed.revoked(
+                    issuer=f"https://other-{reg.SYNTHETIC_PREFIX}.example",
+                    subject=revoked,
+                    token_id=None,
+                ),
+                "an issuer this feed does not cover is unaffected by it",
+                "the feed decided for an issuer it does not cover",
+            )
+
+        control, store, recorder, _ = self._control_for("G20", selection)
+        del control
+        try:
+            return self.graded("G20", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G21: a policy nobody approved decides nothing --------------------------------------
+
+    def g21(self) -> GuaranteeResult:
+        """SPEC-v0.8 §8.4, §11.7. Graded with a **note**, never `N/A`.
+
+        Whether a deployment passes `require_approved_policy=True` is a fact about a constructor
+        call in its own code, which no document verify reads can state, so verify sets the flag
+        for its own scenario and the note says exactly that.
+
+        Both halves, `v0.4 §1.3`. The observable: with the flag set and no committed
+        `policy:<hash>` effect, an action the document would have allowed is denied
+        `policy_unapproved` and the executor is not reached. The control: the **same** action,
+        under the same document with the flag unset, runs. A kernel that denied everything would
+        pass the first and fail the second.
+        """
+        selection = self.select(decisions=(Decision.ALLOW,))
+        if selection is None:
+            return self.na("G21", self.unselected(reg.EVERY_ACTION_DENIED))
+        control, store, recorder, _ = self._control_for("G21", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["note"] = reg.POLICY_APPROVAL_NOTE
+            detail["require_approved_policy"] = "set by verify (SPEC-v0.8 §11.7)"
+            action = selection.build()
+            guarded, guarded_store, _, _ = self._control_for(
+                "G21-guarded", selection, require_approved_policy=True, declares_change=True
+            )
+            # Its own scratch store, closed when the scenario ends: the guarded `Control` must
+            # find **no** committed `policy:<hash>` effect, and sharing the store with the
+            # control half would make that a property of ordering rather than of the flag.
+            detail["guarded_store"] = type(guarded_store).__name__
+            executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(guarded, action, executor, selection.effect_key, None),
+                (ActionDenied,),
+                "ActionDenied(reason='policy_unapproved')",
+                "an action ran under a policy nobody approved",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == "policy_unapproved",
+                "ActionDenied(reason='policy_unapproved')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                executor.calls == 0,
+                "the executor is not reached",
+                f"the executor was called {executor.calls} times",
+            )
+            committed = _Executor()
+            receipt = self.execute(
+                control, selection.build(), committed, selection.effect_key, None
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and committed.calls == 1,
+                "the same action, without the requirement, runs",
+                f"it ended {receipt.result} after {committed.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G21", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G22: a budget held by ambiguity refuses the next reserve --------------------------
+
+    def g22(self) -> GuaranteeResult:
+        """SPEC-v0.9 §4.1, §8. **R2: ambiguity is not a refund.**
+
+        The half that matters is the hold. An `AMBIGUOUS` effect keeps its consumption until a
+        human or a hook resolves it, because otherwise an agent that can generate ambiguity can
+        generate authority, and generating ambiguity is free for any flaky integration. That is
+        the correctness hole that parked budgets for four milestones.
+
+        Both halves, `v0.4 §1.3`: the budget spends while it has room, and refuses once a held
+        charge fills it. And the release: `FAILED` gives the room back, which is the other half of
+        §4.1's single rule and the thing a kernel that simply never released would fail.
+        """
+        if self.authority is None:
+            return self.na("G22", reg.NO_AUTHORITY_SECTION)
+        budgeted = [
+            grant_id
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].budgets
+        ]
+        if not budgeted:
+            return self.na("G22", reg.NO_BUDGET)
+        selection = self.select(needs_effect=True, grant_filter=lambda g: g.id == budgeted[0])
+        if selection is None:
+            return self.na("G22", self.unselected(reg.NO_EFFECT_TEMPLATE))
+        grant = self.authority.grants[budgeted[0]]
+        budget = (grant.budgets or ())[0]
+        # Decided **before** the scenario is built, so a document that cannot exercise the hold
+        # reports `N/A` with a reason that is true of it rather than failing a control leg.
+        try:
+            per_action = _metric_value(selection.build(), budget.metric, budgeted[0])
+        except InvalidArgument:
+            return self.na("G22", reg.NO_BUDGET_METRIC)
+        if per_action == 0:
+            # **The selected action spends nothing, which grades nothing.** `select` picks the
+            # first rule a document admits, and a band beginning at zero gives an amount of zero,
+            # so the budget would never move and every assertion below would pass against a
+            # kernel that does not charge at all. Nudged to the smallest spend the same rule
+            # admits, which keeps the decision and the resource verify already validated.
+            selection = replace(
+                selection, arguments={**dict(selection.arguments), budget.metric: 1}
+            )
+            try:
+                per_action = _metric_value(selection.build(), budget.metric, budgeted[0])
+            except InvalidArgument:
+                return self.na("G22", reg.NO_BUDGET_METRIC)
+        if per_action <= 0 or per_action > budget.limit:
+            return self.na("G22", reg.BUDGET_CANNOT_BE_FILLED)
+        control, store, recorder, _ = self._control_for("G22", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = budgeted[0]
+            detail["metric"] = budget.metric
+            detail["limit"] = budget.limit
+            detail["per_action"] = per_action
+            action = selection.build()
+            # **Resolved here, not read out of a context variable.** `Control._charges_for`
+            # answers from `_AUTHORITY_RESULT`, which only `execute` sets, and this runs before
+            # the control leg. It therefore returned `()` whenever nothing had executed in this
+            # context yet, the synthetic hold below reserved nothing, the budget was never
+            # filled, and G22 reported **FAIL** -- the kernel is broken -- on the shipped
+            # example under `ctrlrun verify --only G22`.
+            #
+            # In a full run it returned the right charges only because a previous scenario's
+            # `execute` had left its own result in that variable, so this guarantee was passing
+            # for a reason that had nothing to do with it. That is the false green this
+            # repository keeps finding, on the guarantee that proves budgets work at all.
+            assert self.authority is not None  # `budgeted` is non-empty, so there is one
+            resolved = self.authority.evaluate(
+                action, now=control._clock(), store=store, task=selection.task
+            )
+            charges = self.authority._charges_for(action, resolved, store=store)
+            _expect_control(
+                bool(charges),
+                "the selected action charges the budgeted grant",
+                f"no charge resolved for {selection.action} on {budgeted[0]}: {resolved.reason}",
+            )
+
+            # The control: with room, it runs.
+            executor = _Executor()
+            receipt = self.execute(
+                control,
+                action,
+                executor,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and executor.calls == 1,
+                "with room in the budget the action runs",
+                f"it ended {receipt.result} after {executor.calls} executor calls",
+            )
+
+            # **One held charge for the rest of the budget**, then `AMBIGUOUS`: the state R2 is
+            # about, where nobody has said whether it happened. One reservation rather than a
+            # loop, so the scenario costs the same on a budget of 500 and one of 500,000,000; the
+            # property is the hold, not the arithmetic of filling.
+            held_key = f"{selection.effect_key}-{reg.SYNTHETIC_PREFIX}-held"
+            held_action = f"act_{reg.SYNTHETIC_PREFIX}held"
+            store.reserve_effect(
+                held_key,
+                held_action,
+                _ONE_HOUR,
+                tuple(replace(charge, amount=charge.limit - per_action) for charge in charges),
+            )
+            store.mark_ambiguous(held_key, held_action, "the outcome is unknown")
+            detail["held"] = budget.limit - per_action
+
+            later = selection.build()
+            blocked = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(control, later, blocked, f"{selection.effect_key}-next", None),
+                (ActionDenied,),
+                "ActionDenied(reason='budget_exhausted') once the budget is held",
+                "the action ran with the budget held by an unresolved effect",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == BUDGET_EXHAUSTED,
+                "ActionDenied(reason='budget_exhausted')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                blocked.calls == 0,
+                "the executor is not reached once the budget is held",
+                f"the executor was called {blocked.calls} times",
+            )
+
+            # And §4.1's other half: `FAILED` gives the room back. A kernel that never released
+            # would pass everything above.
+            #
+            # Through `resolve_effect`, which is §4.2's own row for this: the record is
+            # `AMBIGUOUS`, and `v0.1 §5.2` makes a human the only authority that moves it. That
+            # is also the shape an operator actually meets, `ctrlrun resolve`.
+            store.resolve_effect(held_key, EffectState.FAILED, "ctrlrun-verify")
+            after = _Executor()
+            freed = selection.build()
+            receipt = self.execute(control, freed, after, f"{selection.effect_key}-freed", None)
+            _expect(
+                receipt.result is ReceiptResult.COMMITTED and after.calls == 1,
+                "a `FAILED` effect releases its charge and the budget spends again",
+                f"it ended {receipt.result} after {after.calls} executor calls",
+            )
+
+        try:
+            return self.graded("G22", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G23: a scope provider that cannot answer refuses ---------------------------------
+
+    def g23(self) -> GuaranteeResult:
+        """SPEC-v0.9 §5.6, §8, and §8.1 on why this one is never `N/A`.
+
+        A scope provider is a Python callable an operator passes at decoration or call time, so
+        no document states whether one is configured and `verify` reads a document. Rather than
+        report `N/A` for a fact it cannot observe, verify **constructs the scenario**: it wires a
+        provider that raises and grades what the kernel does, the way `v0.4 §3` has it construct
+        every other scenario.
+
+        Both halves, `v0.4 §1.3`. The positive control is a provider that answers and admits the
+        resource, without which a kernel refusing every scoped action would grade `PASS`.
+        """
+        selection = self.select()
+        if selection is None:
+            return self.na("G23", self.unselected(reg.EVERY_ACTION_DENIED))
+        # A scope names resources, so an action carrying none can never be in one (§5.6, and
+        # `v0.3 §4.4`'s rule for a grant that declares `resources:`). Where nothing this document
+        # admits has a resource, there is no scope question to grade, and saying so is a
+        # statement about the document rather than about the operator's code.
+        if selection.resource is None:
+            scoped = self.select(needs_effect=False, grant_filter=None)
+            if scoped is None or scoped.resource is None:
+                return self.na("G23", reg.NO_RESOURCE_TO_SCOPE)
+            selection = scoped
+        control, store, recorder, _ = self._control_for("G23", selection)
+        resource = selection.resource
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["resource"] = resource
+            detail["note"] = reg.SCOPE_PROVIDER_NOTE
+            # The control: a provider that answers, admitting exactly this resource.
+            answering = _Executor()
+            action = selection.build()
+            receipt = self.execute(
+                control,
+                action,
+                answering,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+                scope=lambda _action: {"resources": [str(resource)]},
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and answering.calls == 1,
+                "a provider that answers, admitting this resource, lets the action run",
+                f"it ended {receipt.result} after {answering.calls} executor calls",
+            )
+
+            def unavailable(_action: Action) -> Mapping[str, Any]:
+                raise RuntimeError(f"{reg.SYNTHETIC_PREFIX}: the scope source is unreachable")
+
+            later = selection.build()
+            blocked = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, later, blocked, selection.effect_key, None, scope=unavailable
+                ),
+                (ActionDenied,),
+                "ActionDenied(reason='scope_unavailable') when the provider raises",
+                "the action ran with no scope answer",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == SCOPE_UNAVAILABLE,
+                "ActionDenied(reason='scope_unavailable')",
+                f"ActionDenied(reason={reason!r})",
+            )
+            _expect(
+                blocked.calls == 0,
+                "the executor is not reached when the scope cannot be read",
+                f"the executor was called {blocked.calls} times",
+            )
+            # **Nothing reserved**, which is the half of G23 that the ordering exists for: a
+            # provider called after the reservation would leave a lease to lapse.
+            record = store.get_effect(str(selection.effect_key))
+            _expect(
+                record is None or record.state is not EffectState.RESERVED,
+                "nothing is left reserved when the scope provider fails",
+                f"the effect record is {None if record is None else record.state}",
+            )
+
+        try:
+            return self.graded("G23", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G24: a task-bound grant is refused off its task ----------------------------------
+
+    def g24(self) -> GuaranteeResult:
+        """SPEC-v0.9 §6.2, §8. Both halves, `v0.4 §1.3`.
+
+        The positive control is the grant on a task it names: without it a kernel that refused
+        every task whatever would grade `PASS`, which is what `v0.4 §2.2` means by a guarantee
+        that could not have failed.
+
+        The refusal is asserted **by reason** and not by type. `authority_task` is the whole
+        point of §6.2: a task mismatch folded into `matches_shape` would report `no_authority`,
+        which an operator cannot tell from having written no grant at all.
+        """
+        if self.authority is None:
+            return self.na("G24", reg.NO_AUTHORITY_SECTION)
+        bound = [
+            self.authority.grants[grant_id]
+            for grant_id in sorted(self.authority.grants)
+            if self.authority.grants[grant_id].tasks
+        ]
+        if not bound:
+            return self.na("G24", reg.NO_TASKS)
+        parent = bound[0]
+        selection = self.select(grant_filter=lambda grant: grant.id == parent.id)
+        if selection is None:
+            return self.na("G24", reg.NO_GRANT_MATCHES)
+        patterns = parent.tasks or ()
+        # A concrete task the document's own pattern admits, built by replacing the glob rather
+        # than invented: a literal that happened not to match would make the control fail for a
+        # reason that is not the kernel's.
+        on_task = patterns[0].replace(DEEP_WILDCARD, "run").replace(WILDCARD, "run")
+        off_task = f"{reg.SYNTHETIC_PREFIX}-not-a-task"
+        control, store, recorder, _ = self._control_for("G24", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["grant_id"] = parent.id
+            detail["tasks"] = list(patterns)
+            detail["on_task"] = on_task
+            detail["off_task"] = off_task
+            action = selection.build()
+            executor = _Executor()
+            receipt = self.execute(
+                control,
+                action,
+                executor,
+                selection.effect_key,
+                self.approve(control, store, action, selection),
+                task=on_task,
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and executor.calls == 1,
+                f"on {on_task!r}, a task the grant names, the action runs",
+                f"it ended {receipt.result} after {executor.calls} executor calls",
+            )
+            later = selection.build()
+            off_executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, later, off_executor, selection.effect_key, None, task=off_task
+                ),
+                (AuthorityDenied,),
+                f"AuthorityDenied(reason='authority_task') on {off_task!r}",
+                "the action ran on a task the grant does not name",
+            )
+            reason = getattr(refusal, "reason", "")
+            _expect(
+                reason == AUTHORITY_TASK,
+                "AuthorityDenied(reason='authority_task')",
+                f"AuthorityDenied(reason={reason!r})",
+            )
+            _expect(
+                off_executor.calls == 0,
+                "the executor is not reached off-task",
+                f"the executor was called {off_executor.calls} times",
+            )
+
+        try:
+            return self.graded("G24", selection, store, recorder, body)
+        finally:
+            store.close()
+
+
+#: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
+#: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a
+#: real issuer's would be `roles` or `groups`.
+_VERIFY_ROLES_CLAIM: Final = "roles"
 
 #: G12's loopback address: the literal, never `localhost` and never `::1` (SPEC-v0.7 §8.9).
 _LOOPBACK: Final = "127.0.0.1"
@@ -3384,6 +4641,12 @@ def _narrow(parent: Grant, selection: _Selection) -> tuple[Grant, Principal, dic
         environments=None if parent.environments is None else (selection.environment,),
         expires_at=None if parent.expires_at is None else parent.expires_at - _ONE_HOUR,
         delegable=False,
+        # SPEC-v0.9 §8.0 — carried, or `_narrowed`'s own guard below raises
+        # `VerifyInternalError` on any document that names tasks, before a single widening runs.
+        tasks=None if parent.tasks is None else parent.tasks,
+        # SPEC-v0.9 §8.0, the same coupling `tasks` has: carried, or `_narrowed`'s own guard
+        # raises `VerifyInternalError` on any document that budgets, before a widening runs.
+        budgets=None if parent.budgets is None else parent.budgets,
     )
     offending = contained_dimension(parent, child)
     if offending is not None:
@@ -3424,6 +4687,22 @@ def _widen(parent: Grant, narrowed: Grant, dimension: str) -> Grant | None:
         if parent.expires_at is None:
             return None
         return replace(narrowed, expires_at=parent.expires_at + _ONE_HOUR)
+    if dimension == "tasks":
+        # SPEC-v0.9 §6.2. `DEEP_WILDCARD` rather than an extra pattern, matching `actions` and
+        # `resources` above: the widening has to be one no parent pattern can contain, and a
+        # sibling task id would be contained by a parent whose pattern already globs.
+        if parent.tasks is None:
+            return None
+        return replace(narrowed, tasks=(DEEP_WILDCARD,))
+    if dimension == "budgets":
+        # SPEC-v0.9 §2.6. Widened on the **limit**, which is the axis that reads forwards; the
+        # window axis reads backwards and a widening there would be a *shorter* window, which is
+        # the case a draft of the rule got wrong. One axis is enough to exercise the dimension,
+        # and the loud one is the one an operator would recognise in a counterexample.
+        if not parent.budgets:
+            return None
+        widened = tuple(replace(budget, limit=budget.limit + 1) for budget in parent.budgets)
+        return replace(narrowed, budgets=widened)
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")
 
 
@@ -3448,4 +4727,8 @@ def _omit(narrowed: Grant, parent: Grant, dimension: str) -> Grant | None:
         return None if parent.environments is None else replace(narrowed, environments=None)
     if dimension == "expires_at":
         return None if parent.expires_at is None else replace(narrowed, expires_at=None)
+    if dimension == "tasks":
+        return None if parent.tasks is None else replace(narrowed, tasks=None)
+    if dimension == "budgets":
+        return None if parent.budgets is None else replace(narrowed, budgets=None)
     raise VerifyInternalError(f"G9: unknown containment dimension {dimension!r}")

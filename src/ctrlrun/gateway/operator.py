@@ -34,7 +34,14 @@ from pathlib import Path
 from typing import Any, Final
 
 from ..action import Principal
-from ..approval import ApprovalRecord, ApprovalStatus
+from ..approval import (
+    ApprovalRecord,
+    ApprovalStatus,
+    _granting_principal,
+    entitled_controls,
+    roles_held,
+    unsatisfied,
+)
 from ..control import Control
 from ..effect import RESOLVED_BY_HUMAN, EffectState
 from ..errors import CTRLRunError, IdentityError, InvalidArgument
@@ -44,7 +51,15 @@ from ..identity import (
     IdentityProvider,
 )
 from ..receipt import Event, EventType, iso_timestamp
-from ..reporting import effect_document, inspection_for, since_boundary, stats_document
+from ..reporting import (
+    effect_document,
+    inspection_for,
+    since_boundary,
+    stats_document,
+)
+from ..reporting import (
+    ledger_rows as _ledger_rows,
+)
 from ..state import RESOLUTIONS, StateStore
 from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
 from .wire import (
@@ -99,6 +114,11 @@ PRINCIPAL_EXPIRED: Final = (-41014, "ctrlrun.principal_expired", 403)
 
 #: Reused unchanged from `v0.2 §6.10`.
 NO_PRINCIPAL: Final = (-41007, "ctrlrun.no_principal", 403)
+
+#: SPEC-v0.8 §3.8 — the credential is verified and does not carry the role the request pinned.
+#: A 403 and not a 400: the caller is who they say they are, and the answer is that this is not
+#: theirs to give.
+_NOT_ENTITLED: Final = -41015
 STORE_REFUSED: Final = (-41003, "ctrlrun.approval_denied", 200)
 
 _METHOD_NOT_FOUND: Final = -32601
@@ -141,6 +161,10 @@ class OperatorConfig:
     identity_jwt_audience: str | None = None
     identity_jwt_token_type: str | None = None
     identity_jwt_header: str = "authorization"
+    #: SPEC-v0.8 §3.4, §11.1 — which claim this deployment's issuer puts roles in. `None` means
+    #: no role can be read, so any control naming one refuses: a deployment naming roles in its
+    #: policy and no claim to read them from has configured half a check.
+    approver_roles_claim: str | None = None
     identity_jwt_agent_claim: str = "sub"
     identity_jwt_user_claim: str | None = None
     identity_jwt_claims: tuple[str, ...] = ()
@@ -399,6 +423,43 @@ class OperatorServer:
         self._control = control
         self._identity = identity
         self._clock = clock
+        self._warn_about_unreadable_roles()
+
+    def _roles_claim(self) -> str | None:
+        """Which claim roles are read from: `--approver-roles-claim`, else the `Control`'s.
+
+        SPEC-v0.8 §3.4 puts the claim name on `ApproverIdentity` because it is a property of
+        the issuer that verifies approvers, and this server is one surface reading it. The flag
+        wins where both are set, because a flag is what an operator changes to debug a
+        deployment, and the two disagreeing is itself worth the warning below.
+        """
+        if self._config.approver_roles_claim:
+            return self._config.approver_roles_claim
+        identity = self._control.approver_identity
+        return None if identity is None else identity.roles_claim
+
+    def _warn_about_unreadable_roles(self) -> None:
+        """SPEC-mcp-operator §4.3: half a check, named at startup and not at the first refusal.
+
+        A policy whose cited controls name an `approver_role` and a deployment with no claim to
+        read roles from refuses **every** answer to those requests. That is the fail-closed
+        direction and it is correct; what is not acceptable is discovering it when a human is
+        told no at three in the morning.
+        """
+        if self._roles_claim():
+            return
+        policy = self._control.policy
+        gated = sorted(
+            identifier for identifier, control in policy.controls.items() if control.approver_role
+        )
+        if not gated:
+            return
+        _LOG.warning(
+            "controls %s name an approver_role and no claim is configured to read roles from: "
+            "every approval they gate will be refused. Set --approver-roles-claim, or pass "
+            "roles_claim= on the Control's ApproverIdentity (SPEC-v0.8 §3.4)",
+            ", ".join(gated),
+        )
 
     @property
     def config(self) -> OperatorConfig:
@@ -754,8 +815,15 @@ class OperatorServer:
             for receipt in self.store.receipts()
             if boundary is None or receipt.finished_at >= boundary
         ]
-        # §9.1 — one producer for `ctrlrun.stats/v1`. T193 asserts equality with the CLI's.
-        return stats_document(counted, mode=self._control.policy.mode, boundary=boundary)
+        # §9.1 — one producer for `ctrlrun.stats/v1`. T193 asserts equality with the CLI's, and
+        # SPEC-v0.9 §7.3's row count is part of that document: a key the CLI reports and this
+        # does not is two documents under one schema name, which is what §9.1 exists to stop.
+        return stats_document(
+            counted,
+            mode=self._control.policy.mode,
+            boundary=boundary,
+            ledger_rows=_ledger_rows(self.store),
+        )
 
     # --- the write tools (§4.5) -----------------------------------------------------------
 
@@ -764,12 +832,12 @@ class OperatorServer:
     ) -> dict[str, Any]:
         who = self._attribution(principal)
         if tool.name == "approve":
-            return self._approve(str(arguments["request_id"]), who)
+            return self._approve(str(arguments["request_id"]), who, principal)
         if tool.name == "deny":
-            return self._deny(str(arguments["request_id"]), who)
+            return self._deny(str(arguments["request_id"]), who, principal)
         return self._resolve_effect(arguments, who)
 
-    def _approve(self, request_id: str, who: str) -> dict[str, Any]:
+    def _approve(self, request_id: str, who: str, principal: Principal) -> dict[str, Any]:
         """The two calls `ctrlrun approve` makes, in the same order (§4.5).
 
         The record's `action_hash` is whatever was stored when the request was created (`v0.1
@@ -779,7 +847,42 @@ class OperatorServer:
         """
         store = self.store
         record = store.get_approval(request_id)
-        approval = store.grant_approval(request_id, who)
+        # SPEC-v0.8 §2.6: **this server is the surface that can do this**, and until now it
+        # resolved a principal for every request and then discarded it into the string `who`.
+        # The principal its own provider verified is recorded beside that string, so an
+        # approval granted here is consumable in a deployment that checks (§2.7). It is recorded
+        # whether or not the deployment checks, because it is true either way.
+        #
+        # SPEC-v0.8 §3.8: and the entitlement the request pinned is computed here, where the
+        # credential is, and refused here where it is not held. This half is the **courtesy**: a
+        # human learns at the moment they answer rather than at the moment an agent retries. The
+        # guarantee is `Control`'s check at consumption, which reads what this recorded.
+        required = () if record is None else record.request.required_roles
+        held = roles_held(principal, self._roles_claim())
+        entitled = entitled_controls(required, held)
+        missing = unsatisfied(required, entitled)
+        if missing is not None:
+            # §3.7: named in the operator's log as well as in the answer, because the answer
+            # goes to the person who was refused and this goes to whoever configured the claim.
+            _LOG.warning(
+                "%s answered %s without the role %r that control %r requires; roles were read "
+                "from the claim %r and held %s",
+                principal.agent,
+                request_id,
+                missing.role,
+                missing.control,
+                self._roles_claim(),
+                sorted(held) or "none",
+            )
+            raise _Refused(
+                _NOT_ENTITLED,
+                "ctrlrun.not_entitled",
+                403,
+                f"answering this request needs the role {missing.role!r}, required by control "
+                f"{missing.control!r}, and the credential presented does not carry it",
+            )
+        with _granting_principal(principal, entitled=entitled):
+            approval = store.grant_approval(request_id, who)
         # `grant_approval` refuses an unknown id (`v0.1 §4.1`, `check_answerable`) and nothing
         # deletes an approval row, so the record exists by here. This is an invariant check and
         # not a guard against a caller: the previous spelling, `if record is not None:`, was a
@@ -791,6 +894,16 @@ class OperatorServer:
                 500,
                 f"{request_id} was granted and then could not be read back",
             )
+        if approval is None:
+            # SPEC-v0.8 §4.4: recorded, still short of N. No `APPROVAL_GRANTED`, because nothing
+            # was granted; the answer is a fact the caller needs and not an event about a grant.
+            after = store.get_approval(request_id)
+            return {
+                "status": "pending",
+                "request_id": request_id,
+                "approvals_required": record.request.approvals_required,
+                "approvals_recorded": 0 if after is None else len(after.approvers),
+            }
         store.append_event(
             self._event(
                 EventType.APPROVAL_GRANTED,
@@ -808,10 +921,11 @@ class OperatorServer:
             "expires_at": iso_timestamp(approval.expires_at),
         }
 
-    def _deny(self, request_id: str, who: str) -> dict[str, Any]:
+    def _deny(self, request_id: str, who: str, principal: Principal) -> dict[str, Any]:
         store = self.store
         record = store.get_approval(request_id)
-        store.deny_approval(request_id, who)
+        with _granting_principal(principal):
+            store.deny_approval(request_id, who)
         if record is None:  # pragma: no cover - deny_approval refused an unknown id above
             raise _Refused(
                 _INTERNAL_ERROR,

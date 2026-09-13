@@ -30,7 +30,7 @@ from ...action import Action
 from ...effect import DEFAULT_LEASE, EffectRecord, EffectState, Reservation
 from ...errors import NotExecuted
 from ...receipt import Event
-from ...state import ClockSkew, DelegationRecord, StateStore
+from ...state import Charge, ClockSkew, DelegationRecord, StateStore
 from .backends import SQLiteBackend, StoreBackend
 
 
@@ -87,7 +87,11 @@ class _TwoWinners(_Wrapped):
     """Drops the uniqueness check: every contender reserves."""
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         now = datetime.now(tz=None).astimezone()
         return Reservation(
@@ -100,7 +104,11 @@ class _ReleasesAnExpiredLease(_Wrapped):
     `AMBIGUOUS` and refusing (`v0.1 §5.3 E3`)."""
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         record = self._inner.get_effect(effect_key)
         if record is not None and record.lease_expires_at is not None:
@@ -126,7 +134,11 @@ class _RefusesWithTheWrongError(_Wrapped):
     """
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         try:
             return self._inner.reserve_effect(effect_key, action_id, lease)
@@ -158,9 +170,10 @@ class _ConsumesBeforeReserving(_Wrapped):
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Any:
         approval = self._inner.consume_approval(approval_id, action_hash)
-        reservation = self._inner.reserve_effect(effect_key, action_id, lease)
+        reservation = self._inner.reserve_effect(effect_key, action_id, lease, charges)
         return approval, reservation
 
 
@@ -274,7 +287,11 @@ class _KeepsTheResolverAcrossARetry(_Wrapped):
         self._resolvers = {}
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         before = self._inner.get_effect(effect_key)
         reservation = self._inner.reserve_effect(effect_key, action_id, lease)

@@ -14,6 +14,7 @@
 - [ ] **`scripts/check.sh` green** under the project's interpreter.
 - [ ] **Independent review** requested for anything touching authorization, identity, delegation, the gateway, an adapter or the store.
 - [ ] **Nothing in `src/` merges on green CI alone**; a maintainer reads it.
+- [ ] **Signed off.** Every commit carries `Signed-off-by` with its author's email (`git commit -s`); CONTRIBUTING.md's *Sign your work* says what that certifies.
 
 ## Mutation table
 

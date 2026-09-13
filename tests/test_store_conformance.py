@@ -20,6 +20,7 @@ from ctrlrun.conformance.report import SuiteStatus
 from ctrlrun.conformance.store import SUITES, run
 from ctrlrun.conformance.store.backends import InMemoryBackend, SQLiteBackend
 from ctrlrun.conformance.store.fixtures import FIXTURES
+from ctrlrun.conformance.store.suites import NO_CONTENTION
 
 # --- T140: every fixture fails its named suite, and every suite has a fixture -------------
 
@@ -152,6 +153,11 @@ def test_T141_in_memory_reports_only_the_honest_reasons(tmp_path):
     assert reasons == {
         "this backend's storage cannot be opened from another process",
         "this backend's storage does not outlive the object that holds it",
+        # SPEC-v0.8 §4.5. Its own sentence rather than the first one above, because it says
+        # something the others do not: the sequential half of that case **did** run and pass,
+        # and a reader who saw only "cannot be opened from another process" would not know
+        # which half of a two-part case they had evidence for.
+        NO_CONTENTION,
         NO_CLOCK,
     }, reasons
     for suite in report.suites:

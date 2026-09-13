@@ -1591,6 +1591,11 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         # a v0.6 feature than that one: §9.4's claim is about the surface *this milestone* grew,
         # and a subcommand landing before the tag does not retroactively make it one.
         "scan",
+        # SPEC-v0.8 §8.3, §11.1. A group, not a command: `propose` and `replay` live under it.
+        # There is deliberately no `policy approve` -- a proposal is an ordinary approval
+        # request, so `ctrlrun approve` answers it, and a second command would be a second
+        # approval path.
+        "policy",
     ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)

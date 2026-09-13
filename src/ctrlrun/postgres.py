@@ -46,8 +46,10 @@ from .approval import (
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
+    count_grant,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -72,12 +74,16 @@ from .errors import (
 from .migrations import migrate
 from .receipt import RECEIPT_SCHEMA, Event, EventType, Receipt, _document_hash, _stored_receipt
 from .state import (
+    Charge,
     ClockSkew,
+    Consumption,
     DelegationRecord,
     HeldContinuation,
     _action_from_json,
     _action_json,
     _approver,
+    _approvers_from_json,
+    _approvers_json,
     _at,
     _checked,
     _iso,
@@ -89,8 +95,11 @@ from .state import (
     _resolved,
     _result_json,
     _result_value,
+    _roles_from_json,
+    _roles_json,
     _transitioned,
     _utc_now,
+    check_charges,
 )
 
 _RESERVED: Final = frozenset({EffectState.RESERVED})
@@ -312,6 +321,13 @@ def _moved(found: EffectRecord, was: EffectRecord, effect_key: str) -> CTRLRunEr
     if found.state is EffectState.COMMITTED:
         return DuplicateEffect(moved, state=COMMITTED_EFFECT, effect_key=effect_key)
     return DuplicateEffect(moved, state=IN_PROGRESS_EFFECT, effect_key=effect_key)
+
+
+#: SPEC-v0.8 §4.3 — how many times a grant re-reads after losing its compare-and-set. Bounded,
+#: because an unbounded retry against a hot approval is a spin nobody can see; N humans answering
+#: one request cannot exceed N collisions, and this is comfortably above any N a human workflow
+#: has.
+_GRANT_ATTEMPTS: Final = 8
 
 
 class PostgresStateStore:
@@ -693,7 +709,8 @@ class PostgresStateStore:
             cursor.execute(
                 "SELECT approval_id, action_hash, status, action_json, approver, created_at, "
                 "granted_at, expires_at, consumed_at, policy_hash_at_approval, "
-                f"precondition_fingerprint FROM {self._q}.approvals WHERE approval_id = %s",
+                "precondition_fingerprint, approvers, required_roles, approvals_required "
+                f"FROM {self._q}.approvals WHERE approval_id = %s",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -708,19 +725,28 @@ class PostgresStateStore:
                 expires_at=datetime.fromisoformat(str(row[7])),
                 policy_hash=None if row[9] is None else str(row[9]),
                 precondition_fingerprint=None if row[10] is None else str(row[10]),
+                required_roles=_roles_from_json(None if row[12] is None else str(row[12])),
+                approvals_required=int(row[13]) if row[13] is not None else 1,
             ),
             status=ApprovalStatus(row[2]),
             approver=row[4],
             granted_at=_at(row[6]),
             consumed_at=_at(row[8]),
+            approvers=_approvers_from_json(None if row[11] is None else str(row[11])),
         )
 
     # --- reservation (SPEC-v0.6 §4.2) ---------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -730,9 +756,10 @@ class PostgresStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -750,6 +777,7 @@ class PostgresStateStore:
         action_id: str | None,
         lease: timedelta,
         *,
+        charges: tuple[Charge, ...] = (),
         retrying: bool = False,
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both, in ONE transaction.
@@ -773,10 +801,23 @@ class PostgresStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(connection, effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1, §3.6 — **the lock, then the sum, then the insert, all inside this
+            # `BEGIN`**. READ COMMITTED does not serialise a sum and an insert, and this is not a
+            # theoretical gap: the spike raced 24 processes against a budget permitting ten spends
+            # and the unlocked version overspent 1200 against a limit of 1000 in three runs of
+            # four. `postgres.py`'s own comment about eight authorised refunds is the same bug,
+            # already found once in this file.
+            if charges:
+                self._lock_budget_anchors(connection, charges)
+                check_charges(charges, lambda charge: self._spent(connection, charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(connection, plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(connection, approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(
+                    connection, charges, str(effect_key), plan.reservation.attempt, now
+                )
         except AmbiguousWrite:
             raise
         except BaseException:
@@ -805,6 +846,7 @@ class PostgresStateStore:
                 approval_id=approval_id,
                 action_hash=action_hash,
                 lease=lease,
+                charges=charges,
             )
             return (approved.as_approval() if approved is not None else None), written
         return (approved.as_approval() if approved is not None else None), plan.reservation
@@ -818,6 +860,7 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """§4.3.2 Table **A2**, for the one reservation that is an `UPDATE`. Returns the
         reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
@@ -852,8 +895,24 @@ class PostgresStateStore:
             # different effect key. `v0.1 §4.2 A2` is that an approval is single-use and
             # consumed atomically with the reservation; this failed it open.
             _took(A2_REISSUE, effect_key)
+            # **`charges` travels with the re-issue, and an independent review found it missing.**
+            # Without it the retried transaction re-inserts the reservation and nothing else: the
+            # effect happens and the budget never sees it, which is `reserved=1, charged=0`, the
+            # exact state §3.3.0's spike named as disqualifying the alternative design. It also
+            # falsified §3.3's second and stated-stronger bar for touching a frozen protocol, that
+            # one re-read resolves the reservation and the charge together.
+            #
+            # Safe to replay for §3.4's reason: the unique constraint on
+            # `(effect_key, attempt, grant_id, metric)` makes a re-insert idempotent. The comments
+            # above record the same mistake being found once before, on `approval_id`.
             _, reissued = self._authorize_and_reserve(
-                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
+                approval_id,
+                action_hash,
+                effect_key,
+                reservation.action_id,
+                lease,
+                charges=charges,
+                retrying=True,
             )
             return _only(reissued, "reservation")
         _took(A2_REFUSE, effect_key)
@@ -878,6 +937,7 @@ class PostgresStateStore:
         approval_id: str | None,
         action_hash: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """§4.3.2 Table A1: what a lost `COMMIT` on the reservation `INSERT` means. Returns the
         reservation on the record, which after a re-issue is the re-issue's (SPEC-v0.7 §5.6).
@@ -901,8 +961,24 @@ class PostgresStateStore:
             # and failed between the re-read and the re-issue's own read, it renews, and its
             # number is not the one first planned (SPEC-v0.7 §5.6).
             _took(A1_REINSERT, effect_key)
+            # **`charges` travels with the re-issue, and an independent review found it missing.**
+            # Without it the retried transaction re-inserts the reservation and nothing else: the
+            # effect happens and the budget never sees it, which is `reserved=1, charged=0`, the
+            # exact state §3.3.0's spike named as disqualifying the alternative design. It also
+            # falsified §3.3's second and stated-stronger bar for touching a frozen protocol, that
+            # one re-read resolves the reservation and the charge together.
+            #
+            # Safe to replay for §3.4's reason: the unique constraint on
+            # `(effect_key, attempt, grant_id, metric)` makes a re-insert idempotent. The comments
+            # above record the same mistake being found once before, on `approval_id`.
             _, reissued = self._authorize_and_reserve(
-                approval_id, action_hash, effect_key, reservation.action_id, lease, retrying=True
+                approval_id,
+                action_hash,
+                effect_key,
+                reservation.action_id,
+                lease,
+                charges=charges,
+                retrying=True,
             )
             return _only(reissued, "reservation")
         expected = _reserved(reservation, None, now)
@@ -993,6 +1069,132 @@ class PostgresStateStore:
         finally:
             with contextlib.suppress(Exception):
                 connection.close()
+
+    def _release_locked(
+        self, connection: Any, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so the re-issue of a lost `UPDATE`
+        (`v0.6 §4.3.2` Table A2 row 2) is a no-op rather than a second subtraction. A decrement
+        would not survive that branch, which is why §3.2's column is a nullable timestamp.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            f"UPDATE {self._q}.budget_ledger SET released_at = %s "
+            "WHERE effect_key = %s AND released_at IS NULL",
+            (now, effect_key),
+        )
+
+    def _lock_budget_anchors(self, connection: Any, charges: tuple[Charge, ...]) -> None:
+        """`SELECT ... FOR UPDATE` on one row per grant charged, **before** the sum (§3.6).
+
+        This is the mechanism the spike measured rather than the one that read best. Twenty-four
+        processes racing a budget permitting exactly ten spends, four runs:
+
+        - sum then insert, no lock: **1200, 1000, 1200, 1200** against a limit of 1000
+        - this: **1000, 1000, 1000, 1000**
+        - `SERIALIZABLE`: 800, 600, 600, 800, with **zero** clean refusals
+
+        `SERIALIZABLE` holds the limit and is still wrong for an operator: it under-spends by 20
+        to 40 percent and turns every refusal into a `SerializationFailure`, where §4.5 promises a
+        denial naming the grant, the metric and the window.
+
+        **Per grant, not per store**, so two budgets on two grants do not serialise against each
+        other. Ordered by grant id, because two transactions taking the same two anchors in
+        opposite orders is a deadlock, and a budget that deadlocks under load is a budget an
+        operator turns off.
+        """
+        anchors = sorted({charge.grant_id for charge in charges})
+        for grant_id in anchors:
+            connection.execute(
+                f"INSERT INTO {self._q}.budget_anchor (grant_id) VALUES (%s) "
+                "ON CONFLICT DO NOTHING",
+                (grant_id,),
+            )
+            connection.execute(
+                f"SELECT grant_id FROM {self._q}.budget_anchor WHERE grant_id = %s FOR UPDATE",
+                (grant_id,),
+            )
+
+    def _spent(self, connection: Any, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
+        row = connection.execute(
+            f"""
+            SELECT COALESCE(SUM(amount), 0) FROM {self._q}.budget_ledger
+             WHERE grant_id = %s AND metric = %s AND released_at IS NULL AND consumed_at >= %s
+            """,
+            (charge.grant_id, charge.metric, now - charge.window),
+        ).fetchone()
+        return int(row[0])
+
+    def _charge_locked(
+        self,
+        connection: Any,
+        charges: tuple[Charge, ...],
+        effect_key: str,
+        attempt: int,
+        now: datetime,
+    ) -> None:
+        """One row per charge, idempotent on the unique key (SPEC-v0.9 §3.4).
+
+        `ON CONFLICT DO NOTHING`, because `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once
+        and an unconstrained append would double-charge precisely when a network is misbehaving.
+        """
+        for charge in charges:
+            connection.execute(
+                f"""
+                INSERT INTO {self._q}.budget_ledger
+                    (grant_id, metric, amount, effect_key, attempt, consumed_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (effect_key, attempt, grant_id, metric) DO NOTHING
+                """,
+                (charge.grant_id, charge.metric, charge.amount, effect_key, attempt, now),
+            )
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+        effect_key: str | None = None,
+    ) -> tuple[Consumption, ...]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if grant_id is not None:
+            clauses.append("grant_id = %s")
+            values.append(grant_id)
+        if metric is not None:
+            clauses.append("metric = %s")
+            values.append(metric)
+        if since is not None:
+            clauses.append("consumed_at >= %s")
+            values.append(since)
+        if effect_key is not None:
+            clauses.append("effect_key = %s")
+            values.append(effect_key)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection().cursor() as cursor:
+            cursor.execute(
+                "SELECT grant_id, metric, amount, effect_key, attempt, consumed_at, released_at"
+                f" FROM {self._q}.budget_ledger{where} ORDER BY id",
+                values,
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            Consumption(
+                grant_id=row[0],
+                metric=row[1],
+                amount=int(row[2]),
+                effect_key=row[3],
+                attempt=int(row[4]),
+                consumed_at=row[5],
+                released_at=row[6],
+            )
+            for row in rows
+        )
 
     def _reserve_locked(
         self, connection: Any, reservation: Reservation, renews: bool, now: datetime
@@ -1258,6 +1460,11 @@ class PostgresStateStore:
                     ),
                 )
                 updated = cursor.rowcount
+            if updated == 1:
+                # SPEC-v0.9 §4.1, inside the same `BEGIN`: the ledger moves with the record or
+                # neither moves. Only where the compare-and-set actually took, so a transition
+                # that is about to be refused releases nothing.
+                self._release_locked(connection, effect_key, state, now)
             if updated != 1:
                 # The record changed between the read and the write. Re-plan through the same
                 # predicate rather than guessing.
@@ -1407,6 +1614,9 @@ class PostgresStateStore:
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
             resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved, record)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._rollback(connection)
             raise
@@ -1462,8 +1672,8 @@ class PostgresStateStore:
                     f"INSERT INTO {self._q}.approvals("
                     "approval_id, action_hash, status, action_json, "
                     "approver, created_at, granted_at, expires_at, consumed_at, "
-                    "policy_hash_at_approval, precondition_fingerprint) "
-                    "VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s,%s)",
+                    "policy_hash_at_approval, precondition_fingerprint, required_roles, "
+                    "approvals_required) VALUES(%s,%s,%s,%s,NULL,%s,NULL,%s,NULL,%s,%s,%s,%s)",
                     (
                         request.request_id,
                         request.action_hash,
@@ -1473,6 +1683,8 @@ class PostgresStateStore:
                         _iso(request.expires_at),
                         request.policy_hash,
                         request.precondition_fingerprint,
+                        _roles_json(request.required_roles),
+                        request.approvals_required,
                     ),
                 )
         except Exception as duplicate:
@@ -1508,42 +1720,76 @@ class PostgresStateStore:
 
         return _newest_denied(self.approvals_for(action_hash), action_hash, self._clock())
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
+        """Record one answer, counting toward the threshold the request pinned (SPEC-v0.8 §4.2).
+
+        **The compare-and-set is on `approvers` and not on `status`, and that is the whole of
+        §4.3.** This store runs READ COMMITTED with an explicit `BEGIN` and reads with a plain
+        `SELECT`, so at N-1 the status does not change: two concurrent grants both read
+        `pending`, both update `WHERE status = 'pending'`, both see `rowcount == 1`, and each
+        writes an `approvers` value computed from the row it read before the other wrote. That is
+        a lost update, and one principal fills two slots. `_consume_locked` documents the
+        identical defect, measured at 8 of 8, and says the condition has to be in the statement.
+
+        So the condition is the value being changed. `IS NOT DISTINCT FROM` and not `=`, because
+        the first grant compares against `NULL`. A miss means somebody else answered first, which
+        is information rather than an error to swallow: the retry re-reads, and it converges
+        because a fresh statement in READ COMMITTED sees the winner's commit.
+        """
         approver = _approver(approver)
         connection = self._connection()
-        now = self._clock()
-        connection.execute("BEGIN")
-        self._use_schema(connection)
-        try:
-            record = self._answerable(connection, approval_id, now)
-            granted = replace(
-                record, status=ApprovalStatus.GRANTED, approver=approver, granted_at=now
-            )
-            with connection.cursor() as cursor:
-                # Conditional on what `check_answerable` saw. Unconditional, a concurrent
-                # `deny_approval` was silently overwritten and `find_granted_approval` then
-                # returned an approval a human had refused.
-                cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s "
-                    "WHERE approval_id=%s AND status=%s",
-                    (
-                        str(ApprovalStatus.GRANTED),
-                        approver,
-                        _iso(now),
-                        approval_id,
-                        str(record.status),
-                    ),
+        for _ in range(_GRANT_ATTEMPTS):
+            now = self._clock()
+            connection.execute("BEGIN")
+            self._use_schema(connection)
+            try:
+                record = self._answerable(connection, approval_id, now)
+                verified = _verified_approver_now(now)
+                approvers, reached = count_grant(record, verified, now)
+                status = ApprovalStatus.GRANTED if reached else record.status
+                granted = replace(
+                    record,
+                    status=status,
+                    approver=approver if reached else record.approver,
+                    granted_at=now if reached else record.granted_at,
+                    approvers=approvers,
                 )
-                if cursor.rowcount != 1:
-                    raise ApprovalMismatch(
-                        f"approval {approval_id} was answered by somebody else first",
-                        reason="answered",
+                with connection.cursor() as cursor:
+                    # Conditional on what this transaction read, which is both halves: the
+                    # status `check_answerable` saw, so a concurrent `deny_approval` is not
+                    # silently overwritten, and the `approvers` value the count was computed
+                    # from, so a concurrent grant is not lost.
+                    cursor.execute(
+                        f"UPDATE {self._q}.approvals SET status=%s, approver=%s, granted_at=%s, "
+                        "approvers=%s WHERE approval_id=%s AND status=%s "
+                        "AND approvers IS NOT DISTINCT FROM %s",
+                        (
+                            str(status),
+                            granted.approver,
+                            _iso(granted.granted_at) if granted.granted_at else None,
+                            _approvers_json(approvers),
+                            approval_id,
+                            str(record.status),
+                            _approvers_json(record.approvers),
+                        ),
                     )
-        except BaseException:
-            self._rollback(connection)
-            raise
-        self._commit(connection)
-        return granted.as_approval()
+                    missed = cursor.rowcount != 1
+            except BaseException:
+                self._rollback(connection)
+                raise
+            if missed:
+                # Somebody else answered between this transaction's read and its write. Roll
+                # back and read again rather than raise: their answer is as valid as this one,
+                # and the next pass counts both.
+                self._rollback(connection)
+                continue
+            self._commit(connection)
+            return granted.as_approval() if reached else None
+        raise ApprovalMismatch(
+            f"approval {approval_id} was answered by somebody else first, {_GRANT_ATTEMPTS} "
+            "times running; nothing was recorded for this answer",
+            reason="answered",
+        )
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)
@@ -1553,11 +1799,19 @@ class PostgresStateStore:
         self._use_schema(connection)
         try:
             record = self._answerable(connection, approval_id, now)
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s "
+                    f"UPDATE {self._q}.approvals SET status=%s, approver=%s, approvers=%s "
                     "WHERE approval_id=%s AND status=%s",
-                    (str(ApprovalStatus.DENIED), approver, approval_id, str(record.status)),
+                    (
+                        str(ApprovalStatus.DENIED),
+                        approver,
+                        _approvers_json(approvers),
+                        approval_id,
+                        str(record.status),
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise ApprovalMismatch(

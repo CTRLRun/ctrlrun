@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 from .action import Action, Principal
-from .control import Control, with_approval
+from .control import Control, _UnmeasurableError, with_approval
 from .effect import resolve_effect_key, resolve_resource
 from .errors import (
     ActionDenied,
@@ -149,6 +149,19 @@ class AcsControlHook:
                 return self._on_request(rpc_id, request_id, params, headers or {})
             if method == TOOL_CALL_RESULT:
                 return self._on_result(rpc_id, request_id, params)
+        except _UnmeasurableError as refused:
+            # SPEC-v0.9 §2.3, §2.4.1. **Before the clause below, and answered as a decision**,
+            # because for this refusal there *is* an action: `Control` has already written
+            # `ACTION_DENIED` and a `denied` receipt for it. An independent review found the two
+            # disagreeing -- an error envelope says the Guardian could not answer, which a
+            # platform is free to act on however it likes, while the evidence said the kernel
+            # refused. That is precisely what the `IdentityError` clause below forbids.
+            #
+            # The code follows the refusal rather than being fixed here, for the same reason
+            # that clause gives: `budget_unmeasurable` and `budget_unkeyed` are different things
+            # to fix, and the receipt already names which.
+            _LOG.warning("refused an ACS envelope: %s", refused)
+            return _final(rpc_id, request_id, DENY, reasoning=str(refused), codes=[refused.reason])
         except InvalidArgument as refused:
             # A malformed payload is not a decision about an action: there is no action.
             return _error(rpc_id, MALFORMED_ENVELOPE, str(refused))

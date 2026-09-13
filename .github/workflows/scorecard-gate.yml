@@ -1,0 +1,68 @@
+name: Scorecard gate
+
+# OpenSSF Scorecard's file-based checks, run against the pull request's tree and failed if any
+# would come back lower than `main` publishes today. `scorecard.yml` is the third party's
+# reading of `main` after a merge; this is the same reading before it, so a change that unpins
+# an install, widens a token or drops the security policy is red here rather than a lower badge
+# on Monday. Only the checks a pull request's own files decide are gated: the ones that need
+# the GitHub API (branch protection, code review, maintenance) are read from `main` by
+# `scorecard.yml` and cannot be read from a pull request.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # On a `pull_request` event the action analyses the checkout (`--local .`) and publishes
+      # nothing; the published result stays `scorecard.yml`'s.
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.json
+          results_format: json
+          publish_results: false
+
+      - name: Nothing this repository controls may score below what main publishes
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          checks = {c["name"]: c for c in json.load(open("results.json"))["checks"]}
+          # What `main` scores today on the checks a pull request's tree decides. A floor moves
+          # up when a check improves and never down: a lower number here is a regression.
+          floors = {
+              "Binary-Artifacts": 10,
+              "Dangerous-Workflow": 10,
+              "Dependency-Update-Tool": 10,
+              "Fuzzing": 10,
+              "License": 9,  # local mode cannot confirm the OSI listing; main reads 10
+              "Packaging": 10,
+              "Pinned-Dependencies": 10,
+              "SAST": 10,
+              "Security-Policy": 10,
+              "Token-Permissions": 10,
+              "Vulnerabilities": 10,
+          }
+          failed = []
+          for name, floor in floors.items():
+              check = checks.get(name)
+              if check is None:
+                  failed.append(f"{name}: not reported")
+                  continue
+              print(f"{check['score']:>3}  {name}: {check['reason']}")
+              for detail in check.get("details") or []:
+                  if detail.startswith("Warn"):
+                      print(f"       {detail}")
+              if check["score"] < floor:
+                  failed.append(f"{name}: {check['score']} < {floor}")
+          if failed:
+              print("::error::" + "; ".join(failed))
+              sys.exit(1)
+          print("no check below its floor")
+          PY

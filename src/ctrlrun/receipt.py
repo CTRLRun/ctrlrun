@@ -22,8 +22,19 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from .action import Principal, canonical_bytes
+
+# `approval.py` imports `action`, `errors` and `identity` and nothing else, so this is
+# downward (ARCHITECTURE §6): a receipt records what an approval verified, and the record
+# type it records is that module's.
+from .approval import APPROVAL_DENIED as APPROVAL_DENIED_REASON
+from .approval import (
+    APPROVAL_UNRECORDED,
+    APPROVALS_UNVERIFIABLE,
+    APPROVER_UNENTITLED,
+    VerifiedApprover,
+)
 from .errors import CTRLRunError, InvalidArgument
-from .policy import Decision
+from .policy import POLICY_UNAPPROVED, Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
 #: field appeared — the principal's claims, issuer and expiry. `execution` and `would_have`
@@ -35,12 +46,23 @@ from .policy import Decision
 #: SPEC-v0.7 §6.11. `v4` adds `precondition_at_request` and `precondition_at_recheck`, and it is
 #: the first bump that does not rehash every older receipt: a receipt read from a store is
 #: hashed as the document it was read from, and renders under its own schema's label and keys.
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v4"
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v6"
 
 _V1: Final = "ctrlrun.receipt/v1"
 _V2: Final = "ctrlrun.receipt/v2"
 _V3: Final = "ctrlrun.receipt/v3"
 _V4: Final = "ctrlrun.receipt/v4"
+_V5: Final = "ctrlrun.receipt/v5"
+#: SPEC-v0.9 §10.1: `v6` is `task` (item 1), `scope_hash` (item 2) and `budget_charges` (item 5).
+#: The version moves once, with whichever lands first, and the later items fill their fields
+#: under the version already in place. Item 7 asserts all three are written by something.
+_V6: Final = "ctrlrun.receipt/v6"
+
+#: SPEC-v0.8 §8.5 — every receipt schema this binary reads. The policy replay checks it before
+#: rebuilding an action: `from_dict` does not raise on an unknown one, so a receipt written by a
+#: later version rebuilt fine and was silently **graded**, on fields this binary may be reading
+#: wrongly. `v0.6 §3.2` draws the same line for a store row.
+KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5, _V6})
 
 #: SPEC-v0.7 §6.11: each schema's top-level key set, exactly its released writers': `v1`, 19
 #: keys, by 0.1.0 and 0.2.0; `v2`, 21, by 0.3.0rc1 to 0.5.0; `v3`, 26, by 0.6.0 and 0.6.1;
@@ -69,7 +91,24 @@ _V1_KEYS: Final = (
 _V2_KEYS: Final = (*_V1_KEYS[:16], "execution", "would_have", *_V1_KEYS[16:])
 _V3_KEYS: Final = (*_V2_KEYS, "seq", "prev_hash", "policy_hash", "policy_version", "controls")
 _V4_KEYS: Final = (*_V3_KEYS, "precondition_at_request", "precondition_at_recheck")
-_KEYS: Final = {_V1: _V1_KEYS, _V2: _V2_KEYS, _V3: _V3_KEYS, _V4: _V4_KEYS}
+#: SPEC-v0.8 §11.3: `v5`, 30 keys. The whole shape is frozen before item 2 writes it, so a
+#: reader can parse a `v5` receipt from any later item: `authority_grant_id` is item 5's and is
+#: `None` until then, which is what "absent or null" means for a field nothing has filled.
+_V5_KEYS: Final = (*_V4_KEYS, "approvers", "authority_grant_id")
+#: SPEC-v0.9 §10.1 — `v6`'s frozen shape is `task` (item 1), `scope_hash` (item 2) and
+#: `budget_charges` (item 5). **The tuple grows as each item lands, not all at once**, on the
+#: guarantee catalogue's own rule: a key listed here is a key `to_dict` projects, so naming one
+#: before something writes it is a `KeyError` on every receipt, which is the field-level form of
+#: a stub row. Item 7 asserts all three are present before the release.
+_V6_KEYS: Final = (*_V5_KEYS, "task", "scope_hash", "budget_charges")
+_KEYS: Final = {
+    _V1: _V1_KEYS,
+    _V2: _V2_KEYS,
+    _V3: _V3_KEYS,
+    _V4: _V4_KEYS,
+    _V5: _V5_KEYS,
+    _V6: _V6_KEYS,
+}
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
 #: SPEC-v0.6 §6.2. The `prev_hash` of receipt 1, and the hash the head row starts at (§3.7), so
@@ -99,7 +138,59 @@ BLOCKED_AMBIGUOUS: Final = "ambiguous"
 #: no, and an agent loop's `except ActionDenied` is written for exactly that.
 BLOCKED_ATTEMPT_CEILING: Final = "attempt_ceiling"
 
-#: The five that mean "the effect state or a presented approval would have stopped it", as
+#: SPEC-v0.8 §4.1 — observe mode records a mismatch's **own** reason now, where it recorded
+#: `BLOCKED_APPROVAL_MISMATCH` for every one of them, so the closed vocabulary above grows by the
+#: reasons an approval refusal actually carries, whether it is raised as an `ApprovalMismatch`
+#: or, for a human's no, as an `ActionDenied`. They are the values `check_consumable` and
+#: `Control` already raise, listed here because §6.4 buckets counts on this set.
+#:
+#: **Widening the set is not decoration: without it the change would have been a silent
+#: under-count.** An independent review measured it. An observe-mode approval refusal, including a
+#: plain hash mismatch that has nothing to do with v0.8, landed in no bucket at all, so
+#: `would_have_been_blocked` went from 1 to 0 and `ctrlrun stats` under-reported exactly what it
+#: exists to report. The comment above says a bucketed count over a string nobody constrained is a
+#: report that quietly stops adding up; this is that, and the fix is to constrain the string.
+#: **`approval_denied` and not `denied`, and the difference is a report that was already wrong.**
+#: `check_consumable` catches a denied record one branch before the generic status branch and
+#: raises `ActionDenied(reason=APPROVAL_DENIED)`, so `"denied"`, which is `str(ApprovalStatus.
+#: DENIED)`, is a value nothing on this path can carry, while `"approval_denied"` is recorded by
+#: observe mode's `ActionDenied` handler and was in no bucket at all. An observe-mode run where a
+#: **human said no** was therefore counted nowhere, which is close to the most important thing
+#: such a report can say. That predates v0.8 and is fixed here, because this is the commit that
+#: writes the set and argues for closing it.
+BLOCKED_APPROVAL_REASONS: Final = frozenset(
+    {
+        "mismatch",
+        "consumed",
+        "expired",
+        "pending",
+        "unknown",
+        APPROVAL_DENIED_REASON,
+        "precondition_changed",
+        "precondition_missing",
+        "precondition_unavailable",
+        "approver_unverified",
+        "approver_is_requester",
+        # **Items 3 and 4's reasons, and their absence was the same defect one item later.**
+        # The paragraph above records `approval_denied` landing in no bucket and being fixed
+        # here; `approver_unentitled` and `approvals_unverifiable` were then coined without
+        # being added here, so an observe-mode run that would have refused an unentitled
+        # approver reported `would_have_been_blocked = 0`. A set maintained by hand is a set
+        # the next reason is missed from, which is why
+        # `test_every_approval_refusal_reason_is_counted_by_stats` enumerates them from
+        # `approval.py` instead of restating them.
+        APPROVER_UNENTITLED,
+        APPROVALS_UNVERIFIABLE,
+        APPROVAL_UNRECORDED,
+        # SPEC-v0.8 §8.4: observe mode records it as a `would_have.blocked_reason`, so it needs
+        # a bucket like every other refusal. This set has been missed twice already, which is
+        # why `test_every_approval_refusal_reason_is_counted_by_stats` enumerates the reasons
+        # from source rather than trusting this list.
+        POLICY_UNAPPROVED,
+    }
+)
+
+#: The ones that mean "the effect state or a presented approval would have stopped it", as
 #: opposed to a decision that would have. `ctrlrun stats` counts them as one line (§6.4).
 BLOCKED_BY_STATE: Final = frozenset(
     {
@@ -108,6 +199,7 @@ BLOCKED_BY_STATE: Final = frozenset(
         BLOCKED_IN_PROGRESS,
         BLOCKED_AMBIGUOUS,
         BLOCKED_ATTEMPT_CEILING,
+        *BLOCKED_APPROVAL_REASONS,
     }
 )
 
@@ -372,6 +464,35 @@ class Receipt:
     #: document, so no reader surfaces the value of a key a document's schema does not declare.
     precondition_at_request: str | None = None
     precondition_at_recheck: str | None = None
+    #: SPEC-v0.8 §2.5: every approver a resolving surface verified for the approval this action
+    #: consumed. Empty where none was, which is every 0.7.0 deployment and every surface §2.6
+    #: names as unable to resolve. Read only from a `v5` document.
+    approvers: tuple[VerifiedApprover, ...] = ()
+    #: SPEC-v0.8 §5.4: the grant that decided this action, for **every** grant and not only for
+    #: break-glass. Item 5 fills it; `None` until then, which is the "absent or null" §11.4's
+    #: frozen shape promises a reader.
+    authority_grant_id: str | None = None
+    #: SPEC-v0.9 §6: the task this action was bound to, or `None` where the caller named none,
+    #: which is every 0.8.0 call. **Not part of the action hash** (§6.3.1): a field on `Action`
+    #: would move every hash in existence and invalidate every stored approval.
+    task: str | None = None
+    #: SPEC-v0.9 §5.5: `"sha256:…"` over what the scope provider returned, or `None` where none
+    #: was configured. **The hash and never the scope**: a scope is a list of what a principal
+    #: may touch, and an evidence store is not the place to accumulate a second copy of an
+    #: authorization system's state (`v0.7 §6.10`). Its own domain tag, so it can never equal a
+    #: precondition fingerprint over the same mapping.
+    scope_hash: str | None = None
+    #: SPEC-v0.9 §10.1: which grants this action charged, which metrics, how much. One entry per
+    #: ancestor charged (§2.7), so a reader can tell an action that spent a child's budget from
+    #: one that spent a root's. Empty where the deciding grant budgets nothing, which is every
+    #: grant written before v0.9.
+    #:
+    #: **On an `observed` receipt it is a counterfactual, not a spend** (§4.2.1a). Observe mode
+    #: charges nothing and its ledger stays empty, so this carries what the action *would have*
+    #: been charged, which is the number a budget is sized from before it is turned on. `result`
+    #: is what tells the two apart, and `v0.3 §6.2` makes every number on an observed receipt a
+    #: counterfactual; a consumer summing these to measure real spend must filter on it.
+    budget_charges: tuple[Mapping[str, Any], ...] = ()
     #: The schema this receipt is written under (§6.11). A receipt this binary builds is
     #: `RECEIPT_SCHEMA`; one read from a store keeps the label its document declared, or `""`
     #: where it declared none, which renders with no `schema` key at all.
@@ -457,6 +578,15 @@ class Receipt:
             "controls": list(self.controls),
             "precondition_at_request": self.precondition_at_request,
             "precondition_at_recheck": self.precondition_at_recheck,
+            "approvers": [approver.to_dict() for approver in self.approvers],
+            "authority_grant_id": self.authority_grant_id,
+            # Always present and nullable, like `authority_grant_id` directly above it rather
+            # than like `_authority_data`'s omitted keys: `_KEYS` projects a fixed tuple, so a
+            # conditional key is a `KeyError`, and a reader tells "no task" from "this binary
+            # predates tasks" by the schema label.
+            "task": self.task,
+            "scope_hash": self.scope_hash,
+            "budget_charges": [dict(charge) for charge in self.budget_charges],
         }
 
     def to_json(self) -> str:
@@ -488,7 +618,7 @@ class Receipt:
             principal=Principal(
                 agent=principal["agent"],
                 user=principal["user"],
-                claims=principal.get("claims") or {},
+                claims=_claims_of(principal.get("claims")),
                 issuer=principal.get("issuer"),
                 expires_at=None if expires_at is None else datetime.fromisoformat(expires_at),
             ),
@@ -524,10 +654,42 @@ class Receipt:
             policy_version=document.get("policy_version"),
             controls=_controls_of(document.get("controls")),
             precondition_at_request=(
-                document.get("precondition_at_request") if schema == _V4 else None
+                document.get("precondition_at_request") if schema in (_V4, _V5, _V6) else None
             ),
             precondition_at_recheck=(
-                document.get("precondition_at_recheck") if schema == _V4 else None
+                document.get("precondition_at_recheck") if schema in (_V4, _V5, _V6) else None
+            ),
+            # SPEC-v0.8 §2.5, and `v0.7 §6.11`'s rule for a key a document's schema does not
+            # declare: read it only from a `v5` document, so no reader surfaces a field an older
+            # writer never wrote. **Never raises**, whatever the column holds: `from_dict` is
+            # the one function every reader of a chain goes through, and a raise on one tampered
+            # row would blind every reader at once.
+            approvers=_approvers_of(document.get("approvers")) if schema in (_V5, _V6) else (),
+            authority_grant_id=(
+                document.get("authority_grant_id") if schema in (_V5, _V6) else None
+            ),
+            # SPEC-v0.9 §6, under `v0.7 §6.11`'s rule: read only from a `v6` document, so no
+            # reader surfaces a field an older writer never wrote. A non-string is dropped rather
+            # than raised on, for the reason three fields above: `from_dict` is what every reader
+            # of a chain goes through.
+            task=(
+                document.get("task")
+                if schema == _V6 and isinstance(document.get("task"), str)
+                else None
+            ),
+            scope_hash=(
+                document.get("scope_hash")
+                if schema == _V6 and isinstance(document.get("scope_hash"), str)
+                else None
+            ),
+            budget_charges=(
+                tuple(
+                    entry
+                    for entry in document.get("budget_charges", ())
+                    if isinstance(entry, Mapping)
+                )
+                if schema == _V6 and isinstance(document.get("budget_charges"), list)
+                else ()
             ),
             schema=schema,
         )
@@ -537,6 +699,53 @@ class Receipt:
         """Parse one JSONL line written by `to_json`."""
         document: dict[str, Any] = json.loads(line)
         return cls.from_dict(document)
+
+
+def _claims_of(value: object) -> dict[str, Any]:
+    """`Principal.claims` out of a document, never raising (`v0.7 §6.11`, SPEC-v0.8 §3.4).
+
+    `_frozen_claims` refuses a claim JSON can hold — an array of numbers, a float, a nested
+    object — and `Principal` runs it on construction, so a receipt carrying one raised out of
+    `from_dict` and blinded every reader of the chain rather than the one field. Dropped here
+    for `_approvers_of`'s reason, and the drop is visible: the receipt reads back with fewer
+    claims than the principal that produced it, and its stored hash no longer matches.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    # `bool | int | str` and no float branch: a float is not an `int` in Python, so it falls
+    # through to the drop below with every other shape. A branch that cannot fire is
+    # documentation, not defence.
+    kept: dict[str, Any] = {}
+    for name, claim in value.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(claim, bool | int | str):
+            kept[name] = claim
+        elif isinstance(claim, list | tuple) and all(
+            isinstance(item, str) and item for item in claim
+        ):
+            kept[name] = tuple(claim)
+    return kept
+
+
+def _approvers_of(value: object) -> tuple[VerifiedApprover, ...]:
+    """`Receipt.approvers` out of a document, never raising (SPEC-v0.8 §2.5, `v0.7 §6.11`).
+
+    A malformed entry is dropped rather than thrown, on the rule `from_dict` already follows:
+    one tampered row must not blind every reader of the chain. What a dropped entry costs is
+    visible, because the receipt then shows fewer approvers than the row that produced it.
+    """
+    if not isinstance(value, list):
+        return ()
+    found = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            found.append(VerifiedApprover.from_dict(item))
+        except (KeyError, ValueError, TypeError, InvalidArgument):
+            continue
+    return tuple(found)
 
 
 def _document_hash(document: Mapping[str, Any]) -> str:

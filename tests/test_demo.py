@@ -102,6 +102,15 @@ SPEC_RECEIPT_FIELDS = (
     # SPEC-v0.7 §6.11: `ctrlrun.receipt/v4`. Fingerprints, never the state they hash.
     "precondition_at_request",
     "precondition_at_recheck",
+    # SPEC-v0.8 §11.3: `ctrlrun.receipt/v5` adds the two.
+    "approvers",
+    "authority_grant_id",
+    # SPEC-v0.9 §6, a `ctrlrun.receipt/v6` field.
+    "task",
+    # SPEC-v0.9 §5.5, a `ctrlrun.receipt/v6` field.
+    "scope_hash",
+    # SPEC-v0.9 §10.1, the third `ctrlrun.receipt/v6` field.
+    "budget_charges",
 )
 
 
@@ -1092,6 +1101,9 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # SPEC-v0.3 §5.7 — build-list item 3.
         "delegate",
         "revoke",
+        # SPEC-v0.8 §8.3 — a policy change is an action, so proposing one is a command. No
+        # `policy approve`: that is `ctrlrun approve`.
+        "policy",
         # SPEC-v0.3 §6.4, §6.5 — build-list item 4.
         "stats",
         "verify",

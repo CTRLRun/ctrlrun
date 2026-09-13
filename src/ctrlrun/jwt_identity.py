@@ -15,9 +15,20 @@ Two things it deliberately cannot do, stated here rather than discovered later (
 - **A tenant-templated issuer cannot be configured correctly.** `issuer` is an exact string.
   Pointing it at a multi-tenant endpoint without pinning the tenant makes every tenant on that
   platform a valid issuer for this process, and that is the fail-open direction.
-- **There is no revocation channel.** A verified token is valid until its `exp`, which is why
-  one without an `exp` is refused. Nothing polls, subscribes or introspects. Short lifetimes
-  are the whole of the story.
+- **A verified token can be revoked before its `exp`** (SPEC-v0.8 §6), and a token without an
+  `exp` is still refused. Pass `revocations=` a `ctrlrun.revocation.RevocationFeed` and a
+  credential the issuer has revoked is refused here, at resolution, as `IdentityError`. Without
+  one this is 0.7.0 exactly: short lifetimes are then the whole of the story.
+
+  **Nothing subscribes and nothing introspects.** A subscription needs an endpoint this project
+  serves and an introspection call is a question this project asks nobody; `PollingRevocationFeed`
+  polls, and `FileRevocationFeed` reads what the operator's own transmitter wrote. Consuming an
+  event is reading it (`v0.3 §1.1`).
+
+  **A revoked credential leaves a log line and no receipt** (§6.4). `resolve` runs before an
+  `Action` exists, so there is no `action_id` to attribute a refusal to. An *expired* credential
+  is different: it is checked on `action.principal` inside `execute`, where one does, and it
+  produces an `ACTION_DENIED` event and a `DENIED` receipt. The asymmetry is deliberate.
 """
 
 from __future__ import annotations
@@ -35,6 +46,7 @@ from typing import Any, Final
 from .action import ClaimValue, Principal
 from .errors import IdentityError, InvalidArgument, MissingDependency
 from .identity import IdentityContext
+from .revocation import FEED_STALE, RevocationFeed
 
 _LOG = logging.getLogger("ctrlrun")
 
@@ -65,6 +77,20 @@ DEFAULT_HTTP_TIMEOUT: Final = timedelta(seconds=5)
 #: The *message* stays deliberately coarse where it reaches a client (§8.2): a caller whose
 #: credential was rejected learns that, and nothing about why.
 _REFUSED: Final = "the credential was rejected"
+
+
+#: A value no `read_at` can equal, so the first staleness episode always warns. `None` cannot
+#: serve: a feed that has never been read reports exactly that.
+_SENTINEL_NEVER: Final[Any] = object()
+
+
+def _stale(feed: RevocationFeed, now: datetime) -> bool:
+    """§6.5 for a third-party feed that exposes the protocol and no `stale()` helper."""
+    bound = feed.max_staleness
+    if bound is None:
+        return False
+    read_at = feed.read_at
+    return read_at is None or now - read_at > bound
 
 
 def _utc_now() -> datetime:
@@ -114,6 +140,7 @@ class JWTIdentityProvider:
         leeway: timedelta = DEFAULT_LEEWAY,
         jwks_min_refresh_interval: timedelta = DEFAULT_JWKS_MIN_REFRESH,
         http_timeout: timedelta = DEFAULT_HTTP_TIMEOUT,
+        revocations: RevocationFeed | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._jwt = _jwt()
@@ -140,6 +167,12 @@ class JWTIdentityProvider:
         self._leeway = leeway
         self._min_refresh = jwks_min_refresh_interval
         self._http_timeout = http_timeout.total_seconds()
+        # SPEC-v0.8 §6.2. Absent means 0.7.0 exactly, which is R1: a deployment that names no
+        # feed behaves as it did, and there is no partial mode between the two.
+        self._revocations = revocations
+        #: Which `read_at` this provider has already warned about, so a staleness episode logs
+        #: once rather than once per resolution (§6.5).
+        self._stale_since: datetime | None = _SENTINEL_NEVER
         self._clock = clock
         self._keys: dict[str, _Key] = {}
         self._fetched_at: datetime | None = None
@@ -221,7 +254,81 @@ class JWTIdentityProvider:
             raise IdentityError(_REFUSED)
         self._check_window(claims)
         self._check_audience(claims)
+        self._check_revocation(claims)
         return claims
+
+    def _check_revocation(self, claims: Mapping[str, Any]) -> None:
+        """Has the issuer revoked this credential? (SPEC-v0.8 §6.3, §6.4, §6.5.)
+
+        **Here, and against the token's own claims.** Not against `Principal.agent`: `agent` is
+        whatever `agent_claim` names, which an operator may set to `client_id` or anything
+        else, so matching an `iss_sub` identifier against it would compare two different things
+        and admit exactly the deployment this was bought for (§6.3, T342). This runs where the
+        raw verified claims are still in hand, and nothing new is retained on `Principal` --
+        `jti` is read here and never stored.
+
+        Refused as `IdentityError`, exactly as a token that fails verification is, and it
+        **writes nothing**: no event, no receipt. `resolve` is called before an `Action` exists,
+        so there is no `action_id` to attribute a refusal to. §6.4 argues that asymmetry and
+        states it plainly: an expired credential leaves a receipt, a revoked one leaves a log
+        line.
+        """
+        feed = self._revocations
+        if feed is None:
+            return
+        issuer = claims.get("iss")
+        subject = claims.get("sub")
+        if not isinstance(issuer, str) or not issuer:  # pragma: no cover - `require` has `iss`
+            raise IdentityError(_REFUSED)
+        if issuer not in feed.issuers:
+            # §6.5: a principal from an issuer this feed does not cover is unaffected by it,
+            # including by its staleness. A feed covering one issuer must not decide for another.
+            return
+        # **Refresh first, then ask whether it is stale**, and an independent review found the
+        # other order fatal. `refresh()` was reachable only from `revoked()`, and this raised
+        # on `stale()` before ever calling it: `PollingRevocationFeed` starts with
+        # `read_at is None`, so with any bound set it was stale on the first resolution,
+        # refused every credential for ever, and **made zero HTTP polls**. The file feed was
+        # the same one step later: after a single staleness episode the file could come back
+        # and the feed stayed dead. §6.5 promises an operator learns why everything stopped,
+        # which implies it starts again.
+        refresh = getattr(feed, "refresh", None)
+        if callable(refresh):
+            refresh()
+        if feed.stale() if hasattr(feed, "stale") else _stale(feed, self._clock()):
+            # §6.5. A security check whose answer is unavailable is fail closed: "has this been
+            # revoked" is exactly the question a stale feed cannot answer, and admitting on
+            # silence would make the bound decoration.
+            if self._stale_since != feed.read_at:
+                # §6.5: one warning per staleness **episode**, not per resolution. During an
+                # outage every agent action resolves a principal, so the per-resolution
+                # spelling emitted one identical line per action.
+                self._stale_since = feed.read_at
+                _LOG.warning(
+                    "refused a token from %s: the revocation feed's last read was %s, past its "
+                    "max_staleness of %s. Every principal of this issuer is refused until it "
+                    "is read again (SPEC-v0.8 §6.5, reason %s)",
+                    issuer,
+                    feed.read_at,
+                    feed.max_staleness,
+                    FEED_STALE,
+                )
+            raise IdentityError(_REFUSED)
+        if not isinstance(subject, str) or not subject:
+            # Nothing to match, so nothing is revoked by subject; a `jti` may still be.
+            subject = ""
+        token_id = claims.get("jti")
+        if feed.revoked(
+            issuer=issuer,
+            subject=subject,
+            token_id=token_id if isinstance(token_id, str) and token_id else None,
+        ):
+            _LOG.warning(
+                "refused a token: the issuer %s revoked this credential before its exp "
+                "(SPEC-v0.8 §6.4)",
+                issuer,
+            )
+            raise IdentityError(_REFUSED)
 
     def _check_window(self, claims: Mapping[str, Any]) -> None:
         """`exp` and `nbf` against this provider's clock, with `leeway` (§3.4).
@@ -571,8 +678,21 @@ def _principal(
         value = claims.get(name)
         if isinstance(value, str | int | bool):  # bool is a subclass of int
             selected[name] = value
+        elif isinstance(value, list) and all(isinstance(item, str) and item for item in value):
+            # SPEC-v0.8 §3.4: a roles claim is a JSON array at every issuer anybody deploys, and
+            # dropping it here is what made its holder silently unentitled. Carried as a tuple,
+            # which is what `Principal.claims` now admits.
+            selected[name] = tuple(value)
         elif value is not None:
-            _LOG.debug("claim %r is %s, which a Principal cannot carry", name, type(value).__name__)
+            # **A warning and not a DEBUG line**, because this is where a silently unentitled
+            # approver begins: a claim an operator asked for by name, that the issuer sent in a
+            # shape this cannot carry, and that every later check then reads as absent (§3.4).
+            _LOG.warning(
+                "claim %r is %s, which a Principal cannot carry, so it is absent: an approver "
+                "role read from this claim will not be held by anybody (SPEC-v0.8 §3.4)",
+                name,
+                type(value).__name__,
+            )
     expires_at = claims.get("exp")
     return Principal(
         agent=agent.strip(),

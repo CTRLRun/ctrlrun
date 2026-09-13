@@ -301,7 +301,27 @@ class InterruptApprovalProvider:
             )
 
         if answer.granted:
-            return self._store.grant_approval(request_id, answer.approver)
+            granted = self._store.grant_approval(request_id, answer.approver)
+            # SPEC-v0.8 §4.4, and the same trap as the scripted provider: `None` from the store
+            # means recorded and short of N, while `None` from `wait` means `v0.1 §4.3`'s
+            # "answered, no". Returning it straight through would report a partial grant as a
+            # **denial**, and `@protect(wait=True)` would raise `ActionDenied` for a request a
+            # second human is still answering.
+            #
+            # This `wait` is not a polling loop: it puts the question to the framework once. So
+            # the truthful answer is that nobody completed it here, which is `ApprovalTimeout`,
+            # naming what is still outstanding. The answer **is** recorded, and another surface
+            # can complete it.
+            if granted is not None:
+                return granted
+            outstanding = self._store.get_approval(request_id)
+            recorded = 0 if outstanding is None else len(outstanding.approvers)
+            needed = 1 if outstanding is None else outstanding.request.approvals_required
+            raise ApprovalTimeout(
+                f"approval request {request_id} holds {recorded} of {needed} approvals; this "
+                "answer was recorded and the request needs another principal",
+                request_id=request_id,
+            )
         self._store.deny_approval(request_id, answer.approver)
         return None
 

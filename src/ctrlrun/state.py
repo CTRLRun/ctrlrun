@@ -37,8 +37,12 @@ from .approval import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovalStore,
+    RequiredRole,
+    VerifiedApprover,
+    _verified_approver_now,
     check_answerable,
     check_consumable,
+    count_grant,
 )
 from .effect import (
     COMMITTED_EFFECT,
@@ -504,16 +508,154 @@ def _explained_by_alignment(measured: ClockSkew, alignment: timedelta) -> bool:
     return measured.bound < past <= measured.bound + alignment
 
 
+@dataclass(frozen=True)
+class Charge:
+    """What one reservation spends against one grant's budget (SPEC-v0.9 §3.3.1).
+
+    **It carries the whole predicate**, not just the amount, and that is the decision §3.3.1
+    argues: `limit` and `window` travel with the charge rather than being looked up, because a
+    store that resolved a grant's budgets would be reading the policy, and `ARCHITECTURE.md` §6
+    has `state.py` not knowing about `policy.py`. The store evaluates one arithmetic predicate it
+    was handed, over rows it owns.
+    """
+
+    grant_id: str
+    metric: str
+    amount: int
+    limit: int
+    window: timedelta
+
+    def __post_init__(self) -> None:
+        """Refuse what the loader refuses, on `Budget.__post_init__`'s rule (§2.2).
+
+        **A negative `amount` refunds the budget**: it unwinds the sum and the grant spends again,
+        which is the compensation §12 puts out of scope, reachable by anyone who can call the
+        store. §2.3 assigns the loader-side refusal to the metric value, and this is the
+        defence in depth that rule cannot give a third-party caller reaching the `StateStore`
+        directly. An independent review found the value object validating nothing while `Budget`
+        beside it validates everything.
+        """
+        for name, value in (("amount", self.amount), ("limit", self.limit)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise InvalidArgument(
+                    f"charge {self.metric!r} on {self.grant_id!r}: {name!r} must be a "
+                    f"non-negative integer, got {value!r} (SPEC-v0.9 §2.3)"
+                )
+        if not isinstance(self.window, timedelta) or self.window <= timedelta(0):
+            raise InvalidArgument(
+                f"charge {self.metric!r} on {self.grant_id!r}: 'window' must be positive, "
+                f"got {self.window!r}"
+            )
+
+
+@dataclass(frozen=True)
+class Consumption:
+    """One ledger row, as `consumptions()` hands it back (SPEC-v0.9 §3.3.3, §10).
+
+    `released_at` is `None` while the charge is held. Whether it is held **and why** is §7.2's
+    question, and the answer is a join through `get_effect` on `effect_key` rather than a column
+    here: the ledger deliberately has no state machine of its own (§4.1).
+    """
+
+    grant_id: str
+    metric: str
+    amount: int
+    effect_key: str
+    attempt: int
+    consumed_at: datetime
+    released_at: datetime | None = None
+
+
+def check_charges(
+    charges: tuple[Charge, ...],
+    spent: Callable[[Charge], int],
+) -> None:
+    """SPEC-v0.9 §3.3.1's predicate, in one place so three backends cannot drift on it.
+
+    `spent` is the store's own sum of un-released rows for this charge's `(grant_id, metric)`
+    over `[now - window, now]`. The comparison is **inclusive**, matching §2.2's "what the sum may
+    reach": a `limit: 0` grant therefore permits an action only if its metric value is 0, and
+    §3.3.1 records that a zero limit does not stop a grant, since it permits unboundedly many
+    zero-valued actions.
+
+    Pure, like `plan_reservation` and for the same reason: every store decides here rather than
+    each deciding for itself, so the arithmetic is one function a test can reach directly.
+
+    **Every charge is evaluated, including several on one `(grant_id, metric)`.** That is §2.2's
+    own motivating shape: a grant with two budgets on `amount`, 100,000 a day and 500,000 a month,
+    is "the first thing an operator asks for", and it arrives here as two charges differing only
+    in `limit` and `window`. Both predicates run; §3.4's key then writes **one** row, which is
+    right, because it is one spend measured against two windows.
+
+    **What is refused is two charges on one `(grant_id, metric)` carrying different amounts.**
+    A charge is invisible to its sibling here (each is compared against the *stored* sum), and
+    §3.4's key carries no window, so differing amounts would collapse to whichever row landed
+    first and the ledger would under-record the spend. Nothing legitimate produces that: the
+    amount comes from the action's own metric value, so two budgets on one metric always agree,
+    and §2.7's per-ancestor charges are distinct grants.
+
+    An earlier version refused **any** duplicate pair, which made §2.2's shape die at execute
+    with no receipt: the loader accepted the document, observe mode reported it clean, and
+    `ctrlrun verify` could not grade it. An independent review found it.
+    """
+    amounts: dict[tuple[str, str], int] = {}
+    for charge in charges:
+        key = (charge.grant_id, charge.metric)
+        seen = amounts.setdefault(key, charge.amount)
+        if seen != charge.amount:
+            raise InvalidArgument(
+                f"two charges on {charge.grant_id!r}/{charge.metric!r} in one reservation carry "
+                f"different amounts ({seen} and {charge.amount}); §3.4's key would keep one row "
+                "and the ledger would under-record the spend"
+            )
+    for charge in charges:
+        if spent(charge) + charge.amount > charge.limit:
+            raise BudgetExhaustedError(charge.grant_id, charge.metric, charge.window)
+
+
+class BudgetExhaustedError(Exception):
+    """The store's refusal when §3.3.1's predicate fails. Package-internal, never public.
+
+    **Not a `CTRLRunError`, and §3.3.2 is why.** `Control` converts it to `ActionDenied` with the
+    events and the receipt that refusal owes; a store raising `ActionDenied` itself would be
+    minting evidence, which is `control.py`'s job. And it must not be an `ActionDenied` subclass:
+    `_secure`'s handler for that type appends `APPROVAL_DENIED` unconditionally, which would
+    fabricate an approval denial for an action no human ever saw. Item 2 met that hazard first
+    with the scope refusal; this is the same handler.
+    """
+
+    def __init__(self, grant_id: str, metric: str, window: timedelta) -> None:
+        super().__init__(f"budget {metric!r} on grant {grant_id!r} over {window} is exhausted")
+        self.grant_id = grant_id
+        self.metric = metric
+        self.window = window
+
+
 class StateStore(ApprovalStore, Protocol):
     """Durable state behind a `Control` (SPEC-v0.1 §5.3): approvals, effects, evidence."""
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
         """Claim an effect key for one attempt. At most one caller wins (§5.3 E1).
 
         Refuses per the retry table of §5.4: `DuplicateEffect` for a committed effect or a
         live reservation, `AmbiguousEffect` for an unresolved or lease-expired one.
+
+        **`charges` is SPEC-v0.9's amendment to this frozen protocol** (§3.3), and it is a MUST
+        rather than a courtesy: a store that accepts charges **MUST** evaluate §3.3.1's predicate
+        inside this same transaction and **MUST** raise `BudgetExhaustedError` when it fails.
+        A store that cannot says so by refusing charges, never by accepting and ignoring them.
+
+        The direction matters and is the reason this is a contract and not a convention. A store
+        that wrote the rows and skipped the predicate would **silently disable every budget on the
+        deployment**, and nothing downstream could tell. `ctrlrun.conformance`'s store suite has
+        the case, and `Control` probes it at construction (§3.3): a store that does not refuse a
+        `limit: 0` charge is one an operator cannot accidentally deploy with budgets configured.
         """
         ...
 
@@ -524,11 +666,45 @@ class StateStore(ApprovalStore, Protocol):
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         """Consume the approval and reserve the effect in one transaction (§4.2 A4).
 
         The approval is checked first, so its refusal is the one raised when both would
         apply (acceptance test T4). If the reservation is refused, nothing is consumed.
+
+        `charges` carries the same MUST as `reserve_effect`'s, and the same transaction.
+        """
+        ...
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+        effect_key: str | None = None,
+    ) -> tuple[Consumption, ...]:
+        """Ledger rows, **in insertion order** (SPEC-v0.9 §3.3.3).
+
+        Not "newest last": both durable backends order by the autoincrement id, and two hosts
+        with ordinary clock skew, which `v0.7 §3` models and this store warns about at open,
+        invert `consumed_at` against it. Deterministic and identical across the three backends,
+        which is what a reader needs; it is simply not a time ordering.
+
+        The **read half** of §3.3's amendment, and it clears `v0.6 §9.2`'s bar the way that
+        section's own example did: a second backend implementing `charges=` and nothing else would
+        satisfy every declared method and break `ctrlrun inspect` and `ctrlrun verify`. `v0.6
+        §2.7.2` records exactly that finding for `events()` and `receipts()`.
+
+        **`grant_id` is optional**, because §7.3 has `stats` report the ledger's row count, and a
+        required one would make that enumerate every grant id that ever existed, runtime
+        delegations and revoked grants included, one call each.
+
+        **`effect_key` is what a resumed leg reads by.** §8.3 makes the resumed receipt the only
+        receipt an MCP multi round-trip or ACS action ever gets, so it has to report what that
+        action spent, and a gateway that restarted mid-round has nothing in memory to report it
+        from. Without this filter that read is a scan of the whole ledger per resumption.
         """
         ...
 
@@ -733,6 +909,62 @@ class StateStore(ApprovalStore, Protocol):
         ...
 
 
+def _roles_json(roles: tuple[RequiredRole, ...]) -> str | None:
+    """The roles a request pinned, as canonical JSON, or `None` where it pinned none."""
+    if not roles:
+        return None
+    return json.dumps([role.to_dict() for role in roles], sort_keys=True)
+
+
+def _roles_from_json(text: str | None) -> tuple[RequiredRole, ...]:
+    """What the column holds, or `()`. A corrupted column raises, for `_approvers_from_json`'s
+    reason: this is authority about to be spent, not evidence a reader walks past."""
+    if not text:
+        return ()
+    try:
+        return tuple(RequiredRole.from_dict(item) for item in json.loads(text))
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise InvalidArgument(
+            f"the approvals row carries an unreadable 'required_roles' column: {exc}"
+        ) from exc
+
+
+def _approvers_json(approvers: tuple[VerifiedApprover, ...]) -> str | None:
+    """The verified approvers as one canonical JSON array, or `None` where there are none.
+
+    `None` and not `"[]"`: a row granted by a surface that resolved nobody and a row granted
+    before the column existed are the same thing to a reader, and both are what `NULL` means
+    (SPEC-v0.8 §2.5).
+    """
+    if not approvers:
+        return None
+    return json.dumps([approver.to_dict() for approver in approvers], sort_keys=True)
+
+
+def _approvers_from_json(text: str | None) -> tuple[VerifiedApprover, ...]:
+    """What the column holds, or `()`. A column a store dropped reads as no approver at all,
+    which `Control` refuses at consumption rather than skipping (SPEC-v0.8 §2.5).
+
+    **A corrupted column is a `CTRLRunError` and not a `JSONDecodeError`.** This read sits under
+    `get_approval`, which sits under `_recheck`, which sits under `execute`: a raw decoding error
+    from a tampered row would reach an agent as an exception no caller catches and no receipt
+    records. Fail closed, named, and traceable to the row.
+
+    It does **not** get `Receipt.from_dict`'s never-raises treatment, and the difference is
+    deliberate: a receipt is evidence a reader walks past, so one bad row must not blind every
+    reader, while an approval is authority about to be spent, so one bad row must stop this
+    action rather than be read as "no approver" (§2.5, `v0.7 §6.11`).
+    """
+    if not text:
+        return ()
+    try:
+        return tuple(VerifiedApprover.from_dict(item) for item in json.loads(text))
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise InvalidArgument(
+            f"the approvals row carries an unreadable 'approvers' column: {exc}"
+        ) from exc
+
+
 class InMemoryStateStore:
     """Everything held in process memory: for tests and `ctrlrun demo`.
 
@@ -746,6 +978,9 @@ class InMemoryStateStore:
     def __init__(self, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self._lock = threading.Lock()
         self._clock = clock
+        #: SPEC-v0.9 §3.2's table, in a list. Append-only until a release sets `released_at`,
+        #: which is a replacement here and a compare-and-set on the durable stores (§4.4).
+        self._ledger: list[Consumption] = []
         self._events: list[Event] = []
         self._receipts: list[Receipt] = []
         #: The chain head (§6.3), starting where `0002_receipt_chain` starts it: seq 0
@@ -868,25 +1103,40 @@ class InMemoryStateStore:
             records = list(self._approvals.values())
         return _newest_denied(records, action_hash, now)
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
+            now = self._clock()
+            # SPEC-v0.8 §2.5: whatever the granting surface verified, or nothing where it
+            # verified nobody. A store that did not read this records no approver, and that is
+            # refused at consumption rather than skipped.
+            #
+            # SPEC-v0.8 §4.2: and `count_grant` decides whether this grant reaches the
+            # threshold, in the one implementation all three stores apply.
+            verified = _verified_approver_now(now)
+            approvers, reached = count_grant(record, verified, now)
             granted = replace(
                 record,
-                status=ApprovalStatus.GRANTED,
-                approver=approver,
-                granted_at=self._clock(),
+                status=ApprovalStatus.GRANTED if reached else record.status,
+                approver=approver if reached else record.approver,
+                granted_at=now if reached else record.granted_at,
+                approvers=approvers,
             )
             self._approvals[approval_id] = granted
-            return granted.as_approval()
+            return granted.as_approval() if reached else None
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)
         with self._lock:
             record = self._answerable(approval_id)
+            now = self._clock()
+            verified = _verified_approver_now(now)
             self._approvals[approval_id] = replace(
-                record, status=ApprovalStatus.DENIED, approver=approver
+                record,
+                status=ApprovalStatus.DENIED,
+                approver=approver,
+                approvers=(*record.approvers, verified) if verified else record.approvers,
             )
 
     def consume_approval(self, approval_id: str, action_hash: str) -> Approval:
@@ -918,9 +1168,15 @@ class InMemoryStateStore:
     # --- effects (SPEC-v0.1 §5.3) -----------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -930,9 +1186,10 @@ class InMemoryStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -943,6 +1200,7 @@ class InMemoryStateStore:
         effect_key: str | None,
         action_id: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both together (SPEC-v0.1 §4.2 A4).
 
@@ -958,10 +1216,18 @@ class InMemoryStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1 — **decided before anything is written, inside the same lock**.
+            # `check_charges` raises `BudgetExhaustedError` and nothing above has been written,
+            # so a refused budget leaves the approval granted and the effect unreserved, which is
+            # the same shape §4.2 A4 already gives a refused reservation.
+            if charges:
+                check_charges(charges, lambda charge: self._spent(charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(charges, effect_key, plan.reservation.attempt, now)
         return (approved.as_approval() if approved is not None else None), plan.reservation
 
     def _consumable(self, approval_id: str, action_hash: str, now: datetime) -> ApprovalRecord:
@@ -988,6 +1254,91 @@ class InMemoryStateStore:
         previous = self._effects.get(reservation.effect_key)
         self._effects[reservation.effect_key] = _reserved(reservation, previous, now)
 
+    def _spent(self, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge's grant and metric, over its rolling window."""
+        floor = now - charge.window
+        return sum(
+            row.amount
+            for row in self._ledger
+            if row.grant_id == charge.grant_id
+            and row.metric == charge.metric
+            and row.released_at is None
+            # SPEC-v0.9 §2.5 — `[now - window, now]`, **closed at the floor**. An independent
+            # review found all three backends half-open here while `consumptions(since=)` was
+            # closed, so `inspect --since` would have shown a row the predicate excluded.
+            and row.consumed_at >= floor
+        )
+
+    def _charge_locked(
+        self, charges: tuple[Charge, ...], effect_key: str | None, attempt: int, now: datetime
+    ) -> None:
+        """Write one row per charge. Idempotent on `(effect_key, attempt, grant_id, metric)`.
+
+        SPEC-v0.9 §3.4: `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once, and an
+        unconstrained append would double-charge there. The in-memory store has no unique index,
+        so it enforces the same key by hand rather than being the one backend that does not.
+        """
+        for charge in charges:
+            key = (effect_key, attempt, charge.grant_id, charge.metric)
+            if any(
+                (row.effect_key, row.attempt, row.grant_id, row.metric) == key
+                for row in self._ledger
+            ):
+                continue
+            self._ledger.append(
+                Consumption(
+                    grant_id=charge.grant_id,
+                    metric=charge.metric,
+                    amount=charge.amount,
+                    effect_key=str(effect_key),
+                    attempt=attempt,
+                    consumed_at=now,
+                )
+            )
+
+    def _release_locked(self, effect_key: str, state: EffectState, now: datetime) -> None:
+        """SPEC-v0.9 §4.1: **released exactly when the effect reaches `FAILED`**, held otherwise.
+
+        The ledger has no state machine of its own. `effect.py`'s `plan_reservation` is already
+        the complete table of exits from a reservation, and this one rule covers every row of
+        §4.2's nineteen: `COMMITTED` holds permanently, `AMBIGUOUS` holds until a human or a hook
+        moves it, a lapsed lease holds because no transition has occurred, and only `FAILED`
+        releases, because that is the one state in which the executor proved nothing happened.
+
+        **Keyed on the state reached, never on the call that reached it** (§4.2's warning): a
+        `fail_effect` that is *refused* because the record moved on releases nothing, and a
+        `resolve_effect(FAILED)` by a human releases even though no `fail_effect` ran.
+
+        A compare-and-set on `released_at`, never a decrement (§4.4): `v0.6 §4.3.2` Table A2 row 2
+        re-issues a lost `UPDATE` once, and a decrement would subtract twice.
+        """
+        if state is not EffectState.FAILED:
+            return
+        self._ledger = [
+            replace(row, released_at=now)
+            if row.effect_key == effect_key and row.released_at is None
+            else row
+            for row in self._ledger
+        ]
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+        effect_key: str | None = None,
+    ) -> tuple[Consumption, ...]:
+        with self._lock:
+            return tuple(
+                row
+                for row in self._ledger
+                if (grant_id is None or row.grant_id == grant_id)
+                and (metric is None or row.metric == metric)
+                and (since is None or row.consumed_at >= since)
+                and (effect_key is None or row.effect_key == effect_key)
+            )
+
     def begin_execution(self, effect_key: str, action_id: str) -> None:
         self._transition(effect_key, action_id, EffectState.EXECUTING, _RESERVED)
 
@@ -1009,9 +1360,15 @@ class InMemoryStateStore:
     def resolve_effect(self, effect_key: str, state: EffectState, resolver: str) -> EffectRecord:
         resolver = _approver(resolver)
         with self._lock:
+            now = self._clock()
             record = _resolvable(self._effects.get(effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._effects[effect_key] = resolved
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row. **This path does not go
+            # through `_transition`**, so the release has to be here too: a human resolving an
+            # `AMBIGUOUS` record `FAILED` is exactly the authority R2 says releases a hold, and
+            # without this the charge would be held for ever by the one act meant to free it.
+            self._release_locked(effect_key, state, now)
             return resolved
 
     def extend_lease(self, effect_key: str, action_id: str, until: datetime) -> None:
@@ -1080,6 +1437,12 @@ class InMemoryStateStore:
             self._effects[effect_key] = _transitioned(
                 record, state, now, result=result, error=error
             )
+            # SPEC-v0.9 §4.1. **This order is the atomicity**, and unlike the SQL stores there is
+            # no rollback to fall back on: `_checked` raising is what must leave the ledger
+            # untouched. Moving the release above it keys it on the *call* rather than the state
+            # reached, and a refused `fail_effect` then releases the hold on an `AMBIGUOUS`
+            # record, which is a manufacturable refund. T425 pins it.
+            self._release_locked(effect_key, state, now)
 
 
 class _HeldConnection:
@@ -1411,8 +1774,8 @@ class SQLiteStateStore:
         try:
             self._connection().execute(
                 "INSERT INTO approvals(approval_id, action_hash, status, action_json, "
-                "created_at, expires_at, policy_hash_at_approval, precondition_fingerprint) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "created_at, expires_at, policy_hash_at_approval, precondition_fingerprint, "
+                "required_roles, approvals_required) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     request.request_id,
                     request.action_hash,
@@ -1422,6 +1785,8 @@ class SQLiteStateStore:
                     _iso(request.expires_at),
                     request.policy_hash,
                     request.precondition_fingerprint,
+                    _roles_json(request.required_roles),
+                    request.approvals_required,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -1535,25 +1900,43 @@ class SQLiteStateStore:
         found = (self._read_approval(connection, row["approval_id"]) for row in rows)
         return tuple(record for record in found if record is not None)
 
-    def grant_approval(self, approval_id: str, approver: str) -> Approval:
+    def grant_approval(self, approval_id: str, approver: str) -> Approval | None:
         approver = _approver(approver)
         connection = self._connection()
         now = self._clock()
         connection.execute("BEGIN IMMEDIATE")
         try:
             record = self._answerable(connection, approval_id, now)
+            # SPEC-v0.8 §2.5, §4.2: the verified approver and the count, inside the same
+            # `BEGIN IMMEDIATE` that serialises the read and the write. That serialisation is
+            # what makes the count a property of the store's write rather than of a read
+            # followed by one (§4.3).
+            verified = _verified_approver_now(now)
+            approvers, reached = count_grant(record, verified, now)
+            status = ApprovalStatus.GRANTED if reached else record.status
             granted = replace(
-                record, status=ApprovalStatus.GRANTED, approver=approver, granted_at=now
+                record,
+                status=status,
+                approver=approver if reached else record.approver,
+                granted_at=now if reached else record.granted_at,
+                approvers=approvers,
             )
             connection.execute(
-                "UPDATE approvals SET status=?, approver=?, granted_at=? WHERE approval_id=?",
-                (str(ApprovalStatus.GRANTED), approver, _iso(now), approval_id),
+                "UPDATE approvals SET status=?, approver=?, granted_at=?, approvers=? "
+                "WHERE approval_id=?",
+                (
+                    str(status),
+                    granted.approver,
+                    _iso(granted.granted_at) if granted.granted_at else None,
+                    _approvers_json(approvers),
+                    approval_id,
+                ),
             )
         except BaseException:
             self._unwind(connection)
             raise
         connection.commit()
-        return granted.as_approval()
+        return granted.as_approval() if reached else None
 
     def deny_approval(self, approval_id: str, approver: str) -> None:
         approver = _approver(approver)
@@ -1561,10 +1944,17 @@ class SQLiteStateStore:
         now = self._clock()
         connection.execute("BEGIN IMMEDIATE")
         try:
-            self._answerable(connection, approval_id, now)
+            record = self._answerable(connection, approval_id, now)
+            verified = _verified_approver_now(now)
+            approvers = (*record.approvers, verified) if verified else record.approvers
             connection.execute(
-                "UPDATE approvals SET status=?, approver=? WHERE approval_id=?",
-                (str(ApprovalStatus.DENIED), approver, approval_id),
+                "UPDATE approvals SET status=?, approver=?, approvers=? WHERE approval_id=?",
+                (
+                    str(ApprovalStatus.DENIED),
+                    approver,
+                    _approvers_json(approvers),
+                    approval_id,
+                ),
             )
         except BaseException:
             self._unwind(connection)
@@ -1605,11 +1995,19 @@ class SQLiteStateStore:
                 expires_at=datetime.fromisoformat(row["expires_at"]),
                 policy_hash=row["policy_hash_at_approval"],
                 precondition_fingerprint=row["precondition_fingerprint"],
+                required_roles=_roles_from_json(row["required_roles"]),
+                # `if ... is None else` and never `or 1`: `or` swallows a tampered `0`,
+                # which `ApprovalRequest.__post_init__` exists to refuse (§4.2, §12). `None`
+                # is the honest absent value, written by every row predating the column.
+                approvals_required=(
+                    1 if row["approvals_required"] is None else row["approvals_required"]
+                ),
             ),
             status=ApprovalStatus(row["status"]),
             approver=row["approver"],
             granted_at=_at(row["granted_at"]),
             consumed_at=_at(row["consumed_at"]),
+            approvers=_approvers_from_json(row["approvers"]),
         )
 
     def _expire_locked(self, connection: sqlite3.Connection, approval_id: str) -> None:
@@ -1629,9 +2027,15 @@ class SQLiteStateStore:
     # --- effects (SPEC-v0.1 §5.3) -----------------------------------------------------
 
     def reserve_effect(
-        self, effect_key: str, action_id: str, lease: timedelta = DEFAULT_LEASE
+        self,
+        effect_key: str,
+        action_id: str,
+        lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> Reservation:
-        _, reservation = self._authorize_and_reserve(None, None, effect_key, action_id, lease)
+        _, reservation = self._authorize_and_reserve(
+            None, None, effect_key, action_id, lease, charges=charges
+        )
         return _only(reservation, "reservation")
 
     def consume_approval_and_reserve(
@@ -1641,9 +2045,10 @@ class SQLiteStateStore:
         effect_key: str,
         action_id: str,
         lease: timedelta = DEFAULT_LEASE,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval, Reservation]:
         approval, reservation = self._authorize_and_reserve(
-            approval_id, action_hash, effect_key, action_id, lease
+            approval_id, action_hash, effect_key, action_id, lease, charges=charges
         )
         return _only(approval, "approval"), _only(reservation, "reservation")
 
@@ -1654,6 +2059,7 @@ class SQLiteStateStore:
         effect_key: str | None,
         action_id: str | None,
         lease: timedelta,
+        charges: tuple[Charge, ...] = (),
     ) -> tuple[Approval | None, Reservation | None]:
         """Consume an approval, reserve an effect, or both, in one transaction (§4.2 A4).
 
@@ -1674,15 +2080,129 @@ class SQLiteStateStore:
             plan = ReservationPlan()
             if effect_key is not None:
                 plan = self._plan(connection, effect_key, _required_action(action_id), lease, now)
+            # SPEC-v0.9 §3.3.1, **inside the `BEGIN IMMEDIATE` this method already holds**. That
+            # is the whole of the amendment's value on this backend: the write lock was taken
+            # before the first read, so the sum and the insert are serialised against every other
+            # process on this file (§3.6), and nothing further is required.
+            if charges:
+                check_charges(charges, lambda charge: self._spent(connection, charge, now))
             if plan.reservation is not None:
                 self._reserve_locked(connection, plan.reservation, plan.renews, now)
             if approved is not None:
                 self._consume_locked(connection, approved.approval_id, now)
+            if charges and plan.reservation is not None:
+                self._charge_locked(
+                    connection, charges, str(effect_key), plan.reservation.attempt, now
+                )
         except BaseException:
             self._unwind(connection)
             raise
         connection.commit()
         return (approved.as_approval() if approved is not None else None), plan.reservation
+
+    def _release_locked(
+        self, connection: sqlite3.Connection, effect_key: str, state: EffectState, now: datetime
+    ) -> None:
+        """SPEC-v0.9 §4.1, §4.4. Released exactly on `FAILED`, by compare-and-set on the flag.
+
+        `WHERE released_at IS NULL` is the compare half, so a re-issued `UPDATE` (`v0.6 §4.3.2`
+        Table A2 row 2) is a no-op rather than a second subtraction.
+        """
+        if state is not EffectState.FAILED:
+            return
+        connection.execute(
+            "UPDATE budget_ledger SET released_at = ? WHERE effect_key = ? AND released_at IS NULL",
+            (_iso(now), effect_key),
+        )
+
+    def _spent(self, connection: sqlite3.Connection, charge: Charge, now: datetime) -> int:
+        """The un-released sum for this charge, over its rolling window (SPEC-v0.9 §2.5)."""
+        row = connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM budget_ledger
+             WHERE grant_id = ? AND metric = ? AND released_at IS NULL AND consumed_at >= ?
+            """,
+            (charge.grant_id, charge.metric, _iso(now - charge.window)),
+        ).fetchone()
+        return int(row[0])
+
+    def _charge_locked(
+        self,
+        connection: sqlite3.Connection,
+        charges: tuple[Charge, ...],
+        effect_key: str,
+        attempt: int,
+        now: datetime,
+    ) -> None:
+        """One row per charge, idempotent on the unique key (SPEC-v0.9 §3.4).
+
+        `INSERT OR IGNORE` against `UNIQUE (effect_key, attempt, grant_id, metric)`, because
+        `v0.6 §4.3.2` Table A1 row 2 retries a lost insert once and an unconstrained append would
+        double-charge exactly when an operator's network is already misbehaving.
+        """
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO budget_ledger
+                (grant_id, metric, amount, effect_key, attempt, consumed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    charge.grant_id,
+                    charge.metric,
+                    charge.amount,
+                    effect_key,
+                    attempt,
+                    _iso(now),
+                )
+                for charge in charges
+            ],
+        )
+
+    def consumptions(
+        self,
+        *,
+        grant_id: str | None = None,
+        metric: str | None = None,
+        since: datetime | None = None,
+        effect_key: str | None = None,
+    ) -> tuple[Consumption, ...]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if grant_id is not None:
+            clauses.append("grant_id = ?")
+            values.append(grant_id)
+        if metric is not None:
+            clauses.append("metric = ?")
+            values.append(metric)
+        if since is not None:
+            clauses.append("consumed_at >= ?")
+            values.append(_iso(since))
+        if effect_key is not None:
+            clauses.append("effect_key = ?")
+            values.append(effect_key)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT grant_id, metric, amount, effect_key, attempt, consumed_at, released_at"
+                f" FROM budget_ledger{where} ORDER BY id",
+                values,
+            )
+            .fetchall()
+        )
+        return tuple(
+            Consumption(
+                grant_id=row[0],
+                metric=row[1],
+                amount=int(row[2]),
+                effect_key=row[3],
+                attempt=int(row[4]),
+                consumed_at=datetime.fromisoformat(row[5]),
+                released_at=_at(row[6]),
+            )
+            for row in rows
+        )
 
     def _consumable(
         self, connection: sqlite3.Connection, approval_id: str, action_hash: str, now: datetime
@@ -1820,9 +2340,13 @@ class SQLiteStateStore:
         connection = self._connection()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            now = self._clock()
             record = _resolvable(self._read_effect(connection, effect_key), effect_key, state)
-            resolved = _resolved(record, state, resolver, self._clock())
+            resolved = _resolved(record, state, resolver, now)
             self._write_effect(connection, resolved)
+            # SPEC-v0.9 §4.1, §4.2's `resolve_effect(FAILED)` row: this path does not go through
+            # `_transition`, so the release is here too, inside the same `BEGIN IMMEDIATE`.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise
@@ -1866,6 +2390,10 @@ class SQLiteStateStore:
             self._write_effect(
                 connection, _transitioned(record, state, now, result=result, error=error)
             )
+            # SPEC-v0.9 §4.1, inside the same `BEGIN IMMEDIATE`: the ledger moves with the record
+            # or neither moves. A release in a second transaction could leave a `FAILED` effect
+            # holding its charge for ever if the process died between them.
+            self._release_locked(connection, effect_key, state, now)
         except BaseException:
             self._unwind(connection)
             raise

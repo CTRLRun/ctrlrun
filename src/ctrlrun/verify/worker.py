@@ -105,9 +105,11 @@ def attempt(payload: str) -> None:
                 from ..control import with_approval
 
                 with with_approval(request["approval_id"]):
-                    control.execute(action, executor, request["effect_key"])
+                    control.execute(
+                        action, executor, request["effect_key"], task=request.get("task")
+                    )
             else:
-                control.execute(action, executor, request["effect_key"])
+                control.execute(action, executor, request["effect_key"], task=request.get("task"))
             result["outcome"] = OUTCOME_COMMITTED
         except CTRLRunError as refused:
             result["outcome"] = OUTCOME_REFUSED

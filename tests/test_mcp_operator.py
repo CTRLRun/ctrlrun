@@ -101,11 +101,13 @@ class Recording:
     satisfy "the read succeeded" while breaking the rule the test is about.
     """
 
-    def __init__(self, *, agent="approver-app", user="alice", expires_at=None):
+    def __init__(self, *, agent="approver-app", user="alice", expires_at=None, roles=None):
         self.calls: list[str] = []
         self.agent = agent
         self.user = user
         self.expires_at = expires_at
+        #: SPEC-v0.8 §3.4 — what this credential's issuer put in the roles claim, or nothing.
+        self.roles = roles
 
     def resolve(self, context):
         self.calls.append(context.action)
@@ -117,6 +119,7 @@ class Recording:
             user=self.user,
             issuer="https://proxy.example/",
             expires_at=self.expires_at,
+            claims={"roles": self.roles} if self.roles else {},
         )
 
 
@@ -155,6 +158,110 @@ def _call(server, tool, arguments=None, *, credential=None, request_id=1):
         headers["X-Approver"] = credential
     response = server.handle(json.dumps(body).encode(), headers)
     return json.loads(response.body), response.status
+
+
+def test_T288_the_operator_server_records_the_principal_it_verified(server, control):
+    """SPEC-v0.8 §2.6 — the one shipped surface that can produce a verified approver.
+
+    It has resolved a principal for every request since `SPEC-mcp-operator.md` shipped, and
+    then discarded it into the string `mcp-operator:<user>`. What item 2 changed is that the
+    principal is recorded beside the string, so an approval granted here is consumable in a
+    deployment that checks (§2.7).
+    """
+    from ctrlrun.approval import DEFAULT_APPROVAL_TTL
+
+    action = _action(control)
+    request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+
+    document, status = _call(
+        server, "approve", {"request_id": request.request_id}, credential="alice"
+    )
+
+    assert status == 200, document
+    record = control.store.get_approval(request.request_id)
+    assert [(who.agent, who.user, who.issuer) for who in record.approvers] == [
+        ("approver-app", "alice", "https://proxy.example/")
+    ]
+    assert record.approver == "mcp-operator:alice", "the string still says what it said"
+
+
+def test_T288_a_denial_records_the_principal_too(server, control):
+    """§2.7's row for `deny_approval`: a denial is an act the evidence attributes."""
+    from ctrlrun.approval import DEFAULT_APPROVAL_TTL
+
+    action = _action(control)
+    request = control.approvals.request(action, DEFAULT_APPROVAL_TTL)
+
+    document, status = _call(server, "deny", {"request_id": request.request_id}, credential="alice")
+
+    assert status == 200, document
+    record = control.store.get_approval(request.request_id)
+    assert [who.agent for who in record.approvers] == ["approver-app"]
+
+
+#: SPEC-v0.8 §3.2 — a registry with a role on it, for the two §3.8 tests. Its own document, so
+#: the rest of this file keeps grading the server it was written for.
+GATED_POLICY = """
+schema: ctrlrun.policy/v6
+controls:
+  card-data-handling:
+    title: Cardholder data changes are approved by a named owner
+    approver_role: payments-owner
+actions:
+  stripe.refund:
+    decision: approve
+    controls: [card-data-handling]
+"""
+
+
+@pytest.fixture
+def gated(store, tmp_path):
+    return Control(Policy.from_yaml(GATED_POLICY), store, LocalApprovalProvider(store))
+
+
+def _pending_on(control):
+    """Propose through `Control.execute`, so the request carries the roles §3.3 pins."""
+    action = _action(control)
+    with pytest.raises(ApprovalRequired) as raised:
+        control.execute(action, lambda: "re_1", "refund:txn_1")
+    return raised.value.request_id
+
+
+def test_T307_the_server_refuses_an_answer_the_credential_is_not_entitled_to(gated):
+    """SPEC-v0.8 §3.8's other half: the courtesy, where the credential actually is.
+
+    The guarantee is `Control`'s check at consumption; this refuses at the moment a human
+    answers, so they learn then rather than when an agent retries. Two defences, two tests, on
+    `CONTRIBUTING.md`'s first shape of a false green.
+    """
+    server = OperatorServer(_config(approver_roles_claim="roles"), gated, Recording())
+    # Through `Control.execute`, because that is where the roles are pinned onto the request
+    # (§3.3): a request built straight from the provider carries none, and a test that did so
+    # would assert a refusal the deployment never reaches.
+    request_id = _pending_on(gated)
+
+    document, status = _call(server, "approve", {"request_id": request_id}, credential="alice")
+
+    assert status == 403, document
+    assert "role" in json.dumps(document)
+    record = gated.store.get_approval(request_id)
+    assert str(record.status) == "pending", "a refused answer is not an answer"
+
+
+def test_T307_an_entitled_credential_is_recorded_with_what_it_satisfied(gated):
+    """The positive control, and what the consume-side check then reads."""
+    server = OperatorServer(
+        _config(approver_roles_claim="roles"),
+        gated,
+        Recording(roles=("payments-owner",)),
+    )
+    request_id = _pending_on(gated)
+
+    document, status = _call(server, "approve", {"request_id": request_id}, credential="alice")
+
+    assert status == 200, document
+    record = gated.store.get_approval(request_id)
+    assert record.approvers[0].entitled == ("card-data-handling",)
 
 
 def _rpc(server, method, params=None, *, request_id=1):

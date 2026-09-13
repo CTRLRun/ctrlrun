@@ -170,16 +170,28 @@ def test_T88_only_the_named_claims_reach_the_principal(keypair, clock):
 
 
 def test_T88_a_claim_whose_value_is_not_scalar_is_dropped(keypair, clock, caplog):
-    private, public = keypair
-    provider = _provider(public, clock, claim_names=["email", "roles", "level", "active"])
+    """Amended by SPEC-v0.8 §3.4: a **list of strings** is carried now, as a tuple.
 
-    token = _sign(private, clock, roles=["a", "b"], level=3, active=True)
+    A roles claim is a JSON array at every issuer anybody deploys, and dropping it is what made
+    its holder silently unentitled. Everything else a `Principal` cannot carry is still dropped,
+    and now says so at WARNING rather than DEBUG, because this is where an unentitled approver
+    begins.
+    """
+    private, public = keypair
+    provider = _provider(public, clock, claim_names=["email", "roles", "level", "active", "nested"])
+
+    token = _sign(private, clock, roles=["a", "b"], level=3, active=True, nested={"deep": 1})
     with caplog.at_level(logging.DEBUG, logger="ctrlrun"):
         principal = provider.resolve(_context(token))
 
-    assert set(principal.claims) == {"email", "level", "active"}
+    assert set(principal.claims) == {"email", "roles", "level", "active"}
+    assert principal.claims["roles"] == ("a", "b")
     assert principal.claims["level"] == 3
     assert principal.claims["active"] is True
+    assert "nested" not in principal.claims
+    assert any(
+        record.levelname == "WARNING" and "nested" in record.message for record in caplog.records
+    )
 
 
 def test_T88_a_claim_name_is_a_flat_key_and_no_nesting_is_traversed(keypair, clock):
