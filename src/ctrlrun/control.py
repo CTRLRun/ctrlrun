@@ -1599,17 +1599,20 @@ class Control:
         # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
         # enforces, and a check that enforced here would refuse during the phase whose entire
         # purpose is to refuse nothing.
+        # SPEC-v0.9 §4.2.1 — **above the scope check, because `_secure` computes charges before
+        # calling `_in_scope`.** An action that is both out of scope and unmeasurable was refused
+        # `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. T458.
+        charges = self._observe_charges(action, effect_key, observation)
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
         except _ObservedRefusalError as would:
             observation.block(would.reason)
-        # SPEC-v0.9 §4.2.1 — **above the approval gate, because `_secure` puts it there.**
-        # §2.3's and §2.4.1's refusals do not depend on anything the gate produces and are
-        # unconditional, so T446 moved them above it in enforce mode; observe mode's copy stayed
-        # below and told a pilot a human would have been asked about an action enforce refuses
-        # before anybody is asked. That is T446's own defect on the other side of the mode
-        # switch, and an independent review found it. T451.
-        charges = self._observe_charges(action, effect_key, observation)
+        # The charges above were computed before the scope check, where `_secure` computes them:
+        # §2.3's and §2.4.1's refusals do not depend on anything the approval gate produces and
+        # are unconditional, so T446 moved them above it in enforce mode; observe mode's copy
+        # stayed below and told a pilot a human would have been asked about an action enforce
+        # refuses before anybody is asked. That is T446's own defect on the other side of the
+        # mode switch, and an independent review found it. T451.
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)

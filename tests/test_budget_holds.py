@@ -1174,3 +1174,41 @@ def test_T457a_an_enforced_resumed_leg_still_reads_the_ledger(store, clock) -> N
 
     assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},)
     assert len(store.consumptions()) == 1, "and the row it read is the one the first leg wrote"
+
+
+def test_T458_observe_and_enforce_agree_when_an_action_is_both_out_of_scope_and_unmeasurable(
+    store, clock
+) -> None:
+    """The third ordering drift, and the one a review suspected without demonstrating.
+
+    `_secure` runs `_charges_for` **before** `_in_scope`; `_observe_secure` ran the scope check
+    first. So an action that is both out of scope and unmeasurable was refused
+    `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. Whichever
+    order is right, one of them has to follow the other, and the enforcing one is the one that
+    decides.
+    """
+    document = DOC.replace(
+        '    effect: "refund:{id}"',
+        '    effect: "refund:{id}"\n    resource: "payment:{id}"',
+    )
+    enforcing, observing, _ = _both_modes(store, clock, document)
+    bad = Action(
+        name="payments.refund",
+        arguments={"id": "1"},  # no `amount`, so §2.3 cannot measure it
+        principal=AGENT,
+        resource="payment:1",
+        environment="prod",
+    )
+    somebody_else = lambda _action: {"resources": ["payment:999"]}  # noqa: E731
+
+    with pytest.raises(InvalidArgument):
+        enforcing.execute(bad, lambda: {"ok": True}, "refund:1", scope=somebody_else)
+    enforced = store.receipts()[-1].decision_reason
+
+    receipt = observing.execute(bad, lambda: {"ok": True}, "refund:1", scope=somebody_else)
+
+    assert enforced == "budget_unmeasurable"
+    assert receipt.would_have is not None
+    assert receipt.would_have.blocked_reason == enforced, (
+        f"enforce refused {enforced!r} and the pilot was told {receipt.would_have.blocked_reason!r}"
+    )
