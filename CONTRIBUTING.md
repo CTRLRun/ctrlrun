@@ -45,6 +45,11 @@ that and asserts nothing skipped.
 Use the project's own interpreter for every check. A bare `python` from elsewhere gives two
 spurious failures, one of which is a false green.
 
+`CTRLRUN_COVERAGE=1 scripts/check.sh` measures coverage as well and writes `coverage.json`.
+CI does that on Python 3.12 and holds two floors with `scripts/coverage_floor.py`: **90% of
+statements and 80% of branches**, subprocess workers included. A change that drops either is
+red on its own pull request.
+
 CI does not install the extras the way the block above does. It installs from
 `requirements/*.txt`, hash-pinned locks that `scripts/lock.sh` writes with `uv pip compile`,
 and then the checkout with `--no-deps`; the floors in `pyproject.toml` are unchanged by that.
