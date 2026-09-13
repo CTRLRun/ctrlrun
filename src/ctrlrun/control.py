@@ -516,6 +516,24 @@ def _hash_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+class _ScopeRefusedError(Exception):
+    """SPEC-v0.9 §5.6's refusal, carried out of `_secure`'s loop without meeting its handlers.
+
+    **Not an `ActionDenied` subclass, and that is the whole point.** `_secure`'s `except
+    ActionDenied` appends `APPROVAL_DENIED` unconditionally, so a scope refusal raised as one
+    fabricates an approval denial for an action no human ever saw, and records `ACTION_DENIED`
+    twice. `SPEC-v0.9 §3.3.2` names this hazard for the budget refusal a later item adds; it is
+    the same handler and the same defect, found here first by reading the events a refusal wrote.
+
+    `_refuse_scope` has already written the events and the receipt, so this carries only the
+    public error the caller should see.
+    """
+
+    def __init__(self, denial: ActionDenied) -> None:
+        super().__init__(str(denial))
+        self.denial = denial
+
+
 class _ObservedRefusalError(Exception):
     """SPEC-v0.9 §5.2.2 — observe mode's would-have-refused, which escapes `_in_scope` and is
     swallowed by `_observe_secure`. Package-internal and never public: it is control flow, not a
@@ -1509,6 +1527,15 @@ class Control:
             reason, _ = self._policy_approval_state()
             if reason is not None:
                 observation.block(reason)
+        # SPEC-v0.9 §5.2.2's observe row. The provider **runs**, so its hash reaches the receipt
+        # and an operator sizing a scope before turning it on sees what would have happened; the
+        # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
+        # enforces, and a check that enforced here would refuse during the phase whose entire
+        # purpose is to refuse nothing.
+        try:
+            self._in_scope(action, scope, scoped, enforcing=False)
+        except _ObservedRefusalError:
+            observation.block(OUT_OF_SCOPE)
         approval_id = None
         if evaluation.decision is Decision.APPROVE:
             approval_id = _PRESENTED_APPROVAL.get(None)
@@ -2206,6 +2233,14 @@ class Control:
                     self._recheck(action, approval_id, preconditions, compared)
                 approval, reservation = self._take(action, approval_id, effect_key, lease)
                 break
+            except _ScopeRefusedError as refused:
+                # SPEC-v0.9 §5.6. Its own clause, **before** the `ActionDenied` one:
+                # `_refuse_scope` has already written the events and the receipt, and an
+                # exception raised inside an `except` clause leaves the whole `try` rather than
+                # meeting its siblings. Routed through `except ActionDenied` instead, this would
+                # append `APPROVAL_DENIED` for an action no human saw and a second
+                # `ACTION_DENIED` (§3.3.2's hazard, the same handler).
+                raise refused.denial from None
             except AmbiguousEffect as refused:
                 # SPEC-v0.7 §3.6, before anything else: a store with its own clock re-measures
                 # when an expired lease is declared AMBIGUOUS, and the report belongs beside this
@@ -3097,7 +3132,7 @@ class Control:
         ):
             raise refuse(action, OUT_OF_SCOPE, f"resource {action.resource!r} is not in this scope")
 
-    def _refuse_scope(self, action: Action, reason: str, error: str) -> ActionDenied:
+    def _refuse_scope(self, action: Action, reason: str, error: str) -> _ScopeRefusedError:
         """The refusal, with its events and its receipt. Returns it for the caller to raise.
 
         Returned rather than raised so the call site reads `raise self._refuse_scope(...)` and a
@@ -3112,7 +3147,7 @@ class Control:
             self._clock(),
             error=error,
         )
-        return ActionDenied(f"{action.name} denied: {reason}", reason=reason)
+        return _ScopeRefusedError(ActionDenied(f"{action.name} denied: {reason}", reason=reason))
 
     def _would_refuse_scope(self, action: Action, reason: str, error: str) -> _ObservedRefusalError:
         """Observe mode's counterpart: record what would have happened, and refuse nothing.

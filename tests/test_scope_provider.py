@@ -147,18 +147,90 @@ def test_T390_a_provider_that_raises_reserves_nothing_and_executes_nothing(store
 
 
 def test_T391_a_provider_returning_a_non_mapping_refuses(store, clock) -> None:
+    """And the **message** names what was wrong, which is what keeps the guard load-bearing.
+
+    A mutation run found the shape guard removable with every test still green: a list reaches
+    `dict()` inside the hash and raises there anyway, so the refusal happened for a reason that
+    was not this check. CONTRIBUTING.md's first pattern allows keeping a subsumed branch for its
+    message, on the condition that a test asserts which message it got.
+    """
     control = _control(store, clock)
     with pytest.raises(ActionDenied) as caught:
         control.execute(_action(), lambda: {"ok": True}, "read:1", scope=lambda action: ["nope"])
     assert caught.value.reason == "scope_unavailable"
+    denied = [e for e in store.events() if e.type.value == "ACTION_DENIED"][-1]
+    assert "mapping" in str(denied.data.get("error")), (
+        "the refusal must name the shape that was wrong, not merely fail somewhere downstream"
+    )
+
+
+def test_T394_observe_mode_runs_the_provider_and_refuses_nothing(store, clock) -> None:
+    """SPEC-v0.9 §5.2.2's observe row, and `v0.3 §6.2`'s rule.
+
+    Observe mode records what it would have done. A scope check that enforced under observation
+    would refuse during the phase whose entire purpose is to refuse nothing, and
+    observe-then-enforce is the documented adoption path. Found by a mutation run: collapsing the
+    two refusal paths into one left every test green.
+    """
+    observing = Control(
+        policy=Policy.from_yaml(
+            POLICY.replace("environment: prod", "environment: prod\nmode: observe"), source="<obs>"
+        ),
+        store=store,
+        clock=clock,
+        environment="prod",
+    )
+    calls: list[int] = []
+    receipt = observing.execute(
+        _action("customer:90210"),
+        lambda: calls.append(1) or {"ok": True},
+        "read:x",
+        scope=_scope("customer:1"),
+    )
+    # It ran: observe mode executes, and records the counterfactual.
+    assert calls == [1]
+    assert receipt.result is ReceiptResult.OBSERVED
+    denied = [
+        event
+        for event in store.events()
+        if event.type.value == "ACTION_DENIED" and event.data.get("reason") == "out_of_scope"
+    ]
+    assert denied, "observe mode must record the scope refusal it did not enforce"
+    assert denied[0].data.get("observed") is True
 
 
 def test_T392_a_provider_returning_what_the_canonicalizer_refuses(store, clock) -> None:
-    """`v0.1 §2.3`'s float rejection, inherited: a scope hashed over a float would drift."""
+    """`v0.1 §2.3`'s float rejection, inherited: a scope hashed over a float would drift.
+
+    **The float is deliberately NOT in `resources`.** A mutation run found the first version of
+    this test green against a kernel with the canonicalizer bypassed entirely: `{"resources":
+    [1.5]}` is refused by the *shape* guard, which wants a list of strings, so the hash never had
+    to reject anything. That is CONTRIBUTING.md's first mutation pattern, a subsumed guard, and a
+    test that cannot tell which one fired proves nothing about either.
+
+    Here `resources` is well-formed and the float sits beside it, so the shape guard passes and
+    only `canonical_bytes` can refuse.
+    """
     control = _control(store, clock)
     with pytest.raises(ActionDenied) as caught:
         control.execute(
-            _action(), lambda: {"ok": True}, "read:1", scope=lambda a: {"resources": [1.5]}
+            _action(),
+            lambda: {"ok": True},
+            "read:1",
+            scope=lambda a: {"resources": ["customer:1"], "quota": 1.5},
+        )
+    assert caught.value.reason == "scope_unavailable"
+
+
+def test_T392a_a_non_string_key_in_the_scope_is_refused(store, clock) -> None:
+    """The canonicalizer's other inherited refusal, for the same reason and by the same route."""
+    control = _control(store, clock)
+    with pytest.raises(ActionDenied) as caught:
+        control.execute(
+            _action(),
+            lambda: {"ok": True},
+            "read:1",
+            scope=lambda a: {"resources": ["customer:1"], 7: "not-a-string-key"},
         )
     assert caught.value.reason == "scope_unavailable"
 
@@ -239,3 +311,24 @@ def test_T398c_an_action_with_no_resource_is_out_of_scope(store, clock) -> None:
             _action(resource=None), lambda: {"ok": True}, "read:1", scope=_scope("customer:1")
         )
     assert caught.value.reason == "out_of_scope"
+
+
+def test_T398d_a_scope_refusal_writes_no_approval_event_and_one_denial(store, clock) -> None:
+    """SPEC-v0.9 §3.3.2's hazard, met by §5's refusal first.
+
+    `_secure`'s `except ActionDenied` appends `APPROVAL_DENIED` unconditionally, so a scope
+    refusal raised as an `ActionDenied` fabricates an approval denial for an action no human ever
+    saw, and records `ACTION_DENIED` twice. Found by reading the events a refusal actually wrote,
+    which is the only way it shows: the exception, the reason and the receipt were all correct.
+    """
+    control = _control(store, clock)
+    with pytest.raises(ActionDenied):
+        control.execute(
+            _action("customer:90210"), lambda: {"ok": True}, "read:x", scope=_scope("customer:1")
+        )
+    kinds = [event.type.value for event in store.events()]
+    assert kinds.count("ACTION_DENIED") == 1, kinds
+    assert "APPROVAL_DENIED" not in kinds, (
+        "a scope refusal must not fabricate an approval denial; no human was asked"
+    )
+    assert len(store.receipts()) == 1
