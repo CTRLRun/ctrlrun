@@ -338,7 +338,7 @@ def test_how_this_is_built_states_the_review_gap_and_the_tooling_once():
     provenance sentence appears in both the README and `SECURITY.md`.
     """
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "https://ctrlrun.dev/docs/how-this-is-built" in readme
+    assert "https://docs.ctrlrun.dev/how-this-is-built" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in readme
     assert "Releases carry PyPI provenance attestations from GitHub Actions" in (
         REPO_ROOT / "SECURITY.md"
