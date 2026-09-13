@@ -96,6 +96,8 @@ from ..errors import (
 from ..identity import IdentityContext
 from ..policy import (
     POLICY_CHANGE_ACTION,
+    UPSTREAM_MISMATCH,
+    UPSTREAM_UNVERIFIED,
     Condition,
     Decision,
     Policy,
@@ -778,6 +780,9 @@ class Engine:
         needs_threshold: bool = False,
         ceiling_bound: int | None = None,
         grant_filter: Callable[[Grant], bool] | None = None,
+        #: SPEC-v0.10 §7, G27: the action must be one the document pins an upstream for, which is
+        #: a property of the action rather than of a grant, so `grant_filter` cannot express it.
+        action_filter: Callable[[str], bool] | None = None,
         mutation: Mapping[str, Any] | None = None,
     ) -> _Selection | None:
         """§3.2 — the first action, sorted by codepoint, that satisfies the requirements.
@@ -797,6 +802,8 @@ class Engine:
         self._budget_miss = None
         self._metric_miss = None
         for name in sorted(self.policy.actions):
+            if action_filter is not None and not action_filter(name):
+                continue
             if needs_effect and self.policy.effect_template(name) is None:
                 continue
             ceiling = self.policy.max_attempts(name)
@@ -4459,6 +4466,103 @@ class Engine:
         try:
             return self.graded("G26", selection, store, recorder, body)
         finally:
+            store.close()
+
+    def g27(self) -> GuaranteeResult:
+        """SPEC-v0.10 §4.3, §7. A swapped upstream is denied, at check 2.
+
+        **Check 2 and only check 2**, which is the one that produces a `DENY`. Check 3 refuses at
+        the handshake and produces `NotExecuted` with the effect `FAILED`; a scenario allowed to
+        grade either would report `PASS` for a guarantee whose title promises a denial that never
+        happened.
+
+        **And check 2 is the only one verify can grade without a network.** The comparison is a
+        pure function over two strings, so verify seeds an observation and asserts the refusal,
+        with no TLS listener to stand up and no certificate to generate. §8.1 made the same move
+        for G23's scope provider and said why: a guarantee about a code surface is graded against
+        a scenario verify constructs, rather than reporting `N/A` about something it never saw.
+        """
+        from .. import upstream as _upstream
+
+        pinned = [name for name in sorted(self.policy.actions) if self.policy.upstream_pin(name)]
+        if not pinned:
+            return self.na("G27", reg.NO_UPSTREAM_PIN)
+        selection = self.select(action_filter=lambda name: name in pinned)
+        if selection is None:
+            return self.na("G27", reg.NO_GRANT_MATCHES)
+        pin = self.policy.upstream_pin(selection.action)
+        if not pin.cert_sha256:
+            return self.na("G27", reg.NO_UPSTREAM_PIN)
+        control, store, recorder, _ = self._control_for("G27", selection)
+        control._upstream = f"{reg.SYNTHETIC_PREFIX}-upstream"
+
+        def body(detail: dict[str, Any]) -> None:
+            detail["action"] = selection.action
+            detail["pinned"] = list(pin.cert_sha256)
+            here = f"{reg.SYNTHETIC_PREFIX}-upstream"
+
+            # The positive control first: the pinned certificate admits the action. Without it a
+            # kernel that refused every pinned action whatever would grade PASS, which is what
+            # `v0.4 §2.2` means by a guarantee that could not have failed.
+            _upstream.forget(here)
+            _upstream._CERTS[here] = pin.cert_sha256[0]
+            executor = _Executor()
+            receipt = self.execute(
+                control,
+                selection.build(),
+                executor,
+                selection.effect_key,
+                self.approve(control, store, selection.build(), selection),
+            )
+            _expect_control(
+                receipt.result is ReceiptResult.COMMITTED and executor.calls == 1,
+                "against the pinned certificate the action runs",
+                f"it ended {receipt.result} after {executor.calls} executor calls",
+            )
+
+            # A swapped server: a different certificate behind the same name.
+            _upstream._CERTS[here] = "sha256:" + "f" * 64
+            swapped_executor = _Executor()
+            refusal = self.refused(
+                lambda: self.execute(
+                    control, selection.build(), swapped_executor, selection.effect_key, None
+                ),
+                (ActionDenied,),
+                "ActionDenied(reason='upstream_mismatch')",
+                "an action pinned to one server ran against another",
+            )
+            _expect(
+                getattr(refusal, "reason", "") == UPSTREAM_MISMATCH,
+                "ActionDenied(reason='upstream_mismatch')",
+                f"ActionDenied(reason={getattr(refusal, 'reason', '')!r})",
+            )
+            _expect(
+                swapped_executor.calls == 0,
+                "the upstream is never called",
+                f"the executor ran {swapped_executor.calls} times",
+            )
+
+            # And nothing observed at all, which is the fail-closed half (§4.5).
+            _upstream.forget(here)
+            unverified_executor = _Executor()
+            missing = self.refused(
+                lambda: self.execute(
+                    control, selection.build(), unverified_executor, selection.effect_key, None
+                ),
+                (ActionDenied,),
+                "ActionDenied(reason='upstream_unverified')",
+                "an action pinned to a server nothing has verified ran anyway",
+            )
+            _expect(
+                getattr(missing, "reason", "") == UPSTREAM_UNVERIFIED,
+                "ActionDenied(reason='upstream_unverified')",
+                f"ActionDenied(reason={getattr(missing, 'reason', '')!r})",
+            )
+
+        try:
+            return self.graded("G27", selection, store, recorder, body)
+        finally:
+            _upstream.forget(f"{reg.SYNTHETIC_PREFIX}-upstream")
             store.close()
 
 

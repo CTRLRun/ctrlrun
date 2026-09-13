@@ -139,8 +139,8 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
 
     assert 'test "$AUTHORITY" = "verified 24/24"' in script
     assert 'test "$TEMPLATES" = "verified 11/11"' in script
-    assert 'test "$AUTHORITY_NA" = "2"' in script
-    assert 'test "$TEMPLATES_NA" = "15"' in script
+    assert 'test "$AUTHORITY_NA" = "3"' in script
+    assert 'test "$TEMPLATES_NA" = "16"' in script
 
 
 @pytest.mark.authority
@@ -158,8 +158,11 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     # when a shape changes) while the N/A counts above are derived.
     assert authority.badge["message"] == "verified 24/24"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
-    # no `max_attempts` (SPEC-v0.7 §8.9).
-    assert authority.not_applicable == 2
+    # no `max_attempts` (SPEC-v0.7 §8.9). **And G27**, because no action entry in this document
+    # pins an upstream: SPEC-v0.10 §7.3's exit criterion wants a shipped example that does, and
+    # §4.4 makes a pinned action refuse on every in-process call, so the example that satisfies
+    # it demonstrates the refusal rather than a working call. That example is the release item's.
+    assert authority.not_applicable == 3
     assert templates.badge is not None
     assert templates.badge["message"] == "verified 11/11"
     assert templates.applicable + templates.not_applicable == len(reg.GUARANTEES)

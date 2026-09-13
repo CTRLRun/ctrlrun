@@ -197,6 +197,16 @@ GUARANTEES: Final = (
         "a hop is named on both sides",
         ("v0.10 §3.4", "v0.10 §3.6 T478", "v0.10 §3.6 T488"),
     ),
+    Guarantee(
+        "G27",
+        # 28 characters against `report._TITLE_WIDTH`'s 32. It grades §4.3's **check 2** and only
+        # check 2: that is the one producing a DENY, which is what this title promises. Check 3
+        # refuses at the handshake and produces `NotExecuted` with the effect `FAILED`, a
+        # different outcome under a different name, and a scenario allowed to grade either would
+        # report PASS without anybody knowing which (SPEC-v0.10 §7).
+        "a swapped upstream is denied",
+        ("v0.10 §4.3", "v0.10 §4.7 T490", "v0.10 §4.7 T493"),
+    ),
 )
 
 #: By id, for `--only` and for the report. Insertion order is catalogue order.
@@ -291,6 +301,9 @@ NO_TASKS: Final = "no grant names a task"
 #: spelling. This one is added because a reason that was silently unreachable would be the false
 #: `N/A` §7 opens by forbidding.
 NO_HOP_ACTION: Final = "the document's delegable grant admits no action verify can drive"
+#: SPEC-v0.10 §7, G27. A statement about the operator's **document**: whether any action entry
+#: declares an `upstream:` pin at all.
+NO_UPSTREAM_PIN: Final = "no action entry pins an upstream"
 #: SPEC-v0.9 §8, G22. A statement about the operator's **document**: whether any grant it declares
 #: carries a budget at all.
 NO_BUDGET: Final = "no grant carries a budget"
@@ -448,6 +461,7 @@ __all__ = [
     "NO_METRIC_TO_MEASURE",
     "NO_RESOURCE_TO_SCOPE",
     "NO_TASKS",
+    "NO_UPSTREAM_PIN",
     "PER_CONNECTION_BACKEND",
     "PROCESSES",
     "SCOPE_PROVIDER_NOTE",

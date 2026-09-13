@@ -48,7 +48,7 @@ from ..identity import (
     IdentityProvider,
     StaticIdentityProvider,
 )
-from ..policy import OBSERVE
+from ..policy import OBSERVE, UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED, Policy
 from ..receipt import Receipt
 from .mcp import (
     ACCEPTED_REVISIONS,
@@ -120,6 +120,15 @@ UPSTREAM_AMBIGUOUS: Final = (-41010, "ctrlrun.upstream_ambiguous", 502)
 #: this configuration; `-41012` means it is not permitted to *you*. The second is worth a
 #: different message to a client and, in a multi-tenant deployment, a different alert.
 UNAUTHORIZED: Final = (-41012, "ctrlrun.unauthorized", 403)
+
+#: SPEC-v0.10 §4.5. `-41016` and **not** `-41013`: `SPEC-mcp-operator.md` §9.3 adds `-41013`
+#: `ctrlrun.not_a_human`, `-41014` and `-41015` to `v0.2 §6.10`'s table, and there is one
+#: namespace. `-41001` to `-41015` are allocated; this is the first free one.
+#:
+#: A distinct code earns its keep on `v0.3 §8.4`'s test: `-41001` means this action is not
+#: permitted to anyone, `-41012` means not to **you**, and this means not against **that
+#: server**, which a client answers differently from either.
+UPSTREAM_UNPINNED: Final = (-41016, "ctrlrun.upstream_unpinned", 403)
 
 #: §6.8 — the `_meta` key every intercepted response carries, so a client is not left
 #: guessing what CTRLRun recorded. `com.ctrlrun/` is a legal prefix under the revision's
@@ -783,7 +792,15 @@ class Gateway:
                 ),
             )
         except ActionDenied as refused:
-            code, token, status = DENIED
+            # SPEC-v0.10 §4.5 — the two upstream reasons get their own code, and this branch is
+            # **inside** the `ActionDenied` clause rather than above it, because they are
+            # `ActionDenied` reasons and not a new exception type. `v0.3 §8.4`'s ordering hazard
+            # does not arise: one type, discriminated on the reason it carries.
+            code, token, status = (
+                UPSTREAM_UNPINNED
+                if refused.reason in (UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED)
+                else DENIED
+            )
             return _json(
                 status,
                 json_rpc_error(
@@ -1078,12 +1095,28 @@ def _request_id(body: bytes) -> JsonRpcId:
 # --- the transport ----------------------------------------------------------------------
 
 
-def httpx_forwarder(config: GatewayConfig) -> Any:
-    """Forward HTTP and SSE, using a fresh connection for every intercepted action."""
+def httpx_forwarder(config: GatewayConfig, policy: Policy | None = None) -> Any:
+    """Forward HTTP and SSE, using a fresh connection for every intercepted action.
+
+    **SPEC-v0.10 §4.3's check 3**, where `policy` is given and any entry pins a certificate file:
+    every pinned certificate becomes a trust anchor for this gateway's one outbound connection,
+    so a swapped server fails the handshake **before the first request byte**. That is the only
+    one of §4.3's three checks that prevents rather than attributing, and it needs nothing new to
+    make `v0.7 §2.3`'s `NotExecuted` claim true of it.
+
+    An entry pinning by digest alone contributes nothing here and gets checks 1 and 2 only, which
+    §4.2 states as a limit rather than leaving to be discovered.
+    """
+    from ..upstream import pinned_context
     from . import http_client
     from .transport import HTTPForwarder
 
-    return HTTPForwarder(config.upstream, config.upstream_timeout, http_client())
+    pinned: set[str] = set()
+    if policy is not None:
+        for name in policy.actions:
+            pinned.update(policy.upstream_pin(name).certs)
+    verify = pinned_context(tuple(sorted(pinned))) if pinned else None
+    return HTTPForwarder(config.upstream, config.upstream_timeout, http_client(), verify)
 
 
 # --- the listening side (stdlib, per §6.11) ---------------------------------------------

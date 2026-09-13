@@ -101,6 +101,7 @@ from .policy import (
     OBSERVE,
     POLICY_CHANGE_ACTION,
     POLICY_UNAPPROVED,
+    UPSTREAM_UNVERIFIED,
     Decision,
     Evaluation,
     Policy,
@@ -737,6 +738,7 @@ class Control:
         environment: str | None = None,
         approver_identity: ApproverIdentity | None = None,
         require_approved_policy: bool = False,
+        upstream: str | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -758,6 +760,10 @@ class Control:
         # SPEC-v0.8 §8.4. **In code and not in the file it governs**, or the file would switch
         # off its own governance. Default false: opt in, then fail closed.
         self._require_approved_policy = require_approved_policy
+        # SPEC-v0.10 §4.3 — the upstream this deployment fronts, which only a surface holding the
+        # connection can name. The gateway passes `GatewayConfig.upstream`; in-process it is
+        # `None`, and §4.4 makes a pinned action refuse `upstream_unverified` there.
+        self._upstream = upstream
         #: Cached **only when the answer is yes** (§8.4). A negative answer is re-asked on every
         #: decision, so a long-lived process that started before the approval landed begins
         #: working the moment it lands, with no restart; the cost is one keyed read per decision
@@ -1684,6 +1690,11 @@ class Control:
         # SPEC-v0.9 §4.2.1 — **above the scope check, because `_secure` computes charges before
         # calling `_in_scope`.** An action that is both out of scope and unmeasurable was refused
         # `budget_unmeasurable` by enforce mode and reported `out_of_scope` by the pilot. T458.
+        # SPEC-v0.10 §4.3, the observe-mode row: **recorded, not refused** (`v0.3 §6.2`). At the
+        # same point in the declared order as `_secure`'s, which is what §5 is about.
+        observed_upstream = self._upstream_reason(action)
+        if observed_upstream is not None:
+            observation.block(observed_upstream)
         charges = self._observe_charges(action, effect_key, observation)
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
@@ -2454,6 +2465,12 @@ class Control:
         # Assembling after the gate asks a human to approve a refund the kernel has already
         # decided to refuse, and leaves a granted approval behind for an action nothing can
         # execute. A probe found `APPROVAL_REQUESTED` written for exactly that shape. T446.
+        # SPEC-v0.10 §4.3's check 2. **Above the approval gate**, on T446's argument: the pin
+        # depends on nothing a human says, so asking one about an action pinned to a server this
+        # process has not verified leaves a granted approval behind for a call that cannot run.
+        refused_upstream = self._upstream_reason(action)
+        if refused_upstream is not None:
+            raise self._refuse_upstream(action, refused_upstream, effect_key)
         charges = self._charges_for(action, effect_key)
         approval_id = (
             self._presented(action, effect_key, evaluation, started_at, preconditions)
@@ -3626,6 +3643,40 @@ class Control:
             error=str(error),
         )
         return _UnmeasurableError(str(error), reason=reason)
+
+    def _upstream_reason(self, action: Action) -> str | None:
+        """§4.3's check 2: is this action pinned to an upstream this process has verified?
+
+        `None` where the entry pins nothing, which is every action written before v0.10.
+
+        **In-process there is no upstream to observe, so a pinned action is refused**
+        `upstream_unverified` on every call (§4.4). That is loud, correct, and exactly what the
+        pin says the operator asked for: a pin is a claim about a server CTRLRun connects to, and
+        in-process the executor is the operator's own code holding its own connection.
+        """
+        from . import upstream as _upstream
+
+        pin = self._policy.upstream_pin(action.name)
+        if not pin:
+            return None
+        if self._upstream is None:
+            return UPSTREAM_UNVERIFIED
+        return _upstream.check(pin, self._upstream, self._policy.tool_name(action.name))
+
+    def _refuse_upstream(self, action: Action, reason: str, effect_key: str | None) -> ActionDenied:
+        """The refusal §4.5 names, recorded the way every other `ActionDenied` is."""
+        self._append(EventType.ACTION_DENIED, action, {"reason": reason}, effect_key)
+        detail = (
+            "this process has verified no upstream for it"
+            if reason == UPSTREAM_UNVERIFIED
+            else "what this process observed is in no pinned list"
+        )
+        return ActionDenied(
+            f"{action.name}: the policy pins the upstream it authorises, and {detail} "
+            "(SPEC-v0.10 §4.3)",
+            reason=reason,
+            action_id=action.action_id,
+        )
 
     def _refuse_budget(self, action: Action, exhausted: BudgetExhaustedError) -> ActionDenied:
         """SPEC-v0.9 §4.5. Names the grant, the metric and the window; **never the balance**.
