@@ -831,3 +831,114 @@ def test_T487b_a_leg_0_9_0_suspended_is_evaluated_as_0_9_0_evaluated_it(tmp_path
         "upgrade (v0.9 §6.4), on the only receipt an MCP multi round-trip ever gets"
     )
     assert bound.hop is None and bound.task is None
+
+
+@pytest.mark.authority
+def test_T488c_revoking_a_hop_cuts_an_in_flight_action_on_every_round(tmp_path):
+    """**SPEC-v0.10 §3.4.3, and the test that section said must exist.**
+
+    `Control._suspend` re-decides authority on every round of a suspended action, which is what
+    makes `v0.3 §5.7`'s "a chain of any depth is cut by one write" true of actions in flight.
+    `_outcome` is reached from `execute` on round one and from `resume` on every round after, so
+    the hop has to travel both ways or round two falls back to the receiver's whole candidate set.
+
+    **This suspends twice on purpose.** §3.4.3 says so in as many words: a test that suspends once
+    exercises only round one, which is the round the first design was right about. An independent
+    review found the gap with exactly this shape, and its control is the second assertion below:
+    without a grant of its own the receiver is cut on round two either way, so a test that omitted
+    the competing grant would pass over the defect.
+    """
+    from ctrlrun.control import Control
+    from ctrlrun.errors import AuthorityDenied, Suspended
+    from ctrlrun.policy import Policy
+
+    policy = Policy.from_yaml(
+        "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n"
+        '    effect: "refund:{payment}"\n    decision: allow\n',
+        source="t",
+    )
+
+    def run(*, receiver_holds_its_own: bool) -> str:
+        authority = _authority(own="aaa-own" if receiver_holds_its_own else None)
+        store = _store(tmp_path, f"s-{receiver_holds_its_own}.db")
+        control = Control(policy, store, authority=authority)
+        hop = control.hop(
+            "issuer", grant_from_yaml(NARROW, source="t"), by=Principal(agent="planner")
+        )
+        rounds: list[str] = []
+
+        def suspends() -> Any:
+            raise Suspended(f"round-{len(rounds)}")
+
+        try:
+            control.execute(
+                _action(), suspends, "refund:EU-1", task="refund-run:7", hop=hop.delegation_id
+            )
+        except Suspended:
+            rounds.append("suspended")
+        # Round two: the operator cuts the hop while the remote is still holding the exchange.
+        control.revoke(hop.delegation_id, by="operator")
+        try:
+            control.resume("round-0", suspends)
+        except Suspended:
+            rounds.append("suspended")
+            return "held across the revocation"
+        except AuthorityDenied as denied:
+            return f"cut: {denied.reason}"
+        return "ran"
+
+    assert run(receiver_holds_its_own=True) == "cut: authority_revoked", (
+        "a receiver holding a grant of its own kept its reservation across the round trip after "
+        "the hop was cut, which is the fallback SPEC-v0.10 §2.3 forbids"
+    )
+    # The control: without a competing grant the revocation cuts round two either way, so a test
+    # that omitted the grant above would pass over the defect.
+    assert run(receiver_holds_its_own=False) == "cut: authority_revoked"
+
+
+@pytest.mark.authority
+def test_T474c_a_malformed_hop_id_is_refused_without_reaching_the_log_verbatim(tmp_path):
+    """§3.3, and an independent review's finding.
+
+    The refusal was always right. The **evidence row** was not: a hop reaches the kernel from the
+    caller, through `@protect`'s template and so from the action's arguments, and every refused
+    action writes one `AUTHORITY_DENIED` into an append-only log an operator reads on a terminal.
+    A megabyte of `A`, or NULs and ANSI escapes, went straight through.
+
+    An id this kernel could not have minted is recorded as its length and nothing else.
+    """
+    from ctrlrun.receipt import EventType
+
+    authority, store = _authority(), _store(tmp_path)
+    now = datetime.now(UTC)
+    for presented in ("A" * 4096, "dlg_x\n\ninjected\x00\x1b[31m", "issuer"):
+        result = authority.evaluate(_action(), now=now, store=store, hop=presented)
+        assert result.reason == AUTHORITY_HOP, presented
+        assert result.hop == presented, "the result carries what was presented"
+
+    from ctrlrun.control import Control
+    from ctrlrun.policy import Policy
+
+    control = Control(
+        Policy.from_yaml(
+            "schema: ctrlrun.policy/v7\nactions:\n  stripe.refund:\n    decision: allow\n",
+            source="t",
+        ),
+        store,
+        authority=authority,
+    )
+    from ctrlrun.errors import AuthorityDenied
+
+    with pytest.raises(AuthorityDenied):
+        control.execute(_action(), lambda: "ok", hop="A" * 4096)
+
+    logged = [
+        event.data.get("hop")
+        for event in store.events()
+        if event.type is EventType.AUTHORITY_DENIED and "hop" in event.data
+    ]
+    assert logged, "no AUTHORITY_DENIED carried a hop"
+    assert all(len(value) < 64 for value in logged), (
+        f"a caller-supplied id reached the evidence log at full length: {len(logged[-1])}"
+    )
+    assert "malformed" in logged[-1] and "4096" in logged[-1]
