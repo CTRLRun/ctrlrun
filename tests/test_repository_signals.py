@@ -109,18 +109,45 @@ def test_the_publish_workflow_attests_through_trusted_publishing():
 
 
 def test_dependabot_keeps_the_pins_current_and_nothing_else():
-    """Actions are pinned to SHAs, so Dependabot is what moves them: grouped, monthly. There is
-    no pip entry on purpose: the version floors in pyproject.toml are deliberate minimums with a
+    """Actions are pinned to SHAs and CI's installs to hashes, so Dependabot is what moves
+    them: the actions grouped monthly, the `requirements/` locks grouped weekly. Nothing else,
+    and in particular not `pyproject.toml`: its version floors are deliberate minimums with a
     reason on each, and a bot raising them would exclude working installations for nothing."""
     config = yaml.safe_load((REPO_ROOT / ".github" / "dependabot.yml").read_text())
-    ecosystems = {entry["package-ecosystem"]: entry for entry in config["updates"]}
-    assert set(ecosystems) == {"github-actions"}
-    actions = ecosystems["github-actions"]
+    entries = {
+        (entry["package-ecosystem"], entry["directory"]): entry for entry in config["updates"]
+    }
+    assert set(entries) == {("github-actions", "/"), ("pip", "/requirements")}
+    actions = entries["github-actions", "/"]
     assert actions["schedule"]["interval"] == "monthly"
     assert "groups" in actions, "ungrouped updates are one pull request per action"
+    locks = entries["pip", "/requirements"]
+    assert locks["schedule"]["interval"] == "weekly"
+    assert "groups" in locks, "ungrouped updates are one pull request per package"
 
 
 # --- the third party's reading -------------------------------------------------------------
+
+
+def test_the_scorecard_gate_runs_on_every_pull_request():
+    """`scorecard.yml` reads `main` after a merge; `scorecard-gate.yml` is the same reading
+    before it, so a change that would lower the published score is red on the pull request
+    rather than a lower badge on Monday. It publishes nothing, and every floor it holds is
+    what `main` scores today: the gate exists to keep the number from going down."""
+    workflow = _workflow("scorecard-gate.yml")
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert "pull_request" in triggers
+    assert workflow["permissions"] == {"contents": "read"}
+    steps = workflow["jobs"]["gate"]["steps"]
+    action = next(s for s in steps if str(s.get("uses", "")).startswith("ossf/scorecard-action@"))
+    assert action["with"]["publish_results"] is False
+    assert action["with"]["results_format"] == "json"
+    gate = next(s for s in steps if "Pinned-Dependencies" in str(s.get("run", "")))
+    floors = dict(re.findall(r'"([A-Za-z-]+)":\s*(\d+)', gate["run"]))
+    assert floors["Pinned-Dependencies"] == "10"
+    assert floors["Token-Permissions"] == "10"
+    assert floors["Vulnerabilities"] == "10", "a vulnerable pin in a lock must be red"
+    assert all(int(score) >= 9 for score in floors.values()), floors
 
 
 def test_the_scorecard_workflow_publishes_and_the_readme_shows_it():
@@ -467,3 +494,85 @@ def test_security_md_says_how_to_check_a_release():
     security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
     assert "gh attestation verify" in security
     assert "--repo CTRLRun/ctrlrun" in security
+
+
+# --- what CI installs ----------------------------------------------------------------------
+
+_PIP_INSTALL = re.compile(r"(?:^|[\s;&|])pip install\s+(.*)$")
+
+
+def _pip_installs() -> list[tuple[str, list[str]]]:
+    """Every `pip install` a workflow runs, as (file, arguments). `action.yml` is left out on
+    purpose: its `pip install "$CTRLRUN_INSTALL"` is the consumer's own requirement, unpinned
+    by design and documented as such in the input's description."""
+    found: list[tuple[str, list[str]]] = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#"):
+                continue
+            match = _PIP_INSTALL.search(line)
+            if match:
+                found.append((path.name, match.group(1).split()))
+    return found
+
+
+def test_every_pip_install_in_a_workflow_is_pinned():
+    """OpenSSF Scorecard's Pinned-Dependencies rule for `pip install`, asserted here so the
+    suite catches a regression before the pull-request gate does. Three shapes pass: hashes
+    required (`--require-hashes -r requirements/<x>.txt`), an editable install of a local path
+    with `--no-deps`, or nothing but wheels built in the same job. Anything else, `python -m
+    pip install --upgrade pip` included, resolves against PyPI at run time, which is a
+    different set of bytes every morning."""
+    installs = _pip_installs()
+    assert installs, "no `pip install` in any workflow; the pattern is wrong"
+    for name, args in installs:
+        positional = [a for a in args if not a.startswith("-")]
+        editable_local = (
+            "--no-deps" in args and "-e" in args and all("://" not in a for a in positional)
+        )
+        wheels_only = bool(positional) and all(a.endswith(".whl") for a in positional)
+        assert "--require-hashes" in args or editable_local or wheels_only, (
+            f"{name}: pip install {' '.join(args)}"
+        )
+        # `--no-deps` says nothing about the isolated environment pip builds the package in,
+        # which fetches setuptools from PyPI unpinned. The backend comes from the lock instead.
+        if editable_local:
+            assert "--no-build-isolation" in args, f"{name}: pip install {' '.join(args)}"
+
+
+def test_every_build_in_a_workflow_uses_the_backend_from_the_lock():
+    """`python -m build` creates an isolated environment and installs the backend into it from
+    PyPI, unpinned, on the trusted publish path of all places. `--no-isolation` makes it use the
+    setuptools every lock carries (`requirements/in/backend.in`)."""
+    builds: list[tuple[str, str]] = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if "python -m build" in line and not line.startswith("#"):
+                builds.append((path.name, line))
+    assert builds, "no `python -m build` in any workflow; the pattern is wrong"
+    for name, line in builds:
+        assert "--no-isolation" in line, f"{name}: {line}"
+    inputs = (REPO_ROOT / "requirements" / "in" / "backend.in").read_text(encoding="utf-8")
+    assert "setuptools" in inputs
+
+
+def test_every_lock_a_workflow_installs_from_exists_and_is_hashed():
+    """A `-r requirements/<x>.txt` names a file `scripts/lock.sh` wrote, and every requirement
+    in it carries a hash, so `--require-hashes` has something to check against. The `docs` job
+    checks this repository out under `ctrlrun/`, which is why that prefix is dropped."""
+    named: set[str] = set()
+    for _, args in _pip_installs():
+        if "-r" in args:
+            named.add(args[args.index("-r") + 1].removeprefix("ctrlrun/"))
+    assert named, "no workflow installs from a lock"
+    for lock in sorted(named):
+        path = REPO_ROOT / lock
+        assert path.is_file(), lock
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert "uv pip compile" in lines[1], f"{lock} was not written by scripts/lock.sh"
+        assert "requirements/in/backend.in" in lines[1], f"{lock} carries no build backend"
+        for index, line in enumerate(lines):
+            if line and not line.startswith(("#", " ")):
+                assert "--hash=" in lines[index + 1], f"{lock}: {line} carries no hash"

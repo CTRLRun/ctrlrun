@@ -48,11 +48,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install
+        # Every dependency by hash from `requirements/ci.txt`, then the checkout itself with
+        # `--no-deps` and against the backend that lock carries (`requirements/in/backend.in`):
+        # what this job resolves is what `scripts/lock.sh` wrote down and somebody reviewed, not
+        # what PyPI happened to serve this morning. The gateway's tests need its
+        # extra; T30 still proves `import ctrlrun` does not touch it, in a subprocess, whether
+        # or not it happens to be installed here.
         run: |
-          python -m pip install --upgrade pip
-          # The gateway's tests need its extra; T30 still proves `import ctrlrun` does not
-          # touch it, in a subprocess, whether or not it happens to be installed here.
-          pip install -e ".[dev,gateway,otel,identity,postgres]"
+          pip install --require-hashes -r requirements/ci.txt
+          pip install --no-deps --no-build-isolation -e .
 
       # A claim about the environment is worth nothing until something checks it: if the
       # service failed to start, the Postgres tests would silently skip and the backend
@@ -238,10 +242,9 @@ jobs:
         # test must be this checkout, so its dependencies are installed on the line above and
         # the adapters are installed against it.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,gateway,otel,identity]"
-          pip install langgraph langchain langchain-openai openai-agents
-          pip install --no-deps -e adapters/langgraph -e adapters/openai-agents
+          pip install --require-hashes -r requirements/adapters.txt
+          pip install --no-deps --no-build-isolation -e .
+          pip install --no-deps --no-build-isolation -e adapters/langgraph -e adapters/openai-agents
 
       # The frameworks are installed, so a skip here is a failure and not a configuration.
       # `-p no:randomly` is not used and no marker is filtered: this is the whole of both files.
@@ -305,9 +308,8 @@ jobs:
         # gateway's client needs the extra installed, and a block that skipped would be a
         # sample nobody ran.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e "./ctrlrun[dev,gateway,otel,identity]"
-          pip install griffe pyyaml
+          pip install --require-hashes -r ctrlrun/requirements/docs.txt
+          pip install --no-deps --no-build-isolation -e ./ctrlrun
 
       # `_core.py` raises when it cannot find the library, so this prints a path or the job
       # stops here. A documentation check that ran against no source would be green and
@@ -395,8 +397,8 @@ jobs:
 
       - name: Build
         run: |
-          python -m pip install --upgrade pip build twine
-          python -m build
+          pip install --require-hashes -r requirements/build.txt
+          python -m build --no-isolation
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
@@ -406,8 +408,9 @@ jobs:
         # packaging it downstream. This is the guard; MANIFEST.in is the fix.
         run: |
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
+          pip install --require-hashes -r requirements/ci.txt
           cd /tmp/sdist
-          pip install ".[dev,gateway,otel,identity]"
+          pip install --no-deps --no-build-isolation -e .
           pytest -q
 
       - name: The quick start works from the wheel

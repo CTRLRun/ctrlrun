@@ -3,10 +3,12 @@
 # grouped pull request a month, because ten one-line pull requests in a morning is noise that
 # gets merged unread.
 #
-# No pip entry on purpose. The version floors in pyproject.toml are deliberate minimums, each
-# with a reasoned comment, and CI installs the latest release of every extra anyway, so a
-# floor bump would exclude working installations for no gain. Security updates are a
-# repository setting (Dependabot alerts and security updates), not this file, and stay on.
+# The pip entry covers `requirements/` and nothing else. Those are the hash-pinned files CI
+# installs from (`scripts/lock.sh` writes them), and a pin nobody moves is a pin to last
+# year's bugs, so they move weekly, grouped. The version floors in pyproject.toml are not in
+# scope: they are deliberate minimums, each with a reasoned comment, and a floor bump would
+# exclude working installations for no gain. Security updates are a repository setting
+# (Dependabot alerts and security updates), not this file, and stay on.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,4 +17,11 @@ updates:
       interval: monthly
     groups:
       actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /requirements
+    schedule:
+      interval: weekly
+    groups:
+      locks:
         patterns: ["*"]

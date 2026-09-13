@@ -45,6 +45,12 @@ that and asserts nothing skipped.
 Use the project's own interpreter for every check. A bare `python` from elsewhere gives two
 spurious failures, one of which is a false green.
 
+CI does not install the extras the way the block above does. It installs from
+`requirements/*.txt`, hash-pinned locks that `scripts/lock.sh` writes with `uv pip compile`,
+and then the checkout with `--no-deps`; the floors in `pyproject.toml` are unchanged by that.
+When a dependency or an extra changes, run `scripts/lock.sh` and commit what it rewrote, or CI
+installs the old resolution against the new declaration.
+
 ## Specification first
 
 Every version is a specification before it is code: `docs/SPEC-v0.1.md` through

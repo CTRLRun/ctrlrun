@@ -27,8 +27,8 @@ jobs:
 
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
+          pip install --require-hashes -r requirements/fuzz.txt
+          pip install --no-deps --no-build-isolation -e .
 
       # The gate. No Atheris, so it cannot be skipped by a toolchain problem, and it fails on
       # a seed that regressed rather than on a campaign that happened to find one.
@@ -41,7 +41,7 @@ jobs:
       # a fuzzing job that quietly stops fuzzing is the false green this repository keeps
       # finding in other costumes.
       - name: Install Atheris
-        run: pip install atheris
+        run: pip install --require-hashes -r requirements/atheris.txt
 
       # Bounded, or an unbounded `atheris.Fuzz()` hangs until the job timeout, which reads as a
       # broken build rather than as a finding. `-runs` is not used: wall-clock is what makes a
