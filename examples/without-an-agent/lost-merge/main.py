@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """A merge that landed, a reply that did not, and a job that goes looking for another way.
 
 The merge queue merges pull request #4471. GitHub merges it, and the connection drops before

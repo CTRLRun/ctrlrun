@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What the kit reports. SPEC-v0.5 §5.2.
 
 `v0.4 §4.1`'s output rules, one level up: a denominator of **applicable** suites, an N/A that

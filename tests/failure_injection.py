@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """A Postgres connection an experiment can break on purpose. Build-list item 4; SPEC-v0.6 §4.5.
 
 Test infrastructure. It is never in the wheel -- `pyproject.toml`'s `packages.find` is `src/`

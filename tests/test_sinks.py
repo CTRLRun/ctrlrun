@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`EventSink` and `JSONLEventSink`. Build-list item 4; SPEC-v0.2 §4, acceptance test T17.
 
 The store is authoritative and everything else is a convenience export of what it already

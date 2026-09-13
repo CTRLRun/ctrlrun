@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T388 to T398: scope providers (SPEC-v0.9 §5).
 
 The bite on an identifier an attacker chose. A grant permits `records.read` on `customer:*`; a

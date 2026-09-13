@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Delegation with attenuation. Build-list item 3; SPEC-v0.3 §5.
 
 The acceptance tests are T75 to T81. Four sentences run through all of them:

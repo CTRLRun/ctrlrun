@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T415 to T443: consumption, reconciliation and release (SPEC-v0.9 §4).
 
 §4.2's table has nineteen rows and the implementation has one rule: **released exactly when the

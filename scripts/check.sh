@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 # Everything CI's `check` job runs, in one place, cheapest first.
 #
 # CI calls this file rather than naming the tools itself, so "it passed locally" and "it

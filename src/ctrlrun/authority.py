@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Grants, patterns, containment and evaluation. Build-list item 2; SPEC-v0.3 §4.
 
 Authority is the second axis. Policy answers *how much autonomy does this action have*, and

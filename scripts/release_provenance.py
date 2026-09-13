@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Turn the attestation `actions/attest-build-provenance` produced into release assets.
 
 The action signs the distributions and hands back one Sigstore bundle. That bundle lives in

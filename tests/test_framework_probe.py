@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The research harness. SPEC-v0.4 §7; T122-T124b.
 
 `research/framework-probe/` is outside `src/` and is not on the import path, so these tests put

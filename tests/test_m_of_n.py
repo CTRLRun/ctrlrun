@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T310 to T325: M-of-N on distinct verified principals (SPEC-v0.8 §4.2).
 
 N distinct resolved principals, counted once each, decided by the store's write and never by a

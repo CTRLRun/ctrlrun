@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The OpenTelemetry sink. Build-list item 8; SPEC-v0.2 §8, acceptance test T29.
 
 An `EventSink` (§4) and nothing more: it never decides, never blocks, and never raises. What

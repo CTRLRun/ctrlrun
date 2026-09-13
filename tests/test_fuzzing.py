@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The fuzz targets under `fuzz/`, and the invariants they assert.
 
 `SPEC-v0.1.md` §2.3 calls canonicalization security-critical, and it is the one place where a

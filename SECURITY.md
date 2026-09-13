@@ -11,6 +11,28 @@ sequence of actions. A failing test is the fastest possible report.
 Expect an acknowledgement within 72 hours and an assessment within seven days. If a fix is
 warranted you will be credited in the release notes unless you ask not to be.
 
+## Response process
+
+What happens to a report, in order, and the reporter hears from us at each step:
+
+1. **Acknowledgement within 72 hours** of the report arriving, from the maintainer, with a
+   tracking reference that stays private.
+2. **Assessment within seven days.** We reproduce the problem, place it against the threat
+   model at https://ctrlrun.dev/docs/THREAT_MODEL (in scope, out of scope, or a documented
+   limitation), and tell the reporter which and why. An out-of-scope report gets a written
+   reason, not silence.
+3. **A fix on a private branch**, with the regression test that fails before it and passes
+   after, reviewed by the other maintainer role holder before it merges. The fix ships in a
+   patch release on the supported line.
+4. **Disclosure.** The release's CHANGELOG entry names the fix. For a report in scope we
+   publish a GitHub Security Advisory on the repository and request a CVE through it. We aim
+   to release within 90 days of the report; if a fix takes longer, the reporter is told when
+   and why, and the advisory is published no later than the fix.
+5. **Credit** in the release notes and the advisory, unless the reporter asks not to be named.
+
+Reports may also be filed through GitHub's private vulnerability reporting on the repository;
+the same process applies.
+
 ## Provenance
 
 Releases carry PyPI provenance attestations from GitHub Actions. Distributions are published
@@ -49,8 +71,13 @@ CTRLRun is pre-1.0. Only the latest release receives fixes.
 
 | Version | Supported |
 |---|---|
-| 0.6.x | yes |
-| < 0.6 | no |
+| the latest release line (the newest `0.x` on PyPI) | yes |
+| earlier lines | no |
+
+The upgrade path is `pip install --upgrade ctrlrun`. Every change to a public name and every
+store migration is listed in [CHANGELOG.md](CHANGELOG.md) under the release that made it,
+with what to do about it; migrations run forward on first use and are numbered, and a
+migration that cannot be reversed says so in its entry.
 
 ## What counts as a vulnerability
 

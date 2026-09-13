@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """An approval is worth exactly one execution.
 
 The human's yes is spent the moment it authorizes a run. An agent that keeps the request id

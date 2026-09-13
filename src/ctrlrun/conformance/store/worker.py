@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """One contender in `reservation/e1-cross-process`. SPEC-v0.6 §2.4.
 
 Reached as `python -m ctrlrun.conformance.store.worker` with its payload on stdin -- a

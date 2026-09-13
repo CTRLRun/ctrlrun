@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The five-scenario demo with an in-process fake Stripe. SPEC-v0.1 §7 T11, SPEC-v0.3 §1.2.
 
 Five ways an agent action goes wrong at the boundary between intention and effect, and what

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """StateStore protocol, SQLite and in-memory stores. Build-list item 6; SPEC-v0.1 §5.3.
 
 `SQLiteStateStore` is the store for anything that matters: it holds approvals, effects and

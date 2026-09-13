@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The dependency rule. Build-list item 6a; SPEC-v0.2 §1.1, and the first half of T30.
 
 `pip install ctrlrun` must not grow. An extra's module imports lazily, and a missing extra

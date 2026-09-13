@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The @protect decorator, Control and the ambient action context. Build-list item 3.
 
 `Control` is the only place the other modules are composed (ARCHITECTURE §6): it turns a
