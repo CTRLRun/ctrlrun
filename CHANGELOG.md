@@ -98,6 +98,34 @@ any change to one appears here.
   precondition hook rather than add a second one. `SPEC-v0.9.md` §5.2.1 records the amendment and
   the three mechanical differences that justify it.
 
+- **The operator surfaces for a budget** (SPEC-v0.9 §7). **No new command.** `ctrlrun inspect`
+  gains `--grant GRANT_ID`, which reports each of that grant's budgets as three numbers:
+  **consumed**, the un-released sum over the rolling window, which is the number that decides;
+  **held**, the part of it whose effects have not committed; and **why**, the effect holding each
+  part and the state it is in.
+
+  The third is the deliverable. A budget that refuses while it looks nowhere near its limit is
+  almost always one unresolved effect, and without the third column an operator cannot get from
+  the refusal to `ctrlrun resolve`. The view prints that command with the effect key already in
+  it, because an operator retyping the key from the line above is one transcription away from
+  resolving a different effect.
+
+  `ctrlrun effects` says what each effect is holding, so `--state ambiguous` answers "what is
+  pinning this grant". It says **spent** for a committed effect and **holds** for every other,
+  because §7.2 defines held as the part that has not committed and one word for two numbers would
+  make the two commands disagree.
+
+  `ctrlrun stats` reports the ledger's row count, so growth is observable before it is a problem.
+  The ledger only grows: the kernel deletes no row, ships no retention command and has no policy
+  key that expires evidence. What §7.3 owes instead is the invariant that makes somebody else's
+  archiving safe, and it states it: rows older than the longest window on any budget of a grant
+  cannot affect any future decision.
+
+  `ctrlrun.budget/v1` is its own document rather than a key inside `ctrlrun.inspection/v2`,
+  because that one answers about an action and this answers about a grant: a reader handed one
+  would have to know which of two shapes it got. Every existing `--json` shape is unchanged, and
+  T436 asserts that rather than assuming it.
+
 ### Changed
 
 - `ctrlrun.receipt/v6` carries `scope_hash` beside `task`, and `ctrlrun.guarantees/v5` carries

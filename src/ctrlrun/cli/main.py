@@ -22,7 +22,7 @@ import click
 
 from ..action import Principal
 from ..approval import ApprovalRecord, LocalApprovalProvider
-from ..authority import Delegation, grant_from_yaml
+from ..authority import Budget, Delegation, grant_from_json, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
 from ..effect import RESOLVED_BY_HUMAN, EffectRecord, EffectState
 from ..errors import (
@@ -41,7 +41,14 @@ from ..receipt import (
     iso_timestamp,
     verify_chain,
 )
-from ..reporting import inspection_for, since_boundary, stats_document
+from ..reporting import (
+    budget_document,
+    budget_lines,
+    inspection_for,
+    ledger_rows,
+    since_boundary,
+    stats_document,
+)
 from ..state import RESOLUTIONS, DelegationRecord, SQLiteStateStore, StateStore
 from .demo import run_demo
 
@@ -520,16 +527,56 @@ def _report_chain(store: StateStore, *, as_json: bool) -> None:
 )
 @STORE_URL_OPTION
 def effects(state: str | None, store_url: str | None) -> None:
-    """Show the logical effects this store knows about."""
+    """Show the logical effects this store knows about.
+
+    An effect that still **holds** part of a budget says so (SPEC-v0.9 §7.2): `--state ambiguous`
+    is how an operator finds what is pinning a grant, and the hold is the reason it matters.
+    """
     try:
-        found = _store(store_url).list_effects(None if state is None else EffectState(state))
+        store = _store(store_url)
+        found = store.list_effects(None if state is None else EffectState(state))
+        holds = _holds_by_effect(store)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
     if not found:
         click.echo("no effects yet" if state is None else f"no effects are {state}")
         return
     for record in found:
-        click.echo(_effect_line(record))
+        line = _effect_line(record)
+        charges = holds.get(record.effect_key)
+        if charges:
+            # **"spent" for a committed effect, "holds" for every other.** §7.2 defines `held`
+            # as the part of the sum whose effects have not committed, and a committed spend is
+            # a spend (§4.2): calling it a hold here would have `ctrlrun effects` and
+            # `ctrlrun inspect --grant` use one word for two different numbers.
+            verb = "spent" if record.state is EffectState.COMMITTED else "holds"
+            line += f"  {verb} " + ", ".join(charges)
+        click.echo(line)
+
+
+def _holds_by_effect(store: StateStore) -> dict[str, list[str]]:
+    """Un-released charges per effect key, whatever state the effect is in (SPEC-v0.9 §7.2).
+
+    "Un-released" is not "held": a committed effect's charge is never released, because a
+    committed spend is a spend. The caller picks the word from the effect's own state.
+
+    Read once and indexed rather than queried per effect: `ctrlrun effects` lists every effect
+    in the store, and a lookup inside that loop is one query per row.
+
+    A store with no ledger returns nothing, so this stays a diagnostic that works against a
+    0.8.0 database rather than one that refuses it.
+    """
+    try:
+        rows = store.consumptions()
+    except CTRLRunError:
+        return {}
+    held: dict[str, list[str]] = {}
+    for row in rows:
+        if row.released_at is None:
+            held.setdefault(row.effect_key, []).append(
+                f"{row.amount} {row.metric} on {row.grant_id}"
+            )
+    return held
 
 
 @main.command()
@@ -568,11 +615,36 @@ def resolve(effect_key: str, committed: bool, failed: bool, store_url: str | Non
 
 
 @main.command()
-@click.argument("action_id")
+@click.argument("action_id", required=False)
+@click.option(
+    "--grant",
+    "grant_id",
+    help="Show this grant's budgets instead: consumed, held, and what holds it.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one JSON object instead.")
 @STORE_URL_OPTION
-def inspect(action_id: str, as_json: bool, store_url: str | None) -> None:
-    """Show one action's whole history: proposal, decision, approval, effect, receipt."""
+def inspect(
+    action_id: str | None, grant_id: str | None, as_json: bool, store_url: str | None
+) -> None:
+    """Show one action's whole history: proposal, decision, approval, effect, receipt.
+
+    With `--grant`, show that grant's budgets instead: how much of each is consumed over its
+    rolling window, how much of that is **held** by effects that have not committed, and which
+    effect holds each part (SPEC-v0.9 §7.2).
+
+    The third number is the one that matters at 3am. A budget that refuses while it looks
+    nowhere near its limit is almost always one unresolved effect: `ctrlrun resolve` clears it.
+    """
+    if (action_id is None) == (grant_id is None):
+        # §7.1 keeps both behind one command, which makes "which of the two did you mean" this
+        # command's own question. Neither names a subject; both name two.
+        raise click.UsageError(
+            "give an ACTION_ID, or --grant GRANT_ID, and not both: they inspect different things"
+        )
+    if grant_id is not None:
+        _inspect_grant(grant_id, as_json, store_url)
+        return
+    assert action_id is not None
     store = _store(store_url)
     try:
         # SPEC-mcp-operator §9.1 — one producer for `ctrlrun.inspection/v2`, choosing included,
@@ -598,6 +670,51 @@ def inspect(action_id: str, as_json: bool, store_url: str | None) -> None:
     effect = _effect_of(store, receipt, events)
     for line in _inspection_lines(action_id, receipt, effect, approvals, events):
         click.echo(line)
+
+
+def _inspect_grant(grant_id: str, as_json: bool, store_url: str | None) -> None:
+    """SPEC-v0.9 §7.2, behind `ctrlrun inspect --grant`.
+
+    The grant's budgets come from the **authority in force**, document grants and runtime
+    delegations alike, because a delegation carries budgets of its own (§2.6) and an operator
+    paged about one needs the same three numbers. The ledger is keyed on the grant id either
+    way, so the read below does not care which kind it found.
+    """
+    try:
+        control = _control_on(store_url)
+        budgets = _budgets_of(control, grant_id)
+        if budgets is None:
+            # Exits non-zero with nothing on stdout, as `inspect` does for an unknown action, so
+            # a script cannot mistake "no such grant" for "a grant with no budgets".
+            raise click.ClickException(f"no grant {grant_id}")
+        document = budget_document(grant_id, budgets, control._store, control._clock())
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(document, ensure_ascii=False, indent=2))
+        return
+    for line in budget_lines(document):
+        click.echo(line)
+
+
+def _budgets_of(control: Control, grant_id: str) -> tuple[Budget, ...] | None:
+    """This grant's budgets, or `None` where no such grant exists.
+
+    `()` and `None` are different answers and the caller treats them differently: a grant that
+    budgets nothing is a real grant an operator may ask about, and §7.2's view says so.
+    """
+    authority = control._authority
+    if authority is None:
+        return None
+    grant = authority.grants.get(grant_id)
+    if grant is not None:
+        return grant.budgets or ()
+    record = control._store.get_delegation(grant_id)
+    if record is None:
+        return None
+    # Stored as JSON, so it is read back through the loader that validates it rather than
+    # trusted: §2.4's refusals apply to a row a text editor could have written.
+    return grant_from_json(record.grant_json, delegation_id=grant_id).budgets or ()
 
 
 def _approvals_for(
@@ -773,7 +890,12 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
         ]
     except CTRLRunError as exc:
         raise _fail(exc) from exc
-    document = stats_document(counted, mode=policy.mode, boundary=boundary)
+    document = stats_document(
+        counted,
+        mode=policy.mode,
+        boundary=boundary,
+        ledger_rows=ledger_rows(_store(store_url)),
+    )
     if as_json:
         click.echo(json.dumps(document, ensure_ascii=False, indent=2))
         return
@@ -796,6 +918,9 @@ def _stats_lines(document: Mapping[str, Any]) -> list[str]:
         lines.append(_stat("denied", document["denied"]))
         lines += _breakdown(document["denied_by_reason"])
     lines.append(_stat("ambiguous outcomes", document["ambiguous_outcomes"]))
+    if "ledger_rows" in document:
+        # §7.3: growth is observable before it is a problem.
+        lines.append(_stat("budget ledger rows", document["ledger_rows"]))
     lines.append("")
     if document["mode"] != OBSERVE:
         # §6.4 — say what is missing rather than print a line the receipts cannot substantiate.
