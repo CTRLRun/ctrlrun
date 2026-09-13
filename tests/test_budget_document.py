@@ -11,7 +11,7 @@ genuinely narrower. T401 and T402 are written in both directions for that reason
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -212,3 +212,116 @@ def test_T407b_a_budget_is_refused_in_a_v6_document() -> None:
     with pytest.raises(PolicyError) as caught:
         Policy.from_yaml(older, source="<old>")
     assert "budgets" in str(caught.value)
+
+
+# --- reading a stored budget back (SPEC-v0.9 §2.2, `v0.3 §5.2`) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("window", "why"),
+    [
+        (10**15, "an oversized int, which timedelta answers with OverflowError"),
+        (float("inf"), "an infinity, same"),
+        (True, "a bool, which timedelta reads as ONE SECOND"),
+        (0.5, "a sub-second float the loader's grammar cannot express"),
+        (0, "a zero window"),
+        (-1, "a negative window"),
+        ("PT24H", "the document's spelling, which is not what is stored"),
+    ],
+)
+def test_T407c_a_corrupt_stored_window_is_unreadable_and_never_an_exception(window, why) -> None:
+    """An independent review found two of these escaping, and one of them deployment-wide.
+
+    `OverflowError` is in neither `except` tuple, so an oversized window raised **out of**
+    `Authority.evaluate`. `_candidates` reads every delegation row on every evaluation, so one
+    corrupt row denied nothing and crashed everything, for every principal and every action, with
+    no event and no receipt for an operator to find.
+
+    And `timedelta(seconds=True)` is a one-second window: the bool trap one field over from where
+    `limit` closes it, failing in the direction that **grants** authority, since a shorter window
+    is a higher rate.
+    """
+    from ctrlrun.authority import _budgets_from_json
+
+    with pytest.raises(Exception) as caught:
+        _budgets_from_json([{"metric": "a", "limit": 5, "window": window}], "dlg_" + "0" * 32)
+    assert type(caught.value).__name__ == "_UnreadableError", (
+        f"{why}: must be unreadable, not {type(caught.value).__name__}"
+    )
+
+
+def test_T407d_a_corrupt_row_denies_an_unrelated_principal_rather_than_crashing() -> None:
+    """The blast radius, driven end to end rather than argued.
+
+    `Authority._candidates` reads every delegation row on every evaluation, so the failure mode
+    for an unreadable row has to be a refusal. Before the fix this raised `OverflowError`.
+    """
+    import json
+
+    from ctrlrun.action import Action, Principal
+    from ctrlrun.state import DelegationRecord, InMemoryStateStore
+
+    document = """
+schema: ctrlrun.policy/v7
+authority:
+  grants:
+    - id: other
+      subject: {agent: "reconciliation-agent"}
+      actions: ["payments.read"]
+"""
+    authority = Authority.from_yaml(document, source="<d>", standalone=True)
+    store = InMemoryStateStore()
+    grant = {
+        "subject": {"agent": "payer", "user": "ada"},
+        "actions": ["payments.refund"],
+        "resources": None,
+        "constraints": {},
+        "environments": None,
+        "expires_at": None,
+        "delegable": False,
+        "tasks": None,
+        "budgets": [{"metric": "amount", "limit": 5, "window": 10**15}],
+    }
+    now = datetime(2026, 9, 13, tzinfo=UTC)
+    store.put_delegation(
+        DelegationRecord(
+            delegation_id="dlg_" + "0" * 32,
+            parent_id="other",
+            depth=1,
+            grant_json=json.dumps(grant),
+            created_by_agent="x",
+            created_by_user=None,
+            created_via="api",
+            created_at=now,
+            revoked_at=None,
+            revoked_by=None,
+        )
+    )
+    unrelated = Action(
+        name="payments.read", arguments={}, principal=Principal(agent="reconciliation-agent")
+    )
+    result = authority.evaluate(unrelated, now=now, store=store)
+    assert not result.passed
+    assert result.reason == "authority_unreadable", (
+        "one corrupt row must deny with a reason, not raise out of evaluate for the deployment"
+    )
+
+
+def test_T407e_a_stored_budget_may_not_carry_a_key_the_document_could_not() -> None:
+    """§2.2's rule in the direction the review found it broken: the loader's key set is closed,
+    so the reader's is too, or a stored row carries what no document can express."""
+    from ctrlrun.authority import _budgets_from_json
+
+    with pytest.raises(Exception) as caught:
+        _budgets_from_json(
+            [{"metric": "a", "limit": 5, "window": 86400, "surprise": 1}], "dlg_" + "0" * 32
+        )
+    assert type(caught.value).__name__ == "_UnreadableError"
+
+
+def test_T407f_a_sub_second_window_is_refused_at_construction() -> None:
+    """A `Budget` that cannot round-trip is not a legal one: `grant_to_json` renders integer
+    seconds, so `timedelta(milliseconds=500)` would store as `0` and read back dead for ever."""
+    with pytest.raises(InvalidArgument) as caught:
+        Budget("amount", 100, timedelta(milliseconds=500))
+    assert "whole number of seconds" in str(caught.value)

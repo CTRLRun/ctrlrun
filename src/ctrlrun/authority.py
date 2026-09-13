@@ -397,6 +397,20 @@ class Budget:
             raise InvalidArgument(
                 f"budget {self.metric!r}: 'window' must be a positive duration, got {self.window!r}"
             )
+        # **Whole seconds, because a `Budget` that cannot round-trip is not a legal one.**
+        # `grant_to_json` renders integer seconds, so `timedelta(milliseconds=500)` would store as
+        # `0` and read back as an unreadable delegation, dead for ever. `Control.delegate` takes a
+        # `Grant` built in Python, which is §2.2's whole reason for validating here as well as in
+        # the loader, and the loader's grammar is integer-only anyway.
+        if self.window.microseconds:
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'window' must be a whole number of seconds, got "
+                f"{self.window!r}; it is stored and hashed as integer seconds (SPEC-v0.9 §2.8)"
+            )
+        if self.window.total_seconds() > _MAX_WINDOW_SECONDS:
+            raise InvalidArgument(
+                f"budget {self.metric!r}: 'window' may not exceed {_MAX_WINDOW_SECONDS} seconds"
+            )
 
 
 @dataclass(frozen=True)
@@ -733,8 +747,15 @@ def grant_from_json(text: str, *, delegation_id: str) -> Grant:
             tasks=_optional_tuple(document.get("tasks"), delegation_id),
             budgets=_budgets_from_json(document.get("budgets"), delegation_id),
         )
-    except (InvalidArgument, PolicyError, TypeError, ValueError) as exc:
+    except (ArithmeticError, InvalidArgument, PolicyError, TypeError, ValueError) as exc:
         raise _UnreadableError(delegation_id, str(exc)) from exc
+
+
+#: SPEC-v0.9 §2.2 — the widest window a budget may carry, in seconds: a hundred years, which is
+#: past any rolling window an operator means and well inside what `timedelta` can hold. It exists
+#: so a stored row cannot raise `OverflowError` out of `Authority.evaluate`, which `_candidates`
+#: would turn into a deployment-wide outage rather than one unreadable delegation.
+_MAX_WINDOW_SECONDS: Final = 100 * 365 * 24 * 60 * 60
 
 
 def _budgets_from_json(value: object, delegation_id: str) -> tuple[Budget, ...] | None:
@@ -752,6 +773,29 @@ def _budgets_from_json(value: object, delegation_id: str) -> tuple[Budget, ...] 
     for entry in value:
         if not isinstance(entry, Mapping):
             raise _UnreadableError(delegation_id, "grant_json has a budget that is not an object")
+        # The loader's key set is closed (`_BUDGET_KEYS`) and this docstring claims to validate
+        # exactly what the loader validates, so it is closed here too. An independent review found
+        # the two disagreeing: a stored row could carry a key the document could not.
+        unknown = set(entry) - _BUDGET_KEYS
+        if unknown:
+            raise _UnreadableError(
+                delegation_id, f"grant_json budget has unknown keys {sorted(unknown)}"
+            )
+        window = entry.get("window")
+        # **The bool trap, one field over from where `limit` closes it**, and an independent
+        # review found it: `timedelta(seconds=True)` is a ONE-SECOND window, and a shorter window
+        # is a higher rate, so the failure grants authority. `0.5` is a sub-second window the
+        # loader's integer-only grammar cannot express. Same predicate as `limit`, not a second
+        # spelling of it. The bound is what keeps `timedelta` from raising `OverflowError` out of
+        # `Authority.evaluate`, which `_candidates` makes a deployment-wide outage: it reads every
+        # delegation row on every evaluation, so one corrupt row would deny nothing and crash
+        # everything, for every principal and every action.
+        if not _is_int(window) or not 0 < cast("int", window) <= _MAX_WINDOW_SECONDS:
+            raise _UnreadableError(
+                delegation_id,
+                f"grant_json budget 'window' must be a positive whole number of seconds up to "
+                f"{_MAX_WINDOW_SECONDS}, got {window!r}",
+            )
         try:
             # `cast` and not a check: `Budget.__post_init__` validates all three, and a second
             # copy of that grammar here is the drift §2.2 forbids. The types are the store's
@@ -760,10 +804,10 @@ def _budgets_from_json(value: object, delegation_id: str) -> tuple[Budget, ...] 
                 Budget(
                     metric=cast("str", entry.get("metric")),
                     limit=cast("int", entry.get("limit")),
-                    window=timedelta(seconds=cast("float", entry.get("window", -1))),
+                    window=timedelta(seconds=cast("int", window)),
                 )
             )
-        except (InvalidArgument, TypeError, ValueError) as exc:
+        except (ArithmeticError, InvalidArgument, TypeError, ValueError) as exc:
             raise _UnreadableError(delegation_id, f"grant_json budget: {exc}") from exc
     return tuple(parsed)
 
