@@ -1534,6 +1534,28 @@ One justification per row. Anything not here is a spec amendment before it is co
 | `ssl_context=` on `ctrlrun.gateway.transport.request` | §4.3's check 3 cannot be implemented without it: `request` builds its client as `httpx.Client(timeout=timeout, follow_redirects=False)` (`gateway/transport.py:155`) and accepts no context, no verify argument and no client. A module-level default is refused rather than omitted: one context set globally pins every caller of this module to one certificate, and the gateway fronts one upstream while the ACS hook and in-process callers share the module |
 | `-41016` `ctrlrun.upstream_unpinned` | §4.5, on `v0.3 §8.4`'s test for `-41012`: a client answers "not permitted to anyone", "not permitted to you" and "not against that server" three different ways |
 
+### 9.4 Three rows in this table did not ship, and the table said they had
+
+Written at release, against the shipped tree, because §9 is the section a reader trusts for the
+public surface and a frozen name that names nothing is worse than a missing row: a missing row is a
+gap, and a wrong one is an answer.
+
+This is §11's finding in its sharpest form. Every row above was justified before it was code, and
+three of them were then not built. Nothing turned red, because **no test in this repository asserts
+that a name §9 freezes exists.** The rule §11 states covers a sentence about a later item; these
+are sentences about *this* document's own frozen table, and they need the same discipline.
+
+| Row | What shipped | What follows from the gap |
+|---|---|---|
+| `hop=` and `task=` on `ctrlrun.adapter.needs_approval` | **nothing.** The signature is still `needs_approval(control, action, arguments, *, resource=None)` | The predicate evaluates against the receiver's whole candidate set while `execute` evaluates against the hop alone, exactly as the row above warned. **It is not an authority hole**: `Control.execute` is the enforcement point and still decides against the hop alone, so a call this predicate waves through is refused there. What it costs is the framework's own approval item — a human is not asked before invocation for a call that then refuses, which is a worse experience and a confusing receipt, not a wider grant |
+| `ssl_context=` on `ctrlrun.gateway.transport.request` | **nothing on that function.** Check 3 was implemented on `ctrlrun.upstream.observe_upstream(url, *, verify=...)` and on the forwarder's `verify`, both new surfaces; `transport.request` still takes no context, no verify argument and no client | Check 3 runs where the gateway builds its forwarder, not inside the shared request helper. The module-level-default objection the row raises is satisfied by that placement rather than by the parameter, so the *reason* held and the *name* did not |
+| `ctrlrun.hop/v1`'s key set (§6.2) | the table's keys **and three more**: `schema`, `root_id`, `missing_parent_id` | A consumer written against §6.2 alone gets keys it did not expect. The document under-describes what it emits, which is the safe direction for a reader and the wrong one for a frozen schema. `ctrlrun.hop/v1` is the version to amend, not to re-cut, and v0.11 owns it |
+
+**What this asks of v0.11**, stated here so it is not rediscovered: a test that every name §9 freezes
+is importable with the signature the row gives. It is cheap, it is the same shape as
+`test_every_source_file_carries_its_copyright_and_license`, and it is the only thing that would have
+caught all three.
+
 **No new error type.** `errors.py`'s closed set already covers every refusal here: `authority_hop`
 is an `AuthorityDenied` reason, and both upstream reasons are `ActionDenied` reasons. If an item
 disagrees, the item stops and the maintainer is asked.

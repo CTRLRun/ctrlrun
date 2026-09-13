@@ -792,3 +792,67 @@ def test_every_source_file_carries_its_copyright_and_license():
                 missing.append(str(path.relative_to(REPO_ROOT)))
     assert checked > 100, checked
     assert not missing, "\n".join(missing)
+
+
+# --- every name a spec freezes is a name that exists ------------------------------------------
+
+#: `SPEC-v0.10 §9` froze a table of public API additions, and **three of its rows were never
+#: built**: `hop=`/`task=` on `needs_approval`, `ssl_context=` on `gateway.transport.request`, and
+#: three keys of `ctrlrun.hop/v1`. Nothing went red, because nothing in this repository asserted
+#: that a frozen name exists. §9.4 records the gap and asks for this test; this is it, for the
+#: rows that did ship. A row added to §9 without a line here is a row that can quietly not ship.
+_FROZEN_V0_10: tuple[tuple[str, str, str | None], ...] = (
+    ("ctrlrun.control", "protect", "hop"),
+    ("ctrlrun.control", "Control.execute", "hop"),
+    ("ctrlrun.control", "Control.evaluate", "hop"),
+    ("ctrlrun.control", "Control.hop", None),
+    ("ctrlrun.authority", "Authority.evaluate", "hop"),
+    ("ctrlrun.upstream", "observe_upstream", "verify"),
+    ("ctrlrun.upstream", "check", "upstream"),
+    ("ctrlrun.upstream", "pinned_context", "certs"),
+)
+
+
+def test_every_v0_10_name_the_spec_freezes_is_importable_with_the_parameter_it_names():
+    """SPEC-v0.10 §9, asserted rather than described.
+
+    A frozen name that names nothing is worse than a missing row: a missing row is a gap, and a
+    wrong one is an answer. Three rows of §9 shipped as nothing and the table went on saying they
+    had, for a whole milestone, because no test ever looked.
+    """
+    import importlib
+    import inspect
+
+    for module_name, dotted, parameter in _FROZEN_V0_10:
+        module = importlib.import_module(module_name)
+        target: object = module
+        for part in dotted.split("."):
+            assert hasattr(target, part), f"{module_name}.{dotted}: {part!r} does not exist"
+            target = getattr(target, part)
+        if parameter is None:
+            continue
+        signature = inspect.signature(target)  # type: ignore[arg-type]
+        assert parameter in signature.parameters, (
+            f"{module_name}.{dotted} does not take {parameter!r}; SPEC-v0.10 §9 freezes it. "
+            f"It takes: {sorted(signature.parameters)}"
+        )
+
+
+def test_the_three_rows_of_section_9_that_did_not_ship_still_have_not():
+    """§9.4's table, pinned so it stays true in both directions.
+
+    If one of these is built later, this test fails and §9.4's row comes out in the same commit.
+    That is the point: the document and the tree are wrong together or right together, never one
+    of each, which is the state §9.4 exists because of.
+    """
+    import inspect
+
+    from ctrlrun import adapter
+    from ctrlrun.gateway import transport
+
+    assert "hop" not in inspect.signature(adapter.needs_approval).parameters, (
+        "needs_approval now takes a hop: build it, and delete its row from SPEC-v0.10 §9.4"
+    )
+    assert "ssl_context" not in inspect.signature(transport.request).parameters, (
+        "transport.request now takes ssl_context: delete its row from SPEC-v0.10 §9.4"
+    )
