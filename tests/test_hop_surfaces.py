@@ -277,3 +277,31 @@ def test_T505c_a_broken_chain_suggests_the_presented_hop_and_names_the_unreadabl
         "non-zero: a dead end teaches an operator the line is noise"
     )
     assert first.delegation_id in message, "the unreadable id belongs in the prose"
+
+
+@pytest.mark.authority
+def test_T507_scan_names_the_principals_holding_a_root_grant(tmp_path):
+    """**§6.4, and the operator's half of §2.3.2's residual.**
+
+    CTRLRun cannot make a receiving agent present the hop it was given: one holding a grant of its
+    own can decline and act on that instead. The deployment rule that collapses it is *an agent
+    that only ever acts on handed-over work holds no root grant of its own*, and §2.3.2 leans on
+    §6's surfaces to make it checkable. Without this line the rule is advice.
+
+    **It reports and does not score** (`v0.4 §3.9`): a principal here is a fact about the
+    document, it is not a finding, and it does not move the exit code.
+    """
+    from ctrlrun.scan import report_document, report_lines, scan
+
+    (tmp_path / "ctrlrun.yaml").write_text(DOC)
+    (tmp_path / "app.py").write_text("import ctrlrun\n")
+
+    report = scan(str(tmp_path))
+
+    assert report.root_grant_holders == ("planner",)
+    assert "holds a root grant (1)" in "\n".join(report_lines(report))
+    assert report_document(report)["root_grant_holders"] == ["planner"]
+    # A fact, not a finding.
+    assert all("planner" not in finding.target for finding in report.findings), (
+        "a root-grant holder was reported as a finding; v0.4 §3.9 forbids scan grading a document"
+    )

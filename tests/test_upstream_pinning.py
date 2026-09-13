@@ -406,3 +406,123 @@ def test_T491b_the_gateways_forwarder_pins_when_the_policy_does(tmp_path):
         "without PARTIAL_CHAIN a pinned CA-signed leaf refuses every connection, the right one "
         "included"
     )
+
+
+# --- T495: check 1, and the observation check 2 reads --------------------------------------
+
+
+@pytest.mark.serial
+def test_T495_the_startup_probe_records_what_check_2_then_compares(tmp_path):
+    """**§4.3's check 1, and the finding that made it necessary.**
+
+    A spec review round three established that nothing in the shipped product ever called
+    `observe_certificate`: the register `check` reads was written only by tests and by `verify`'s
+    own G27 scenario. So `check` answered `upstream_unverified` in every real process, a gateway
+    that pinned refused every pinned action for ever, and §10's `upstream_mismatch` row described
+    an outcome no shipped code path could produce.
+
+    This is the fix, end to end against a real listener: the startup probe observes, and check 2
+    then has something to compare.
+    """
+    from ctrlrun.upstream import check, observe_upstream
+
+    key, crt = _ca_signed(tmp_path, "startup")
+    port = _serve(key, crt)
+    url = f"https://localhost:{port}"
+
+    forget()
+    from ctrlrun.policy import UpstreamPin
+
+    assert check(UpstreamPin(cert_sha256=(DIGEST_A,)), url) == UPSTREAM_UNVERIFIED, (
+        "before anything observes, a pin is unverified: the fail-closed half of §4.5"
+    )
+
+    observed = observe_upstream(url, verify=_pinned_context(crt))
+
+    assert check(UpstreamPin(cert_sha256=(observed,)), url) is None, (
+        "after the probe, check 2 compares against a real observation"
+    )
+    assert check(UpstreamPin(cert_sha256=(DIGEST_A,)), url) == UPSTREAM_MISMATCH, (
+        "and a server whose certificate is in no pinned list is a mismatch, which is the §10 row "
+        "that had no reachable code path"
+    )
+
+
+def _pinned_context(crt: Path):
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    context.load_verify_locations(cafile=str(crt))
+    return context
+
+
+@pytest.mark.serial
+def test_T495b_a_swapped_server_stops_the_gateway_before_it_listens(tmp_path):
+    """§4.3's check 1 is the **legible** one, and the only one where the operator is present: a
+    pin an operator got wrong fails on a console rather than on production traffic."""
+    from ctrlrun.errors import InvalidArgument
+    from ctrlrun.upstream import observe_upstream
+
+    _, good = _ca_signed(tmp_path, "good2")
+    evil_key, evil_crt = _ca_signed(tmp_path, "evil2")
+    port = _serve(evil_key, evil_crt)
+
+    forget()
+    with pytest.raises(Exception) as refused:
+        observe_upstream(f"https://localhost:{port}", verify=_pinned_context(good))
+
+    assert "CERTIFICATE_VERIFY" in str(refused.value) or isinstance(
+        refused.value, (ssl.SSLError, OSError, InvalidArgument)
+    ), refused.value
+
+
+def test_T495c_an_http_upstream_presents_nothing_to_pin():
+    """A pin is a claim about a server's identity and an unencrypted hop carries none, so it is
+    refused rather than silently recorded as verified."""
+    from ctrlrun.errors import InvalidArgument
+    from ctrlrun.upstream import observe_upstream
+
+    with pytest.raises(InvalidArgument) as refused:
+        observe_upstream("http://mcp.example")
+
+    assert "not https" in str(refused.value)
+
+
+def test_T494c_the_two_pin_halves_must_agree_at_load(tmp_path):
+    """**§4.2's correspondence check, whose absence a review found contradicting its own
+    docstring.**
+
+    §4.2 measured what a half-moved rotation costs and then the check was not written. A document
+    whose `tls_cert_file` still held only the old certificate while `tls_cert_sha256` had both
+    loaded cleanly and failed at the **handshake** — the outage §4.2 says the list prevents,
+    arriving one layer down, on the day an operator believed they had prepared for.
+    """
+    _, crt = _ca_signed(tmp_path, "corr")
+    real = cert_hash(crt.read_bytes() and ssl.PEM_cert_to_DER_cert(crt.read_text()))
+
+    agreeing = Policy.from_yaml(
+        "schema: ctrlrun.policy/v8\nactions:\n  stripe.refund:\n    decision: allow\n"
+        f'    upstream: {{ tls_cert_sha256: ["{real}"], tls_cert_file: "{crt}" }}\n',
+        source="t",
+    )
+    assert agreeing.actions["stripe.refund"].upstream.certs == (str(crt),)
+
+    with pytest.raises(PolicyError) as disagreeing:
+        Policy.from_yaml(
+            "schema: ctrlrun.policy/v8\nactions:\n  stripe.refund:\n    decision: allow\n"
+            f'    upstream: {{ tls_cert_sha256: ["{DIGEST_A}"], tls_cert_file: "{crt}" }}\n',
+            source="t",
+        )
+    assert "does not name" in str(disagreeing.value)
+
+    with pytest.raises(PolicyError) as missing:
+        Policy.from_yaml(
+            "schema: ctrlrun.policy/v8\nactions:\n  stripe.refund:\n    decision: allow\n"
+            f'    upstream: {{ tls_cert_file: "{tmp_path}/nope.pem" }}\n',
+            source="t",
+        )
+    assert "could not be read" in str(missing.value), (
+        "a pin whose certificate is missing builds an empty trust store and refuses everything"
+    )

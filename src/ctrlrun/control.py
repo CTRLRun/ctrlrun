@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import IntEnum
 from pathlib import Path
 from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
@@ -52,8 +53,7 @@ from .approval import (
     unsatisfied,
 )
 from .authority import (
-    NO_AUTHORITY,
-    REASON_PRECEDENCE,
+    _DELEGATION_ID,
     RESOURCE_SEPARATOR,
     Authority,
     AuthorityResult,
@@ -105,7 +105,6 @@ from .policy import (
     OBSERVE,
     POLICY_CHANGE_ACTION,
     POLICY_UNAPPROVED,
-    UPSTREAM_MISMATCH,
     UPSTREAM_UNVERIFIED,
     Decision,
     Evaluation,
@@ -115,8 +114,6 @@ from .policy import (
 )
 from .receipt import (
     BLOCKED_AMBIGUOUS,
-    BLOCKED_APPROVAL_MISMATCH,
-    BLOCKED_APPROVAL_REASONS,
     BLOCKED_APPROVAL_REQUIRED,
     BLOCKED_ATTEMPT_CEILING,
     BLOCKED_DUPLICATE,
@@ -246,6 +243,59 @@ def _utc_now() -> datetime:
 
 
 # --- the ambient context ---------------------------------------------------------------
+
+
+class DecisionPoint(IntEnum):
+    """**Where** enforce mode decides, declared once, in order (SPEC-v0.10 §5).
+
+    An earlier version of this ranked the **reason**, which cannot work, and an independent
+    review demonstrated three live regressions from it before anything else did. Two reasons
+    make a reason-ranking impossible rather than merely wrong:
+
+    - **The same reason is produced at two different points.** `precondition_changed`,
+      `approval_denied`, `consumed`, `expired` and `mismatch` all belong to
+      `BLOCKED_APPROVAL_REASONS`, and enforce mode raises `approval_required` at the gate
+      (`_presented`, above `_in_scope`) while raising the rest inside the loop (`_recheck` and
+      `_take`, below `_in_scope`). No single rank for `precondition_changed` is both above and
+      below `out_of_scope`.
+    - **Some checks are not in `_secure` at all.** The attempt-ceiling fast path runs in
+      `execute` before `_secure` is called, so its reason outranks everything `_secure` decides,
+      including the upstream pin and the budget.
+
+    So the call site declares where it is, and the reason travels as evidence rather than as an
+    ordering key. That is what `control.py`'s own comment has always described:
+    `principal_expired -> authority -> policy -> approval -> reservation -> execution`.
+
+    **Adding a refusal means giving its call site a point.** One that forgets still reports as a
+    refusal and still loses to every point declared, which is the fail-safe direction, and §5.3's
+    end-to-end property test is what turns the omission red.
+    """
+
+    PRINCIPAL = 0
+    #: `v0.8 §8.4` — a policy nobody approved decides nothing, checked before anything else is
+    #: decided because what follows would be decided *by* it.
+    POLICY_UNAPPROVED = 1
+    #: `v0.3 §4.3` — authority before policy, so a denial leaves no pending approval behind.
+    AUTHORITY = 2
+    POLICY = 3
+    #: `v0.7 §5.5`'s fast path, which runs in `execute` **before** `_secure`.
+    CEILING = 4
+    #: SPEC-v0.10 §4.3's check 2, first inside `_secure`.
+    UPSTREAM = 5
+    #: `v0.9 §2.3`, §2.4.1 — above the gate on T446's argument: unconditional, so a human's
+    #: answer cannot change them.
+    BUDGET = 6
+    #: `_presented`, above `_in_scope`.
+    APPROVAL_GATE = 7
+    #: `v0.9 §5.3` — inside the loop, before every `_take`.
+    SCOPE = 8
+    #: `v0.7 §6.2`'s recheck, and the approval refusals `_take` raises. **Below scope**, which is
+    #: why these cannot share a rank with the gate above.
+    APPROVAL_TAKE = 9
+    RESERVATION = 10
+    #: Anything that forgot to declare a point. Last, which is fail-safe: the report stays a
+    #: refusal and names something that did declare one.
+    UNDECLARED = 99
 
 
 @dataclass(frozen=True)
@@ -429,26 +479,29 @@ class _Observation:
     position because it changes none.
     """
 
-    __slots__ = ("blocked_reason", "decision", "reason")
+    __slots__ = ("blocked_at", "blocked_reason", "decision", "reason")
 
     def __init__(self) -> None:
         self.decision = Decision.ALLOW
         self.reason = ""
         self.blocked_reason: str | None = None
+        self.blocked_at: DecisionPoint = DecisionPoint.UNDECLARED
 
     def decided(self, evaluation: Evaluation) -> None:
         self.decision = evaluation.decision
         self.reason = evaluation.reason
 
-    def block(self, reason: str) -> None:
-        """Record a refusal enforce mode would have raised, keeping the one it would raise FIRST.
+    def block(self, reason: str, at: DecisionPoint = DecisionPoint.UNDECLARED) -> None:
+        """Record a refusal enforce mode would have raised, keeping the one it raises FIRST.
 
-        A reason `DECISION_ORDER` does not name sorts last among itself and still loses to any
-        reason it does name, which is the fail-safe direction for a reason somebody adds without
-        listing it: the report stays a refusal and names something the order knows.
+        `at` is **where** enforce mode decides this, and the caller declares it because only the
+        caller knows: the same reason is produced at two different points (§5), so the reason
+        cannot carry the ordering. A call site that declares none sorts last and still loses to
+        every one that does, which is fail-safe.
         """
-        if self.blocked_reason is None or _rank(reason) < _rank(self.blocked_reason):
+        if self.blocked_reason is None or at < self.blocked_at:
             self.blocked_reason = reason
+            self.blocked_at = at
 
     def frozen(self) -> _WouldHave:
         return _WouldHave(
@@ -688,58 +741,6 @@ BUDGET_UNKEYED: Final = "budget_unkeyed"
 SCOPE_UNAVAILABLE: Final = "scope_unavailable"
 OUT_OF_SCOPE: Final = "out_of_scope"
 
-#: SPEC-v0.10 §5 — **the order enforce mode decides in, declared once, as data.**
-#:
-#: `control.py` has carried this sequence as a comment since v0.3 (`principal_expired ->
-#: authority -> policy -> approval -> reservation -> execution`). Making it a value is the whole
-#: of item 4: observe mode's checks do not run in this order, `_Observation.block` used to keep
-#: whichever it was handed first, and `v0.9 §4.2.1b` is the record of what that cost.
-#:
-#: **The list starts at `Control.execute`'s entry, not at `_secure`.** `policy_unapproved` is
-#: decided by `_require_approved` above authority, while `_observe_secure` is not called until
-#: several hundred lines later; an ordering beginning at `_secure` could not have covered it.
-#:
-#: **Groups, and every group that has a source is read from it.** `receipt.py`'s own comment
-#: records this set being missed twice, and says why
-#: `test_every_approval_refusal_reason_is_counted_by_stats` enumerates from `approval.py` rather
-#: than restating: *a set maintained by hand is a set the next reason is missed from.* This list
-#: was hand-written once and `attempt_ceiling` was missing from it within the hour, caught by
-#: T250. So the authority group is `REASON_PRECEDENCE` and the approval group is
-#: `BLOCKED_APPROVAL_REASONS`, both imported, and neither can drift from its owner.
-_ORDERED_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
-    (PRINCIPAL_EXPIRED,),
-    # Above authority: `v0.8 §8.4`, a policy nobody approved decides nothing, checked before
-    # anything else is decided because what follows would be decided *by* it. It is also a
-    # member of `BLOCKED_APPROVAL_REASONS`, and this explicit position is what puts it here
-    # rather than with the approval gate.
-    (POLICY_UNAPPROVED,),
-    # `v0.3 §4.3`: authority before policy, so a denial leaves no pending approval behind.
-    REASON_PRECEDENCE,
-    # SPEC-v0.10 §4.3's check 2, and `v0.9 §2.3`/§2.4.1's budget refusals: all three are above
-    # the approval gate on T446's argument, that they depend on nothing a human says.
-    (UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED),
-    (BUDGET_UNMEASURABLE, BUDGET_EXHAUSTED),
-    # SPEC-v0.7 §5.5 — and T250 asserts by name that the ceiling is recorded **before** the
-    # approval gate, which is how the hand-written version of this list was caught.
-    (BLOCKED_ATTEMPT_CEILING,),
-    (BLOCKED_APPROVAL_REQUIRED, BLOCKED_APPROVAL_MISMATCH, *sorted(BLOCKED_APPROVAL_REASONS)),
-    (SCOPE_UNAVAILABLE, OUT_OF_SCOPE),
-    (BLOCKED_DUPLICATE, BLOCKED_IN_PROGRESS, BLOCKED_AMBIGUOUS),
-)
-
-DECISION_ORDER: Final = tuple(reason for group in _ORDERED_GROUPS for reason in group)
-
-_RANKS: Final[dict[str, int]] = {}
-for _index, _group in enumerate(_ORDERED_GROUPS):
-    for _reason in _group:
-        _RANKS.setdefault(_reason, _index)
-
-#: Where a reason this list does not name sits. **The policy axis, because that is the one open
-#: vocabulary**: `v0.1 §3.2` lets a decision reason be `rule[N]` for any N, and no fixed tuple can
-#: enumerate those. Ranking them with the policy decision they are is correct rather than a
-#: fallback; every other vocabulary in the kernel is closed and belongs in a group above.
-_UNLISTED_RANK: Final = _RANKS[NO_AUTHORITY] + 1
-
 
 def _where_to_look(result: AuthorityResult) -> str:
     """SPEC-v0.10 §6.3 — the command, with its argument filled in, never a placeholder.
@@ -767,12 +768,6 @@ def _where_to_look(result: AuthorityResult) -> str:
     elif result.expired_parent_id is not None:
         detail = f"; {result.expired_parent_id} above it has expired"
     return f"{detail}. ctrlrun inspect --hop {hop}"
-
-
-def _rank(reason: str) -> int:
-    """Where `reason` sits in the declared order (SPEC-v0.10 §5)."""
-    rank: int = _RANKS.get(reason, _UNLISTED_RANK)
-    return rank
 
 
 #: SPEC-v0.9 §5.5 — its own domain tag, so a scope hash can never equal a precondition
@@ -1181,7 +1176,20 @@ class Control:
         # is what lets §6.3 print `ctrlrun inspect --hop <id>` with the argument filled in. The id
         # and nothing else: §3.3 refuses to describe the envelope a refusal would otherwise leak.
         if result.hop is not None:
-            data["hop"] = result.hop
+            # SPEC-v0.10 §3.3 — the presented id, **bounded**. A hop reaches the kernel from the
+            # caller (through `@protect`'s template, so from the action's arguments), and a
+            # refusal writes one `AUTHORITY_DENIED` row per refused action into an append-only
+            # log an operator reads on a terminal. An independent review drove a megabyte of
+            # `A`, then NULs, newlines and ANSI escapes, straight through to `data.hop`.
+            #
+            # An id that is not one this kernel could have minted is recorded as its length and
+            # nothing else: enough to tell a typo from a flood, and no more. `new_delegation_id`
+            # mints `dlg_` plus 32 hex, so a well-formed id is 36 characters and unharmed.
+            data["hop"] = (
+                result.hop
+                if _DELEGATION_ID.match(result.hop)
+                else f"<malformed, {len(result.hop)} characters>"
+            )
         for key in ("dimension", "missing_parent_id", "expired_parent_id", "cycle_at"):
             value = getattr(result, key)
             if value is not None:
@@ -1410,6 +1418,12 @@ class Control:
         # stale grant id: a refusal whose receipt carried the previous action's task would be the
         # same defect on a new field.
         _TASK.set(None)
+        # SPEC-v0.10 §3.4 — **and the hop**, for the reason the block above gives for the other
+        # five. `v0.3 §4.3.1` puts `principal_expired` above authority, so a denied receipt is
+        # written before `_authority_result` ever runs; without this reset it names the previous
+        # action's hop. A review demonstrated exactly that, which is the same defect this block's
+        # own comment was written for, reproduced on the field v0.10 adds.
+        _HOP.set(None)
         _SCOPE_HASH.set(None)
         _BUDGET_CHARGES.set(())
         # SPEC-v0.3 §6.2 — the counterfactual for an observed run, or `None` in enforce mode.
@@ -1430,7 +1444,7 @@ class Control:
                 # records what enforce mode *would have reached*, not a deeper answer it
                 # never gets to.
                 observation.decided(expired)
-                observation.block(PRINCIPAL_EXPIRED)
+                observation.block(PRINCIPAL_EXPIRED, DecisionPoint.PRINCIPAL)
                 return self._observed(
                     action,
                     expired,
@@ -1481,7 +1495,7 @@ class Control:
                         effect_key,
                     )
                     observation.decided(denial)
-                    observation.block(result.reason)
+                    observation.block(result.reason, DecisionPoint.AUTHORITY)
                     return self._observed(
                         action,
                         denial,
@@ -1520,7 +1534,7 @@ class Control:
                 # bucket for the other two would leave `ctrlrun stats` unable to say which
                 # rule an operator should look at. The vocabulary stays closed per document:
                 # every value is a reason some check actually produced.
-                observation.block(evaluation.reason)
+                observation.block(evaluation.reason, DecisionPoint.POLICY)
                 return self._observed(
                     action,
                     evaluation,
@@ -1579,7 +1593,7 @@ class Control:
                 # enforce mode decides this before the approval gate and `_Observation.block`
                 # keeps the first reason: recording it later would let `approval_required` win a
                 # race that enforce mode does not have.
-                observation.block(BLOCKED_ATTEMPT_CEILING)
+                observation.block(BLOCKED_ATTEMPT_CEILING, DecisionPoint.CEILING)
             else:
                 # SPEC-v0.6 §7.2.1, applied here as the `DENY` branch above applies it: a
                 # presented approval is recorded against the refusal it met, so the history
@@ -1720,7 +1734,7 @@ class Control:
         if reservation is not None and self._over_the_ceiling(
             self._policy.max_attempts(action.name), reservation.attempt
         ):
-            observation.block(BLOCKED_ATTEMPT_CEILING)
+            observation.block(BLOCKED_ATTEMPT_CEILING, DecisionPoint.CEILING)
         if held_key is not None:
             try:
                 self._store.begin_execution(held_key, action.action_id)
@@ -1734,7 +1748,7 @@ class Control:
                     _refusal_data(refused),
                     effect_key,
                 )
-                observation.block(_blocked_by(refused))
+                observation.block(_blocked_by(refused), DecisionPoint.RESERVATION)
                 held_key = None
         self._append(
             EventType.EXECUTION_STARTED, action, _started_data(), effect_key, approval=approval
@@ -1790,7 +1804,7 @@ class Control:
         if self._require_approved_policy and action.name != POLICY_CHANGE_ACTION:
             reason, _ = self._policy_approval_state()
             if reason is not None:
-                observation.block(reason)
+                observation.block(reason, DecisionPoint.POLICY_UNAPPROVED)
         # SPEC-v0.9 §5.2.2's observe row. The provider **runs**, so its hash reaches the receipt
         # and an operator sizing a scope before turning it on sees what would have happened; the
         # refusal is recorded and not raised. `v0.3 §6.2`: observe mode records rather than
@@ -1803,12 +1817,12 @@ class Control:
         # same point in the declared order as `_secure`'s, which is what §5 is about.
         observed_upstream = self._upstream_reason(action)
         if observed_upstream is not None:
-            observation.block(observed_upstream)
+            observation.block(observed_upstream, DecisionPoint.UPSTREAM)
         charges = self._observe_charges(action, effect_key, observation)
         try:
             self._in_scope(action, scope, scoped, enforcing=False)
         except _ObservedRefusalError as would:
-            observation.block(would.reason)
+            observation.block(would.reason, DecisionPoint.SCOPE)
         # The charges above were computed before the scope check, where `_secure` computes them:
         # §2.3's and §2.4.1's refusals do not depend on anything the approval gate produces and
         # are unconditional, so T446 moved them above it in enforce mode; observe mode's copy
@@ -1829,7 +1843,8 @@ class Control:
                 observation.block(
                     APPROVALS_UNVERIFIABLE
                     if required > 1 and self._approver_identity is None
-                    else BLOCKED_APPROVAL_REQUIRED
+                    else BLOCKED_APPROVAL_REQUIRED,
+                    DecisionPoint.APPROVAL_GATE,
                 )
         if approval_id is None and effect_key is None:
             return None, None
@@ -1841,7 +1856,7 @@ class Control:
             if isinstance(refused, AmbiguousEffect):
                 # SPEC-v0.7 §3.6, as in `_secure`: observe mode reserves, so it meets E3 too.
                 self._report_clock_skew(action, effect_key)
-            observation.block(_blocked_by(refused))
+            observation.block(_blocked_by(refused), DecisionPoint.RESERVATION)
             self._append(
                 EventType.EFFECT_RESERVATION_REFUSED,
                 action,
@@ -1862,7 +1877,7 @@ class Control:
             # Recording the specific reason for the approver refusals alone would leave a
             # vocabulary nobody can explain, so every mismatch now records its own reason. The
             # values are the ones `_secure` raises, and §11.1's table lists them.
-            observation.block(mismatch.reason)
+            observation.block(mismatch.reason, DecisionPoint.APPROVAL_TAKE)
             self._append(
                 EventType.APPROVAL_INVALIDATED,
                 action,
@@ -1875,7 +1890,7 @@ class Control:
             # The store raises this where the record says a human refused the approval that
             # was presented. §4.2 makes that a denial of the action, and the reason is the
             # one `_secure` records; observe mode records it and runs.
-            observation.block(denied.reason)
+            observation.block(denied.reason, DecisionPoint.APPROVAL_TAKE)
             self._append(
                 EventType.APPROVAL_DENIED,
                 action,
@@ -2021,6 +2036,15 @@ class Control:
         # makes the whole evidence for an MCP multi round-trip. In observe mode the ledger is
         # empty by design, so this sets `()` and §4.2.1a's counterfactual is computed below.
         self._resumed_charges(held.effect_key, held.record.attempt)
+        # SPEC-v0.10 §3.4, and `v0.9 §13.8`'s defect on the field beside the one it was found on.
+        # `execute` clears five context variables at its top so a receipt cannot carry the
+        # previous action's evidence; `resume` re-establishes four of them (the task, the hop and
+        # the two authority values through `_authority_result`, the charges through the line
+        # above) and left this one alone. A resumed receipt then reported an unrelated action's
+        # scope hash, on the one receipt an MCP multi round-trip ever gets. A resumed leg fetches
+        # no scope of its own (`v0.9 §5.3` runs the provider before the reservation, which this
+        # leg already holds), so the honest value is none.
+        _SCOPE_HASH.set(None)
         # SPEC-v0.3 §2.5 — a continuation is a store-wide token, so a Control in another
         # environment can reach one. Evaluating a staging action inside a production
         # deployment is the fail-open §2.5 exists to close.
@@ -2088,7 +2112,7 @@ class Control:
             observation = _Observation()
             observation.decided(evaluation)
             if evaluation.decision is Decision.DENY:
-                observation.block(evaluation.reason)
+                observation.block(evaluation.reason, DecisionPoint.POLICY)
             # §4.2.1a's counterfactual, on the real observation and announcing nothing: the
             # first leg already wrote this action's `ACTION_DENIED`.
             self._observe_charges(action, held.effect_key, observation, announce=False)
@@ -2109,6 +2133,17 @@ class Control:
             observation=observation,
             resumed=True,
             compared=compared,
+            # SPEC-v0.10 §3.4.3 — **the hop the first leg held, into the lease extension.**
+            # `_outcome` passes it to `_suspend`, which re-decides authority on every round after
+            # the first. Without it that decision falls back to the receiver's whole candidate
+            # set, so a receiver holding any grant of its own keeps its reservation across the
+            # round trip after the hop is cut: `v0.3 §5.7`'s "a chain of any depth is cut by one
+            # write" inverted, for exactly the actions the check at `:2325` exists to cut.
+            #
+            # §3.4.3 named this as item 2's residual to close. An independent review found it
+            # open, with a control: without the receiver's own grant the same revocation does cut
+            # round 2, which is the fallback §2.3 forbids.
+            hop=bound.hop,
         )
 
     def _resumed_context(
@@ -3675,7 +3710,7 @@ class Control:
         try:
             check_charges(charges, spent)
         except BudgetExhaustedError as exhausted:
-            observation.block(BUDGET_EXHAUSTED)
+            observation.block(BUDGET_EXHAUSTED, DecisionPoint.BUDGET)
             self._append(
                 EventType.ACTION_DENIED,
                 action,
@@ -3731,7 +3766,7 @@ class Control:
             # nothing. Writing the `denied` receipt below would put a refusal it did not make in
             # the store, alongside the `observed` receipt for the run that went ahead: two
             # receipts for one action, disagreeing. T439c.
-            observation.block(reason)
+            observation.block(reason, DecisionPoint.BUDGET)
             if announce:
                 # **Not on a resumed leg**: its first leg already wrote this event for this
                 # action, and a second one made the evidence say the action was denied twice

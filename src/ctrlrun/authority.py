@@ -1350,8 +1350,17 @@ class Authority:
                 try:
                     chain = self._check_chain(delegation, store=store, now=now)
                 except _UnreadableError as unreadable:
+                    # SPEC-v0.10 §9 — `hop` is on **every** result an action under one produces,
+                    # passing or failing, which is what lets §6.3 print a command for each. This
+                    # path is the chain walk's own unreadable record, one frame below the
+                    # identical handler above, and it was the one return that dropped it: an
+                    # independent review found a hop with an unreadable ANCESTOR refusing with
+                    # `hop=None`, leaving §6.3 no argument to print.
                     return AuthorityResult(
-                        False, AUTHORITY_UNREADABLE, delegation_id=unreadable.delegation_id
+                        False,
+                        AUTHORITY_UNREADABLE,
+                        delegation_id=unreadable.delegation_id,
+                        hop=hop,
                     )
                 depth = chain.depth
                 if chain.failure is not None:
