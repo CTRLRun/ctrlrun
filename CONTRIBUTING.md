@@ -259,6 +259,23 @@ tracked.
 Adapters ship on their own version line (`adapters-langgraph-1.0`), from `adapters/`, and gate
 no kernel release.
 
+**A release can be rebuilt by anyone and compared byte for byte.** The workflows set
+`SOURCE_DATE_EPOCH` to the tagged commit's timestamp and normalise the sdist with
+`scripts/normalize_sdist.py`, so from a clean clone of the tag, with the interpreter series
+CI uses (3.11):
+
+```bash
+pip install --require-hashes -r requirements/build.txt
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+python -m build --no-isolation
+python scripts/normalize_sdist.py dist/*.tar.gz
+sha256sum dist/*
+```
+
+The hashes match the distributions on PyPI and on the GitHub Release, for every release cut
+after this was added. CI's `package` job builds every pull request twice and fails if the two
+differ, so the property is checked before a tag rather than claimed after one.
+
 ## Reporting a vulnerability
 
 Privately, per [SECURITY.md](SECURITY.md). If an action ran that policy should have refused,

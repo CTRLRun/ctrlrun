@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -672,6 +675,96 @@ def test_coverage_floor_names_the_number_that_slipped(tmp_path):
     )
     assert slipped.returncode == 1
     assert slipped.stderr.strip() == "coverage_floor: below the floor: branches"
+
+
+# --- a build anyone can repeat ---------------------------------------------------------------
+
+
+def test_every_build_in_a_workflow_is_reproducible():
+    """Every `python -m build` in a workflow runs with `SOURCE_DATE_EPOCH` set to the commit's
+    timestamp and normalises the sdist afterwards, so the distributions a tag publishes are the
+    ones a reader rebuilds from it (CONTRIBUTING.md, Releases)."""
+    found = 0
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                run = str(step.get("run", ""))
+                if "python -m build" not in run:
+                    continue
+                found += 1
+                lines = [line.strip() for line in run.splitlines() if line.strip()]
+                build = next(i for i, line in enumerate(lines) if "python -m build" in line)
+                assert 'export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"' in lines[:build], (
+                    f"{path.name}: {step.get('name')} builds without SOURCE_DATE_EPOCH"
+                )
+                assert any("scripts/normalize_sdist.py" in line for line in lines[build:]), (
+                    f"{path.name}: {step.get('name')} builds without normalising the sdist"
+                )
+    assert found >= 4, found  # ci.yml twice, publish.yml, release.yml
+
+
+def _tarball(path: Path, files: dict[str, bytes], *, mtime: int, uid: int, order: list[str]):
+    with tarfile.open(path, "w:gz") as tar:
+        for name in order:
+            info = tarfile.TarInfo(name)
+            info.size = len(files[name])
+            info.mtime = mtime
+            info.uid = info.gid = uid
+            info.uname = info.gname = "somebody"
+            info.mode = 0o664
+            tar.addfile(info, io.BytesIO(files[name]))
+
+
+def test_normalize_sdist_makes_two_builds_of_the_same_tree_identical(tmp_path):
+    files = {"pkg-1.0/PKG-INFO": b"Name: pkg\n", "pkg-1.0/src/a.py": b"print(1)\n"}
+    first, second = tmp_path / "first.tar.gz", tmp_path / "second.tar.gz"
+    _tarball(first, files, mtime=1_700_000_000, uid=1000, order=list(files))
+    _tarball(second, files, mtime=1_700_000_099, uid=1001, order=list(reversed(files)))
+    assert first.read_bytes() != second.read_bytes()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "normalize_sdist.py"),
+            str(first),
+            str(second),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SOURCE_DATE_EPOCH": "1789312180"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first, "r:gz") as tar:
+        members = tar.getmembers()
+        assert [m.name for m in members] == sorted(files)
+        assert {m.mtime for m in members} == {1789312180}
+        assert {(m.uid, m.gid, m.uname, m.gname, m.mode) for m in members} == {
+            (0, 0, "", "", 0o644)
+        }
+        for member in members:
+            extracted = tar.extractfile(member)
+            assert extracted is not None and extracted.read() == files[member.name]
+
+
+def test_normalize_sdist_refuses_without_an_epoch_and_refuses_a_wheel(tmp_path):
+    wheel = tmp_path / "pkg-1.0-py3-none-any.whl"
+    wheel.write_bytes(b"not a tar")
+    without = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "normalize_sdist.py"), str(wheel)],
+        capture_output=True,
+        text=True,
+        env={k: v for k, v in os.environ.items() if k != "SOURCE_DATE_EPOCH"},
+    )
+    assert without.returncode == 2 and "SOURCE_DATE_EPOCH" in without.stderr
+    refused = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "normalize_sdist.py"), str(wheel)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SOURCE_DATE_EPOCH": "1"},
+    )
+    assert refused.returncode != 0 and "not a .tar.gz sdist" in refused.stderr
 
 
 # --- every source file says who holds it and under what licence -------------------------------
