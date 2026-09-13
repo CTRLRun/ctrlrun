@@ -22,12 +22,12 @@
   <a href="https://github.com/CTRLRun/ctrlrun/blob/badges/clones-history.json"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/clones-badge.json" alt="Clones"></a>
   <a href="https://pypi.org/project/ctrlrun/"><img src="https://img.shields.io/pypi/v/ctrlrun?color=B8730A&label=pypi" alt="PyPI"></a>
   <a href="https://pypistats.org/packages/ctrlrun"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/downloads-badge.json" alt="Downloads"></a>
-  <a href="https://ctrlrun.dev"><img src="https://img.shields.io/badge/docs-ctrlrun.dev-B8730A" alt="Docs"></a>
+  <a href="https://docs.ctrlrun.dev/"><img src="https://img.shields.io/badge/docs-docs.ctrlrun.dev-B8730A" alt="Docs"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/fuzz.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/fuzz.yml/badge.svg?branch=main" alt="Fuzz"></a>
-  <a href="https://ctrlrun.dev/docs/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
-  <a href="https://ctrlrun.dev/docs/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://docs.ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
+  <a href="https://docs.ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://www.bestpractices.dev/projects/14615"><img src="https://www.bestpractices.dev/projects/14615/badge" alt="OpenSSF Best Practices"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=B8730A" alt="License"></a>
@@ -123,7 +123,7 @@ Read them:    CTRLRUN_STATE=.ctrlrun/demo/state.db ctrlrun receipts
 
 Approval and delegation ids are generated per run; everything else is exactly what the demo
 prints, and a test fails if the two drift apart. No network, no external service, under a
-second. [Run it in your browser](https://ctrlrun.dev/docs/try-it) with nothing installed.
+second. [Run it in your browser](https://docs.ctrlrun.dev/try-it) with nothing installed.
 
 </details>
 
@@ -133,8 +133,8 @@ refuses to *knowingly* act twice, and it rolls nothing back. Receipts are chaine
 is detected. They are not signed: alteration is not authorship. The badge above means the
 **declared guarantees pass** in the setup they ran against, and it does not mean secure, safe,
 compliant, certified or audited:
-[what the badge means](https://ctrlrun.dev/docs/verify#what-the-badge-means)
-· [`OWASP-AGENTIC-TOP10.md`](https://ctrlrun.dev/docs/OWASP-AGENTIC-TOP10)
+[what the badge means](https://docs.ctrlrun.dev/verify#what-the-badge-means)
+· [`OWASP-AGENTIC-TOP10.md`](https://docs.ctrlrun.dev/OWASP-AGENTIC-TOP10)
 names the four entries this does not address.
 
 If an agent only reads and answers, you do not need CTRLRun. The moment it can **send, pay,
@@ -273,10 +273,10 @@ whole integration: a policy file, a decorator, a context, and `with_approval` to
 Money is the example, not the scope. A condition is `<argument>_<op>`, so the same policy
 language reads `role_in: [reader, viewer]` or `replicas_lte: 10` as easily as `amount_lte`, and
 [nine domains](#the-same-shape-in-nine-domains) below have one policy each.
-[Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) walks the same path
+[Protect your first action](https://docs.ctrlrun.dev/get-started/quickstart) walks the same path
 with every output explained ·
-[Policy YAML reference](https://ctrlrun.dev/docs/reference/policy-yaml) ·
-[Cookbook](https://ctrlrun.dev/docs/cookbook/index): refunds, deploys, IAM, deletions, email, MCP.
+[Policy YAML reference](https://docs.ctrlrun.dev/reference/policy-yaml) ·
+[Cookbook](https://docs.ctrlrun.dev/cookbook/index): refunds, deploys, IAM, deletions, email, MCP.
 
 ## Three ways to use it
 
@@ -294,7 +294,7 @@ that reaches its tools over MCP, in any language.
 Cursor, Codex, OpenAI Agents: any AI agent you have. CTRLRun checks the action, not the
 agent, so if the agent acts through a tool server or an API you run, the action is checked, and
 the agent is not rebuilt, redeployed or told.
-[Agents you can't modify](https://ctrlrun.dev/docs/agents-you-cant-modify) says where the
+[Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) says where the
 boundary goes for each kind.
 
 An adapter exists for one reason: to route an `approve` decision through the framework's own
@@ -351,7 +351,7 @@ same write, so a thousand refunds that each pass `amount_lte` cannot add up to m
 grant allows. An `AMBIGUOUS` effect holds its budget until it is resolved, because otherwise an
 agent that can manufacture ambiguity could manufacture authority. A budget bounds what the next
 reservation may do; it cannot recall an action already in flight.
-[Authority](https://ctrlrun.dev/docs/authority) has the whole model.
+[Authority](https://docs.ctrlrun.dev/authority) has the whole model.
 
 State lives in SQLite by default, a file with no server and no ops, and the reservation holds
 across processes rather than merely across threads. Point it at Postgres when more than one
@@ -371,9 +371,6 @@ grades the transport classifier.
 | **Authority and delegation** — Every principal needs a grant, delegation cannot widen one, and a grant bounds the total. | yes | yes | yes |
 | **Receipts** — Every executed action leaves a portable JSON receipt of who, what and outcome. | yes | yes | yes |
 <!-- end generated -->
-
-[Follow one action through every check](https://ctrlrun.dev/execution-boundary), interactively,
-with nothing installed.
 
 ## The same shape in nine domains
 
@@ -410,33 +407,18 @@ about your domain gets written down; CTRLRun is what makes it hold.
 
 ## Documentation
 
-**[ctrlrun.dev](https://ctrlrun.dev)** is the documentation: concepts, guides, a cookbook, the
+**[docs.ctrlrun.dev](https://docs.ctrlrun.dev/)** is the documentation: concepts, guides, a cookbook, the
 full reference, and a browser demo that runs with no install.
 
 | | |
 |---|---|
-| Start here | [Why](https://ctrlrun.dev/docs/why) · [Protect your first action](https://ctrlrun.dev/docs/get-started/quickstart) · [Try it in your browser](https://ctrlrun.dev/docs/try-it) · [The execution boundary](https://ctrlrun.dev/execution-boundary), one action through every check |
-| The ideas, and doing something with them | [Concepts](https://ctrlrun.dev/docs/concepts/outcomes-and-ambiguous) · [Guides](https://ctrlrun.dev/docs/guides/protect-a-function) · [Cookbook](https://ctrlrun.dev/docs/cookbook/index) |
-| Agents and MCP | [Agents you can't modify](https://ctrlrun.dev/docs/agents-you-cant-modify) · [MCP overview](https://ctrlrun.dev/docs/mcp/overview) · [The gateway in five minutes](https://ctrlrun.dev/docs/mcp/gateway-in-5-minutes) |
-| Running it for real | [Production](https://ctrlrun.dev/docs/production/index) · [Postgres](https://ctrlrun.dev/docs/production/postgres) · [Recovery](https://ctrlrun.dev/docs/production/recovery) · [Operations](https://ctrlrun.dev/docs/production/operations) |
-| Every key, flag and error | [Reference](https://ctrlrun.dev/docs/reference/policy-yaml) · [FAQ](https://ctrlrun.dev/docs/faq) |
-| Compared with | [Idempotency keys](https://ctrlrun.dev/docs/compare/idempotency-keys) · [Framework human-in-the-loop](https://ctrlrun.dev/docs/compare/framework-hitl) · [Guardrail libraries](https://ctrlrun.dev/docs/compare/guardrail-libraries) · [Durable workflows](https://ctrlrun.dev/docs/compare/durable-workflows) · [Governance toolkits](https://ctrlrun.dev/docs/compare/governance-toolkits) |
-| What holds, and what does not | [Threat model](https://ctrlrun.dev/docs/THREAT_MODEL) · [What `verify` proves](https://ctrlrun.dev/docs/verify) · [`CLAIMS.md`](https://ctrlrun.dev/docs/CLAIMS), every sentence mapped to its test · [How this is built](https://ctrlrun.dev/docs/how-this-is-built) |
-
-## Open source, Pro, Enterprise
-
-The boundary is the same in every tier. What differs is who runs it.
-
-- **ctrlrun Open Source: free, run it yourself.** The boundary itself, at no cost. No account,
-  no card, no call with us. Every rule that decides is code you can read, and every action
-  leaves a receipt you keep. Free to use and free to change, under the Apache-2.0 licence.
-- **ctrlrun Pro, in development: the boundary, run for you.** Connect your agents and workflows
-  and see what each connection covers. Search every action, decision and outcome across your
-  agents. Manage policies and approvals from one place, test a rule in observe mode, then turn
-  enforcement on. [Request early access](https://ctrlrun.dev/#pro-and-enterprise).
-- **ctrlrun Enterprise, engagements open: the boundary, shaped to you.** Everything in Pro, with
-  CTRLRun engineers who design, integrate and maintain the controls your business needs.
-  [Keep your stack, add the boundary](https://ctrlrun.dev/protect-my-agent).
+| Start here | [Why](https://docs.ctrlrun.dev/why) · [Protect your first action](https://docs.ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://docs.ctrlrun.dev/try-it) |
+| The ideas, and doing something with them | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) · [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
+| Agents and MCP | [Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) · [MCP overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
+| Running it for real | [Production](https://docs.ctrlrun.dev/production/index) · [Postgres](https://docs.ctrlrun.dev/production/postgres) · [Recovery](https://docs.ctrlrun.dev/production/recovery) · [Operations](https://docs.ctrlrun.dev/production/operations) |
+| Every key, flag and error | [Reference](https://docs.ctrlrun.dev/reference/policy-yaml) · [FAQ](https://docs.ctrlrun.dev/faq) |
+| Compared with | [Idempotency keys](https://docs.ctrlrun.dev/compare/idempotency-keys) · [Framework human-in-the-loop](https://docs.ctrlrun.dev/compare/framework-hitl) · [Guardrail libraries](https://docs.ctrlrun.dev/compare/guardrail-libraries) · [Durable workflows](https://docs.ctrlrun.dev/compare/durable-workflows) · [Governance toolkits](https://docs.ctrlrun.dev/compare/governance-toolkits) |
+| What holds, and what does not | [Threat model](https://docs.ctrlrun.dev/THREAT_MODEL) · [What `verify` proves](https://docs.ctrlrun.dev/verify) · [`CLAIMS.md`](https://docs.ctrlrun.dev/CLAIMS), every sentence mapped to its test · [How this is built](https://docs.ctrlrun.dev/how-this-is-built) |
 
 ## Contributing
 
@@ -448,13 +430,9 @@ working agreement, and
 vulnerability. Every claim in this file has a test behind it, so a change to the prose usually
 means a change to the suite.
 [`CHANGELOG.md`](https://github.com/CTRLRun/ctrlrun/blob/main/CHANGELOG.md) and
-[`https://ctrlrun.dev/docs/ROADMAP`](https://ctrlrun.dev/docs/ROADMAP) say
+[`https://docs.ctrlrun.dev/ROADMAP`](https://docs.ctrlrun.dev/ROADMAP) say
 where it is going. Releases carry PyPI provenance attestations from GitHub Actions.
 
 ## License
 
 Apache-2.0. The enforcement kernel is and will remain fully open source.
-
-<p align="center">
-  Let agents act. <strong>Keep the consequences yours to decide.</strong>
-</p>

@@ -363,13 +363,13 @@ def test_the_readme_carries_the_badge_and_links_it_to_what_it_means():
 
     assert "img.shields.io/endpoint" in readme
     assert "verify-badge.json" in readme
-    assert "https://ctrlrun.dev/docs/verify#what-the-badge-means" in readme
+    assert "https://docs.ctrlrun.dev/verify#what-the-badge-means" in readme
 
 
 def test_the_readme_documentation_table_links_the_verify_page():
     readme = _repository_file(README)
 
-    assert "https://ctrlrun.dev/docs/verify" in readme
+    assert "https://docs.ctrlrun.dev/verify" in readme
     assert "declared guarantees pass" in readme
 
 
