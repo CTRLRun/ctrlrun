@@ -9,6 +9,39 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Added
+
+- `docs/SPEC-v0.10.md`, the v0.10 "Multi-agent" contract: authority propagation across agent hops,
+  upstream identity pinning, and one ordered list of checks for both enforcement modes, as a delta
+  over v0.1 to v0.9. Documentation only. It answers one question: when one agent hands work to
+  another, what does the second one hold?
+
+  Almost nothing in it is a new mechanism. A hop is `SPEC-v0.3.md` §5's delegation over a boundary
+  the kernel does not control, checked by the same `contained_dimension` with a third caller,
+  identified by the `delegation_id` that already exists, and charged by `SPEC-v0.9.md` §2.7's walk
+  to the root. **One rule is new, and §2.3 is the whole of it: which grant decides.** A probe
+  against the tree at the 0.9.0 tag settled that: `Authority.evaluate` passes on any matching grant,
+  so a receiving agent holding a grant of its own is authorised by that one, the hop is never
+  consulted, and the issuer's budget is charged nothing. An action proposed under a hop is therefore
+  evaluated against that hop's grant alone, with no fallback.
+
+  Four rules the milestone is measured against. **A hop narrows or it is refused**, with no widening
+  at a boundary and no dimension inherited by omission. **The issuing agent's budget is what a hop
+  spends**, so a hop never creates a second root. **A hop is evidence, not a side channel**: both
+  sides' receipts carry the same hop id. And **nothing infers who the peer is**: the receiving
+  agent's identity is resolved by the `IdentityProvider` and never read off the payload.
+
+  The four open questions are answered in the specification rather than left to an item. CTRLRun
+  defines no wire format and consumes none; what crosses a hop is a reference of two strings. A hop
+  is a record in the store and not a claim in a token, which the budget rule forces and which costs
+  cross-store propagation, refused fail-closed and by name. Depth across hops is
+  `max_delegation_depth`, unchanged. A receipt records the hop it ran under and nothing derivable
+  from it.
+
+  It also pays `SPEC-v0.9.md` §4.2.1b's named debt, the two enforcement paths whose checks run in
+  different orders, and takes up §6.3.2's handover: the task and the hop are stamped onto
+  `EXECUTION_STARTED` so a resumed leg is evaluated on both dimensions instead of skipping them.
+
 ### Fixed
 
 - **The DCO check refused every Dependabot pull request.** Dependabot signs its commits off as
