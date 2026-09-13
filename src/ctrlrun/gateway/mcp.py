@@ -75,6 +75,15 @@ class ParsedRequest:
     is_response: bool = False
     tool_name: str | None = None
     arguments: Mapping[str, Any] = field(default_factory=dict)
+    #: SPEC-v0.10 §3.1.2 — the hop and the task the caller referenced, read out of
+    #: `params.metadata`, which is the field MCP already carries for caller-supplied metadata.
+    #:
+    #: **These are lookup keys, not assertions**, and that is the whole of why reading them off
+    #: the payload is safe where `v0.3 §8.4` refuses to read a principal off it. The principal is
+    #: still the `IdentityProvider`'s; a hop addressed to somebody else matches nothing (§3.1.1),
+    #: and a hop id naming nothing is `authority_hop`. Neither value widens anything on its own.
+    hop: str | None = None
+    task: str | None = None
 
     @property
     def is_legacy(self) -> bool:
@@ -137,6 +146,15 @@ def parse_request(
     arguments = params.get("arguments")
     arguments = dict(arguments) if isinstance(arguments, Mapping) else {}
 
+    # SPEC-v0.10 §3.1.2. Non-string values are dropped rather than coerced or refused: a caller
+    # that sends `{"hop": 7}` has referenced no hop, and the action is then decided exactly as one
+    # presenting none. Refusing here would make a malformed metadata bag a transport error for an
+    # action that may not need a hop at all.
+    metadata = params.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    hop = metadata.get("hop")
+    task = metadata.get("task")
+
     mismatch = _validate_headers(headers, revision, method, tool_name, arguments)
     if mismatch is not None:
         return mismatch
@@ -148,6 +166,8 @@ def parse_request(
         intercept=intercept,
         tool_name=tool_name if isinstance(tool_name, str) else None,
         arguments=arguments,
+        hop=hop if isinstance(hop, str) else None,
+        task=task if isinstance(task, str) else None,
     )
 
 

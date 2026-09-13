@@ -46,7 +46,7 @@ from .policy import POLICY_UNAPPROVED, Decision
 #: SPEC-v0.7 §6.11. `v4` adds `precondition_at_request` and `precondition_at_recheck`, and it is
 #: the first bump that does not rehash every older receipt: a receipt read from a store is
 #: hashed as the document it was read from, and renders under its own schema's label and keys.
-RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v6"
+RECEIPT_SCHEMA: Final = "ctrlrun.receipt/v7"
 
 _V1: Final = "ctrlrun.receipt/v1"
 _V2: Final = "ctrlrun.receipt/v2"
@@ -57,12 +57,16 @@ _V5: Final = "ctrlrun.receipt/v5"
 #: The version moves once, with whichever lands first, and the later items fill their fields
 #: under the version already in place. Item 7 asserts all three are written by something.
 _V6: Final = "ctrlrun.receipt/v6"
+#: SPEC-v0.10 §3.5: `v7` is `hop`, and nothing else. Bumped once, by item 2, with the whole shape
+#: frozen in §9.1 before any item started. The rule since `SPEC-v0.3 §12.2` is unchanged: every
+#: reader upgrades before any writer switches, so a `v6` receipt on disk still parses.
+_V7: Final = "ctrlrun.receipt/v7"
 
 #: SPEC-v0.8 §8.5 — every receipt schema this binary reads. The policy replay checks it before
 #: rebuilding an action: `from_dict` does not raise on an unknown one, so a receipt written by a
 #: later version rebuilt fine and was silently **graded**, on fields this binary may be reading
 #: wrongly. `v0.6 §3.2` draws the same line for a store row.
-KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5, _V6})
+KNOWN_RECEIPT_SCHEMAS: Final = frozenset({_V1, _V2, _V3, _V4, _V5, _V6, _V7})
 
 #: SPEC-v0.7 §6.11: each schema's top-level key set, exactly its released writers': `v1`, 19
 #: keys, by 0.1.0 and 0.2.0; `v2`, 21, by 0.3.0rc1 to 0.5.0; `v3`, 26, by 0.6.0 and 0.6.1;
@@ -101,6 +105,9 @@ _V5_KEYS: Final = (*_V4_KEYS, "approvers", "authority_grant_id")
 #: before something writes it is a `KeyError` on every receipt, which is the field-level form of
 #: a stub row. Item 7 asserts all three are present before the release.
 _V6_KEYS: Final = (*_V5_KEYS, "task", "scope_hash", "budget_charges")
+#: SPEC-v0.10 §3.5 — `v7` adds one key, `hop`, and item 2 both names it and writes it, so there is
+#: no window in which the tuple promises a projection nothing fills.
+_V7_KEYS: Final = (*_V6_KEYS, "hop")
 _KEYS: Final = {
     _V1: _V1_KEYS,
     _V2: _V2_KEYS,
@@ -108,6 +115,7 @@ _KEYS: Final = {
     _V4: _V4_KEYS,
     _V5: _V5_KEYS,
     _V6: _V6_KEYS,
+    _V7: _V7_KEYS,
 }
 
 #: The two files of SPEC-v0.1 §6, written beside the state database.
@@ -482,6 +490,17 @@ class Receipt:
     #: authorization system's state (`v0.7 §6.10`). Its own domain tag, so it can never equal a
     #: precondition fingerprint over the same mapping.
     scope_hash: str | None = None
+    #: SPEC-v0.10 §3.4: the hop this action ran **under**, or `None`. One string, and the same
+    #: string on both of a hop's ends, which is §1.2's rule 3.
+    #:
+    #: **Never the hop this action created** (§3.4.4). A relay presents one hop and creates
+    #: another in the same action, and a receipt is evidence about a decision: the decision was
+    #: made against the presented hop, and the created one authorised nothing here. It is named
+    #: by its own `DELEGATION_CREATED` event instead.
+    #:
+    #: Not part of the action hash, for `v0.9 §6.3.1`'s reason, which is unchanged: a field on
+    #: `Action` moves every hash in existence and invalidates every stored approval.
+    hop: str | None = None
     #: SPEC-v0.9 §10.1: which grants this action charged, which metrics, how much. One entry per
     #: ancestor charged (§2.7), so a reader can tell an action that spent a child's budget from
     #: one that spent a root's. Empty where the deciding grant budgets nothing, which is every
@@ -587,6 +606,7 @@ class Receipt:
             "task": self.task,
             "scope_hash": self.scope_hash,
             "budget_charges": [dict(charge) for charge in self.budget_charges],
+            "hop": self.hop,
         }
 
     def to_json(self) -> str:
@@ -654,19 +674,19 @@ class Receipt:
             policy_version=document.get("policy_version"),
             controls=_controls_of(document.get("controls")),
             precondition_at_request=(
-                document.get("precondition_at_request") if schema in (_V4, _V5, _V6) else None
+                document.get("precondition_at_request") if schema in (_V4, _V5, _V6, _V7) else None
             ),
             precondition_at_recheck=(
-                document.get("precondition_at_recheck") if schema in (_V4, _V5, _V6) else None
+                document.get("precondition_at_recheck") if schema in (_V4, _V5, _V6, _V7) else None
             ),
             # SPEC-v0.8 §2.5, and `v0.7 §6.11`'s rule for a key a document's schema does not
             # declare: read it only from a `v5` document, so no reader surfaces a field an older
             # writer never wrote. **Never raises**, whatever the column holds: `from_dict` is
             # the one function every reader of a chain goes through, and a raise on one tampered
             # row would blind every reader at once.
-            approvers=_approvers_of(document.get("approvers")) if schema in (_V5, _V6) else (),
+            approvers=_approvers_of(document.get("approvers")) if schema in (_V5, _V6, _V7) else (),
             authority_grant_id=(
-                document.get("authority_grant_id") if schema in (_V5, _V6) else None
+                document.get("authority_grant_id") if schema in (_V5, _V6, _V7) else None
             ),
             # SPEC-v0.9 §6, under `v0.7 §6.11`'s rule: read only from a `v6` document, so no
             # reader surfaces a field an older writer never wrote. A non-string is dropped rather
@@ -674,12 +694,12 @@ class Receipt:
             # of a chain goes through.
             task=(
                 document.get("task")
-                if schema == _V6 and isinstance(document.get("task"), str)
+                if schema in (_V6, _V7) and isinstance(document.get("task"), str)
                 else None
             ),
             scope_hash=(
                 document.get("scope_hash")
-                if schema == _V6 and isinstance(document.get("scope_hash"), str)
+                if schema in (_V6, _V7) and isinstance(document.get("scope_hash"), str)
                 else None
             ),
             budget_charges=(
@@ -688,8 +708,13 @@ class Receipt:
                     for entry in document.get("budget_charges", ())
                     if isinstance(entry, Mapping)
                 )
-                if schema == _V6 and isinstance(document.get("budget_charges"), list)
+                if schema in (_V6, _V7) and isinstance(document.get("budget_charges"), list)
                 else ()
+            ),
+            hop=(
+                document.get("hop")
+                if schema == _V7 and isinstance(document.get("hop"), str)
+                else None
             ),
             schema=schema,
         )
