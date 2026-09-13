@@ -238,8 +238,20 @@ def test_the_community_files_exist_and_say_what_they_must():
         # The contribution agreement is the DCO and nothing more; the file has to say so.
         "Developer Certificate of Origin",
         "git commit -s",
+        # The written policies the best-practices criteria point at, each by its heading.
+        "## Coding standards",
+        "## Code review",
+        "new functionality MUST arrive with\ntests",
     ):
         assert phrase in contributing, phrase
+
+    governance = (REPO_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")
+    for phrase in ("## Decisions", "## Roles", "## Continuity", "@arpanghoshal", "@rohanrkamath"):
+        assert phrase in governance, phrase
+
+    security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    for phrase in ("## Response process", "72 hours", "Security Advisory", "Credit"):
+        assert phrase in security, phrase
 
     conduct = (REPO_ROOT / "CODE_OF_CONDUCT.md").read_text(encoding="utf-8")
     assert "Contributor Covenant" in conduct
