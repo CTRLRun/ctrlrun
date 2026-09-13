@@ -535,6 +535,27 @@ def test_every_pip_install_in_a_workflow_is_pinned():
         assert "--require-hashes" in args or editable_local or wheels_only, (
             f"{name}: pip install {' '.join(args)}"
         )
+        # `--no-deps` says nothing about the isolated environment pip builds the package in,
+        # which fetches setuptools from PyPI unpinned. The backend comes from the lock instead.
+        if editable_local:
+            assert "--no-build-isolation" in args, f"{name}: pip install {' '.join(args)}"
+
+
+def test_every_build_in_a_workflow_uses_the_backend_from_the_lock():
+    """`python -m build` creates an isolated environment and installs the backend into it from
+    PyPI, unpinned, on the trusted publish path of all places. `--no-isolation` makes it use the
+    setuptools every lock carries (`requirements/in/backend.in`)."""
+    builds: list[tuple[str, str]] = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if "python -m build" in line and not line.startswith("#"):
+                builds.append((path.name, line))
+    assert builds, "no `python -m build` in any workflow; the pattern is wrong"
+    for name, line in builds:
+        assert "--no-isolation" in line, f"{name}: {line}"
+    inputs = (REPO_ROOT / "requirements" / "in" / "backend.in").read_text(encoding="utf-8")
+    assert "setuptools" in inputs
 
 
 def test_every_lock_a_workflow_installs_from_exists_and_is_hashed():
@@ -551,6 +572,7 @@ def test_every_lock_a_workflow_installs_from_exists_and_is_hashed():
         assert path.is_file(), lock
         lines = path.read_text(encoding="utf-8").splitlines()
         assert "uv pip compile" in lines[1], f"{lock} was not written by scripts/lock.sh"
+        assert "requirements/in/backend.in" in lines[1], f"{lock} carries no build backend"
         for index, line in enumerate(lines):
             if line and not line.startswith(("#", " ")):
                 assert "--hash=" in lines[index + 1], f"{lock}: {line} carries no hash"

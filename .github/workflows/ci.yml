@@ -49,13 +49,14 @@ jobs:
 
       - name: Install
         # Every dependency by hash from `requirements/ci.txt`, then the checkout itself with
-        # `--no-deps`: what this job resolves is what `scripts/lock.sh` wrote down and somebody
-        # reviewed, not what PyPI happened to serve this morning. The gateway's tests need its
+        # `--no-deps` and against the backend that lock carries (`requirements/in/backend.in`):
+        # what this job resolves is what `scripts/lock.sh` wrote down and somebody reviewed, not
+        # what PyPI happened to serve this morning. The gateway's tests need its
         # extra; T30 still proves `import ctrlrun` does not touch it, in a subprocess, whether
         # or not it happens to be installed here.
         run: |
           pip install --require-hashes -r requirements/ci.txt
-          pip install --no-deps -e .
+          pip install --no-deps --no-build-isolation -e .
 
       # A claim about the environment is worth nothing until something checks it: if the
       # service failed to start, the Postgres tests would silently skip and the backend
@@ -242,8 +243,8 @@ jobs:
         # the adapters are installed against it.
         run: |
           pip install --require-hashes -r requirements/adapters.txt
-          pip install --no-deps -e .
-          pip install --no-deps -e adapters/langgraph -e adapters/openai-agents
+          pip install --no-deps --no-build-isolation -e .
+          pip install --no-deps --no-build-isolation -e adapters/langgraph -e adapters/openai-agents
 
       # The frameworks are installed, so a skip here is a failure and not a configuration.
       # `-p no:randomly` is not used and no marker is filtered: this is the whole of both files.
@@ -308,7 +309,7 @@ jobs:
         # sample nobody ran.
         run: |
           pip install --require-hashes -r ctrlrun/requirements/docs.txt
-          pip install --no-deps -e ./ctrlrun
+          pip install --no-deps --no-build-isolation -e ./ctrlrun
 
       # `_core.py` raises when it cannot find the library, so this prints a path or the job
       # stops here. A documentation check that ran against no source would be green and
@@ -397,7 +398,7 @@ jobs:
       - name: Build
         run: |
           pip install --require-hashes -r requirements/build.txt
-          python -m build
+          python -m build --no-isolation
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
@@ -409,7 +410,7 @@ jobs:
           mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
           pip install --require-hashes -r requirements/ci.txt
           cd /tmp/sdist
-          pip install --no-deps -e .
+          pip install --no-deps --no-build-isolation -e .
           pytest -q
 
       - name: The quick start works from the wheel

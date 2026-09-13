@@ -54,7 +54,7 @@ jobs:
       - name: Build
         run: |
           pip install --require-hashes -r requirements/build.txt
-          python -m build --outdir dist "${{ steps.target.outputs.path }}"
+          python -m build --no-isolation --outdir dist "${{ steps.target.outputs.path }}"
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*
@@ -107,7 +107,7 @@ jobs:
           # same hashed lock.
           pip install --require-hashes -r requirements/ci.txt
           cd /tmp/sdist
-          pip install --no-deps -e .
+          pip install --no-deps --no-build-isolation -e .
           pytest -q
 
       - name: The quick start works from the wheel

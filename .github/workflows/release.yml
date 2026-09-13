@@ -77,7 +77,7 @@ jobs:
         if: steps.existing.outputs.exists == 'false'
         run: |
           pip install --require-hashes -r requirements/build.txt
-          python -m build
+          python -m build --no-isolation
 
       # Signed provenance for the artifacts this release is about to carry. The action signs
       # against the workflow's OIDC identity, so what it attests is *this* workflow, at *this*

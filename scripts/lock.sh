@@ -7,6 +7,8 @@
 # interpreter in the matrix, `--generate-hashes` is what `pip install --require-hashes` checks
 # against. Dependabot moves the pins (`.github/dependabot.yml`); this is how a person does.
 #
+# `requirements/in/backend.in` rides in every lock: see the comment there for why.
+#
 # The inputs live in `requirements/in/`, one directory down, on purpose: Dependabot treats an
 # `x.in` beside an `x.txt` as a pip-tools pair and would regenerate the lock with pip-compile,
 # which knows nothing of `--universal` or of the extras taken from pyproject.toml. With no
@@ -22,11 +24,11 @@ compile() {
 
 extras="--extra dev --extra gateway --extra otel --extra identity"
 # shellcheck disable=SC2086
-compile requirements/ci.txt        pyproject.toml $extras --extra postgres
+compile requirements/ci.txt        pyproject.toml $extras --extra postgres requirements/in/backend.in
 # shellcheck disable=SC2086
-compile requirements/adapters.txt  pyproject.toml $extras requirements/in/adapters.in
+compile requirements/adapters.txt  pyproject.toml $extras requirements/in/adapters.in requirements/in/backend.in
 # shellcheck disable=SC2086
-compile requirements/docs.txt      pyproject.toml $extras requirements/in/docs.in
-compile requirements/fuzz.txt      pyproject.toml
-compile requirements/build.txt     requirements/in/build.in
-compile requirements/atheris.txt   requirements/in/atheris.in
+compile requirements/docs.txt      pyproject.toml $extras requirements/in/docs.in requirements/in/backend.in
+compile requirements/fuzz.txt      pyproject.toml requirements/in/backend.in
+compile requirements/build.txt     requirements/in/build.in requirements/in/backend.in
+compile requirements/atheris.txt   requirements/in/atheris.in requirements/in/backend.in

@@ -28,7 +28,7 @@ jobs:
       - name: Install
         run: |
           pip install --require-hashes -r requirements/fuzz.txt
-          pip install --no-deps -e .
+          pip install --no-deps --no-build-isolation -e .
 
       # The gate. No Atheris, so it cannot be skipped by a toolchain problem, and it fails on
       # a seed that regressed rather than on a campaign that happened to find one.
