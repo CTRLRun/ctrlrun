@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Synthetic evidence workbench: real policy, approval, effects, and receipts.
 
 The curated fixture validator is deliberately narrow. It is not a scientific

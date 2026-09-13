@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The webhook approval provider. Build-list item 7; SPEC-v0.2 §7.
 
 Core, not an extra, because the outbound half needs neither an HTTP server nor a third-party

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """No model, no agent, no prompt: a task queue with automatic retry, charging twice.
 
 This is the same failure as `examples/double-refund/`, written the way it actually reaches

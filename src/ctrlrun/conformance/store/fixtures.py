@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The broken-store fixtures. SPEC-v0.6 §2.6.
 
 **A suite that only ever passes is a suite nothing exercises.** Each store here is broken in one

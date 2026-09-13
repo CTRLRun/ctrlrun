@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The store conformance suite. Build-list item 1; SPEC-v0.6 §2, §8 T140-T146.
 
 The suite predates the backend it grades. A Postgres store measured against a suite written for

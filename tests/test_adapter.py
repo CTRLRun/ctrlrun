@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The adapter surface. SPEC-v0.5 §2, §3, §4; T126-T129h.
 
 Every test here that asserts a refusal counts the interrupt double's calls and asserts the

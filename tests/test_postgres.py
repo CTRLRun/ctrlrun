@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The Postgres backend. Build-list item 3; SPEC-v0.6 §4, §8 T153-T154f.
 
 **It passes item 1's suite. Not a suite written for it -- that one.** A backend graded against a

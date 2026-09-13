@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T434 to T438: what v0.9 built, visible to the person who gets paged (SPEC-v0.9 §7).
 
 §7.1 adds **no new command**. `inspect`, `effects` and `stats` are extended, because the question

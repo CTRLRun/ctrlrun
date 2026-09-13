@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun verify` — the operator's own configuration, against the kernel's own refusals.
 
 SPEC-v0.4 §1, §9.1. Core: stdlib, `pyyaml` and `click`, and **not** re-exported from

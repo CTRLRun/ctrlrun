@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun.reporting`: the shared producer behind `stats`, `inspect` and the operator server."""
 
 from __future__ import annotations

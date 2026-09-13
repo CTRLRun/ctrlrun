@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """What both servers in this package speak, and neither owns.
 
 `ctrlrun gateway` (`server.py`) and `ctrlrun mcp-operator` (`operator.py`) are two HTTP servers

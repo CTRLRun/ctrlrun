@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """How the read commands open a store, and what they say when they cannot.
 
 `_store`'s docstring states the invariant: *"It creates nothing, and it migrates nothing -- a

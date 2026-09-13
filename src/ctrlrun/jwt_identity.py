@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """JWT verification as an `IdentityProvider`. Build-list item 5; SPEC-v0.3 §3.4.
 
 Ships in `ctrlrun[identity]` and is imported by naming it: `import ctrlrun` must not pull in

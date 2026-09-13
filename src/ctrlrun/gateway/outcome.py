@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.2 §6.8, and nothing else. Build-list item 6b.
 
 This module is the reason the gateway is specified at all: it is v0.1 §5.5 for a network hop,

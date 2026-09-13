@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The report and its three renderings. SPEC-v0.4 §4.
 
 `run()` performs the work and returns a `Report`; rendering it costs nothing and can be done
