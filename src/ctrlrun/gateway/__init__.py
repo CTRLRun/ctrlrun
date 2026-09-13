@@ -107,7 +107,7 @@ def serve(*, upstream: str, alias: str, **options: Any) -> None:
         # and §4.4 refuses a pinned action there.
         upstream=config.upstream,
     )
-    forwarder = httpx_forwarder(config)
+    forwarder = httpx_forwarder(config, control.policy)
     gateway = Gateway(config, control, forwarder)
     _announce(control, config, gateway.identity, authority_path)
     try:

@@ -74,7 +74,6 @@ def test_T489_the_pinned_upstream_admits_the_action(tmp_path):
     """The negative control for every row below. Without it a kernel that refused every pinned
     action whatever would pass them all, which is `v0.4 §2.2`'s guarantee that could not fail."""
     store = SQLiteStateStore(str(tmp_path / "s.db"))
-    control = Control(_policy(), store, upstream="mcp.example")
     observe_certificate("mcp.example", b"the-pinned-cert")
     pinned = _policy(f'["{cert_hash(b"the-pinned-cert")}"]')
     control = Control(pinned, store, upstream="mcp.example")
@@ -238,6 +237,10 @@ def _serve(key: Path, crt: Path) -> int:
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # `PROTOCOL_TLS_SERVER` still admits TLS 1.0 and 1.1, which CodeQL flags high and is right
+    # to: a listener in a test for a *pinning* feature that negotiates a protocol the product
+    # would refuse is testing something the product does not do.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(crt), str(key))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -259,6 +262,7 @@ def test_T491_the_pinned_certificate_is_the_connections_only_trust_anchor(tmp_pa
 
     def context() -> ssl.SSLContext:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_verify_locations(cadata=good_crt.read_text())
         ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
         return ctx
@@ -369,3 +373,34 @@ def test_the_check_is_a_pure_function_over_two_strings():
     observe_certificate("u", b"x")
     assert check(UpstreamPin(cert_sha256=(cert_hash(b"x"),)), "u") is None
     assert check(UpstreamPin(cert_sha256=(DIGEST_B,)), "u") == UPSTREAM_MISMATCH
+
+
+def test_T491b_the_gateways_forwarder_pins_when_the_policy_does(tmp_path):
+    """§4.3's check 3, wired: the forwarder's verification context is built from the certificates
+    the policy pins, and is httpx's ordinary verification where it pins none."""
+    pytest.importorskip("httpx")
+    from ctrlrun.gateway.server import GatewayConfig, httpx_forwarder
+
+    _, crt = _ca_signed(tmp_path, "pinned")
+    config = GatewayConfig(upstream="https://mcp.example", alias="x", principal="worker")
+
+    plain = httpx_forwarder(config, _policy())
+    assert plain.verify is None, (
+        "a pin by digest alone contributes no trust anchor; §4.2 states that as a limit"
+    )
+
+    with_file = Policy.from_yaml(
+        "schema: ctrlrun.policy/v8\nactions:\n  stripe.refund:\n    decision: allow\n"
+        f'    upstream: {{ tls_cert_file: "{crt}" }}\n',
+        source="t",
+    )
+    pinning = httpx_forwarder(config, with_file)
+    assert pinning.verify is not None
+    assert pinning.verify.minimum_version is ssl.TLSVersion.TLSv1_2, (
+        "a context built for a pinning check must not negotiate a protocol the product would "
+        "refuse; CodeQL flagged exactly this, high, on this file's own listener"
+    )
+    assert pinning.verify.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN, (
+        "without PARTIAL_CHAIN a pinned CA-signed leaf refuses every connection, the right one "
+        "included"
+    )

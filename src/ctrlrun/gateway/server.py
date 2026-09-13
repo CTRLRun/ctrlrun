@@ -48,7 +48,7 @@ from ..identity import (
     IdentityProvider,
     StaticIdentityProvider,
 )
-from ..policy import OBSERVE, UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED
+from ..policy import OBSERVE, UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED, Policy
 from ..receipt import Receipt
 from .mcp import (
     ACCEPTED_REVISIONS,
@@ -1095,12 +1095,28 @@ def _request_id(body: bytes) -> JsonRpcId:
 # --- the transport ----------------------------------------------------------------------
 
 
-def httpx_forwarder(config: GatewayConfig) -> Any:
-    """Forward HTTP and SSE, using a fresh connection for every intercepted action."""
+def httpx_forwarder(config: GatewayConfig, policy: Policy | None = None) -> Any:
+    """Forward HTTP and SSE, using a fresh connection for every intercepted action.
+
+    **SPEC-v0.10 §4.3's check 3**, where `policy` is given and any entry pins a certificate file:
+    every pinned certificate becomes a trust anchor for this gateway's one outbound connection,
+    so a swapped server fails the handshake **before the first request byte**. That is the only
+    one of §4.3's three checks that prevents rather than attributing, and it needs nothing new to
+    make `v0.7 §2.3`'s `NotExecuted` claim true of it.
+
+    An entry pinning by digest alone contributes nothing here and gets checks 1 and 2 only, which
+    §4.2 states as a limit rather than leaving to be discovered.
+    """
+    from ..upstream import pinned_context
     from . import http_client
     from .transport import HTTPForwarder
 
-    return HTTPForwarder(config.upstream, config.upstream_timeout, http_client())
+    pinned: set[str] = set()
+    if policy is not None:
+        for name in policy.actions:
+            pinned.update(policy.upstream_pin(name).certs)
+    verify = pinned_context(tuple(sorted(pinned))) if pinned else None
+    return HTTPForwarder(config.upstream, config.upstream_timeout, http_client(), verify)
 
 
 # --- the listening side (stdlib, per §6.11) ---------------------------------------------

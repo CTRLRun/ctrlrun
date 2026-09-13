@@ -15,7 +15,10 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections.abc import Mapping
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:  # `ssl` is stdlib but not needed unless a deployment pins (SPEC-v0.10 §4.3).
+    import ssl
 
 from .action import canonical_bytes
 from .policy import UPSTREAM_MISMATCH, UPSTREAM_UNVERIFIED, UpstreamPin
@@ -103,11 +106,40 @@ def check(pin: UpstreamPin, upstream: str, tool: str | None = None) -> str | Non
     return None
 
 
+def pinned_context(certs: tuple[str, ...]) -> ssl.SSLContext:
+    """An `ssl.SSLContext` whose only trust anchors are the pinned certificates (§4.3, check 3).
+
+    **The check that prevents.** Checks 1 and 2 compare an observation, which is a decision about
+    the past; this one refuses the handshake, so a swapped server never receives a request byte
+    and `v0.7 §2.3`'s `NotExecuted` claim is true of it without anything new.
+
+    `VERIFY_X509_PARTIAL_CHAIN` is what makes a **leaf** a valid anchor. A real upstream's leaf is
+    signed by a CA, so loading it into the trust store is not enough on its own: OpenSSL wants the
+    chain to terminate at a self-signed certificate unless told that a trusted non-root may end
+    it. Without the flag a pinned CA-signed leaf refuses every connection, including the right
+    one.
+
+    **A TLS floor, set explicitly.** `PROTOCOL_TLS_CLIENT` still admits TLS 1.0 and 1.1, and
+    CodeQL flags that high on a test file of this feature's own. A context built for a pinning
+    check that then negotiates a protocol the rest of the product would not is the wrong shape to
+    ship from a security library, so the floor is here rather than inherited.
+    """
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    for path in certs:
+        context.load_verify_locations(cafile=path)
+    return context
+
+
 __all__ = [
     "cert_hash",
     "check",
     "forget",
     "observe_certificate",
     "observe_tool_schema",
+    "pinned_context",
     "tool_schema_hash",
 ]
