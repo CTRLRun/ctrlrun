@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Fixtures shared across the suite.
 
 `state_store` is parametrized over both shipped implementations. A reservation test written

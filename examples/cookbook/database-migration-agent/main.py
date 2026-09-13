@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 # Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
 # docs/cookbook/database-migration-agent.mdx — edit the page, never this file.
 from pathlib import Path

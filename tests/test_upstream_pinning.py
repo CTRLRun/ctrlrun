@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.10 §4, item 3: upstream identity pinning.
 
 The honest slice of `ASI04` and nothing more: this decides actions, and it never inspects a

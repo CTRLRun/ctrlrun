@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The suites, and what an adapter hands the kit. SPEC-v0.5 §5.2, §5.3.
 
 Every case drives **one** protected call through the adapter's own framework and asserts what

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 # Regenerates every hash-pinned requirements file CI installs from.
 #
 # The version floors in pyproject.toml are deliberate minimums and stay where they are; what

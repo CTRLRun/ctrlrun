@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Where a `Principal` comes from. Build-list item 1; SPEC-v0.3 §3.
 
 CTRLRun **consumes** identities. It verifies what it is handed and maps the result onto a

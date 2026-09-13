@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.10 §2, item 1: the hop, and the envelope that crosses it.
 
 T470 to T477 and T488a. The centre of the file is T472: §2.3.1 measured that a receiving agent

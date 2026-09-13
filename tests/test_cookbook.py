@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The cookbook: every recipe runs, twice, offline, and refuses something.
 
 A recipe page is the single source, and it lives in CTRLRun/ctrlrun-docs, where

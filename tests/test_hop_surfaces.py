@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.10 §6, item 5: the operator surfaces for a hop.
 
 The 3am question is `v0.9 §7.2`'s shape one level up: **which envelope did the peer actually hold,

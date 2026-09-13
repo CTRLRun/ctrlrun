@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The operator MCP server. SPEC-mcp-operator.md; acceptance tests T182-T193.
 
 An approver answers from the assistant they are already talking to, through the same two

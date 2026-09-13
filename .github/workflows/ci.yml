@@ -274,7 +274,8 @@ jobs:
   # The pages moved to `CTRLRun/ctrlrun-docs`, and the checks moved with them -- but what they
   # check is *this* commit, so the job runs them there against a checkout of here. One
   # implementation of every rule, two triggers: this job on a change to the library, and that
-  # repository's own CI on a change to a page.
+  # repository's own CI on a change to a page. Which checkout of there is decided below: the
+  # branch named after this one when there is one, and `main` otherwise.
   #
   # Every step is a hard failure. Three of them carried `continue-on-error: true` from session
   # 0 to session 6, while a baseline nobody had cleared yet would have made the job red on
@@ -294,9 +295,43 @@ jobs:
         with:
           path: ctrlrun
 
+      # The pages are rendered from this commit's docstrings and `--help`, so a commit that
+      # changes either has changed a page, and the two land as a pair: a branch here that
+      # alters a signature is accompanied by a branch of the same name there, regenerated
+      # against it, and each is checked against the other. `main` is checked against `main`,
+      # so the pages there match the library's `main` at all times, and the docs branch merges
+      # when the kernel branch does.
+      #
+      # Before this every branch was checked against that repository's `main`, and a page could
+      # not be regenerated until the commit it describes had merged, so every pull request that
+      # touched a docstring was red by construction -- eleven runs in a row from the first v0.10
+      # item -- and a check that is always red is a check nobody reads. The fallback is `main`
+      # and not a skip, for the reason the flags above are gone: a branch that forgot its pages
+      # is a red job, not a green one that verified nothing.
+      #
+      # The branch name reaches the shell through `env:`, never inline in the script, so a
+      # branch called `$(...)` is a string here and not a command. The comparison is exact and
+      # fixed-string: `ls-remote` matches a pattern against the tail of a ref, and `.` in a
+      # version would be a regex wildcard.
+      - name: Pick the ctrlrun-docs ref
+        id: docs
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -eu
+          if git ls-remote --heads https://github.com/CTRLRun/ctrlrun-docs.git "refs/heads/$BRANCH" \
+              | cut -f2 | grep -qxF "refs/heads/$BRANCH"; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "ctrlrun-docs at $BRANCH, the branch of the same name"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "ctrlrun-docs at main: it has no branch named $BRANCH"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CTRLRun/ctrlrun-docs
+          ref: ${{ steps.docs.outputs.ref }}
           path: ctrlrun-docs
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -398,10 +433,26 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `SOURCE_DATE_EPOCH` is the commit's own timestamp, so a wheel built from this commit by
+      # anyone, anywhere, with the backend the lock names, is the same bytes. The sdist needs
+      # `scripts/normalize_sdist.py` for what setuptools records from the scratch directory
+      # (copy times, uid, filesystem order). The step after builds a second time and compares:
+      # "reproducible" is a claim until something checks it.
       - name: Build
         run: |
           pip install --require-hashes -r requirements/build.txt
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           python -m build --no-isolation
+          python scripts/normalize_sdist.py dist/*.tar.gz
+
+      - name: The build is reproducible
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python -m build --no-isolation --outdir /tmp/again
+          python scripts/normalize_sdist.py /tmp/again/*.tar.gz
+          (cd dist && sha256sum ./*) > /tmp/first.sha256
+          (cd /tmp/again && sha256sum ./*) | diff /tmp/first.sha256 -
+          echo "both builds produced:"; cat /tmp/first.sha256
 
       - name: Metadata renders on PyPI
         run: twine check --strict dist/*

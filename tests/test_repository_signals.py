@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The repository's trust signals, as assertions rather than intentions.
 
 A visitor decides in thirty seconds whether an unknown project is safe to put in front of
@@ -10,10 +12,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -238,8 +243,20 @@ def test_the_community_files_exist_and_say_what_they_must():
         # The contribution agreement is the DCO and nothing more; the file has to say so.
         "Developer Certificate of Origin",
         "git commit -s",
+        # The written policies the best-practices criteria point at, each by its heading.
+        "## Coding standards",
+        "## Code review",
+        "new functionality MUST arrive with\ntests",
     ):
         assert phrase in contributing, phrase
+
+    governance = (REPO_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")
+    for phrase in ("## Decisions", "## Roles", "## Continuity", "@arpanghoshal", "@rohanrkamath"):
+        assert phrase in governance, phrase
+
+    security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    for phrase in ("## Response process", "72 hours", "Security Advisory", "Credit"):
+        assert phrase in security, phrase
 
     conduct = (REPO_ROOT / "CODE_OF_CONDUCT.md").read_text(encoding="utf-8")
     assert "Contributor Covenant" in conduct
@@ -607,3 +624,120 @@ def test_every_lock_a_workflow_installs_from_exists_and_is_hashed():
         for index, line in enumerate(lines):
             if line and not line.startswith(("#", " ")):
                 assert "--hash=" in lines[index + 1], f"{lock}: {line} carries no hash"
+
+
+# --- a build anyone can repeat ---------------------------------------------------------------
+
+
+def test_every_build_in_a_workflow_is_reproducible():
+    """Every `python -m build` in a workflow runs with `SOURCE_DATE_EPOCH` set to the commit's
+    timestamp and normalises the sdist afterwards, so the distributions a tag publishes are the
+    ones a reader rebuilds from it (CONTRIBUTING.md, Releases)."""
+    found = 0
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                run = str(step.get("run", ""))
+                if "python -m build" not in run:
+                    continue
+                found += 1
+                lines = [line.strip() for line in run.splitlines() if line.strip()]
+                build = next(i for i, line in enumerate(lines) if "python -m build" in line)
+                assert 'export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"' in lines[:build], (
+                    f"{path.name}: {step.get('name')} builds without SOURCE_DATE_EPOCH"
+                )
+                assert any("scripts/normalize_sdist.py" in line for line in lines[build:]), (
+                    f"{path.name}: {step.get('name')} builds without normalising the sdist"
+                )
+    assert found >= 4, found  # ci.yml twice, publish.yml, release.yml
+
+
+def _tarball(path: Path, files: dict[str, bytes], *, mtime: int, uid: int, order: list[str]):
+    with tarfile.open(path, "w:gz") as tar:
+        for name in order:
+            info = tarfile.TarInfo(name)
+            info.size = len(files[name])
+            info.mtime = mtime
+            info.uid = info.gid = uid
+            info.uname = info.gname = "somebody"
+            info.mode = 0o664
+            tar.addfile(info, io.BytesIO(files[name]))
+
+
+def test_normalize_sdist_makes_two_builds_of_the_same_tree_identical(tmp_path):
+    files = {"pkg-1.0/PKG-INFO": b"Name: pkg\n", "pkg-1.0/src/a.py": b"print(1)\n"}
+    first, second = tmp_path / "first.tar.gz", tmp_path / "second.tar.gz"
+    _tarball(first, files, mtime=1_700_000_000, uid=1000, order=list(files))
+    _tarball(second, files, mtime=1_700_000_099, uid=1001, order=list(reversed(files)))
+    assert first.read_bytes() != second.read_bytes()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "normalize_sdist.py"),
+            str(first),
+            str(second),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SOURCE_DATE_EPOCH": "1789312180"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first, "r:gz") as tar:
+        members = tar.getmembers()
+        assert [m.name for m in members] == sorted(files)
+        assert {m.mtime for m in members} == {1789312180}
+        assert {(m.uid, m.gid, m.uname, m.gname, m.mode) for m in members} == {
+            (0, 0, "", "", 0o644)
+        }
+        for member in members:
+            extracted = tar.extractfile(member)
+            assert extracted is not None and extracted.read() == files[member.name]
+
+
+def test_normalize_sdist_refuses_without_an_epoch_and_refuses_a_wheel(tmp_path):
+    wheel = tmp_path / "pkg-1.0-py3-none-any.whl"
+    wheel.write_bytes(b"not a tar")
+    without = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "normalize_sdist.py"), str(wheel)],
+        capture_output=True,
+        text=True,
+        env={k: v for k, v in os.environ.items() if k != "SOURCE_DATE_EPOCH"},
+    )
+    assert without.returncode == 2 and "SOURCE_DATE_EPOCH" in without.stderr
+    refused = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "normalize_sdist.py"), str(wheel)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SOURCE_DATE_EPOCH": "1"},
+    )
+    assert refused.returncode != 0 and "not a .tar.gz sdist" in refused.stderr
+
+
+# --- every source file says who holds it and under what licence -------------------------------
+
+_SOURCE_DIRS = ("src", "tests", "fuzz", "scripts", "adapters", "examples")
+_COPYRIGHT_LINE = "# SPDX-FileCopyrightText: 2026 The CTRLRun contributors"
+_LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
+
+
+def test_every_source_file_carries_its_copyright_and_license():
+    """The licence is in `LICENSE` and the copyright is the contributors'; a file copied out of
+    this tree on its own says both at the top, in the SPDX form a tool can read. A shebang, where
+    there is one, stays on line one, and the two tags follow it."""
+    missing: list[str] = []
+    checked = 0
+    for directory in _SOURCE_DIRS:
+        for path in sorted((REPO_ROOT / directory).rglob("*")):
+            if path.suffix not in (".py", ".sh") or not path.is_file():
+                continue
+            checked += 1
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if lines and lines[0].startswith("#!"):
+                lines = lines[1:]
+            if lines[:2] != [_COPYRIGHT_LINE, _LICENSE_LINE]:
+                missing.append(str(path.relative_to(REPO_ROOT)))
+    assert checked > 100, checked
+    assert not missing, "\n".join(missing)

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The reconciliation hook. Build-list item 1; SPEC-v0.2 §2.
 
 `AMBIGUOUS` is the state only a human could leave in v0.1. v0.2 admits one other authority: a

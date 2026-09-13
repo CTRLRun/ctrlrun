@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """T399 to T407: the budget in the document (SPEC-v0.9 §2).
 
 Parse, validate, canonicalise into the policy hash, and contain. **Nothing counts anything in

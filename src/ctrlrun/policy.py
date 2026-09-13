@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Policy loading and rule evaluation to a Decision. Build-list item 2; SPEC-v0.1 §3.
 
 SPEC-v0.2 §3 adds per-action `effect:` and `resource:` templates, because the gateway has no

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """Effect key templating. Build-list item 5; SPEC-v0.1 §5.1.
 
 The effect key is the identity of a *logical effect*, the thing duplicate protection is

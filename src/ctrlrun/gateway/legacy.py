@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """The 2025 revisions' transport mechanics, relayed without being interpreted.
 
 SPEC-v0.2 §6.2's passthrough table, and §6.2's one real cost: **resumption is not relayed for

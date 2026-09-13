@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.10 §5, item 4: one declared order, walked by both modes.
 
 `SPEC-v0.9 §4.2.1b` is the statement of what was wrong: `_secure` and `_observe_secure` run their

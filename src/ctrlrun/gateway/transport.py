@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """HTTP forwarding and incremental SSE decoding for the MCP gateway.
 
 The listener supplies a request-local sink. Progress is sent immediately; an intercepted

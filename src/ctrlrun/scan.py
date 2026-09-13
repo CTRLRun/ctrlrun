@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """`ctrlrun scan` — what a project is not covering. `docs/SPEC-scan.md`.
 
 Scan reads text. It reports the consequential call sites and policy entries CTRLRun is not

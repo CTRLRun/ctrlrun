@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
 """click command group for the ctrlrun CLI. Build-list item 8; SPEC-v0.1 §8.
 
 The CLI is the human end of the kernel: it answers approval requests, shows the evidence,
