@@ -1122,6 +1122,13 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # than a parameter. §11 keeps the management plane off the roadmap and this is not one:
         # it writes rows and prints lines, and it decides nothing.
         "anchor",
+        # SPEC-v0.11 §4.2, §9. A prune is an operator's act at the CLI and is deliberately NOT
+        # routed through `Control.execute`: the gate there refuses every action but one on a
+        # deployment that has not approved its current policy, and a store that cannot prune is
+        # a store that fills.
+        "prune",
+        # A group: `place`, `release` and `list`.
+        "hold",
     }
 
 

@@ -873,6 +873,12 @@ _FROZEN_V0_11: tuple[tuple[str, str, str | None, str], ...] = (
     # a digit is not an identifier. This is the row §9 says a bare third element cannot express,
     # and the reason every row here carries a `kind`.
     ("ctrlrun.migrations", "MIGRATIONS", "0008_anchor_checkpoint_hold", "member"),
+    # Item 3 (SPEC-v0.11 §4).
+    ("ctrlrun.state", "StateStore.put_checkpoint", None, "name"),
+    ("ctrlrun.state", "StateStore.checkpoint", None, "name"),
+    ("ctrlrun.state", "StateStore.put_hold", None, "name"),
+    ("ctrlrun.state", "StateStore.holds", None, "name"),
+    ("ctrlrun.state", "StateStore.release_hold", None, "name"),
 )
 
 

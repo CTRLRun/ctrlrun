@@ -1601,6 +1601,9 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         # SPEC-v0.11 §9. An anchor is made on a schedule by an operator, where every other
         # surface in this kernel is a library call made by an agent.
         "anchor",
+        # SPEC-v0.11 §4.2, §9. An operator's act, deliberately not an action.
+        "prune",
+        "hold",
     ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)
