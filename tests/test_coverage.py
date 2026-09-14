@@ -251,6 +251,20 @@ def test_T561c_a_row_that_cannot_be_read_back_is_not_reported_here(tmp_path, sto
 
     assert _names_seen(_OneBad(store)) == ("k8s.delete_namespace", "stripe.refund")
 
+    # **And the filter is on the type and on emptiness, not merely on `None`.** A mutation
+    # relaxing it to `name is not None` survived the version of this test above, because an
+    # `UnreadableReceipt` has no `action` attribute at all and `getattr` already returns `None`.
+    # A row whose `action` is an empty string, or is not a string, is the input that tells the
+    # two apart, and an empty name in a coverage list is an entry an operator cannot act on.
+    class _Odd:
+        def __init__(self, *actions):
+            self._actions = actions
+
+        def receipts(self):
+            return tuple(type("R", (), {"action": value})() for value in self._actions)
+
+    assert _names_seen(_Odd("", "a.b", None, 7, "c.d")) == ("a.b", "c.d")
+
 
 # --- T562: the three kinds ----------------------------------------------------------------------
 
@@ -307,9 +321,23 @@ def test_T563_the_coverage_flag_does_not_move_the_exit_code(tmp_path, store) -> 
 
     workspace = tmp_path / "work"
     workspace.mkdir()
-    (workspace / "ctrlrun.yaml").write_text(POLICY, encoding="utf-8")
-    # A tree with nothing in it to find, so `scan`'s own half is clean and only `--coverage`
-    # could move the code.
+    # **Every action declares an `effect:`**, so `scan`'s own half finds nothing: it reports
+    # `action_without_effect` otherwise, and that would make the comparison below meaningless.
+    (workspace / "ctrlrun.yaml").write_text(
+        "schema: ctrlrun.policy/v2\n"
+        "actions:\n"
+        "  stripe.refund:\n"
+        '    effect: "refund:{payment_id}"\n'
+        "    decision: allow\n"
+        "  quarterly.reconcile:\n"
+        '    effect: "reconcile:{period}"\n'
+        "    decision: allow\n",
+        encoding="utf-8",
+    )
+    # **A tree `scan`'s own half finds nothing in**, which is what makes the comparison below
+    # mean anything: with findings of its own, `scan` exits 1 either way and a `--coverage` that
+    # moved the code would be invisible. A mutation making `--coverage` exit 1 on any unexercised
+    # entry survived the first version of this test for exactly that reason.
     (workspace / "app.py").write_text("x = 1\n", encoding="utf-8")
     database = tmp_path / "state.db"
     store.close()
@@ -327,8 +355,14 @@ def test_T563_the_coverage_flag_does_not_move_the_exit_code(tmp_path, store) -> 
     # **The comparison is the claim.** Whatever `scan`'s own half decides, `--coverage` must not
     # change it: an exit code that moved with an unexercised policy entry would fail a CI job
     # because somebody declared an action for a quarterly run.
-    assert with_coverage.exit_code == plain.exit_code, (
-        f"--coverage moved the exit code from {plain.exit_code} to {with_coverage.exit_code}"
+    assert plain.exit_code == 0, (
+        "`ctrlrun scan` found something in this tree on its own, so it exits non-zero either way "
+        f"and this test cannot see whether --coverage moved it:\n{plain.output}"
+    )
+    assert with_coverage.exit_code == 0, (
+        "--coverage moved the exit code. An unexercised policy entry is a fact about the record, "
+        "not a finding about the operator, and a CI job must not fail because somebody declared "
+        f"an action for a quarterly run:\n{with_coverage.output}"
     )
     assert "never exercised" in with_coverage.output, with_coverage.output
     assert NOT_A_VERDICT in with_coverage.output
