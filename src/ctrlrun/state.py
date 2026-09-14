@@ -1712,9 +1712,9 @@ class SQLiteStateStore:
         #
         # `_read_receipt` and not `_stored_receipt`: a row this binary cannot construct comes
         # back named at its `seq` rather than raising through every caller at once (§5.2).
-        return tuple(
-            _read_receipt(json.loads(row["json"]), row["hash"], row["seq"]) for row in rows
-        )
+        # The stored **text**, not a parsed document: parsing is one of the ways a row refuses,
+        # and a `json.loads` out here would raise through every caller (§5.2).
+        return tuple(_read_receipt(row["json"], row["hash"], row["seq"]) for row in rows)
 
     # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
 
