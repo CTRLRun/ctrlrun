@@ -816,21 +816,28 @@ def test_T549_two_prunes_racing_cannot_both_succeed() -> None:
             "is written only forward, so the lower prune is refused or its checkpoint is ignored"
         )
 
-        # **And it is refused by the right rule**, which is what the lock buys. Before
-        # `pruning()` held a real transaction, the two ran straight through each other and were
-        # serialized only by the anchors table: the loser was refused with *"a checkpoint anchor
-        # must be above the last checkpoint anchor"*, which is shared state reached by accident,
-        # not a lock, and would order them differently under a different anchor provider.
+        # **Both outcomes are legitimate, and asserting one of them was a defect in this test.**
+        # Serialized as 5-then-3, the second is refused: a checkpoint is written only forward.
+        # Serialized as 3-then-5, **both succeed** and both are correct -- the first deletes
+        # seq 1..3 and the second seq 4..5, and the chain afterwards is exactly what one prune
+        # through 5 would have left. A first version asserted `len(refused) == 1` and was flaky
+        # one run in three, which is this test lying about a store that was fine.
         #
-        # The connection is `autocommit=True` with every write taking an explicit `BEGIN`
-        # (`postgres.py`'s `_connect` says why), so a bare `SELECT ... FOR UPDATE` commits the
-        # instant it returns and holds nothing. That is the defect this line pins.
+        # What must hold either way is rule 2 and the checkpoint, both asserted above. What is
+        # asserted here is that **a refusal, if there is one, comes from the checkpoint rule**.
+        # Before `pruning()` held a real transaction the loser was refused by the *anchor
+        # ordering* instead -- shared state reached by accident, which would order the pair
+        # differently under a different provider and not at all under some.
+        #
+        # `T549b` is the direct evidence for §4.5's lock, because an outcome test cannot supply
+        # it: `put_checkpoint`'s own SQL is forward-only, so the dangerous interleaving is
+        # refused by the database even with no lock at all.
         refused = [item for item in outcomes if not item["ok"]]
-        assert len(refused) == 1, f"both prunes succeeded: {outcomes}"
-        assert "written only forward" in refused[0]["refused"], (
-            "the losing prune was refused, but not by the checkpoint rule. If it names the "
-            f"anchor ordering, pruning() is not holding a transaction: {refused[0]['refused']}"
-        )
+        for item in refused:
+            assert "written only forward" in item["refused"], (
+                "a prune was refused, but not by the checkpoint rule. If it names the anchor "
+                f"ordering, pruning() is not holding a transaction: {item['refused']}"
+            )
     finally:
         PostgresStateStore.drop_schema(POSTGRES_URL, schema)
         for item in gate.iterdir():
