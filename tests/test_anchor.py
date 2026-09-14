@@ -110,6 +110,47 @@ class Provider:
         return tuple(item for item in self.held.values() if item.seq >= seq)
 
 
+def _rewrite_chain_from(database: Path, *, at: int, find: str, replace: str) -> None:
+    """Alter one receipt and recompute every hash after it, plus the head.
+
+    An administrator with write access who edits one row and leaves the hashes is caught by
+    `verify_chain`; one who recomputes is not, and `THREAT_MODEL.md` has listed them as out of
+    scope for the chain since v0.6. The anchor is what narrows that, for everything at or below
+    an anchored `seq`.
+    """
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        "SELECT seq, json, prev_hash FROM receipts WHERE seq IS NOT NULL ORDER BY seq"
+    ).fetchall()
+    previous: str | None = None
+    for row in rows:
+        document = json.loads(row["json"])
+        if row["seq"] == at:
+            document = json.loads(row["json"].replace(find, replace))
+            assert document != json.loads(row["json"]) or find not in row["json"], (
+                f"the tamper {find!r} changed nothing at seq {at}"
+            )
+        if previous is not None:
+            document["prev_hash"] = previous
+        digest = _document_hash(document)
+        connection.execute(
+            "UPDATE receipts SET json = ?, prev_hash = ?, hash = ? WHERE seq = ?",
+            (
+                json.dumps(document, separators=(",", ":"), ensure_ascii=False),
+                document.get("prev_hash"),
+                digest,
+                row["seq"],
+            ),
+        )
+        previous = digest
+    connection.execute(
+        "UPDATE receipt_chain SET seq = ?, hash = ? WHERE id = 1", (rows[-1]["seq"], previous)
+    )
+    connection.commit()
+    connection.close()
+
+
 def a_chain(database: Path, count: int = 6) -> SQLiteStateStore:
     store = SQLiteStateStore(database, clock=lambda: T0)
     control = Control(Policy.from_yaml(ALLOW), store, clock=lambda: T0)
@@ -710,3 +751,91 @@ def test_T538b_an_older_store_migrates_forward_and_keeps_its_chain(tmp_path) -> 
     assert reopened.anchors() == ()
     assert reopened.checkpoint() is None
     reopened.close()
+
+
+# --- T530b: the other half of §2.4's "yes" column ----------------------------------------------
+
+
+def test_T530b_a_rewrite_at_or_below_an_anchored_seq_fails_the_anchor(tmp_path) -> None:
+    """§2.4's second row: **any rewrite at or below an anchored `seq`** is detected, because the
+    hash there differs.
+
+    `T530` covers a row that is *absent*. This covers one that is *present and different*, which
+    is a different branch and was reached by no test: a mutation deleting the hash comparison
+    entirely left the whole file green.
+
+    The chain catches this one too, and that is the point rather than a redundancy: the anchor
+    must not go quiet about a tamper just because another reader would have caught it, or an
+    operator who runs only the anchor check learns nothing.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database, 5)
+    provider = Provider()
+    anchor = make_anchor(store, provider)
+    store.close()
+
+    # The administrator who rewrites **every row including the head**, which is the case
+    # `THREAT_MODEL.md` has always said the chain alone cannot catch: alter receipt 2, then
+    # recompute every hash after it and the head, so the chain is internally consistent again.
+    # That is the tamper the anchor exists for, and a half-done one -- editing the document and
+    # leaving the hash column -- is caught by `verify_chain` instead and proves nothing here.
+    _rewrite_chain_from(database, at=2, find='"amount":2000', replace='"amount":1')
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    chain = verify_chain(reopened)
+    report = verify_anchors(reopened, provider)
+    rewritten = [item for item in reopened.receipts() if item.seq == 2]
+    reopened.close()
+
+    # The tamper landed, and the chain cannot see it. Without both of these the test would pass
+    # against a rewrite that never happened, or against one the chain already caught, and in
+    # neither case would it be showing what the anchor adds.
+    assert rewritten and rewritten[0].arguments.get("amount") == 1, "the rewrite did not land"
+    assert chain.ok, (
+        "the chain caught a full rewrite, so this test is not exercising the case the anchor "
+        f"exists for: {[(b.name, b.seq) for b in chain.breaks]}"
+    )
+
+    assert not report.ok and not report.unavailable
+    named = [(item.name, item.seq) for item in report.breaks]
+    assert ("anchor_broken", anchor.seq) in named, (
+        f"a rewrite below the anchored seq did not fail the anchor: {named}"
+    )
+
+
+# --- T535e: the ordering that a joint rule would have refused forever --------------------------
+
+
+def test_T535e_a_checkpoint_anchor_below_the_newest_interval_anchor_is_accepted(tmp_path) -> None:
+    """§3.2 and §4.6. **The case a joint ordering refuses, and refuses permanently.**
+
+    A deployment anchoring hourly and pruning at ninety days takes its checkpoint anchor over the
+    `seq` it pruned through, which is far *below* its newest interval anchor. A draft that
+    ordered all anchors by `seq` refused it, so the prune was refused, and §4.6 exists precisely
+    so that an anchoring deployment does not have to choose between pruning and a permanent
+    tamper signal.
+
+    **A mutation is why this test exists.** Restoring the joint ordering survived every other
+    test in this file, because nothing could produce a checkpoint anchor below an interval one
+    for the per-kind rule to have to allow: `make_anchor` anchored the head and nothing else.
+    That was a gap in the implementation as much as in the tests, and `at=` closes it.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database, 6)
+    provider = Provider()
+    interval = make_anchor(store, provider)
+    assert interval.seq == 6 and interval.kind == INTERVAL
+
+    # What a prune does: anchor the checkpoint over the seq it is about to prune through.
+    rows = store.receipts()
+    below = rows[1]
+    assert below.seq == 2 and below.hash is not None
+    checkpoint = make_anchor(store, provider, kind=CHECKPOINT, at=(below.seq, below.hash))
+    store.close()
+
+    assert checkpoint.kind == CHECKPOINT
+    assert checkpoint.seq == 2, (
+        "a checkpoint anchor below the newest interval anchor was refused, which makes a "
+        "pruning deployment choose between retention and a permanent tamper signal (§4.6)"
+    )
+    assert checkpoint.seq < interval.seq

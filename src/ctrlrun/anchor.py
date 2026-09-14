@@ -288,6 +288,7 @@ def make_anchor(
     provider: AnchorProvider,
     *,
     kind: str = INTERVAL,
+    at: tuple[int, str] | None = None,
 ) -> Anchor:
     """Anchor the chain's current head, and cache what came back (§3.1, §3.2).
 
@@ -306,12 +307,22 @@ def make_anchor(
       sequence that goes backwards is either a misconfiguration or the attack.
     """
     kind = _checked_kind(kind)
-    head = store.chain_head()
-    if head is None:
-        raise InvalidArgument(
-            "this store has no chain head to anchor; nothing has written a chained receipt yet"
-        )
-    seq, digest = head
+    if at is not None:
+        # §4.6: a prune anchors its **checkpoint**, and a checkpoint names the `seq` pruned
+        # through, which is below the head by construction. Without this a checkpoint anchor
+        # could only ever be taken over the head, and §4.6's supersession rule -- an anchored
+        # `seq` at or below an anchored checkpoint is superseded rather than broken -- would
+        # have nothing to match against. Found by a mutation: ordering the two kinds jointly
+        # survived every test, because nothing could produce a checkpoint anchor below an
+        # interval one for the per-kind rule to have to allow.
+        seq, digest = at
+    else:
+        head = store.chain_head()
+        if head is None:
+            raise InvalidArgument(
+                "this store has no chain head to anchor; nothing has written a chained receipt yet"
+            )
+        seq, digest = head
     _require_ordering(store.anchors(), seq, kind)
 
     try:
@@ -324,8 +335,8 @@ def make_anchor(
             f"({type(refused).__name__}), so nothing was anchored"
         ) from refused
 
-    token, at = _checked_answer(answer)
-    anchor = Anchor(seq=seq, hash=digest, token=token, kind=kind, at=at)
+    token, anchored_at = _checked_answer(answer)
+    anchor = Anchor(seq=seq, hash=digest, token=token, kind=kind, at=anchored_at)
     _require_time_moves_forward(store.anchors(), anchor)
     store.put_anchor(anchor)
     return anchor
