@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from ctrlrun import Control, Policy, SQLiteStateStore
 from ctrlrun.action import Action, Principal
 from ctrlrun.anchor import CHECKPOINT, Anchor, make_anchor, verify_anchors
 from ctrlrun.errors import InvalidArgument
-from ctrlrun.receipt import verify_chain
+from ctrlrun.receipt import ChainBreak, verify_chain
 from ctrlrun.retention import PRUNE_ACTION, Hold, prune
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -1309,6 +1310,45 @@ def test_T556b_a_prune_whose_simulation_shows_a_new_break_is_refused(tmp_path) -
         "a checkpoint naming the wrong hash produced no new break in the simulation, so rule 2's "
         "comparison has nothing to refuse and the guard cannot fire"
     )
+
+
+def test_T556c_the_rule_2_comparison_refuses_when_the_simulation_shows_a_new_break(
+    tmp_path, monkeypatch
+) -> None:
+    """Rule 2's guard, driven directly, because **no store state reaches it any more.**
+
+    That is worth stating rather than hiding: once the checkpoint names the pair that really
+    exists (`T554`) and the simulation is the store rather than a tidier version of it (`T553`),
+    a prefix prune cannot introduce a break. Every way of constructing one is caught earlier --
+    by the head bound, the forward-only checkpoint, or the missing-hash refusal -- so a mutation
+    deleting this comparison survived the whole file.
+
+    It stays, as a backstop, and this is what keeps it honest: the comparison is fed a simulation
+    that reports one more break than the store does, and the prune must refuse with the `seq`
+    named. A guard nothing can trigger is still a guard somebody will edit.
+    """
+    import ctrlrun.retention as module
+
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    real = module._after_prune
+
+    def _one_more(receipts, through, checkpoint, head):
+        report = real(receipts, through, checkpoint, head)
+        return replace(report, ok=False, breaks=[*report.breaks, ChainBreak("missing", 99, "x")])
+
+    monkeypatch.setattr(module, "_after_prune", _one_more)
+
+    with pytest.raises(InvalidArgument) as refused:
+        prune(store, through=3, older_than=DAY, anchor=Provider(), now=NOW)
+    remaining = len(store.receipts())
+    checkpoint = store.checkpoint()
+    store.close()
+
+    assert "missing at seq 99" in str(refused.value), str(refused.value)
+    assert "no flag that admits it" in str(refused.value)
+    assert remaining == 8, "a prune refused by rule 2 deleted receipts anyway"
+    assert checkpoint is None, "a prune refused by rule 2 left a checkpoint behind"
 
 
 def test_T557_a_ledger_row_whose_effect_is_still_held_refuses_the_prune(tmp_path) -> None:
