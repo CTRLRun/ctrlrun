@@ -42,6 +42,22 @@ any change to one appears here.
   trusted. Found by review; the tests that missed it all tampered with a row's *content*, and
   `{}` and a float among the controls are both valid JSON.
 
+- **Enforcement coverage: what this deployment has never exercised** (`SPEC-v0.11.md` §7).
+  `ctrlrun scan --coverage` reads a store and reports the policy entries, gateway tools and
+  `@protect` actions that no receipt in it names.
+
+  **From what is already written**: no new event type and no new column. The action name lives on
+  the receipt rather than on the event, and every action that reached a decision leaves one, a
+  **denial included** — so an action that is always denied counts as exercised, because the deny
+  rule firing is the action being enforced rather than ignored.
+
+  **It is a list and not a score.** No percentage, no ratio, no badge, and it does not move the
+  exit code: a number that ranked a deployment would be `verify` grading an operator's document
+  in a new costume, which `SPEC-v0.4.md` §3.9 forbids. Every entry carries a reason that states
+  what was not found, and the report says in every rendering, empty or not, that **a policy entry
+  nothing exercised may be correctly unused** — a quarterly job, a deny rule that exists so the
+  action is refused rather than unknown, a tool nobody has needed yet.
+
 - **Retention: a prune that leaves the chain verifiable across the gap, a checkpoint, and a
   hold** (`SPEC-v0.11.md` §4 and rule 2). There has been no retention policy until now, and
   `../ctrlrun-docs/docs/postgres.md` said so in the same breath as the reason one is hard:
