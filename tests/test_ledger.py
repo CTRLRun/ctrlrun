@@ -338,7 +338,11 @@ def test_T414_the_migration_runs_and_a_0_8_0_store_upgrades(tmp_path) -> None:
     """`0007_budget_ledger` is additive and forward-only (`v0.6 §3`)."""
     from ctrlrun.migrations import HEAD, MIGRATIONS
 
-    assert HEAD == "0007_budget_ledger"
+    # `HEAD` moves with every milestone that adds a migration; what T414 is about is that
+    # `0007_budget_ledger` is additive and forward-only, which is asserted below against the
+    # migration itself rather than against whichever id happens to be last.
+    assert HEAD == "0008_anchor_checkpoint_hold"
+    assert any(migration.id == "0007_budget_ledger" for migration in MIGRATIONS)
     assert [migration.id for migration in MIGRATIONS][-1] == HEAD
     store = SQLiteStateStore(tmp_path / "state.db")
     try:

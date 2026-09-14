@@ -860,6 +860,19 @@ _FROZEN_V0_11: tuple[tuple[str, str, str | None, str], ...] = (
     # Item 1 (SPEC-v0.11 §5.2).
     ("ctrlrun.receipt", "UnreadableReceipt", None, "name"),
     ("ctrlrun.state", "StateStore.receipts", "UnreadableReceipt", "returns"),
+    # Item 2 (SPEC-v0.11 §3).
+    ("ctrlrun.anchor", "AnchorProvider", None, "name"),
+    ("ctrlrun.anchor", "ANCHOR_BREAKS", None, "name"),
+    ("ctrlrun.anchor", "verify_anchors", None, "name"),
+    ("ctrlrun.anchor", "AnchorReport", None, "name"),
+    ("ctrlrun.control", "Control", "anchor", "parameter"),
+    ("ctrlrun.state", "StateStore.put_anchor", None, "name"),
+    ("ctrlrun.state", "StateStore.anchors", None, "name"),
+    # A **membership** claim on a named symbol, because a migration id can never be an attribute
+    # path: `hasattr(ctrlrun.migrations, "0008_...")` cannot be true, since a name beginning with
+    # a digit is not an identifier. This is the row §9 says a bare third element cannot express,
+    # and the reason every row here carries a `kind`.
+    ("ctrlrun.migrations", "MIGRATIONS", "0008_anchor_checkpoint_hold", "member"),
 )
 
 

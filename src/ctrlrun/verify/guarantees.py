@@ -214,6 +214,18 @@ GUARANTEES: Final = (
         ("v0.10 §4.3", "v0.10 §4.7 T490", "v0.10 §4.7 T493"),
     ),
     Guarantee(
+        "G28",
+        # 30 characters against `report._TITLE_WIDTH`'s 32. **It says truncation and does not say
+        # append**, and an earlier draft said both. §2.4's table is what this title has to agree
+        # with: an append lands above every anchored `seq`, so no anchored pair stops reproducing
+        # and a later anchor freezes the forged chain as readily as an honest one. Correcting the
+        # prose that argues a claim and leaving the claim in the registry would be worse than not
+        # correcting it: the argument is read once and the registry is read by every operator who
+        # runs `verify`.
+        "truncation past an anchor fails",
+        ("v0.11 §3", "v0.11 §3.6 T530", "v0.11 §3.6 T533"),
+    ),
+    Guarantee(
         "G31",
         # 27 characters against `report._TITLE_WIDTH`'s 32. It grades **the walk**, not the
         # field: `schema` has existed since v0.3 and `SPEC-v0.11 §6` adds no field. What was

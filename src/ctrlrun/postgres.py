@@ -43,6 +43,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from .action import Action
+from .anchor import Anchor
 from .approval import (
     Approval,
     ApprovalRecord,
@@ -2200,5 +2201,47 @@ class PostgresStateStore:
     def chain_head(self) -> tuple[int, str] | None:
         with self._connection().cursor() as cursor:
             cursor.execute(f"SELECT seq, hash FROM {self._q}.receipt_chain WHERE id = 1")
+            row = cursor.fetchone()
+        return None if row is None else (int(row[0]), str(row[1]))
+
+    # --- anchors (SPEC-v0.11 §3.3) ----------------------------------------------------
+
+    def put_anchor(self, anchor: Anchor) -> None:
+        """Cache one anchor. A cache and never the record (§3.3), as SQLite's is."""
+        connection = self._connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO {self._q}.anchors (token, seq, hash, kind, at) "
+                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (token) DO NOTHING",
+                    (anchor.token, anchor.seq, anchor.hash, anchor.kind, anchor.at),
+                )
+        except BaseException:
+            self._rollback(connection)
+            raise
+        self._commit(connection)
+
+    def anchors(self) -> tuple[Anchor, ...]:
+        with self._connection().cursor() as cursor:
+            cursor.execute(
+                f"SELECT token, seq, hash, kind, at FROM {self._q}.anchors "
+                "ORDER BY seq, kind, token"
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            Anchor(
+                seq=int(row[1]),
+                hash=str(row[2]),
+                token=str(row[0]),
+                kind=str(row[3]),
+                at=row[4],
+            )
+            for row in rows
+        )
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        """The `seq` a prune pruned through and the hash at it (SPEC-v0.11 §4.2, §4.6)."""
+        with self._connection().cursor() as cursor:
+            cursor.execute(f"SELECT seq, hash FROM {self._q}.prune_checkpoint WHERE id = 1")
             row = cursor.fetchone()
         return None if row is None else (int(row[0]), str(row[1]))

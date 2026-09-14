@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast
 
 from .action import Action, Principal, canonical_bytes
+from .anchor import AnchorProvider
 from .approval import (
     APPROVAL_UNRECORDED,
     APPROVALS_UNVERIFIABLE,
@@ -844,6 +845,7 @@ class Control:
         approver_identity: ApproverIdentity | None = None,
         require_approved_policy: bool = False,
         upstream: str | None = None,
+        anchor: AnchorProvider | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
@@ -865,6 +867,17 @@ class Control:
         # SPEC-v0.8 §8.4. **In code and not in the file it governs**, or the file would switch
         # off its own governance. Default false: opt in, then fail closed.
         self._require_approved_policy = require_approved_policy
+        # SPEC-v0.11 §9 — **a property of the deployment, not of an action**, which is why it is
+        # here and not on `execute`. A deployment anchors its receipt chain or it does not; no
+        # single action decides that, and a per-action parameter would invite one caller to
+        # anchor and another not to, in the same store.
+        #
+        # `Control` never *makes* an anchor on an action's path. Anchoring is an operator's act
+        # on a schedule (`ctrlrun anchor`), and putting it on the write path would mean an
+        # unreachable timestamp authority could block an agent from acting, which is a
+        # availability cost this milestone has no reason to impose: the anchor is about reading
+        # the record later, not about deciding now.
+        self._anchor = anchor
         # SPEC-v0.10 §4.3 — the upstream this deployment fronts, which only a surface holding the
         # connection can name. The gateway passes `GatewayConfig.upstream`; in-process it is
         # `None`, and §4.4 makes a pinned action refuse `upstream_unverified` there.

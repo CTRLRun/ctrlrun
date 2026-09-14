@@ -44,6 +44,7 @@ from typing import Any, Final
 from uuid import uuid4
 
 from ..action import Action, Principal
+from ..anchor import Anchor, make_anchor, verify_anchors
 from ..approval import (
     DEFAULT_APPROVAL_TTL,
     ApprovalStatus,
@@ -4583,6 +4584,120 @@ class Engine:
             _upstream.forget(f"{reg.SYNTHETIC_PREFIX}-upstream")
             store.close()
 
+    # --- G28: a truncation past an anchor fails ------------------------------------------
+
+    def g28(self) -> GuaranteeResult:
+        """SPEC-v0.11 §3, §8. A chain truncated at or below an anchored `seq` is refused.
+
+        **The positive control is the attack itself**, run against a real store: truncate the
+        chain, fix the head the way an administrator with write access would, and require the
+        break to be named. Without it this guarantee ships a mechanism that has never seen the
+        thing it exists for, which is `SPEC-v0.4.md` §2.2's guarantee that could not have failed.
+        §2.1 measured the attack at two SQL statements, undetected:
+
+            two SQL statements: ok=True verified=3 breaks=[]
+
+        **Verify supplies the provider**, as it supplies a scope provider for `G23` and a
+        revocation feed for `G20`, and for the same reason §8.1 gives: a guarantee about a code
+        surface is graded against a scenario verify constructs rather than reported `N/A` about
+        something it never saw. Whether *this* deployment configures a provider is a fact about
+        its own code, which verify does not read, and the report says so.
+
+        **What this does NOT grade, and the title does not claim:** an append. §2.4's table is
+        the whole bounded claim, and an appended row lands above every anchored `seq`, so no
+        anchored pair stops reproducing. `T533` asserts that directly, so the limit is a tested
+        property rather than a sentence in a document.
+        """
+        selection = self.select(decisions=(Decision.ALLOW, Decision.APPROVE, Decision.DENY))
+        if selection is None:
+            return self.na("G28", self.unselected(reg.NO_ACTIONS))
+        control, store, recorder, _ = self._control_for("G28", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            for index in range(4):
+                action = selection.build()
+                key = (
+                    None
+                    if selection.effect_key is None
+                    else f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-anchor-{index}"
+                )
+                with suppress(CTRLRunError):
+                    self.execute(
+                        control,
+                        action,
+                        _Executor(lambda: f"{APPROVER}-result"),
+                        key,
+                        self.approve(control, store, action, selection),
+                    )
+            written = _written(store)
+            _expect_control(
+                len(written) >= 3,
+                "the scenario wrote a chain to anchor",
+                f"only {len(written)} receipts reached the store",
+            )
+
+            provider = _VerifyAnchorProvider()
+            made = make_anchor(store, provider)
+            detail["anchored_seq"] = made.seq
+
+            # The control: an untouched chain reproduces its anchor. Without this, every
+            # assertion below passes against a checker that always says broken.
+            intact = verify_anchors(store, provider)
+            _expect_control(
+                intact.ok and intact.checked == 1 and not intact.unavailable,
+                "an untouched chain reproduces its anchor",
+                f"it reported ok={intact.ok} checked={intact.checked} "
+                f"{[(b.name, b.seq) for b in intact.breaks]}",
+            )
+
+            # §2.1's attack: erase a suffix and fix the head, which is what makes it invisible to
+            # the chain. Verify does not know which backend it is on, so it presents the
+            # truncated chain as a view rather than issuing a DELETE.
+            kept = tuple(item for item in written if item.seq is not None and item.seq <= 2)
+            _expect_control(
+                bool(kept) and len(kept) < len(written),
+                "the truncation removes some receipts and keeps some",
+                f"it kept {len(kept)} of {len(written)}",
+            )
+            last_seq, last_hash = kept[-1].seq, kept[-1].hash
+            _expect_control(
+                last_seq is not None and last_hash is not None,
+                "the receipts kept by the truncation carry a seq and a hash",
+                f"the last kept receipt has seq={last_seq!r} hash={last_hash!r}",
+            )
+            assert last_seq is not None and last_hash is not None  # narrowed by the control
+            # The head is fixed to name the new last row, which is exactly what makes §2.1's
+            # attack invisible to the chain: without this the chain would report head_mismatch
+            # and the anchor would be grading something the chain already caught.
+            truncated = _AnchoredChain(kept, (last_seq, last_hash), store)
+
+            # The chain alone does not notice, which is the defect this item exists to answer.
+            chain = verify_chain(truncated)
+            detail["chain_after_truncation"] = {
+                "ok": chain.ok,
+                "breaks": [{"name": b.name, "seq": b.seq} for b in chain.breaks],
+            }
+
+            report = verify_anchors(truncated, provider)
+            detail["anchor_breaks"] = [{"name": b.name, "seq": b.seq} for b in report.breaks]
+            _expect(
+                not report.ok and not report.unavailable,
+                "a chain truncated past an anchored seq is refused against its anchor",
+                f"the anchor report was ok={report.ok} unavailable={report.unavailable}",
+            )
+            _expect(
+                any(
+                    item.name == "anchor_broken" and item.seq == made.seq for item in report.breaks
+                ),
+                f"the truncation is named `anchor_broken` at seq {made.seq}",
+                f"it was reported as {[(b.name, b.seq) for b in report.breaks]}",
+            )
+
+        try:
+            return self.graded("G28", selection, store, recorder, body)
+        finally:
+            store.close()
+
     # --- G31: one chain, five receipt schema versions, walked end to end ------------------
 
     def g31(self) -> GuaranteeResult:
@@ -4942,6 +5057,73 @@ def _post(connection: Any, *, pause: Callable[[], None] | None = None) -> str:
     finally:
         connection.close()
     return f"{APPROVER}-result"
+
+
+class _VerifyAnchorProvider:
+    """The anchor provider verify supplies for `G28` (SPEC-v0.11 §3.2, §8.1).
+
+    In memory, and deliberately the simplest thing that satisfies the protocol: it records what
+    it was asked to vouch for and answers about it. It is **not** a timestamp authority and does
+    not pretend to be one. What `G28` grades is that CTRLRun asks the right questions of whatever
+    the operator supplies and refuses on the right answers, exactly as `G23` grades a scope
+    provider verify supplies rather than one it found.
+
+    Its clock moves forward on every `make`, because §3.2 refuses an anchor whose time runs
+    backwards and a provider returning a constant would make that rule ungradeable.
+    """
+
+    def __init__(self) -> None:
+        self._held: dict[str, Anchor] = {}
+        self._at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def make(self, seq: int, hash: str, kind: str) -> tuple[str, datetime]:
+        self._at += timedelta(seconds=1)
+        token = f"{reg.SYNTHETIC_PREFIX}-anchor-{kind}-{seq}"
+        self._held[token] = Anchor(seq=seq, hash=hash, token=token, kind=kind, at=self._at)
+        return token, self._at
+
+    def check(self, seq: int, hash: str, token: str) -> bool:
+        held = self._held.get(token)
+        return held is not None and held.seq == seq and held.hash == hash
+
+    def latest(self) -> tuple[int, str] | None:
+        if not self._held:
+            return None
+        best = max(self._held.values(), key=lambda item: item.seq)
+        return (best.seq, best.token)
+
+    def since(self, seq: int) -> tuple[Anchor, ...]:
+        return tuple(item for item in self._held.values() if item.seq >= seq)
+
+
+@dataclass(frozen=True)
+class _AnchoredChain:
+    """A store's chain with a suffix erased and the head fixed, as §2.1's attack leaves it.
+
+    Verify does not know which backend it is on, so it cannot truncate with a `DELETE`. This
+    presents what the store would return afterwards, to the same readers an operator runs.
+
+    The anchors and the checkpoint come from the **real** store, because the attack §2.1
+    describes erases receipts and rewrites the head; it does not touch the anchor cache. The
+    case where it touches that too is `T532`, and it is a different break.
+    """
+
+    _receipts: tuple[Receipt, ...]
+    _head: tuple[int, str] | None
+    _store: Any
+
+    def receipts(self) -> tuple[Receipt, ...]:
+        return self._receipts
+
+    def chain_head(self) -> tuple[int, str] | None:
+        return self._head
+
+    def anchors(self) -> tuple[Anchor, ...]:
+        return tuple(self._store.anchors())
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        result: tuple[int, str] | None = self._store.checkpoint()
+        return result
 
 
 @dataclass(frozen=True)
