@@ -35,8 +35,12 @@ from .approval import (
     APPROVER_UNENTITLED,
     VerifiedApprover,
 )
+
+# `decision.py` imports nothing from the package, so this is downward and the cycle
+# `state -> receipt -> policy -> authority -> state` that ARCHITECTURE §6 recorded is gone.
+# These two names were the whole of what a receipt needed from the decider.
+from .decision import POLICY_UNAPPROVED, Decision
 from .errors import CTRLRunError, InvalidArgument
-from .policy import POLICY_UNAPPROVED, Decision
 
 #: SPEC-v0.3 §12.2. The bump landed with build-list item 1, because that is when the first v2
 #: field appeared — the principal's claims, issuer and expiry. `execution` and `would_have`

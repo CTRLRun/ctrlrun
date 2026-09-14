@@ -21,7 +21,6 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from enum import StrEnum
 from functools import cached_property, partial
 from pathlib import Path
 from types import MappingProxyType
@@ -30,6 +29,13 @@ from typing import Any, Final, Literal
 import yaml
 
 from .action import Action, PlainValue, canonical_bytes
+
+# Re-exported, not merely used. `SPEC-v0.1.md` §8 freezes `from .policy import Decision, Policy`
+# in `__init__.py`, and `adapter.py` imports `Decision` from here too. Both names moved down to
+# break the module cycle §6 records, and both still resolve from this module because that block
+# is a frozen public surface and a cycle is not a reason to move a published import path.
+from .decision import POLICY_UNAPPROVED as POLICY_UNAPPROVED
+from .decision import Decision as Decision
 from .effect import template_placeholders
 from .errors import InvalidArgument, PolicyError
 
@@ -185,12 +191,6 @@ _V5_ENTRY_KEYS: Final[Mapping[str, str]] = {
 #: rules were mutually exclusive.
 POLICY_CHANGE_ACTION: Final = "ctrlrun.policy.change"
 
-#: SPEC-v0.8 §8.4 — the refusal a deployment gets under a policy nobody approved. Its own
-#: reason, never folded into `unknown_action` or a generic denial: "this policy was never
-#: approved" and "this policy denies this action" are different facts and an operator acts on
-#: them differently.
-POLICY_UNAPPROVED: Final = "policy_unapproved"
-
 #: SPEC-v0.10 §4.5 — the two upstream refusals, separately observable because "the server
 #: changed" and "nobody has checked" are different findings an operator fixes differently.
 #: `UPSTREAM_UNVERIFIED` is the fail-closed half and the one to get right: a pin that does
@@ -332,17 +332,6 @@ _CUT_DATA_KEYS: Final[Mapping[str, str]] = {
         "the value from the auditor and from nobody else"
     ),
 }
-
-
-class Decision(StrEnum):
-    """What may happen to an action: exactly three outcomes in v0.1 (SPEC-v0.1 §3.3).
-
-    `StrEnum`, so a member renders as its value in receipts and CLI output (SPEC-v0.1 §6.1).
-    """
-
-    ALLOW = "allow"
-    APPROVE = "approve"
-    DENY = "deny"
 
 
 @dataclass(frozen=True)

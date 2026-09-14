@@ -50,6 +50,11 @@ from .errors import IdentityError, InvalidArgument, MissingDependency
 from .identity import IdentityContext
 from .revocation import FEED_STALE, RevocationFeed
 
+# `_NoRedirects` is re-exported, not merely used: it was defined here until v0.12, and both
+# `tests/test_revocation_feed.py` and anything else reaching for `jwt_identity._NoRedirects`
+# still resolve. It moved down to break the layering cycle §6 forbids; it did not change.
+from .revocation import _NoRedirects as _NoRedirects
+
 _LOG = logging.getLogger("ctrlrun")
 
 #: The module this provider needs, and the extra that carries it.
@@ -484,30 +489,6 @@ class JWTIdentityProvider:
             _LOG.warning("the JWK Set at %s is not a JSON object", self._jwks_url)
             raise IdentityError(_REFUSED)
         return document
-
-
-class _NoRedirects(urllib.request.HTTPRedirectHandler):
-    """A redirect handler that redirects nowhere (SPEC-v0.3 §3.4).
-
-    `urllib.request.build_opener` does **not** drop `HTTPRedirectHandler` when it is handed an
-    `HTTPSHandler` — the default classes it removes are only the ones an argument is an
-    instance or subclass of, and the two are unrelated. An opener built that way still follows
-    a 302, and `HTTPRedirectHandler` permits `http`, `https` and `ftp` targets: an open
-    redirect on the issuer's domain would make this process fetch its signing keys, in
-    cleartext, from wherever the redirect pointed. Those keys are cached for the life of the
-    process, so every token the attacker then signs verifies, with an arbitrary `agent` and
-    `user`. That is the whole authority model, bypassed at the one input that decides who
-    everybody is.
-
-    Subclassing and refusing is the reliable way to say "no redirects": passing an instance of
-    a subclass *does* displace the default, which passing an unrelated handler does not.
-    """
-
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> None:
-        _LOG.warning("the JWK Set at %s redirected to %s; refusing to follow", req.full_url, newurl)
-        return None
 
 
 class _Key:
