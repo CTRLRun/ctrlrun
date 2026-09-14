@@ -27,6 +27,7 @@ costs an operator an error message; getting this wrong costs them the record.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final, Protocol
@@ -205,6 +206,8 @@ class RetentionStore(Protocol):
 
     def get_effect(self, effect_key: str) -> _EffectRow | None: ...
 
+    def pruning(self) -> AbstractContextManager[None]: ...
+
     def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]: ...
 
     def put_anchor(self, anchor: Anchor) -> None: ...
@@ -378,6 +381,27 @@ def prune(
     if older_than < timedelta(0):
         raise InvalidArgument("--older-than must not be negative")
 
+    # §4.5: **the lock is held across the validation and the delete**, not only the delete.
+    # Two prunes that both validated and then both acted would each be individually valid under
+    # §10 and together break rule 2, which is the case §4.5 measured. A first implementation took
+    # the lock inside `delete_prefix`, and a probe against a real Postgres server found the pair
+    # serialized by the *anchor* ordering instead: shared state, but not a lock.
+    #
+    # A hold is therefore consulted **inside** this, which §4.5 also requires: a hold placed
+    # between a consult and a delete would be honoured by neither.
+    with store.pruning():
+        return _prune_locked(store, through=through, older_than=older_than, anchor=anchor, now=now)
+
+
+def _prune_locked(
+    store: RetentionStore,
+    *,
+    through: int,
+    older_than: timedelta,
+    anchor: AnchorProvider,
+    now: datetime,
+) -> PruneResult:
+    """Everything a prune does while it holds the receipt-write lock."""
     head = store.chain_head()
     if head is None:
         raise InvalidArgument("this store has no chain head; there is nothing to prune")
