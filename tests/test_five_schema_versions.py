@@ -1,0 +1,334 @@
+# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-License-Identifier: Apache-2.0
+"""One chain, five receipt schema versions, walked end to end. SPEC-v0.11 §6; T521-T525.
+
+A store kept since v0.6 holds **five** receipt schema versions: `v3` (0.6), `v4` (0.7), `v5`
+(0.8), `v6` (0.9), `v7` (0.10). The count comes from `receipt.py`'s constants, which is the only
+place it cannot be stale: `ROADMAP.md` has said "three shapes", then "four", and was wrong at the
+next release both times.
+
+**No new field.** `schema` has existed since `SPEC-v0.3.md` §12.2 and the rule since then is that
+every reader upgrades before any writer switches, so an older receipt on disk still parses. What
+was never proved is that `verify_chain` walks such a chain **hash by hash, each row hashed by the
+rule its own version wrote**. v0.10's release pass proved the `v6`/`v7` boundary against the
+released 0.9.0 and stopped there.
+
+**The premise is proved against the released wheels, not against fixtures**, by
+`scripts/five_schema_chain.py`, which needs a network and five virtual environments and is
+therefore a script rather than a test. Its transcript on 2026-09-14, against this build::
+
+    0.6.1   wrote 2 receipts under ctrlrun.receipt/v3; store now holds 2
+    0.7.0   wrote 2 receipts under ctrlrun.receipt/v4; store now holds 4
+    0.8.0   wrote 2 receipts under ctrlrun.receipt/v5; store now holds 6
+    0.9.0   wrote 2 receipts under ctrlrun.receipt/v6; store now holds 8
+    0.10.0  wrote 2 receipts under ctrlrun.receipt/v7; store now holds 10
+
+      receipts:              10
+      schemas in ONE chain:  5
+        ctrlrun.receipt/v3     at seq [1, 2]
+        ctrlrun.receipt/v4     at seq [3, 4]
+        ctrlrun.receipt/v5     at seq [5, 6]
+        ctrlrun.receipt/v6     at seq [7, 8]
+        ctrlrun.receipt/v7     at seq [9, 10]
+      verify_chain:          ok=True verified=10 chained=10 unchained=0
+      breaks:                none
+
+**That run was wrong the first time and the way it was wrong is worth keeping.** Run as
+`PYTHONPATH=src python scripts/five_schema_chain.py`, the variable is inherited by every child,
+so each "released wheel" imported this build's `src/ctrlrun` instead of the wheel installed
+beside it. It printed a chain of ten receipts that verified perfectly and reported **one** schema
+version. The script now strips the variable and asserts, per release, that the interpreter it
+just ran came from that release's own environment.
+
+What is kept here is the invariant, so that a later change breaks the ordinary suite rather than
+only a release rehearsal.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from ctrlrun import Control, Policy, SQLiteStateStore
+from ctrlrun.action import Action, Principal
+from ctrlrun.receipt import (
+    GENESIS_HASH,
+    KNOWN_RECEIPT_SCHEMAS,
+    RECEIPT_SCHEMA,
+    Receipt,
+    _document_hash,
+    new_receipt_id,
+    verify_chain,
+)
+
+T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+LEASE = timedelta(minutes=5)
+ALLOW = "schema: ctrlrun.policy/v1\nactions:\n  stripe.refund:\n    decision: allow\n"
+
+#: The five a store kept since v0.6 can hold, oldest first. Written out **here** deliberately,
+#: where `scenarios.py` derives its list from `KNOWN_RECEIPT_SCHEMAS`: a derived list and a
+#: derived assertion about it agree with each other no matter what either says, and T522 is what
+#: makes the derivation answerable to something.
+CHAINED_SCHEMAS = (
+    "ctrlrun.receipt/v3",
+    "ctrlrun.receipt/v4",
+    "ctrlrun.receipt/v5",
+    "ctrlrun.receipt/v6",
+    "ctrlrun.receipt/v7",
+)
+
+
+def an_action(payment_id: str) -> Action:
+    return Action(
+        name="stripe.refund",
+        arguments={"payment_id": payment_id, "amount": 2000},
+        principal=Principal(agent="chain-agent"),
+    )
+
+
+def a_chain_of_every_schema(seed: Receipt) -> tuple[tuple[Receipt, ...], str]:
+    """One chained receipt per schema version, linked the way `put_receipt` links them.
+
+    `seq` and `prev_hash` go **into** the document before it is hashed, which is what makes them
+    tamper-evident (`SPEC-v0.6.md` §6.2); `hash` is a column and never a key, so it is attached
+    afterwards. The document renders under each row's own schema's key set, which is
+    `SPEC-v0.7.md` §6.11 and the whole reason one chain can hold five shapes.
+    """
+    rows: list[Receipt] = []
+    previous = GENESIS_HASH
+    for position, label in enumerate(CHAINED_SCHEMAS, start=1):
+        row = replace(
+            seed,
+            receipt_id=new_receipt_id(),
+            schema=label,
+            seq=position,
+            prev_hash=previous,
+            hash=None,
+        )
+        previous = _document_hash(row.to_dict())
+        rows.append(replace(row, hash=previous))
+    return tuple(rows), previous
+
+
+class _Chain:
+    """A `ChainSource` over receipts this test built (`SPEC-v0.6.md` §6.5's protocol)."""
+
+    def __init__(self, rows: tuple[Receipt, ...], head: tuple[int, str] | None) -> None:
+        self._rows = rows
+        self._head = head
+
+    def receipts(self) -> tuple[Receipt, ...]:
+        return self._rows
+
+    def chain_head(self) -> tuple[int, str] | None:
+        return self._head
+
+
+@pytest.fixture
+def seed(tmp_path) -> Receipt:
+    """A real receipt, written by this binary through the ordinary path."""
+    store = SQLiteStateStore(tmp_path / "seed.db", clock=lambda: T0)
+    control = Control(Policy.from_yaml(ALLOW), store, clock=lambda: T0)
+    control.execute(an_action("p0"), lambda: {"ok": True}, "refund:p0", lease=LEASE)
+    written = store.receipts()[0]
+    store.close()
+    assert isinstance(written, Receipt)
+    return written
+
+
+# --- T521: the walk ----------------------------------------------------------------------------
+
+
+def test_T521_a_chain_of_five_receipt_schema_versions_verifies_end_to_end(seed) -> None:
+    """SPEC-v0.11 §6. **The deliverable.**
+
+    The positive control comes first and is not decoration: a chain of five rows that all carry
+    the *current* schema verifies perfectly and proves nothing, so the distinct-label count is
+    asserted before the walk is. That is `SPEC-v0.4.md` §2.2's guarantee that could not have
+    failed, in the place it would be easiest to write by accident.
+    """
+    rows, head = a_chain_of_every_schema(seed)
+    labels = sorted({row.schema for row in rows})
+
+    assert len(labels) == 5, f"the chain does not span five schemas: {labels}"
+    assert labels == sorted(CHAINED_SCHEMAS)
+
+    report = verify_chain(_Chain(rows, (len(rows), head)))
+
+    assert report.ok, [(item.name, item.seq) for item in report.breaks]
+    assert report.verified == 5
+    assert report.chained == 5
+    assert report.unchained == 0
+    assert report.breaks == []
+
+
+@pytest.mark.parametrize("position", range(5), ids=[s.rsplit("/", 1)[-1] for s in CHAINED_SCHEMAS])
+def test_T521b_altering_the_row_of_any_one_version_is_named_at_its_seq(seed, position) -> None:
+    """Every row is load-bearing, not just the newest.
+
+    Without this, a walk that skipped rows whose label it did not recognise would pass `T521`
+    and "verified" would be a count of the rows it bothered to read. Parametrized over all five,
+    because a walk could plausibly read the two it knows best and skip the rest.
+    """
+    rows, head = a_chain_of_every_schema(seed)
+    target = rows[position]
+    altered = replace(target, decision_reason=f"{target.decision_reason}-altered")
+    damaged = tuple(altered if row.seq == target.seq else row for row in rows)
+
+    report = verify_chain(_Chain(damaged, (len(rows), head)))
+
+    assert not report.ok, f"altering the {target.schema} row was not detected"
+    named = [(item.name, item.seq) for item in report.breaks]
+    assert ("content_altered", target.seq) in named, (
+        f"altering a {target.schema} row was reported as {named}"
+    )
+
+
+# --- T522: the count comes from the constants, not from a document -----------------------------
+
+
+def test_T522_the_schemas_a_chain_can_hold_are_the_ones_receipt_py_declares() -> None:
+    """SPEC-v0.11 §6. `ROADMAP.md` said "three shapes", then "four", and was wrong at the next
+    release both times, which is the argument for reading `receipt.py`'s constants instead.
+
+    This is what makes `scenarios.py`'s **derived** list answerable to something. A derived list
+    and a derived assertion about it agree no matter what either says; this states the five
+    independently, so adding `v8` without adding it here goes red and somebody decides whether
+    the new version belongs in the chain G31 grades.
+    """
+    from ctrlrun.verify.scenarios import _OLDER_RECEIPT_SCHEMAS
+
+    assert RECEIPT_SCHEMA == "ctrlrun.receipt/v7", (
+        "the current receipt schema moved; CHAINED_SCHEMAS and SPEC-v0.11 §6's count of five "
+        "both need a decision, and G31 grades whatever this list says"
+    )
+    assert set(CHAINED_SCHEMAS) <= KNOWN_RECEIPT_SCHEMAS
+    assert CHAINED_SCHEMAS[-1] == RECEIPT_SCHEMA
+    assert tuple(_OLDER_RECEIPT_SCHEMAS) == CHAINED_SCHEMAS[:-1], (
+        f"verify grades {_OLDER_RECEIPT_SCHEMAS} and this file says {CHAINED_SCHEMAS[:-1]}"
+    )
+    # `v1` and `v2` are known and are NOT in the chain's set: the chain arrived in `v3`
+    # (SPEC-v0.6 §6.2), so those rows carry no `seq` and are `unchained`, which G11 covers and
+    # which is never a pass.
+    assert {"ctrlrun.receipt/v1", "ctrlrun.receipt/v2"} <= KNOWN_RECEIPT_SCHEMAS
+    assert "ctrlrun.receipt/v1" not in CHAINED_SCHEMAS
+    assert "ctrlrun.receipt/v2" not in CHAINED_SCHEMAS
+
+
+# --- T523: a version this binary does not know -------------------------------------------------
+
+
+def test_T523_a_receipt_from_a_future_version_is_named_and_is_not_a_break(seed) -> None:
+    """SPEC-v0.11 §6.2. `SPEC-v0.6.md` §3.2 draws the same line for a `schema_version` row the
+    binary does not know, and the difference matters to the only person who reads the output:
+    *this evidence is from a future version* and *this evidence is tampered with* are different
+    sentences that call for different actions.
+
+    **Constructed honestly**, which is the whole difficulty: relabelling a stored row is a
+    *tamper*, and `content_altered` is the right answer to that. A receipt a future writer
+    actually wrote carries a hash computed over its own document, so that is what this builds.
+    """
+    future = "ctrlrun.receipt/v9"
+    assert future not in KNOWN_RECEIPT_SCHEMAS, "pick a version this binary really does not know"
+
+    rows, _ = a_chain_of_every_schema(seed)
+    tail = replace(
+        rows[-1],
+        receipt_id=new_receipt_id(),
+        schema=future,
+        seq=len(rows) + 1,
+        prev_hash=rows[-1].hash,
+        hash=None,
+    )
+    digest = _document_hash(tail.to_dict())
+    rows = (*rows, replace(tail, hash=digest))
+
+    report = verify_chain(_Chain(rows, (len(rows), digest)))
+
+    assert report.ok, (
+        "a receipt written by a version this binary does not know was reported as a break: "
+        f"{[(item.name, item.seq) for item in report.breaks]}"
+    )
+    assert report.verified == 6
+    assert report.breaks == []
+    # And it is **named**: a reader can tell which row it could not fully interpret, rather than
+    # the row passing silently as though this binary had read every field in it.
+    unknown = [row.seq for row in rows if row.schema not in KNOWN_RECEIPT_SCHEMAS]
+    assert unknown == [6], unknown
+
+
+def test_T523b_a_relabelled_row_is_a_tamper_and_is_reported_as_one(seed) -> None:
+    """The other side of §6.2, and the reason it needs stating.
+
+    Taking a stored `v7` row and writing `v9` on it **without** rehashing is somebody editing
+    evidence, not a future version. It must be `content_altered`, and a reader that treated any
+    unknown label as "from the future, nothing to see" would have made relabelling a way to
+    launder a tamper.
+    """
+    rows, head = a_chain_of_every_schema(seed)
+    target = rows[-1]
+    relabelled = replace(target, schema="ctrlrun.receipt/v9")
+    damaged = tuple(relabelled if row.seq == target.seq else row for row in rows)
+
+    report = verify_chain(_Chain(damaged, (len(rows), head)))
+
+    assert not report.ok, "relabelling a stored row to an unknown version was not detected"
+    assert ("content_altered", target.seq) in [(item.name, item.seq) for item in report.breaks]
+
+
+# --- T524: G31 grades it, and agrees with itself -----------------------------------------------
+
+
+def test_T524_G31_is_in_the_catalogue_and_the_catalogue_moved_once() -> None:
+    """SPEC-v0.11 §8. The catalogue moves to `v7` once, with whichever item lands first."""
+    from ctrlrun.verify import guarantees as reg
+
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v7"
+    assert reg.BY_ID["G31"].title == "five receipt schemas verify"
+    assert reg.BY_ID["G31"].descends_from, "G31 names no acceptance test"
+    # §8 assigns ids in item order, so G31 lands before G28 to G30 exist. A stub row for them
+    # would report something before its check existed, which is the false green §8 forbids.
+    assert {"G28", "G29", "G30", "G32"}.isdisjoint({g.id for g in reg.GUARANTEES})
+
+
+# --- T525: the script that proves the premise --------------------------------------------------
+
+
+def test_T525_the_released_wheel_script_strips_what_would_make_it_lie() -> None:
+    """The methodology, asserted rather than trusted.
+
+    `scripts/five_schema_chain.py` is the half of §6.1 that uses the **released** wheels, and its
+    first run was wrong in a way that looked exactly like a pass: `PYTHONPATH` is inherited by
+    every child, so every "released wheel" imported this build's source and the script reported
+    one schema version across a chain of ten receipts.
+
+    The script is not run here: it needs a network and builds five virtual environments. What is
+    checked is that the two guards which make its answer mean anything are still in it, because
+    a script whose methodology quietly regressed would go on printing a convincing transcript.
+    """
+    script = Path(__file__).resolve().parent.parent / "scripts" / "five_schema_chain.py"
+    source = script.read_text(encoding="utf-8")
+
+    assert "PYTHONPATH" in source, "the script no longer strips PYTHONPATH from its children"
+    assert "_clean_environment" in source
+    assert source.count("env=_clean_environment()") >= 3, (
+        "a subprocess in the script runs with this process's environment, so it may import this "
+        "build instead of the wheel it just installed"
+    )
+    assert "_require_wrote_as" in source, (
+        "the script no longer checks that each release ran from its own environment, which is "
+        "the positive control for the stripping above"
+    )
+    for version, _schema in (
+        ("0.6.1", ""),
+        ("0.7.0", ""),
+        ("0.8.0", ""),
+        ("0.9.0", ""),
+        ("0.10.0", ""),
+    ):
+        assert version in source, f"the script no longer builds the chain with {version}"
+    for schema in CHAINED_SCHEMAS:
+        assert schema in source, f"the script no longer expects {schema}"
