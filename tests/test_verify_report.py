@@ -149,8 +149,8 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
         # where nothing does. So the first two gain a pass and the third gains an N/A.
         # The passes are literal because they are the point; the N/A count is derived, for the
         # reason above. `len(reg.GUARANTEES)` moves with the catalogue and these fixtures do not.
-        (ALL_APPLICABLE, "17/17 declared guarantees pass."),
-        (WITH_NOT_APPLICABLE, "12/12 declared guarantees pass."),
+        (ALL_APPLICABLE, "18/18 declared guarantees pass."),
+        (WITH_NOT_APPLICABLE, "13/13 declared guarantees pass."),
         (EMPTY, "0/0 declared guarantees pass."),
     ],
     ids=["passing", "some-na", "all-na"],
