@@ -42,6 +42,28 @@ any change to one appears here.
   trusted. Found by review; the tests that missed it all tampered with a row's *content*, and
   `{}` and a float among the controls are both valid JSON.
 
+- **One chain, five receipt schema versions, walked end to end** (`SPEC-v0.11.md` §6). A store
+  kept since v0.6 holds five: `v3` (0.6), `v4` (0.7), `v5` (0.8), `v6` (0.9), `v7` (0.10).
+  **No new field**: `schema` has existed since `SPEC-v0.3.md` §12.2. What is new is the proof
+  that `verify_chain` walks such a chain hash by hash, **each row hashed by the rule its own
+  version wrote**. v0.10's release pass proved the `v6`/`v7` boundary against the released 0.9.0
+  and stopped there.
+
+  `scripts/five_schema_chain.py` builds the chain from the **released wheels** rather than from
+  fixtures: five environments, `pip install ctrlrun==0.6.1`, `0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`,
+  one store, then this build verifies across the whole thing. A fixture is this build's opinion
+  of what 0.6 wrote; the wheel is what it wrote.
+
+  And a receipt whose schema label this binary does **not** know is named, not reported as a
+  break: `SPEC-v0.6.md` §3.2's distinction, and the difference between *this evidence is from a
+  future version* and *this evidence is tampered with*. Relabelling a stored row without
+  rehashing it is still `content_altered`, because that is somebody editing evidence.
+
+- **`G31`, five receipt schemas verify**, and `ctrlrun.guarantees/v6` becomes **`v7`**, moved
+  once. `G28` to `G30` and `G32` are not in the catalogue yet: `SPEC-v0.11.md` §8 assigns ids in
+  item order so that splitting the milestone renumbers nothing, and a row whose check does not
+  exist would report something before it could.
+
 ### Changed
 
 - **`StateStore.receipts()` returns `tuple[Receipt | UnreadableReceipt, ...]`**, amending
