@@ -149,8 +149,8 @@ def test_T113_a_failing_report_names_the_subject_and_prints_the_counterexample(
         # where nothing does. So the first two gain a pass and the third gains an N/A.
         # The passes are literal because they are the point; the N/A count is derived, for the
         # reason above. `len(reg.GUARANTEES)` moves with the catalogue and these fixtures do not.
-        (ALL_APPLICABLE, "16/16 declared guarantees pass."),
-        (WITH_NOT_APPLICABLE, "11/11 declared guarantees pass."),
+        (ALL_APPLICABLE, "17/17 declared guarantees pass."),
+        (WITH_NOT_APPLICABLE, "12/12 declared guarantees pass."),
         (EMPTY, "0/0 declared guarantees pass."),
     ],
     ids=["passing", "some-na", "all-na"],
@@ -208,7 +208,7 @@ def test_T114_the_document_matches_the_schema_field_for_field(tmp_path):
 
     assert set(document) == TOP_LEVEL
     assert document["schema"] == REPORT_SCHEMA == "ctrlrun.verify/v1"
-    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v6"
+    assert document["catalogue"] == reg.CATALOGUE == "ctrlrun.guarantees/v7"
     assert set(document["policy"]) == {"path", "sha256", "schema", "mode", "actions"}
     assert document["authority"] is None
     assert document["store"] == {"backend": "sqlite", "scratch": True}

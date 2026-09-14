@@ -111,9 +111,13 @@ from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
     Event,
     EventType,
+    GENESIS_HASH,
+    KNOWN_RECEIPT_SCHEMAS,
+    RECEIPT_SCHEMA,
     Receipt,
     ReceiptResult,
     UnreadableReceipt,
+    _document_hash,
     iso_timestamp,
     new_receipt_id,
     verify_chain,
@@ -4579,6 +4583,169 @@ class Engine:
             _upstream.forget(f"{reg.SYNTHETIC_PREFIX}-upstream")
             store.close()
 
+    # --- G31: one chain, five receipt schema versions, walked end to end ------------------
+
+    def g31(self) -> GuaranteeResult:
+        """SPEC-v0.11 §6, §8. A chain spanning five receipt schema versions verifies end to end.
+
+        **The walk, not the field.** `schema` has existed since `SPEC-v0.3.md` §12.2 and v0.11
+        adds no field. What was never proved is that `verify_chain` walks a chain holding more
+        than one of them, hash by hash, **each row hashed by the rule its own version wrote**.
+        v0.10's release pass proved the `v6`/`v7` boundary against the released 0.9.0 and stopped
+        there.
+
+        **Why this can be graded without installing five wheels**, which is the question to ask
+        of a scenario about released versions. `SPEC-v0.7.md` §6.11 made `to_dict` render under
+        *its own* schema's label and key set, and made a receipt hash the document it was read
+        from, through the same `_document_hash` every version has used. So a `Receipt` carrying
+        `ctrlrun.receipt/v3` serializes to v3's 26 keys and hashes to what 0.6 stored.
+
+        **It cannot go through `put_receipt`, and that is correct.** Every backend's
+        `put_receipt` does `replace(receipt, schema=RECEIPT_SCHEMA, ...)`: a writer writes under
+        its own schema, so an older receipt cannot be forged through the public API. The first
+        version of this scenario tried exactly that and control 1 below caught it, reporting a
+        chain of one label where it had asked for five. So the chain is presented as a
+        `ChainSource` **view**, which is what `G11` already does to alter a row, and the links
+        are computed the way `put_receipt` computes them: `seq` and `prev_hash` into the
+        document, then `_document_hash` over it, then that digest is the next row's `prev_hash`.
+
+        **The construction is self-checking.** If it were wrong, `verify_chain` would report
+        breaks and this scenario would fail rather than pass: there is no way for a badly built
+        chain to grade `PASS` here. What that does not cover is a walk that quietly skipped rows
+        whose label it did not recognise, so there are two controls, and neither is decoration:
+
+        1. The chain must really hold **five distinct schema labels** before the walk is graded.
+           A chain of five `v7` rows verifies perfectly and proves nothing, which is
+           `SPEC-v0.4.md` §2.2's guarantee that could not have failed.
+        2. An **older** row is then altered and the break must be named at its `seq`. Without it
+           "verified" would be a count of the rows the walk bothered to read.
+
+        `scripts/five_schema_chain.py` is the other half, and it is the one built from the
+        **released wheels**: five environments, five `pip install ctrlrun==`, one real store.
+        This guarantee is what an operator can run on their own host with no network; that
+        script is what proves the premise against what 0.6 actually wrote.
+        """
+        selection = self.select(decisions=(Decision.ALLOW, Decision.APPROVE, Decision.DENY))
+        if selection is None:
+            return self.na("G31", self.unselected(reg.NO_ACTIONS))
+        control, store, recorder, _ = self._control_for("G31", selection)
+
+        def body(detail: dict[str, Any]) -> None:
+            action = selection.build()
+            key = (
+                None
+                if selection.effect_key is None
+                else f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-schemas"
+            )
+            # One real receipt first, written by this binary through the ordinary path, so every
+            # row below is a real receipt's fields rather than a shape this scenario invented.
+            with suppress(CTRLRunError):
+                self.execute(
+                    control,
+                    action,
+                    _Executor(lambda: f"{APPROVER}-result"),
+                    key,
+                    self.approve(control, store, action, selection),
+                )
+            seed = _written(store)
+            _expect_control(
+                bool(seed),
+                "the scenario wrote a receipt to build the chain from",
+                "no receipt reached the store",
+            )
+
+            labels = (*_OLDER_RECEIPT_SCHEMAS, RECEIPT_SCHEMA)
+            rows: list[Receipt] = []
+            previous = GENESIS_HASH
+            for position, label in enumerate(labels, start=1):
+                # `seq` and `prev_hash` go into the document BEFORE it is hashed, because that
+                # is what makes them tamper-evident (SPEC-v0.6 §6.2). `hash` is a column and
+                # never a key, so it is set after.
+                row = replace(
+                    seed[-1],
+                    receipt_id=new_receipt_id(),
+                    schema=label,
+                    seq=position,
+                    prev_hash=previous,
+                    hash=None,
+                )
+                previous = _document_hash(row.to_dict())
+                rows.append(replace(row, hash=previous))
+
+            chain = _AlteredChain(tuple(rows), (len(rows), previous))
+            present = sorted({item.schema for item in rows})
+            detail["schemas"] = present
+            detail["receipts"] = len(rows)
+            # Control 1. Without it every assertion below passes on a chain of one version, and
+            # the first version of this scenario failed exactly here.
+            _expect_control(
+                len(present) == len(labels),
+                f"the chain holds {len(labels)} distinct receipt schemas",
+                f"it holds {present}",
+            )
+
+            report = verify_chain(chain)
+            _expect(
+                report.ok and report.verified == len(rows),
+                f"a chain of {len(present)} receipt schema versions verifies end to end",
+                f"it reported ok={report.ok} verified={report.verified} of {len(rows)}, "
+                f"{[(item.name, item.seq) for item in report.breaks]}",
+            )
+
+            # Control 2. Alter an OLDER row, never the newest: a walk that skipped labels it did
+            # not know would have passed everything above.
+            target = rows[0]
+            altered = replace(target, decision_reason=f"{target.decision_reason}-altered")
+            damaged = verify_chain(
+                _AlteredChain(
+                    tuple(altered if item.seq == target.seq else item for item in rows),
+                    (len(rows), previous),
+                )
+            )
+            detail["older_row_altered"] = {"schema": target.schema, "seq": target.seq}
+            _expect(
+                any(
+                    item.name == "content_altered" and item.seq == target.seq
+                    for item in damaged.breaks
+                ),
+                f"altering a {target.schema} row is named `content_altered` at seq {target.seq}",
+                f"it was reported as {[(b.name, b.seq) for b in damaged.breaks]}",
+            )
+
+        try:
+            return self.graded("G31", selection, store, recorder, body)
+        finally:
+            store.close()
+
+
+#: SPEC-v0.11 §6. Every receipt schema version a **chain** can hold other than the current one.
+#:
+#: Derived from `receipt.py`'s constants and never listed, because §6 says the count is taken
+#: from the only place it cannot be stale: `ROADMAP.md` has said "three shapes", then "four", and
+#: both went wrong at the next release. G31 then grades whatever this binary can actually write.
+#:
+#: **From `v3`, not from `v1`.** The chain itself arrived in `v3` (`SPEC-v0.6.md` §6.2), so a
+#: `v1` or `v2` receipt has no `seq` at all and is `unchained`, which is a different case, which
+#: `G11` already covers, and which is never a pass.
+#:
+#: The version is parsed as a **number** rather than compared as a string: `"ctrlrun.receipt/v10"`
+#: sorts below `"ctrlrun.receipt/v3"` lexically, so a string comparison here would quietly drop
+#: every row from v0.13 onward and G31 would go on passing over a shorter chain.
+def _schema_number(label: str) -> int:
+    return int(label.rsplit("/v", 1)[-1])
+
+
+_FIRST_CHAINED_SCHEMA: Final = 3
+_OLDER_RECEIPT_SCHEMAS: Final = tuple(
+    sorted(
+        (
+            label
+            for label in KNOWN_RECEIPT_SCHEMAS
+            if _schema_number(label) >= _FIRST_CHAINED_SCHEMA and label != RECEIPT_SCHEMA
+        ),
+        key=_schema_number,
+    )
+)
 
 #: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
 #: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a

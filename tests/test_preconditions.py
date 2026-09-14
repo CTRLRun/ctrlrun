@@ -2096,7 +2096,7 @@ def _g16(path, **kwargs):
 def test_T269_G16_is_in_the_catalogue():
     from ctrlrun.verify import guarantees as reg
 
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v6"
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v7"
     assert "G16" in reg.BY_ID
     assert reg.BY_ID["G16"].descends_from
 
