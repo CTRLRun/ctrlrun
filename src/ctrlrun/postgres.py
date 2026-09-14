@@ -74,7 +74,16 @@ from .errors import (
     MissingDependency,
 )
 from .migrations import migrate
-from .receipt import RECEIPT_SCHEMA, Event, EventType, Receipt, _document_hash, _stored_receipt
+from .receipt import (
+    RECEIPT_SCHEMA,
+    Event,
+    EventType,
+    Receipt,
+    UnreadableReceipt,
+    _document_hash,
+    _read_receipt,
+    _readable,
+)
 from .state import (
     Charge,
     ClockSkew,
@@ -2148,8 +2157,17 @@ class PostgresStateStore:
                     # branch exists: an advanced head with no row behind it is a permanent gap.
                     # The caller gets the row as it stands, not the one it tried to write.
                     self._rollback(connection)
+                    # `_readable`: this is the *writer* looking for the row it just tried to
+                    # write, and a row this binary cannot read back is not that row. It falls
+                    # through to returning `receipt`, which is what the caller already gets when
+                    # the row is not found (SPEC-v0.11 §5.2).
                     existing = next(
-                        (r for r in self.receipts() if r.receipt_id == receipt.receipt_id), None
+                        (
+                            r
+                            for r in _readable(self.receipts())
+                            if r.receipt_id == receipt.receipt_id
+                        ),
+                        None,
                     )
                     return existing if existing is not None else receipt
                 cursor.execute(
@@ -2161,10 +2179,13 @@ class PostgresStateStore:
         self._commit(connection)
         return replace(chained, hash=digest)
 
-    def receipts(self) -> tuple[Receipt, ...]:
+    def receipts(self) -> tuple[Receipt | UnreadableReceipt, ...]:
+        # SPEC-v0.11 §5.2: `seq` is **selected** and not only ordered by, so a receipt's position
+        # comes from the column rather than from the document a tamperer controls, and a row this
+        # binary cannot construct still has a position to be named at.
         with self._connection().cursor() as cursor:
             cursor.execute(
-                f"SELECT json, hash FROM {self._q}.receipts "
+                f"SELECT seq, json, hash FROM {self._q}.receipts "
                 "ORDER BY seq NULLS FIRST, ts, receipt_id"
             )
             rows = cursor.fetchall()
@@ -2172,7 +2193,7 @@ class PostgresStateStore:
         # `json` here is `json.dumps(..., sort_keys=True)` and SQLite's is `to_json()`, which are
         # different byte strings -- and the chain does not care, because `chain_hash` recomputes
         # the canonical form from the parsed document rather than hashing whatever was stored.
-        return tuple(_stored_receipt(json.loads(str(row[0])), row[1]) for row in rows)
+        return tuple(_read_receipt(json.loads(str(row[1])), row[2], row[0]) for row in rows)
 
     def chain_head(self) -> tuple[int, str] | None:
         with self._connection().cursor() as cursor:

@@ -40,6 +40,8 @@ from ..receipt import (
     EventType,
     JSONLEventSink,
     Receipt,
+    UnreadableReceipt,
+    _readable,
     iso_timestamp,
     verify_chain,
 )
@@ -483,13 +485,29 @@ def receipts(
         # document defines is not an error here -- it matches nothing, which is the right answer
         # for a reader running against a store whose policy has since changed. A dangling
         # citation is a *load* error, in the place that can see the registry.
-        found = tuple(receipt for receipt in found if control_id in receipt.controls)
+        # An unreadable row is **kept**, whatever the filter says (SPEC-v0.11 §5.2). Its
+        # `controls` could not be read, so it cannot be shown not to cite this id, and dropping
+        # it would let one `UPDATE` hide a row from exactly the query an operator runs to find
+        # a control's evidence.
+        found = tuple(
+            receipt
+            for receipt in found
+            if isinstance(receipt, UnreadableReceipt) or control_id in receipt.controls
+        )
     if last is not None:
         found = found[-last:]
     if not found:
         click.echo("no receipts yet" if control_id is None else f"no receipts cite {control_id!r}")
         return
     for receipt in found:
+        if isinstance(receipt, UnreadableReceipt):
+            # SPEC-v0.11 §5.2: named in place, at its `seq`, and the rows around it still print.
+            click.echo(
+                json.dumps(receipt.to_dict(), ensure_ascii=False)
+                if as_json
+                else _unreadable_line(receipt)
+            )
+            continue
         click.echo(receipt.to_json() if as_json else _receipt_line(receipt))
 
 
@@ -674,7 +692,12 @@ def inspect(
         # today are two that disagree later (T193).
         document = inspection_for(store, action_id)
         events = tuple(event for event in store.events() if event.action_id == action_id)
-        receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
+        # `_readable`: a row that cannot be read carries no `action_id`, so it can never be
+        # the receipt for *this* action. SPEC-v0.11 §2.3's sharp case is exactly this line:
+        # `inspect` on an action the tamper never touched used to raise here.
+        receipt = next(
+            (found for found in _readable(store.receipts()) if found.action_id == action_id), None
+        )
     except CTRLRunError as exc:
         raise _fail(exc) from exc
 
@@ -934,11 +957,16 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
         # kernel's own refusal; the exit code an operator scripts against stays 2.
         raise click.UsageError(str(exc)) from exc
     try:
+        rows = _store(store_url).receipts()
+        # A refused row has no `finished_at` to compare and no result to count, so it cannot
+        # enter a total. It is reported separately below rather than dropped in silence: a
+        # count that quietly omitted it would be `SPEC-v0.4 §3.8`'s false green (§5.2).
         counted = [
             receipt
-            for receipt in _store(store_url).receipts()
+            for receipt in _readable(rows)
             if boundary is None or receipt.finished_at >= boundary
         ]
+        unreadable = tuple(row for row in rows if isinstance(row, UnreadableReceipt))
     except CTRLRunError as exc:
         raise _fail(exc) from exc
     document = stats_document(
@@ -946,6 +974,7 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
         mode=policy.mode,
         boundary=boundary,
         ledger_rows=ledger_rows(_store(store_url)),
+        unreadable=len(unreadable),
     )
     if as_json:
         click.echo(json.dumps(document, ensure_ascii=False, indent=2))
@@ -972,6 +1001,12 @@ def _stats_lines(document: Mapping[str, Any]) -> list[str]:
     if "ledger_rows" in document:
         # §7.3: growth is observable before it is a problem.
         lines.append(_stat("budget ledger rows", document["ledger_rows"]))
+    if "unreadable_receipts" in document:
+        # SPEC-v0.11 §5.2. Present only where there is one, so a clean store prints what it
+        # printed at 0.10.0 (§5.3). Without this line `actions` silently under-counts a store
+        # with a tampered row in it and the operator reading the terminal sees nothing at all,
+        # which is the number reading as a verdict about a store nobody could fully read.
+        lines.append(_stat("unreadable receipts", document["unreadable_receipts"]))
     lines.append("")
     if document["mode"] != OBSERVE:
         # §6.4 — say what is missing rather than print a line the receipts cannot substantiate.
@@ -980,6 +1015,11 @@ def _stats_lines(document: Mapping[str, Any]) -> list[str]:
             "and ambiguous breakdown is not reported."
         )
     lines.append("Actions still awaiting a human have no receipt yet and are not counted.")
+    if "unreadable_receipts" in document:
+        lines.append(
+            "Some rows could not be read back as receipts and are not counted above. Run "
+            "`ctrlrun receipts --verify-chain` to see where."
+        )
     return lines
 
 
@@ -1776,6 +1816,17 @@ def gateway(
         raise _fail(exc) from exc
     except KeyboardInterrupt:  # pragma: no cover - an operator pressing ctrl-c
         click.echo("")
+
+
+def _unreadable_line(row: UnreadableReceipt) -> str:
+    """One row this binary could not read back, named where the receipt would have printed.
+
+    SPEC-v0.11 §5.2, and rule 3: one tampered row costs one row. The refusal is printed **by
+    type** and never by message, because the canonicalizer quotes what it refused and a lone
+    surrogate echoed here is a line that cannot be printed.
+    """
+    at = "no seq" if row.seq is None else f"seq {row.seq}"
+    return f"{at}  {row.receipt_id or '-'}  UNREADABLE  this row could not be read ({row.refusal})"
 
 
 def _receipt_line(receipt: Receipt) -> str:

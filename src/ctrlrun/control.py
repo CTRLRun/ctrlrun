@@ -125,6 +125,7 @@ from .receipt import (
     JSONLEventSink,
     Receipt,
     ReceiptResult,
+    UnreadableReceipt,
     _WouldHave,
     iso_timestamp,
     new_receipt_id,
@@ -4268,6 +4269,22 @@ class Control:
         rows: list[dict[str, Any]] = []
         receipts = list(self._store.receipts())[-limit:]
         for receipt in receipts:
+            if isinstance(receipt, UnreadableReceipt):
+                # SPEC-v0.11 §5.2: a row this binary cannot read back is **skipped and named**,
+                # in the shape this loop already uses for a receipt it cannot rebuild an action
+                # from. It is not dropped: a replay that silently left out the one row somebody
+                # tampered with would report "no decision changes" about a store it could not
+                # read, which is `SPEC-v0.4 §3.8`'s false green.
+                rows.append(
+                    {
+                        "receipt_id": receipt.receipt_id,
+                        "action": None,
+                        "skipped": (
+                            f"this row could not be read back as a receipt ({receipt.refusal})"
+                        ),
+                    }
+                )
+                continue
             rebuilt = _action_from_receipt(receipt, self._environment)
             if rebuilt is None:
                 rows.append(

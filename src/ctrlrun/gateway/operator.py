@@ -52,7 +52,7 @@ from ..identity import (
     IdentityContext,
     IdentityProvider,
 )
-from ..receipt import Event, EventType, iso_timestamp
+from ..receipt import Event, EventType, UnreadableReceipt, _readable, iso_timestamp
 from ..reporting import (
     effect_document,
     inspection_for,
@@ -790,7 +790,17 @@ class OperatorServer:
         if control_id is not None:
             # `v0.6 §7.3` — a filter and not a lookup, exactly as `ctrlrun receipts --control`
             # is: an id no document defines matches nothing rather than erroring.
-            found = tuple(receipt for receipt in found if str(control_id) in receipt.controls)
+            #
+            # An unreadable row is kept whatever the filter says (SPEC-v0.11 §5.2): its
+            # `controls` could not be read, so it cannot be shown not to cite this id.
+            found = tuple(
+                receipt
+                for receipt in found
+                if isinstance(receipt, UnreadableReceipt) or str(control_id) in receipt.controls
+            )
+        # SPEC-v0.11 §2.3: this tool is a **network** surface, and one `UPDATE` used to take out
+        # the remote console as well as the terminal. A row that cannot be read back is rendered
+        # as its refusal, in place and at its `seq`, and the rows around it are returned.
         return {"receipts": [receipt.to_dict() for receipt in found[-limit:]]}
 
     def _effects(self, state: object) -> dict[str, Any]:
@@ -812,9 +822,12 @@ class OperatorServer:
             boundary = since_boundary(None if since is None else str(since))
         except InvalidArgument as exc:
             raise _Refused(_INVALID_PARAMS, "ctrlrun.invalid_argument", 200, str(exc)) from exc
+        rows = self.store.receipts()
+        # A refused row has no `finished_at` to compare, so it cannot enter a total; it is
+        # counted separately below rather than dropped in silence (SPEC-v0.11 §5.2).
         counted = [
             receipt
-            for receipt in self.store.receipts()
+            for receipt in _readable(rows)
             if boundary is None or receipt.finished_at >= boundary
         ]
         # §9.1 — one producer for `ctrlrun.stats/v1`. T193 asserts equality with the CLI's, and
@@ -825,6 +838,7 @@ class OperatorServer:
             mode=self._control.policy.mode,
             boundary=boundary,
             ledger_rows=_ledger_rows(self.store),
+            unreadable=sum(1 for row in rows if isinstance(row, UnreadableReceipt)),
         )
 
     # --- the write tools (§4.5) -----------------------------------------------------------

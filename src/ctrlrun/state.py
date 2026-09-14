@@ -66,8 +66,9 @@ from .receipt import (
     Event,
     EventType,
     Receipt,
+    UnreadableReceipt,
     _document_hash,
-    _stored_receipt,
+    _read_receipt,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -897,12 +898,22 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
-    def receipts(self) -> tuple[Receipt, ...]:
+    def receipts(self) -> tuple[Receipt | UnreadableReceipt, ...]:
         """Every receipt, oldest first (SPEC-v0.6 §9.2).
 
         Declared on the protocol in v0.6, for `events()`'s reason and one of its own: the
         receipt chain reader (SPEC-v0.6 §6.5) enumerates receipts to verify it, and
         `ctrlrun receipts --verify-chain` runs against whatever backend the operator has.
+
+        **SPEC-v0.11 §5.2 amends this signature**, and it is an amendment to SPEC-v0.6 §9.2's
+        frozen protocol rather than an addition. A row this store cannot construct comes back as
+        an `UnreadableReceipt` naming its `seq`; it does not raise. Before v0.11 it raised, and
+        because both backends build every row before any caller sees one, a single malformed
+        value took out five readers together (SPEC-v0.11 §2.3).
+
+        SPEC-v0.6 §9.2's bar for touching this protocol is *a second backend could not be
+        written without it*, and it is cleared: a backend that raised on one bad row could not
+        implement §5 at all.
         """
         ...
 
@@ -1681,20 +1692,29 @@ class SQLiteStateStore:
             for row in rows
         )
 
-    def receipts(self) -> tuple[Receipt, ...]:
+    def receipts(self) -> tuple[Receipt | UnreadableReceipt, ...]:
         # By `seq`, not by `rowid`: §6.5's reader takes a receipt's *position* from this column
         # and its *content* from the document, and a reader ordering by physical row order would
         # report a gap, or fail to, according to how the rows happen to sit on disk. SQLite sorts
         # NULLs first, which puts pre-chain rows before the chain rather than inside it.
+        #
+        # SPEC-v0.11 §5.2: `seq` is **selected** and not only ordered by. It was ordered by and
+        # never read through five releases, so the position every reader worked from came out of
+        # the document, which is the half a tamperer controls.
         rows = (
             self._connection()
-            .execute("SELECT json, hash FROM receipts ORDER BY seq, rowid")
+            .execute("SELECT seq, json, hash FROM receipts ORDER BY seq, rowid")
             .fetchall()
         )
         # `hash` comes off the column, because a document cannot contain its own hash (§6.2).
         # And the parsed document stays with the receipt (SPEC-v0.7 §6.11), so `chain_hash()`
         # hashes what was stored rather than what this binary would render.
-        return tuple(_stored_receipt(json.loads(row["json"]), row["hash"]) for row in rows)
+        #
+        # `_read_receipt` and not `_stored_receipt`: a row this binary cannot construct comes
+        # back named at its `seq` rather than raising through every caller at once (§5.2).
+        return tuple(
+            _read_receipt(json.loads(row["json"]), row["hash"], row["seq"]) for row in rows
+        )
 
     # --- delegations (SPEC-v0.3 §5.2) -------------------------------------------------
 

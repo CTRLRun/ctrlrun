@@ -840,6 +840,68 @@ def test_every_v0_10_name_the_spec_freezes_is_importable_with_the_parameter_it_n
         )
 
 
+#: `SPEC-v0.11 §9`'s table, in the shape §9 itself specifies. **Four elements, not three**: the
+#: rows gain an explicit `kind`, because the v0.10 shape above cannot express what half of v0.11's
+#: rows claim. A review put them into the three-tuple and got
+#: `TypeError: ... is not a callable object` from `inspect.signature`, which is `SPEC-v0.10 §9.4`'s
+#: failure reproduced inside the section written to prevent it.
+#:
+#:   * `name`      -- the dotted path exists.
+#:   * `parameter` -- it exists and its signature takes this parameter.
+#:   * `member`    -- the dotted path is a collection containing this value. A migration id can
+#:                    never be an attribute path: `hasattr(ctrlrun.migrations, "0008_...")` cannot
+#:                    be true, because a name beginning with a digit is not an identifier.
+#:   * `returns`   -- its return annotation names this type.
+#:
+#: **Created by item 1 rather than item 2.** §9 names item 2 because item 2 was expected to be
+#: the first with rows here, but item 1 has two of its own, and §9's whole point is that nothing
+#: turns red at release that could have turned red during the item. Item 2 extends this tuple.
+_FROZEN_V0_11: tuple[tuple[str, str, str | None, str], ...] = (
+    # Item 1 (SPEC-v0.11 §5.2).
+    ("ctrlrun.receipt", "UnreadableReceipt", None, "name"),
+    ("ctrlrun.state", "StateStore.receipts", "UnreadableReceipt", "returns"),
+)
+
+
+def test_every_v0_11_name_the_spec_freezes_exists_in_the_shape_it_names():
+    """SPEC-v0.11 §9, asserted rather than described, and extended by each item as it lands.
+
+    `SPEC-v0.10 §9.4` is why this exists: three of v0.10's frozen rows shipped as nothing and
+    the table went on saying they had, for a whole milestone, because no test ever looked.
+    """
+    import importlib
+    import inspect
+    import typing
+
+    for module_name, dotted, target, kind in _FROZEN_V0_11:
+        module = importlib.import_module(module_name)
+        held: object = module
+        for part in dotted.split("."):
+            assert hasattr(held, part), f"{module_name}.{dotted}: {part!r} does not exist"
+            held = getattr(held, part)
+        if kind == "name":
+            continue
+        assert target is not None, f"{module_name}.{dotted}: a {kind} row needs a target"
+        if kind == "parameter":
+            signature = inspect.signature(held)  # type: ignore[arg-type]
+            assert target in signature.parameters, (
+                f"{module_name}.{dotted} does not take {target!r}; SPEC-v0.11 §9 freezes it. "
+                f"It takes: {sorted(signature.parameters)}"
+            )
+        elif kind == "member":
+            assert target in {
+                getattr(item, "id", item) for item in typing.cast(typing.Iterable[object], held)
+            }, f"{module_name}.{dotted} does not contain {target!r}; SPEC-v0.11 §9 freezes it"
+        elif kind == "returns":
+            annotation = str(inspect.signature(held).return_annotation)  # type: ignore[arg-type]
+            assert target in annotation, (
+                f"{module_name}.{dotted} returns {annotation}, which does not name {target!r}; "
+                "SPEC-v0.11 §9 freezes it"
+            )
+        else:  # pragma: no cover - a kind nobody defined is a row nobody can check
+            raise AssertionError(f"{module_name}.{dotted}: unknown frozen-row kind {kind!r}")
+
+
 def test_the_row_of_section_9_that_did_not_ship_still_has_not():
     """§9.4's remaining row, pinned in the other direction.
 
