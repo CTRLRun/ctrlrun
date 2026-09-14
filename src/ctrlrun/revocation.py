@@ -36,6 +36,45 @@ from .errors import InvalidArgument
 _LOG = logging.getLogger("ctrlrun.revocation")
 
 
+#: `_NoRedirects` logs here and not to this module's `_LOG`. It moved down from `jwt_identity.py`
+#: to break the layering cycle `jwt_identity <-> revocation`, and it warned on the `ctrlrun`
+#: logger from both callers before the move, because `revocation.py` was importing the class from
+#: there. Keeping that name keeps every existing handler and filter pointed at the same place: a
+#: refactor that silently re-routes a security warning is a refactor that loses it.
+_REDIRECT_LOG = logging.getLogger("ctrlrun")
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that redirects nowhere (SPEC-v0.3 §3.4).
+
+    **Defined here, below both callers, and used by `jwt_identity.py` too.** It lived in
+    `jwt_identity.py` and `revocation.py` imported it from inside `_opener` -- deliberately, to
+    avoid a second copy, and that deferred import was a layering cycle `ARCHITECTURE.md` §6
+    forbids. One copy was always right; the direction was wrong. `jwt_identity.py` already
+    imports this module at module level, so defining it here needs no new module and no new edge.
+
+    `urllib.request.build_opener` does **not** drop `HTTPRedirectHandler` when it is handed an
+    `HTTPSHandler` — the default classes it removes are only the ones an argument is an
+    instance or subclass of, and the two are unrelated. An opener built that way still follows
+    a 302, and `HTTPRedirectHandler` permits `http`, `https` and `ftp` targets: an open
+    redirect on the issuer's domain would make this process fetch its signing keys, in
+    cleartext, from wherever the redirect pointed. Those keys are cached for the life of the
+    process, so every token the attacker then signs verifies, with an arbitrary `agent` and
+    `user`. That is the whole authority model, bypassed at the one input that decides who
+    everybody is. The revocation feed is the same argument one step along: a redirect there
+    decides which revocations this process never hears about.
+
+    Subclassing and refusing is the reliable way to say "no redirects": passing an instance of
+    a subclass *does* displace the default, which passing an unrelated handler does not.
+    """
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        _REDIRECT_LOG.warning("%s redirected to %s; refusing to follow", req.full_url, newurl)
+        return None
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -348,11 +387,10 @@ class PollingRevocationFeed(_Feed):
         self._read_at = now
 
     def _opener(self) -> Any:
-        """HTTPS, and follows nothing. `jwt_identity._NoRedirects`, reused deliberately: two
-        copies of this handler would be two things to keep correct at the one input that
-        decides who everybody is."""
-        from .jwt_identity import _NoRedirects
-
+        """HTTPS, and follows nothing. `_NoRedirects` is defined in this module: two copies of
+        this handler would be two things to keep correct at the one input that decides who
+        everybody is, and importing it from `jwt_identity.py` was the layering cycle §6
+        forbids."""
         return urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=ssl.create_default_context()), _NoRedirects()
         )
