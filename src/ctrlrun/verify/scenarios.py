@@ -109,11 +109,11 @@ from ..policy import (
 )
 from ..receipt import (
     BLOCKED_ATTEMPT_CEILING,
-    Event,
-    EventType,
     GENESIS_HASH,
     KNOWN_RECEIPT_SCHEMAS,
     RECEIPT_SCHEMA,
+    Event,
+    EventType,
     Receipt,
     ReceiptResult,
     UnreadableReceipt,
