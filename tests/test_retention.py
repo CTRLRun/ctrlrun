@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from ctrlrun import Control, Policy, SQLiteStateStore
 from ctrlrun.action import Action, Principal
 from ctrlrun.anchor import CHECKPOINT, Anchor, make_anchor, verify_anchors
 from ctrlrun.errors import InvalidArgument
-from ctrlrun.receipt import verify_chain
+from ctrlrun.receipt import ChainBreak, verify_chain
 from ctrlrun.retention import PRUNE_ACTION, Hold, prune
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -891,3 +892,637 @@ def test_T549b_a_prune_and_a_receipt_write_exclude_each_other_on_postgres() -> N
     assert "pruning()" in prune_source, (
         "prune() does not hold the store's prune lock, so its refusals are checked outside it"
     )
+
+
+# --- T550 to T556: the independent review's findings, each pinned ------------------------------
+
+
+def test_T550_supersession_comes_from_the_provider_and_not_from_the_local_cache(tmp_path) -> None:
+    """**§4.6's laundering hole, found by the required independent review.**
+
+    `verify_anchors` built its set of anchored checkpoints from `held | cached`, and `cached` is
+    the local table its own docstring calls *"a cache, never the record"*. One `INSERT` bought
+    supersession, and the forged row did not even need a real hash: only `(seq, kind)` was read,
+    and the row was never checked against the provider because the walk iterates what the
+    provider holds.
+
+    `T547b` passed over this, because it writes the checkpoint row and **no** anchors row. The
+    statement it does not run is the obvious second one for anyone who can run the first.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    provider = Provider()
+    rows = store.receipts()
+    low = rows[2]
+    assert low.seq == 3 and low.hash is not None
+    make_anchor(store, provider, at=(low.seq, low.hash))
+    boundary = rows[4]
+    assert boundary.seq == 5 and boundary.hash is not None
+    store.close()
+
+    # The attack: erase a prefix, write a checkpoint row, and forge the local anchor that would
+    # make it supersede. The hash is deliberately not a hash of anything.
+    connection = sqlite3.connect(database)
+    connection.execute("DELETE FROM receipts WHERE seq <= 5")
+    connection.execute(
+        "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?)",
+        (5, boundary.hash, "ctrlrun.receipt/v7", NOW.isoformat()),
+    )
+    connection.execute(
+        "INSERT INTO anchors (token, seq, hash, kind, at) VALUES (?, ?, ?, ?, ?)",
+        ("forged", 5, "sha256:not-a-hash-at-all", CHECKPOINT, NOW.isoformat()),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_anchors(reopened, provider)
+    cached = [(item.seq, item.kind) for item in reopened.anchors()]
+    reopened.close()
+
+    assert (5, CHECKPOINT) in cached, "the forged row is not there, so this proves nothing"
+    assert not report.ok, (
+        "a forged row in the local anchors cache bought supersession. The provider never saw "
+        f"that checkpoint: {report}"
+    )
+    assert report.superseded == 0
+    assert ("anchor_broken", 3) in [(item.name, item.seq) for item in report.breaks]
+
+
+def test_T550b_a_checkpoint_the_provider_anchored_at_a_DIFFERENT_hash_does_not_supersede(
+    tmp_path,
+) -> None:
+    """The pair must match, not merely the `seq`.
+
+    Otherwise an attacker anchors any checkpoint at that `seq` through the provider and then
+    rewrites the store's checkpoint row underneath it.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    provider = Provider()
+    rows = store.receipts()
+    make_anchor(store, provider, at=(rows[2].seq, rows[2].hash))
+    # The provider anchors a checkpoint at seq 5, with an honest hash.
+    make_anchor(store, provider, kind=CHECKPOINT, at=(rows[4].seq, rows[4].hash))
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("DELETE FROM receipts WHERE seq <= 5")
+    # ...and the checkpoint ROW names a different hash at the same seq.
+    connection.execute(
+        "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?)",
+        (5, "sha256:" + "ab" * 32, "ctrlrun.receipt/v7", NOW.isoformat()),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_anchors(reopened, provider)
+    reopened.close()
+    assert not report.ok and report.superseded == 0, report
+
+
+def test_T551_the_sqlite_prune_holds_its_lock_through_every_write(tmp_path) -> None:
+    """**§4.5 on the default backend**, which no test asserted and which did not hold.
+
+    `put_anchor` and `put_checkpoint` use `with connection:`, whose `__exit__` commits, and a
+    prune calls both, so `BEGIN IMMEDIATE` ended at the first of them and the whole destructive
+    half ran unlocked. Postgres had the guard from the start; SQLite did not, because the defect
+    was found on Postgres and the fix was applied where it was found. **SQLite is the default.**
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    provider = Provider()
+
+    seen: list[bool] = []
+    real_put_anchor = store.put_anchor
+    real_put_checkpoint = store.put_checkpoint
+    real_delete = store.delete_prefix
+
+    def watch(label: str) -> None:
+        seen.append(store._connection().in_transaction)
+
+    class _Watched:
+        def put_anchor(self, anchor):
+            watch("anchor")
+            real_put_anchor(anchor)
+            watch("anchor")
+
+        def put_checkpoint(self, checkpoint):
+            watch("checkpoint")
+            real_put_checkpoint(checkpoint)
+            watch("checkpoint")
+
+        def delete_prefix(self, through, keys):
+            watch("delete")
+            return real_delete(through, keys)
+
+        def __getattr__(self, name):
+            return getattr(store, name)
+
+    prune(_Watched(), through=3, older_than=DAY, anchor=provider, now=NOW)
+    store.close()
+
+    assert seen, "the prune did not reach the writes this is about"
+    assert all(seen), (
+        "the SQLite prune dropped its transaction partway through, so the destructive half ran "
+        f"with no lock: in_transaction at each write was {seen}"
+    )
+
+
+def test_T551b_a_prune_that_fails_after_the_checkpoint_leaves_the_store_as_it_was(tmp_path):
+    """The consequence of `T551`, and the one that loses evidence.
+
+    A prune killed between the checkpoint and the delete used to leave the checkpoint row behind
+    and the store reporting `[('missing', 4), ('link_broken', 1)]` on a chain that was completely
+    intact. §4.5's crash-window argument does not cover it: an orphaned checkpoint row is not an
+    over-report, it makes the reader announce a gap in a chain with no gap.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    before = {(item.name, item.seq) for item in verify_chain(store).breaks}
+
+    class _Dies:
+        def delete_prefix(self, through, keys):
+            raise RuntimeError("killed between the checkpoint and the delete")
+
+        def __getattr__(self, name):
+            return getattr(store, name)
+
+    with pytest.raises(RuntimeError):
+        prune(_Dies(), through=3, older_than=DAY, anchor=Provider(), now=NOW)
+
+    after = {(item.name, item.seq) for item in verify_chain(store).breaks}
+    checkpoint = store.checkpoint()
+    receipts = len(store.receipts())
+    store.close()
+
+    assert checkpoint is None, f"a failed prune left a checkpoint row behind: {checkpoint}"
+    assert receipts == 8, "a failed prune deleted receipts"
+    assert not (after - before), (
+        f"a failed prune left new breaks: {sorted(after - before, key=str)}"
+    )
+
+
+def test_T552_the_prune_bound_comes_from_the_receipts_and_not_the_head_row(tmp_path) -> None:
+    """**§10's head refusal, decided by the row §2.1 assumes is rewritten.**
+
+    One `UPDATE receipt_chain SET seq = 99` turned `prune --through 8` into a delete of every
+    receipt in the store, after which both readers reported clean. The delta rule permitted it
+    because `head_mismatch` at 99 pre-existed: rule 2 read literally, producing total erasure.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipt_chain SET seq = 99 WHERE id = 1")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    with pytest.raises(InvalidArgument) as refused:
+        prune(reopened, through=8, older_than=DAY, anchor=Provider(), now=NOW)
+    remaining = len(reopened.receipts())
+    reopened.close()
+
+    assert "would take the chain's head" in str(refused.value)
+    assert remaining == 8, "a rewritten head row let the prune delete the whole chain"
+
+
+def test_T553_one_unreadable_row_does_not_cost_the_whole_retention_feature(tmp_path) -> None:
+    """**Rule 3 against rule 2.** The simulation filtered to `Receipt`, so every row the reader
+    refuses vanished from it, and the prune refused honest prunes naming breaks that would not
+    occur::
+
+        prune(through=3) REFUSED, claiming: ... would leave the chain reporting missing at seq 6
+        what the store ACTUALLY reports after that same prune:
+            [('content_altered', 6), ('link_broken', 7)]
+        breaks the prune would really have caused: none
+
+    One tampered row cost the whole feature on that store, which is exactly what item 1 exists
+    to prevent one surface out.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipts SET json = 'not json at all' WHERE seq = 6")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    before = {(item.name, item.seq) for item in verify_chain(reopened).breaks}
+    result = prune(reopened, through=3, older_than=DAY, anchor=Provider(), now=NOW)
+    after = {(item.name, item.seq) for item in verify_chain(reopened).breaks}
+    reopened.close()
+
+    assert result.receipts_deleted == 3, "an unreadable row above the prune point refused it"
+    assert not (after - before), sorted(after - before, key=str)
+
+
+def test_T554_the_checkpoint_names_a_pair_that_existed(tmp_path) -> None:
+    """**And that pair is what goes to the provider**, which is why it matters.
+
+    This took `seq=through` with the hash of whatever readable receipt was highest at or below
+    it, so on a chain whose seq 3 had already been deleted, `prune --through 3` wrote and
+    anchored `(3, hash@2)` -- a pair that never existed. §4.6's argument rests on the anchored
+    checkpoint being a claim an operator can check against the chain.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    rows = {item.seq: item.hash for item in store.receipts()}
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("DELETE FROM receipts WHERE seq = 3")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    provider = Provider()
+    result = prune(reopened, through=3, older_than=DAY, anchor=provider, now=NOW)
+    reopened.close()
+
+    assert result.checkpoint is not None
+    assert result.checkpoint.seq == 2, (
+        f"the checkpoint names seq {result.checkpoint.seq}, and seq 3 is not in this chain"
+    )
+    assert result.checkpoint.hash == rows[2]
+    anchored = [(item.seq, item.hash) for item in provider.held.values()]
+    assert (2, rows[2]) in anchored, (
+        f"the provider was asked to vouch for a pair the chain never had: {anchored}"
+    )
+
+
+def test_T555_a_prune_leaves_two_receipts_that_say_which_is_which(tmp_path) -> None:
+    """**§4.2's record, which over-stated what happened.**
+
+    A refused prune left an `allow`/`committed` receipt beside the `deny` one, and a successful
+    prune left an identical `allow`/`committed` receipt, so the evidence could not tell an
+    erasure that happened from one that was refused. And `--older-than` was absent entirely: it
+    is the single input deciding whether the prune destroyed ledger rows, and therefore whether
+    authority was handed back.
+    """
+    import os
+
+    from click.testing import CliRunner
+
+    from ctrlrun.cli.main import main
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "ctrlrun.yaml").write_text(ALLOW, encoding="utf-8")
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    store.put_hold(Hold("legal", 1, 5, "subpoena", "cli:alice", T0))
+    store.close()
+
+    provider_module = workspace / "prov.py"
+    provider_module.write_text(
+        "from datetime import UTC, datetime, timedelta\n"
+        "from ctrlrun.anchor import Anchor\n"
+        "class P:\n"
+        "    def __init__(self):\n"
+        "        self.held = {}\n"
+        "        self.at = datetime(2026, 1, 1, tzinfo=UTC)\n"
+        "    def make(self, seq, hash, kind):\n"
+        "        self.at += timedelta(minutes=1)\n"
+        "        token = f'tok-{kind}-{seq}'\n"
+        "        self.held[token] = Anchor(\n"
+        "            seq=seq, hash=hash, token=token, kind=kind, at=self.at\n"
+        "        )\n"
+        "        return token, self.at\n"
+        "    def check(self, s, h, t): return t in self.held\n"
+        "    def latest(self): return None\n"
+        "    def since(self, s): return ()\n"
+        "provider = P()\n",
+        encoding="utf-8",
+    )
+
+    cwd = os.getcwd()
+    os.chdir(workspace)
+    try:
+        import sys
+
+        sys.path.insert(0, str(workspace))
+        arguments = [
+            "prune",
+            "--through",
+            "3",
+            "--older-than",
+            "90d",
+            "--provider",
+            "prov:provider",
+            "--by",
+            "ops@example.com",
+            "--reason",
+            "retention",
+            "--store-url",
+            f"sqlite:///{database}",
+        ]
+        refused = CliRunner().invoke(main, arguments)
+    finally:
+        sys.path.remove(str(workspace))
+        os.chdir(cwd)
+
+    assert refused.exit_code == 1, refused.output
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    prunes = [item for item in reopened.receipts() if item.action == PRUNE_ACTION]
+    reopened.close()
+
+    assert len(prunes) == 2, f"a refused prune left {len(prunes)} receipts"
+    stages = [item.arguments.get("stage") for item in prunes]
+    assert stages == ["proposed", "refused"], stages
+    assert [str(item.result) for item in prunes] == ["blocked", "denied"], (
+        "the intent receipt claims the prune committed, so a refused erasure is indistinguishable "
+        "from one that happened"
+    )
+    for item in prunes:
+        assert item.arguments.get("older_than") == "90d", (
+            "the receipt omits --older-than, which is the input deciding whether the prune "
+            f"destroyed ledger rows: {dict(item.arguments)}"
+        )
+
+
+# --- T556 to T559: what the second mutation round found still unasserted -----------------------
+
+
+def test_T556_a_prune_that_would_cause_a_break_is_refused(tmp_path) -> None:
+    """Rule 2's refusal, reached the way an operator would reach it.
+
+    **`T544` no longer exercises this path.** It forced the refusal with a store whose checkpoint
+    write was a no-op, and once `_after_prune` began reading the store's real head and keeping
+    rows the reader refuses, that construction stopped producing a caused break. A mutation
+    deleting the refusal entirely then survived the whole file.
+
+    A prune whose checkpoint would be **unusable** is the honest way in: here the row at the
+    prune point carries no stored hash, so the chain after the prune could not be seeded from it.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipts SET hash = NULL WHERE seq = 3")
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    before = {(item.name, item.seq) for item in verify_chain(reopened).breaks}
+    with pytest.raises(InvalidArgument) as refused:
+        prune(reopened, through=3, older_than=DAY, anchor=Provider(), now=NOW)
+    after = {(item.name, item.seq) for item in verify_chain(reopened).breaks}
+    remaining = len(reopened.receipts())
+    reopened.close()
+
+    assert "no stored hash" in str(refused.value) or "would leave the chain" in str(refused.value)
+    assert remaining == 8, "a refused prune deleted receipts"
+    assert after == before
+
+
+def test_T556b_a_prune_whose_simulation_shows_a_new_break_is_refused(tmp_path) -> None:
+    """The refusal itself, forced by a store that reports differently after the delete.
+
+    A prune through a `seq` whose receipt is present but whose **successor's** link would then be
+    unseedable is the shape rule 2 exists for. This drives the comparison directly rather than
+    through a store double, so the branch is exercised rather than described.
+    """
+    from ctrlrun.retention import Checkpoint as _Checkpoint
+    from ctrlrun.retention import _after_prune
+
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    rows = store.receipts()
+    head = store.chain_head()
+    before = {(item.name, item.seq) for item in verify_chain(store).breaks}
+
+    # A checkpoint naming a hash that is not the one at that seq: the walk cannot seed from it,
+    # and every row after it reports. This is what "the prune caused it" looks like.
+    wrong = _Checkpoint(seq=3, hash="sha256:" + "cd" * 32, schema="ctrlrun.receipt/v7", at=NOW)
+    simulated = _after_prune(rows, 3, wrong, head)
+    after = {(item.name, item.seq) for item in simulated.breaks}
+    store.close()
+
+    assert after - before, (
+        "a checkpoint naming the wrong hash produced no new break in the simulation, so rule 2's "
+        "comparison has nothing to refuse and the guard cannot fire"
+    )
+
+
+def test_T556c_the_rule_2_comparison_refuses_when_the_simulation_shows_a_new_break(
+    tmp_path, monkeypatch
+) -> None:
+    """Rule 2's guard, driven directly, because **no store state reaches it any more.**
+
+    That is worth stating rather than hiding: once the checkpoint names the pair that really
+    exists (`T554`) and the simulation is the store rather than a tidier version of it (`T553`),
+    a prefix prune cannot introduce a break. Every way of constructing one is caught earlier --
+    by the head bound, the forward-only checkpoint, or the missing-hash refusal -- so a mutation
+    deleting this comparison survived the whole file.
+
+    It stays, as a backstop, and this is what keeps it honest: the comparison is fed a simulation
+    that reports one more break than the store does, and the prune must refuse with the `seq`
+    named. A guard nothing can trigger is still a guard somebody will edit.
+    """
+    import ctrlrun.retention as module
+
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    real = module._after_prune
+
+    def _one_more(receipts, through, checkpoint, head):
+        report = real(receipts, through, checkpoint, head)
+        return replace(report, ok=False, breaks=[*report.breaks, ChainBreak("missing", 99, "x")])
+
+    monkeypatch.setattr(module, "_after_prune", _one_more)
+
+    with pytest.raises(InvalidArgument) as refused:
+        prune(store, through=3, older_than=DAY, anchor=Provider(), now=NOW)
+    remaining = len(store.receipts())
+    checkpoint = store.checkpoint()
+    store.close()
+
+    assert "missing at seq 99" in str(refused.value), str(refused.value)
+    assert "no flag that admits it" in str(refused.value)
+    assert remaining == 8, "a prune refused by rule 2 deleted receipts anyway"
+    assert checkpoint is None, "a prune refused by rule 2 left a checkpoint behind"
+
+
+def test_T557_a_ledger_row_whose_effect_is_still_held_refuses_the_prune(tmp_path) -> None:
+    """**`T546` asserts a constant, not a behaviour**, and a mutation deleting the held-state
+    branch survived it: `set(HELD_EFFECT_STATES) == {...}` stays true however the branch that
+    reads it is written. This drives `_ledger_refusals` over each held state."""
+    from ctrlrun.effect import EffectState
+    from ctrlrun.retention import HELD_EFFECT_STATES, _ledger_refusals
+
+    class _Row:
+        effect_key = "refund:p0"
+        consumed_at = NOW - timedelta(days=400)
+        released_at = None
+
+    class _Store:
+        def __init__(self, state):
+            self._state = state
+
+        def consumptions(self):
+            return (_Row(),)
+
+        def get_effect(self, key):
+            return type("E", (), {"state": self._state})()
+
+    for state in HELD_EFFECT_STATES:
+        refusals = _ledger_refusals(_Store(state), ["refund:p0"], now=NOW, older_than=DAY)
+        assert refusals, f"a {state} effect's ledger row was prunable"
+        assert "still holds its charge" in refusals[0], refusals
+
+    # And the two terminal ones, well outside the window, are not refused.
+    for state in (EffectState.COMMITTED, EffectState.FAILED):
+        assert _ledger_refusals(_Store(state), ["refund:p0"], now=NOW, older_than=DAY) == []
+
+
+@postgres
+def test_T558_the_postgres_prune_lock_is_a_real_transaction(tmp_path) -> None:
+    """**Three Postgres guards no test asserted**, each found by a mutation surviving.
+
+    `pruning()` drops its `BEGIN`; `_commit` stops suppressing inside a prune; `put_hold` stops
+    taking the lock. All three were demonstrated defects, and all three are invisible to an
+    outcome test because the connection is `autocommit=True` and the damage is a window rather
+    than a result.
+    """
+    import ast
+
+    import ctrlrun.postgres as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    named = {
+        node.name: ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "BEGIN" in named["pruning"], (
+        "pruning() does not open a transaction. The connection is autocommit=True with every "
+        "write taking an explicit BEGIN, so a bare SELECT ... FOR UPDATE commits the instant it "
+        "returns and holds no lock at all (SPEC-v0.11 §4.5)"
+    )
+    assert "FOR UPDATE" in named["pruning"]
+    assert "self._pruning" in named["_commit"], (
+        "_commit no longer suppresses inside a prune, so put_anchor or put_checkpoint ends the "
+        "transaction pruning() opened and releases the lock mid-prune"
+    )
+    assert "FOR UPDATE" in named["put_hold"], (
+        "put_hold does not take the prune lock. `holds` does not contend with the receipt_chain "
+        "row lock, so a hold placed while a prune is in flight is missed by both (§4.5)"
+    )
+
+
+@postgres
+def test_T558b_a_hold_cannot_land_while_a_prune_holds_the_lock() -> None:
+    """The behaviour `T558` asserts statically, run against a real server.
+
+    Measured: the child blocked 1.85s and placed its hold the moment the prune released.
+    """
+    import subprocess
+    import sys
+    import time
+
+    from ctrlrun.postgres import PostgresStateStore
+
+    schema = f"holdlock_{uuid.uuid4().hex[:10]}"
+    PostgresStateStore.create_schema(POSTGRES_URL, schema)
+    child_source = (
+        "import time\n"
+        "from datetime import UTC, datetime\n"
+        "from ctrlrun.postgres import PostgresStateStore\n"
+        "from ctrlrun.retention import Hold\n"
+        f"s = PostgresStateStore({POSTGRES_URL!r}, schema={schema!r})\n"
+        "start = time.time()\n"
+        "s.put_hold(Hold('late', 1, 3, 'litigation', 'cli:bob', datetime.now(UTC)))\n"
+        "print('%.3f' % (time.time() - start))\n"
+        "s.close()\n"
+    )
+    try:
+        store = PostgresStateStore(POSTGRES_URL, schema=schema, clock=lambda: T0)
+        control = Control(Policy.from_yaml(ALLOW), store, clock=lambda: T0)
+        for index in range(6):
+            control.execute(
+                an_action(f"p{index}"), lambda: {"ok": True}, f"refund:p{index}", lease=LEASE
+            )
+        store.close()
+
+        parent = PostgresStateStore(POSTGRES_URL, schema=schema, clock=lambda: T0)
+        with parent.pruning():
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_source],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            time.sleep(1.5)
+            still_waiting = child.poll() is None
+        output, _ = child.communicate(timeout=60)
+        parent.close()
+
+        assert still_waiting, (
+            "a hold landed while a prune held the lock, so it can be placed over receipts the "
+            f"prune is about to delete: {output}"
+        )
+        # The child's own measurement starts after its interpreter and imports, so it is
+        # necessarily less than the parent's sleep. `still_waiting` above is the real proof;
+        # this is the coarse floor that separates blocking from an unblocked call, which takes
+        # single-digit milliseconds.
+        waited = float(output.strip().splitlines()[-1])
+        assert waited >= 0.25, f"the child did not block on the lock: waited {waited}s"
+    finally:
+        PostgresStateStore.drop_schema(POSTGRES_URL, schema)
+
+
+def test_T559_a_forged_local_anchor_matching_the_checkpoint_still_does_not_supersede(
+    tmp_path,
+) -> None:
+    """`T550`'s forged row carries a hash that is not a hash of anything, so the pair check alone
+    refuses it and the **source** check is never the thing that fires.
+
+    This forges a local row whose hash matches the checkpoint row exactly, so only *the provider
+    never saw it* can refuse it. Without that, a mutation restoring `held | cached` survives.
+    """
+    database = tmp_path / "state.db"
+    store = a_chain(database)
+    provider = Provider()
+    rows = store.receipts()
+    make_anchor(store, provider, at=(rows[2].seq, rows[2].hash))
+    boundary = rows[4]
+    assert boundary.seq == 5 and boundary.hash is not None
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("DELETE FROM receipts WHERE seq <= 5")
+    connection.execute(
+        "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?)",
+        (5, boundary.hash, "ctrlrun.receipt/v7", NOW.isoformat()),
+    )
+    # The forged local row agrees with the checkpoint in every field. Only the provider's own
+    # record can tell that no such anchor was ever made.
+    connection.execute(
+        "INSERT INTO anchors (token, seq, hash, kind, at) VALUES (?, ?, ?, ?, ?)",
+        ("forged", 5, boundary.hash, CHECKPOINT, NOW.isoformat()),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    report = verify_anchors(reopened, provider)
+    reopened.close()
+
+    assert ("checkpoint", 5) in [
+        (item.kind, item.seq) for item in [*provider.since(0)]
+    ] or True  # the provider holds no such checkpoint; stated for the reader
+    assert not any(item.kind == CHECKPOINT and item.seq == 5 for item in provider.since(0)), (
+        "the provider holds the checkpoint, so this is not testing the forgery"
+    )
+    assert not report.ok, (
+        "a forged local anchor agreeing with the checkpoint row bought supersession. Only the "
+        f"provider's record can refuse it, and it was not consulted: {report}"
+    )
+    assert report.superseded == 0

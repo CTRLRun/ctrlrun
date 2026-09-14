@@ -745,15 +745,25 @@ def prune_command(
     #
     # The receipt records an **intent**, so a refused prune leaves one saying DENIED rather than
     # one asserting an erasure that never happened.
-    intent = _prune_receipt(through=through, by=by, reason=reason, now=now)
+    intent = _prune_receipt(
+        through=through, older_than=older_than, by=by, reason=reason, now=now, stage="proposed"
+    )
     try:
         store.put_receipt(intent)
     except CTRLRunError as exc:
         raise _fail(exc) from exc
 
-    try:
-        result = prune(store, through=through, older_than=window, anchor=provider, now=now)
-    except CTRLRunError as exc:
+    def _outcome(refusal: str | None = None) -> None:
+        """Record what became of the intent above, against the same `action_id`.
+
+        **Every prune leaves exactly two receipts, and they are distinguishable**, which an
+        independent review found they were not: a refused prune left an `allow`/`committed`
+        receipt beside the `deny` one, and a successful prune left an identical
+        `allow`/`committed` receipt, so the record could not tell an erasure that happened from
+        one that was refused. §4.2 says an operator deleting records should leave one, and a
+        receipt that over-states what happened is worse than none.
+        """
+        stage = "refused" if refusal is not None else "completed"
         with suppress(CTRLRunError):
             store.put_receipt(
                 replace(
@@ -762,13 +772,20 @@ def prune_command(
                     seq=None,
                     prev_hash=None,
                     hash=None,
-                    decision=Decision.DENY,
-                    decision_reason="refused",
-                    result=ReceiptResult.DENIED,
-                    error=str(exc),
+                    arguments={**dict(intent.arguments), "stage": stage},
+                    decision=Decision.DENY if refusal is not None else Decision.ALLOW,
+                    decision_reason="refused" if refusal is not None else intent.decision_reason,
+                    result=ReceiptResult.DENIED if refusal is not None else ReceiptResult.COMMITTED,
+                    error=refusal or "",
                 )
             )
+
+    try:
+        result = prune(store, through=through, older_than=window, anchor=provider, now=now)
+    except CTRLRunError as exc:
+        _outcome(str(exc))
         raise _fail(exc) from exc
+    _outcome()
 
     if as_json:
         click.echo(json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":")))
@@ -892,7 +909,9 @@ def _duration(text: str) -> timedelta:
     return timedelta(**{units[text[-1]]: int(text[:-1])})
 
 
-def _prune_receipt(*, through: int, by: str, reason: str, now: datetime) -> Receipt:
+def _prune_receipt(
+    *, through: int, older_than: str, by: str, reason: str, now: datetime, stage: str
+) -> Receipt:
     """The receipt a prune writes before it takes the lock (§4.2, §4.5).
 
     **Not routed through `Control.execute`**, and §4.2 is why: the gate is
@@ -904,9 +923,18 @@ def _prune_receipt(*, through: int, by: str, reason: str, now: datetime) -> Rece
     **And the receipt is not what the walk trusts.** A receipt naming itself a checkpoint is a
     string in a document; the checkpoint row is what `verify_chain` reads. This is for a human.
     """
+    # **`older_than` is in the record**, and an independent review found it was not. It is the
+    # single input that decides whether the prune destroyed budget ledger rows, and therefore
+    # whether authority was handed back: a receipt that omits it cannot answer the one question
+    # somebody reading it afterwards would ask.
     action = Action(
         name=PRUNE_ACTION,
-        arguments={"through": through, "reason": reason},
+        arguments={
+            "through": through,
+            "older_than": older_than,
+            "reason": reason,
+            "stage": stage,
+        },
         principal=Principal(agent=by),
     )
     return Receipt(
@@ -920,7 +948,8 @@ def _prune_receipt(*, through: int, by: str, reason: str, now: datetime) -> Rece
         environment=action.environment,
         decision=Decision.ALLOW,
         decision_reason="an operator's act at the CLI; policy does not mediate shell access",
-        result=ReceiptResult.COMMITTED,
+        # The intent is **proposed**, not committed: what happened is on the second receipt.
+        result=ReceiptResult.COMMITTED if stage != "proposed" else ReceiptResult.BLOCKED,
         started_at=now,
         finished_at=now,
     )
