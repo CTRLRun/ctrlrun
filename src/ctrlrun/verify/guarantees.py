@@ -31,7 +31,11 @@ from typing import Final
 #: SPEC-v0.9 §8: `v5` was G1 to G24, and it moved once, with G24. G22 and G23 joined it with
 #: their items. No stub rows: a guarantee that reports anything before its check exists is a
 #: false green, which is what 0.6.1 had to fix and what G17 shipped as in v0.8.
-CATALOGUE: Final = "ctrlrun.guarantees/v6"
+#: SPEC-v0.11 §8: `v7` is G1 to G32, and it moves once, here, with item 4's G31. G28 (item 2),
+#: G29, G30 and G32 (item 3) join it with their items, and the release item asserts every row
+#: present before the release. No stub rows: a guarantee that reports anything before its check
+#: exists is a false green.
+CATALOGUE: Final = "ctrlrun.guarantees/v7"
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,15 @@ GUARANTEES: Final = (
         # report PASS without anybody knowing which (SPEC-v0.10 §7).
         "a swapped upstream is denied",
         ("v0.10 §4.3", "v0.10 §4.7 T490", "v0.10 §4.7 T493"),
+    ),
+    Guarantee(
+        "G31",
+        # 27 characters against `report._TITLE_WIDTH`'s 32. It grades **the walk**, not the
+        # field: `schema` has existed since v0.3 and `SPEC-v0.11 §6` adds no field. What was
+        # never proved is that `verify_chain` walks a chain holding more than one of them,
+        # hash by hash, each row hashed by the rule its own version wrote.
+        "five receipt schemas verify",
+        ("v0.11 §6", "v0.11 §6.1 T521", "v0.11 §6.2 T523"),
     ),
 )
 

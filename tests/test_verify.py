@@ -178,7 +178,8 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # section, G13, which is N/A on every SQLite run: SQLite has no clock of its own, and G15,
     # because this document names no `max_attempts` (SPEC-v0.7 §8.9). The rest are applicable,
     # G14 among them, and the count is over those.
-    assert report.applicable == 11
+    # 12 since v0.11 item 4's `G31`, which needs only an action to build a chain from.
+    assert report.applicable == 12
     # Derived: every guarantee is applicable or not, exactly once. The literal moved with every
     # milestone that added an id (G19, then G25), and the invariant never did.
     assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
@@ -777,22 +778,26 @@ def test_G11_is_applicable_even_where_every_action_is_denied(tmp_path):
 
 
 def test_the_catalogue_is_closed_and_ordered():
-    """SPEC-v0.10 §7: `v6` is G1 to G27, and each id lands with its item. Ordered by number, so
+    """SPEC-v0.11 §8: `v7` is G1 to G32, and each id lands with its item. Ordered by number, so
     an id that arrives before a lower one still sits where a reader looks for it, and unreleased
-    `main` carries a partial `v6` until the release item asserts all three.
+    `main` carries a partial `v7` until the release item asserts every row.
 
-    **No stub rows.** The upper bound is what v0.10 may reach; what is asserted about the middle
-    is that every id present is one of them and that none is missing from the order. A catalogue
-    holding an id whose check does not exist yet would report something before it could, which
-    is a false green (`v0.7 §9.4`'s D27). G26 and G27 are absent here on purpose: items 2 and 3
-    bring them, and an assertion that they are present would be the stub row this forbids."""
-    assert reg.CATALOGUE == "ctrlrun.guarantees/v6"
+    **No stub rows.** The upper bound is what v0.11 may reach; what is asserted about the middle
+    is that every id present is one of them and that none is out of order. A catalogue holding an
+    id whose check does not exist yet would report something before it could, which is a false
+    green (`v0.7 §9.4`'s D27).
+
+    **G28 to G30 and G32 are absent here on purpose**, and G31 is present without them: §8
+    assigns ids in **item** order rather than landing order, so that splitting the milestone
+    renumbers nothing, and item 4 lands before items 2 and 3. An assertion that G28 is present
+    would be the stub row this forbids."""
+    assert reg.CATALOGUE == "ctrlrun.guarantees/v7"
     ids = [guarantee.id for guarantee in reg.GUARANTEES]
     assert ids[:11] == [f"G{n}" for n in range(1, 12)]
     assert "G13" in ids and "G16" in ids and "G18" in ids
     assert ids == sorted(ids, key=lambda gid: int(gid[1:])), ids
     assert len(ids) == len(set(ids))
-    assert set(ids) <= {f"G{n}" for n in range(1, 28)}, ids
+    assert set(ids) <= {f"G{n}" for n in range(1, 33)}, ids
     for guarantee in reg.GUARANTEES:
         assert guarantee.descends_from, f"{guarantee.id} names no acceptance test"
 
@@ -860,7 +865,7 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_eleven_over_eleven():
+def test_the_v1_payments_template_reports_twelve_over_twelve():
     """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1).
 
     Ten and not nine since v0.8 item 6, and nine and not eight since item 2. G18 is graded
@@ -871,10 +876,12 @@ def test_the_v1_payments_template_reports_eleven_over_eleven():
     report = run(V1_PAYMENTS)
 
     assert report.exit_code == 0
-    assert (report.passed, report.applicable) == (11, 11)
+    # 12 since v0.11 item 4 added `G31`, which needs only an action to build a chain from
+    # and is therefore applicable wherever this template's other eleven are.
+    assert (report.passed, report.applicable) == (12, 12)
     assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
     text = report.to_text()
-    assert "11/11 declared guarantees pass." in text
+    assert "12/12 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider

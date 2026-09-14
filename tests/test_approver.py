@@ -846,7 +846,7 @@ def test_T294_the_catalogue_is_v4_and_carries_G18():
     """§11.4: the version moves once, here, and G18 lands with it."""
     from ctrlrun.verify.guarantees import CATALOGUE, GUARANTEES
 
-    assert CATALOGUE == "ctrlrun.guarantees/v6"
+    assert CATALOGUE == "ctrlrun.guarantees/v7"
     identifiers = [guarantee.id for guarantee in GUARANTEES]
     assert "G18" in identifiers
     assert identifiers == sorted(identifiers, key=lambda name: int(name[1:]))

@@ -139,8 +139,8 @@ def test_T118_ci_asserts_the_two_shapes_the_specification_names():
     steps = _workflow()["jobs"]["verify"]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
 
-    assert 'test "$AUTHORITY" = "verified 24/24"' in script
-    assert 'test "$TEMPLATES" = "verified 11/11"' in script
+    assert 'test "$AUTHORITY" = "verified 25/25"' in script
+    assert 'test "$TEMPLATES" = "verified 12/12"' in script
     assert 'test "$AUTHORITY_NA" = "3"' in script
     assert 'test "$TEMPLATES_NA" = "16"' in script
 
@@ -158,7 +158,7 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     # `examples/authority/payments.yaml` is the one with a delegable grant to hop from. This
     # pin stays a literal on purpose (it is a CI pin on a shipped example, which exists to fail
     # when a shape changes) while the N/A counts above are derived.
-    assert authority.badge["message"] == "verified 24/24"
+    assert authority.badge["message"] == "verified 25/25"
     # G13 and G15: SQLite has no clock of its own to diverge from, and the document declares
     # no `max_attempts` (SPEC-v0.7 §8.9). **And G27**, because no action entry in this document
     # pins an upstream: SPEC-v0.10 §7.3's exit criterion wants a shipped example that does, and
@@ -166,7 +166,7 @@ def test_T118_the_two_configurations_really_do_report_those_shapes():
     # it demonstrates the refusal rather than a working call. That example is the release item's.
     assert authority.not_applicable == 3
     assert templates.badge is not None
-    assert templates.badge["message"] == "verified 11/11"
+    assert templates.badge["message"] == "verified 12/12"
     assert templates.applicable + templates.not_applicable == len(reg.GUARANTEES)
 
 
@@ -209,7 +209,11 @@ def test_T119_the_denominator_is_applicable_and_never_the_catalogue_size():
 
     assert badge is not None
     assert badge["message"] == f"verified {report.passed}/{report.applicable}"
-    assert report.applicable == 11
+    # 12 since v0.11 item 4: `G31` needs only an action to build a chain from, so it is
+    # applicable wherever this configuration's other eleven are. The number is pinned rather
+    # than derived because the claim under test is that the denominator moves with what was
+    # *graded* and not with the catalogue's size, and a derived number could not fail.
+    assert report.applicable == 12
     assert report.applicable < len(reg.GUARANTEES)
     assert f"/{len(reg.GUARANTEES)}" not in badge["message"]
 
@@ -295,7 +299,7 @@ def test_T120_a_configuration_with_not_applicable_guarantees_still_writes_a_badg
 
     assert report.exit_code == 0
     assert report.badge is not None
-    assert report.badge["message"] == "verified 11/11"
+    assert report.badge["message"] == "verified 12/12"
 
 
 def test_T120_a_failing_run_writes_a_red_badge_and_a_non_zero_exit(tmp_path, monkeypatch):
