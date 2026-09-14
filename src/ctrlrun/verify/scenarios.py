@@ -4788,7 +4788,12 @@ class Engine:
             prune(
                 store,
                 through=through,
-                older_than=timedelta(days=1),
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
                 anchor=provider,
                 now=datetime.now(UTC),
             )
@@ -4850,7 +4855,12 @@ class Engine:
                 prune(
                     store,
                     through=2,
-                    older_than=timedelta(days=1),
+                    # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                    # same run, so any positive window puts every `COMMITTED` row inside it and the
+                    # prune is refused for a reason that has nothing to do with what this grades.
+                    # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                    # and §4.4's window is graded by `T546b` against a store built for it.
+                    older_than=timedelta(0),
                     anchor=provider,
                     now=datetime.now(UTC),
                 )
@@ -4880,7 +4890,12 @@ class Engine:
             prune(
                 store,
                 through=2,
-                older_than=timedelta(days=1),
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
                 anchor=provider,
                 now=datetime.now(UTC),
             )
@@ -4948,7 +4963,12 @@ class Engine:
             prune(
                 store,
                 through=2,
-                older_than=timedelta(days=1),
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
                 anchor=provider,
                 now=datetime.now(UTC),
             )
