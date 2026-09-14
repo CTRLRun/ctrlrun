@@ -1117,6 +1117,11 @@ def test_the_cli_offers_exactly_the_commands_the_spec_freezes():
         # SPEC-scan.md §9.4. The same shape and for the same reason: a subcommand that adds no
         # table, column, event, error or policy key, on its own no version line.
         "scan",
+        # SPEC-v0.11 §9. An anchor is made on a schedule **by an operator**, where every other
+        # surface in this kernel is a library call made by an agent, so it is a command rather
+        # than a parameter. §11 keeps the management plane off the roadmap and this is not one:
+        # it writes rows and prints lines, and it decides nothing.
+        "anchor",
     }
 
 
