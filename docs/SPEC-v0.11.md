@@ -129,10 +129,23 @@ Two things this section states carefully, because the earlier write-up rounded t
 - **The blinding is at construction, not at the walk.** `verify_chain` already catches a document it
   cannot canonicalize and reports `content_altered` at its `seq` (`receipt.py`, the
   `except CTRLRunError` around `chain_hash`). What raises is `store.receipts()` building `Receipt`
-  objects before the walk begins. §5 therefore has a narrower target than §12.5 implies.
+  objects before the walk begins. §5 therefore has a narrower target than `SPEC-v0.7.md` §12.5 implies.
 - **`effects` was not exercised by the probe** and is not claimed here. The probe's actions carried
-  no effect key, so it read nothing and exited 0. `SPEC-v0.7.md` §12.5 lists five surfaces; four are
-  measured above and the fifth is item 1's to establish or drop.
+  no effect key, so it read nothing and exited 0. A later review drove it with four real committed
+  effects and the tamper in place: it exits 0 and prints all four, so it does **not** blind and item
+  1 drops it from `SPEC-v0.7.md` §12.5's list of five.
+- **The MCP operator server blinds too, and it is a network surface.** `gateway/operator.py`'s
+  `_receipts` and `_stats` tools call `store.receipts()` directly, so the same one `UPDATE` takes out
+  the remote console as well as the CLI:
+
+  ```
+  gateway.operator _receipts tool (MCP, network)  RAISES InvalidArgument
+  gateway.operator _stats tool    (MCP, network)  RAISES InvalidArgument
+  ```
+
+  `verify/scenarios.py` and `conformance/suites.py` are on the same read. **Item 1's scope is the
+  shared read, not the CLI**, and a fix that landed in `cli/main.py` alone would leave the console
+  blind while the terminal recovered.
 
 ### 2.4 What an anchor can and cannot fix
 
@@ -216,6 +229,10 @@ and the missing one is checked anyway.
 - **An anchor whose time runs backwards against the one before it is refused.** A monotonic sequence
   is the only property the kernel can check about a timestamp it did not issue, and an anchor
   sequence that goes backwards is either a misconfiguration or the attack.
+- **An anchor whose `seq` is at or below the one before it is refused**, which is the same rule on
+  the other axis and §4.5's rule for a checkpoint. The first draft ordered only time, while
+  `latest()` is defined on `seq`, so nothing required the two orderings to agree and an anchor could
+  be made backwards in `seq` while moving forwards in time.
 
 ### 3.3 Where it lives, and the question that decides it
 
@@ -269,11 +286,35 @@ So the anchor gets **its own report and its own closed set**, `ANCHOR_BREAKS`, a
 
 | Kind | When |
 |---|---|
-| `anchor_broken` | the chain does not reproduce an anchored pair: the anchored `seq` is absent, or the hash at it differs. §2.4's table is what this does and does not cover, and an append is not in it |
-| `anchor_missing` | the provider holds anchors and the store's chain reaches a `seq` none of them covers, or a configuration that anchors holds none at all |
+| `anchor_broken` | an anchored pair does not reproduce: the anchored `seq` is **present and hashes differently**, or it is absent and **not accounted for by a checkpoint** (§4.6). §2.4's table is what this does and does not cover, and an append is not in it |
+| `anchor_missing` | **a configuration that anchors holds no anchor at all**, or the provider's `latest()` names an anchor the local table does not have |
+| `anchor_unavailable` | the provider cannot be reached **at verification time**. Never a pass, and named rather than silent |
+
+**`anchor_missing` does not fire on the exposed window, and an earlier draft made it do exactly
+that.** That draft read *"the store's chain reaches a `seq` none of them covers"*, which is the state
+§2.4 blesses as normal: the window `(last anchored seq, current head]` is where every honest
+deployment lives between anchors. A review measured it, one honest action after an anchor:
+
+```
+A. honest deployment, anchor just taken at head 4   -> []
+B. same deployment, ONE honest action later
+   -> [('anchor_missing', 5, 'the chain reaches seq 5; the highest anchored seq is 4')]
+```
+
+`G28` would have failed on every anchoring deployment except in the instant after an anchor. That is
+the round-one fix moving its own defect one surface out: separating the reports stopped it failing
+`G11` with `control failed` and left the definition that fires constantly untouched. **A fail-closed
+check that fires on the honest case is not fail-closed, it is broken**, and `SPEC-v0.4.md` §2.2's
+rule about a guarantee that could not have failed has a mirror image here: a guarantee that could not
+have passed.
+
+**`anchor_unavailable` is in the set, and it was not.** §3.2 requires the provider to be consulted at
+verification time and requires a raise never to be a pass, and the first draft had no name for what
+the report carries when that happens: it named the reason in §10 from the `make` side only. A
+refusal with no name in the closed set is the shape §3.4 exists to fix, one report out.
 
 This is better than the amendment on three counts, and the third is the one that decides it. `G11`
-is genuinely untouched rather than argued to be. `SPEC-v0.6.md` §9.2's closed set stays closed, so
+is genuinely untouched rather than argued to be. `SPEC-v0.6.md` §6.5's closed set stays closed, so
 this milestone amends one frozen surface instead of two. And §9's frozen table can name
 `ANCHOR_BREAKS` as a symbol a test imports, where "`CHAIN_BREAKS` gains two members" is a membership
 claim the frozen-name test's shape cannot express.
@@ -284,7 +325,7 @@ off by being absent. `SPEC-v0.4.md` §3.8's false green is the failure this refu
 
 A configuration that does **not** anchor reports neither, and `G28` is `N/A` with a reason true of
 the operator's document. Anchoring is opt-in and then fail-closed, which is the rule `SPEC-v0.3.md`
-states in its preamble and §1.2's items inherit.
+states in its preamble and every item inherits.
 
 ---
 
@@ -350,7 +391,7 @@ out of the policy document, and O4 let it back in through the action gate. One o
 move, and it is O4.
 
 **A prune is an operator's act at the CLI, not an agent's action.** It writes a receipt, because
-`SPEC-v0.1.md` §5 does not carve out an exception for evidence about evidence and an operator
+`SPEC-v0.1.md` §6 does not carve out an exception for evidence about evidence and an operator
 deleting records should leave one. It is not decided by policy, because the thing that authorises it
 is shell access to the store, which policy does not mediate and has never claimed to. An operator
 who wants a human in the loop puts one in front of the command, where they already are for every
@@ -392,18 +433,37 @@ The first draft wrote that rule as *"a prune excludes un-released rows"*, and a 
 that excludes. `state.py`'s `_release_locked` says it plainly: **`COMMITTED` holds permanently and
 only `FAILED` releases**, because a committed spend is a spend. So "un-released" is almost every row
 in the ledger, permanently, and the rule would have made the feature inert while §10 turned it into
-a refusal. `cli/main.py` already carries the distinction the draft missed: *"Un-released is not
-held."*
+a refusal. `cli/main.py` already carries the distinction the draft missed: `"Un-released" is not "held"`.
 
 **The rule is settlement, not release.** A prune excludes a ledger row whose effect is not in a
 terminal state:
 
 | Effect state | Charge | Prunable |
 |---|---|---|
-| `COMMITTED` | never released, because the spend happened | **yes.** It is history, not a hold |
+| `COMMITTED` | never released, because the spend happened | **only outside `SPEC-v0.9.md` §7.3's window.** See below: this is not "yes" |
 | `FAILED` | released | **yes** |
 | `AMBIGUOUS` | held until a human or a hook resolves it | **no.** `SPEC-v0.9.md` §4's hold, and deleting it would release authority nobody granted |
-| `RESERVED`, or a lapsed lease | held, because no transition has occurred | **no.** Still in flight |
+| `RESERVED` | held, because no transition has occurred | **no.** Still in flight |
+| `EXECUTING` | held, for the same reason | **no.** The first draft's table omitted this state entirely, and `effect.py` persists five |
+
+**The window is a condition, not a footnote, and the first draft made it one.** A review ran what
+"`COMMITTED` is history and is prunable" costs, on a 250-unit daily budget:
+
+```
+ledger: [('refund:1','amount',100,None), ('refund:2','amount',100,None)]
+third 100 on a 250 budget: REFUSED -> budget 'amount' on grant 'payer' ... is exhausted
+pruned COMMITTED ledger rows: 2
+SAME action after pruning the COMMITTED rows: ALLOWED   <-- authority manufactured
+```
+
+`control.py` sums `consumptions(...)` over `now - window` where `released_at is None`, and a
+`COMMITTED` row is never released, so it counts. **Pruning it inside the window hands back authority
+nobody granted**, which is precisely the hole `SPEC-v0.9.md` §4 exists to close and precisely what
+§7.3's invariant is conditioned on. Round one replaced "un-released" with settlement and dropped the
+window on the way through; §10's row carried the unconditional version, and §10 is the table an
+implementer codes refusals from.
+
+`NEW` is not in the table because `effect.py` says it "is never written to a store".
 
 A prune that released a hold by deleting it would be manufacturing authority, which is the hole
 `SPEC-v0.9.md` §4 exists to close. A prune that refused to touch `COMMITTED` rows would be a
@@ -440,6 +500,58 @@ Neither is refusable alone, and together they break rule 2. So:
 - **A hold is consulted inside the prune's transaction**, not before it. §4.3 said "the prune
   consults it" and said nothing about when; a hold placed between the consult and the delete would
   be honoured by neither.
+- **The prune's own receipt is written before the prune takes the lock**, and this is forced rather
+  than chosen. `put_receipt` opens `BEGIN IMMEDIATE` on the store's own connection, so a prune
+  already holding that transaction cannot write through it:
+
+  ```
+  writing the prune's receipt inside the prune's transaction ->
+      OperationalError: cannot start a transaction within a transaction
+  ```
+
+  §4.2 says the prune writes a receipt and §4.5 says it takes the receipt-write lock, and the first
+  draft never said which came first, so the two rules were unsatisfiable together on the shipped
+  store. Before, and the crash window is the safe one: a receipt for a prune that did not happen
+  over-reports, where a prune with no receipt is indistinguishable from §2.1.
+
+### 4.6 An anchor and a prune, which cancelled each other
+
+**The first draft of this document specified items 2 and 3 so that they could not both run.** §3
+never contained the word *prune*, §4 contained the word *anchor* once, each section verified alone,
+and a review found what they do together:
+
+```
+C. after an honest prune through seq 3 (checkpoint written)
+   checkpoint-seeded verify_chain   ok=True verified=2 breaks=[]
+   an anchor taken at seq 2 before the prune
+   -> [('anchor_broken', 2, 'the anchored seq is absent')]
+```
+
+The chain verifies and the anchor reports tampering. In steady state, anchoring hourly and pruning at
+ninety days, **every anchor older than the retention window is permanently `anchor_broken`**, so
+under rule 2 an anchoring deployment must either refuse every prune or live with a permanent tamper
+signal. That is the cross-module class this project keeps finding: each part is right, and the pair
+is not.
+
+**The rule: a prune anchors its checkpoint before it deletes anything, and an anchored `seq` below a
+checkpoint is evaluated against that checkpoint's anchor rather than against the chain.**
+
+| Anchored `seq` | Evaluated how |
+|---|---|
+| above the newest checkpoint | against the chain, as §3.4 says |
+| at or below it, and the checkpoint that covers it is itself anchored | **superseded**, not broken. The checkpoint's anchor carries the claim forward |
+| at or below it, with no anchored checkpoint covering it | **`anchor_broken`**, which is §2.1's attack wearing a prune's clothes |
+
+**The third row is what stops "superseded" becoming the hole.** An attacker who erases a prefix and
+writes a checkpoint to explain it must also anchor that checkpoint, and anchoring goes through the
+provider, which is outside the store. So the provider's own record shows that a prune happened, at
+what `seq`, and when. **A prune becomes something an operator can see in the anchor history even
+though the receipts are gone**, which is the whole of what retention owes evidence.
+
+The ordering follows from it and is not negotiable: **anchor the checkpoint, then delete.** A crash
+between them leaves an anchored checkpoint for a prune that did not happen, which over-reports and is
+the safe direction. The reverse leaves a prefix erased with nothing accounting for it, which is
+indistinguishable from §2.1.
 
 ---
 
@@ -457,7 +569,7 @@ So the fix is not a new break kind, and `SPEC-v0.7.md` §12.5's first candidate 
 the reason: `content_altered` already covers a document that cannot be canonicalized, and a second
 name for the same fact would be two names for one break.
 
-**The fix is §12.5's second candidate**: a reader that yields per row and reports a row it cannot
+**The fix is `SPEC-v0.7.md` §12.5's second candidate**: a reader that yields per row and reports a row it cannot
 construct, rather than raising out of the walk.
 
 ### 5.2 What a refused row becomes
@@ -481,7 +593,7 @@ what lets a refused row carry a position at all and what makes the docstring tru
 message: `SPEC-v0.7.md` §6.11's rule, because the canonicalizer quotes what it refused and a lone
 surrogate in a report is a report that cannot be printed.
 
-Every reader then chooses. `receipts` prints the row as unreadable and prints the others.
+Every reader then chooses. Every caller of that shared read chooses: `receipts` prints the row as unreadable and prints the others, and so does the operator server's `_receipts` tool.
 `verify_chain` reports `content_altered` at that `seq`, which is what it already does for a document
 it cannot hash, so one tamper reads as one break whichever half catches it. `inspect` on an
 unrelated action never sees it at all, which is the case §2.3 measured.
@@ -552,7 +664,7 @@ own output in the shape `CLAIMS.md` uses.
 
 | Id | Grades | Item |
 |---|---|---|
-| `G28` | a truncated or appended chain is refused against its anchor | 2 |
+| `G28` | a chain truncated at or below an anchored `seq` is refused against its anchor | 2 |
 | `G29` | a prune across a checkpoint leaves a chain that verifies | 3 |
 | `G30` | a held range refuses to prune | 3 |
 | `G31` | a chain spanning five receipt schema versions verifies end to end | 4 |
@@ -561,6 +673,17 @@ Each with a positive control, each graded or `N/A` with a reason true of the ope
 **each grading the same under `--only` as in a full run**. `SPEC-v0.9.md` §13.8 records G22 passing
 for a reason that had nothing to do with G22; the parametrized agreement test covers the shipped ids
 and extends to these.
+
+**`G28`'s text says truncation and does not say append, and an earlier draft said both.** Round one
+rewrote §2.4 into a table and left the claim standing here, which is the row that becomes the graded
+guarantee's text in `ctrlrun.guarantees/v7` and in `ctrlrun verify`'s output. Correcting the prose
+that argues a claim and leaving the claim in the registry is worse than not correcting it: the
+argument is read once and the registry is read by every operator who runs `verify`.
+
+**The same uncorrected sentence is on `ROADMAP.md` line 389**, the Exit line `G28` is graded against:
+*"the truncation and append cases that `SPEC-v0.6.md` §6.4 lists as undetected now detect."* §6 of
+this document quotes that very line for a different reason and did not notice. **Item 2 corrects it
+there**, in the same edit that corrects line 378.
 
 **`G28`'s positive control is the attack in §2.1**, run against a real store: truncate, fix the head,
 require the break. A guarantee whose scenario has never seen the attack it exists for is
@@ -609,17 +732,17 @@ release item adds each to the frozen-name list or records in §12 why it was del
 | `ctrlrun.state.StateStore.put_anchor` / `.anchors` | 2 | **amends `SPEC-v0.6.md` §9.2's frozen protocol.** The bar is *a second backend could not be written without it*, and an anchor's local cache cannot be reconstructed from the tables that exist |
 | `ctrlrun.state.StateStore.put_checkpoint` / `.checkpoint` | 3 | the same amendment. §4.2 is why a checkpoint the walk trusts cannot live in a receipt document |
 | `ctrlrun.state.StateStore.put_hold` / `.holds` / `.release_hold` | 3 | **the first draft froze `ctrlrun hold` with no storage at all**, and `G30` grades a held range refusing to prune against a table that did not exist. A review found it; this is the row that was missing |
-| `ctrlrun.migrations` gains `0008_anchor_checkpoint_hold` | 2, 3 | the three tables above. Named rather than written `0008_…`, because a row naming no symbol is what §9.4 is about |
+| `ctrlrun.migrations.MIGRATIONS` contains an entry whose `.id` is `0008_anchor_checkpoint_hold` | 2, 3 | the three tables above. **Written as a membership claim on a named symbol, because a migration id can never be an attribute path**: `hasattr(ctrlrun.migrations, "0008_…")` can never be true, a name starting with a digit is not an identifier, and a review showed the previous wording was still unwritable as a test row. So the frozen-name list gains a second shape, `(module, symbol, member)`, and this is its only user |
 | `ctrlrun anchor`, `ctrlrun prune`, `ctrlrun hold` | 2, 3 | CLI commands. An anchor is made on a schedule by an operator and a prune is an operator's act (§4.2), where every other surface in this kernel is a library call made by an agent. §11 keeps the management plane off the roadmap and these are not one: each writes rows and prints lines |
 
-**Every row above names something a test can import**, which the first draft's did not. A review put
+**Every row above names something a test can assert**, and the shape it needs is stated per row. A review put
 each row into `_FROZEN_V0_10`'s shape and found three that could not be written as a test row at all
 (`StateStore gains anchor and checkpoint methods`, `migration 0008_…`, and `CHAIN_BREAKS gains two
 members`, the last being a membership claim the test's shape cannot express). That is `SPEC-v0.10.md`
-§9.4's failure reproduced inside the section written to prevent it.
+`SPEC-v0.10.md` §9.4's failure reproduced inside the section written to prevent it.
 
 **Item 2 adds the v0.11 list to `tests/test_repository_signals.py` and every later item extends it**,
-rather than the release item doing it once. §9.4's gap was found at release precisely because nothing
+rather than the release item doing it once. `SPEC-v0.10.md` §9.4's gap was found at release precisely because nothing
 turned red during the items.
 
 **No new error type.** `errors.py`'s closed set covers every refusal here: a prune that would break
@@ -638,14 +761,19 @@ that fills. The prune's own receipt is where approval belongs, and §4.2 puts it
 
 | Situation | Result |
 |---|---|
-| the anchor provider raises, times out, or answers a shape the canonicalizer refuses | `anchor_unavailable`; the anchor is not made and nothing is recorded as anchored |
-| a configuration anchors and the store holds no anchor | `anchor_missing`, a break, never a pass |
+| the anchor provider raises, times out, or answers a shape the canonicalizer refuses **when an anchor is made** | `anchor_unavailable`; the anchor is not made and nothing is recorded as anchored |
+| the same, **at verification time** | `anchor_unavailable` in the report, never a pass. The first draft wrote this row from the `make` side only and had no name for the verification side |
+| an anchor whose `seq` is at or below the one before it | refused (§3.2) |
+| a configuration anchors and the store holds **no anchor at all**, or `latest()` names one the local table lacks | `anchor_missing`, a break, never a pass. **Not** the ordinary window `(last anchored seq, current head]`, which §2.4 blesses |
 | an anchored pair does not reproduce | `anchor_broken` |
 | an anchor's time runs backwards against the one before it | refused |
-| a prune that would leave the chain reporting **any** break: `missing`, `link_broken`, `head_mismatch` or `unchained` | refused, with the `seq` named. The first draft enumerated two, and a review found a prune **through the head** leaves `head_mismatch` and is refused by neither |
+| a prune that would leave the chain reporting a break **the prune caused**: any of `CHAIN_BREAKS`' six that the same store did not report before it | refused, with the `seq` named. **Not "any break".** A review found that `unchained` is a pre-existing condition on any store migrated from v0.1 to v0.5, survives a prefix prune, and can never be removed by one, because the row has no `seq` to be in a prefix of. "Any break" makes retention permanently unavailable on the oldest and largest stores, which are the ones it is for |
 | a prune through the chain's head | refused. It leaves no chained receipt for the head to name |
 | a checkpoint naming a `seq` at or below the one already recorded | refused (§4.5): this is the second of two racing prunes |
-| a prune that would delete a ledger row whose effect is `AMBIGUOUS` or still in flight | refused (§4.4). A `COMMITTED` row is history and is prunable |
+| a prune that would delete a ledger row whose effect is `AMBIGUOUS`, `RESERVED` or `EXECUTING` | refused (§4.4) |
+| a prune that would delete a `COMMITTED` ledger row **inside `SPEC-v0.9.md` §7.3's window** | refused (§4.4). Pruning it hands back authority nobody granted, demonstrated there. Outside the window it is prunable |
+| an anchored `seq` below a checkpoint that is not itself anchored | `anchor_broken` (§4.6): a prefix erased with a checkpoint written to explain it, and no anchor behind the explanation |
+| a prune that would delete receipts before its checkpoint is anchored | refused (§4.6). Anchor, then delete |
 | a prune overlapping a held range | refused, with the hold named |
 | a receipt row `from_dict` refuses | that row is unreadable and named; every other row is read |
 | a receipt whose schema label this binary does not know | named, not a break |
@@ -675,7 +803,9 @@ kernel that decided which evidence mattered would be making the consequence-taxo
 
 ---
 
-## 11.1 Round one of the spec review, and what it changed
+## 12. The review rounds, and what they changed
+
+### 12.1 Round one: twelve findings, seven design errors
 
 Recorded here rather than in a commit message, because `SPEC-v0.10.md` §11's finding was that a spec
 is believed and a commit message is not.
@@ -694,7 +824,7 @@ reasoned about rather than run.**
 | a prune excludes **un-released** ledger rows (§4.4) | `COMMITTED` is never released, so that was most of the ledger forever. The rule is **settlement**, not release |
 | a prune's receipt is ordinary and subject to policy (§4.2) | that was O3's trap arriving through O4. A prune is an operator's act, not an agent's action |
 | nothing about concurrency | §4.5. Two prunes, each valid alone, break rule 2 together |
-| §9 froze three rows naming no symbol | §9.4's failure inside the section written to prevent it. Every row now names something a test imports, and `ctrlrun hold` gained the storage `G30` grades |
+| §9 froze three rows naming no symbol | `SPEC-v0.10.md` §9.4's failure inside the section written to prevent it. Every row now names something a test imports, and `ctrlrun hold` gained the storage `G30` grades |
 
 Five citations pointed at the right file and the wrong section, and one quoted a sentence that is not
 in the document it named. All corrected; every file-qualified reference now resolves.
@@ -706,7 +836,30 @@ shipped.
 
 ---
 
-## 12. What building v0.11 settled
+### 12.2 Round two: fifteen findings, ten of them in round one's own fixes
+
+Recorded because the distribution is the lesson. **Ten of fifteen were in text round one wrote**, and
+the dominant shape was *a fix applied to the argument and not to the artifact*:
+
+| Round one fixed | Round two found it had not |
+|---|---|
+| §2.4's append claim, rewritten as a table | the claim survived in **§8's `G28` row**, which is the text that becomes the graded guarantee, and on `ROADMAP.md`'s Exit line |
+| `anchor_missing` moved out of `CHAIN_BREAKS` so it stops failing `G11` | its **definition** was untouched, so it fired on every honest deployment and failed `G28` universally instead |
+| §4.4's release rule replaced with settlement | §10 carried the **unconditional** version, and pruning a `COMMITTED` row inside §7.3's window manufactures budget authority |
+| §9's three unwritable rows named | the migration row **still cannot be an attribute path**; naming it did not change its shape |
+| §11.1 declared the citation class closed | **three new citation defects in the new text**, one quoting a paraphrase as if it were a file's words |
+
+**And one nobody looked for in either round until it was searched for: §4.6.** Items 2 and 3 were
+specified in isolation, each verified alone, and cancelled each other. §3 did not contain the word
+*prune*; §4 contained the word *anchor* once.
+
+**What this says about review rounds.** v0.9 and v0.10 each needed three, and the reason is now
+legible: the first round finds what the author did not know, and the second finds what the author
+did while fixing it. A milestone that stops at one round ships the second set.
+
+---
+
+## 13. What building v0.11 settled
 
 Written by item 6, in one pass, from the CHANGELOG line each item leaves.
 
