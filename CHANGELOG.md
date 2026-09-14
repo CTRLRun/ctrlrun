@@ -42,6 +42,46 @@ any change to one appears here.
   trusted. Found by review; the tests that missed it all tampered with a row's *content*, and
   `{}` and a float among the controls are both valid JSON.
 
+- **An anchor: the chain's head, recorded where the store's writer cannot reach it**
+  (`SPEC-v0.11.md` §2, §3). The receipt chain detects alteration. It does not detect
+  **truncation**, because the head that would catch it is a row in the same database. Measured on
+  a six-receipt chain, in two statements:
+
+  ```
+  DELETE FROM receipts WHERE seq > 3
+  UPDATE receipt_chain SET seq = ?, hash = ?
+  -> ok=True verified=3 breaks=[]
+  ```
+
+  Three receipts erased, and the chain reports itself intact. An anchor records the pair the head
+  holds outside the database, at an interval the operator chooses, and the same two statements are
+  then named `anchor_broken` at the anchored `seq`.
+
+  **What an anchor proves, and what it does not.** It freezes a **prefix**: anything at or below
+  an anchored `seq` can no longer be removed or altered without the anchored pair failing to
+  reproduce. **An append is not detected**, because it lands above every anchored `seq`; nor are
+  receipts created and destroyed between two anchors; nor who wrote any of it. The window you are
+  exposed to is `(last anchored seq, current head]`, and its size is your choice of interval.
+  That is the number to quote rather than any sentence about tamper-evidence, and there is a test
+  that runs a forged append and requires both reports to stay clean.
+
+  **No keys.** The anchor consumes a timestamp and issues nothing: no key generation, no rotation,
+  no revocation, no signing. Signing stays off the roadmap for the reason `SPEC-v0.6.md` §11
+  gives, and a test greps this module's own source to keep that true.
+
+- `ctrlrun.anchor`: `AnchorProvider` (a four-call protocol you implement, because CTRLRun ships no
+  timestamp client and a network client does not belong in this wheel), `verify_anchors`,
+  `AnchorReport`, `ANCHOR_BREAKS`, and `anchor=` on `Control`.
+- **`ANCHOR_BREAKS` is its own closed set and `CHAIN_BREAKS` does not change.** `anchor_broken`,
+  `anchor_missing`, `anchor_repudiated`. Putting them in `CHAIN_BREAKS` would fail `G11`'s control
+  with `control failed` on every anchoring deployment, because that control reads the whole
+  `ChainReport`. `anchor_unavailable` is in neither set: an unreachable provider is a transport
+  failure, and grading it as tampering would make a network blip indistinguishable from a
+  truncation.
+- **`ctrlrun anchor`**, with `--verify`, and migration **`0008_anchor_checkpoint_hold`**.
+- **`G28`, a truncation past an anchor fails**, whose positive control is the attack itself run
+  against a real store.
+
 - **One chain, five receipt schema versions, walked end to end** (`SPEC-v0.11.md` §6). A store
   kept since v0.6 holds five: `v3` (0.6), `v4` (0.7), `v5` (0.8), `v6` (0.9), `v7` (0.10).
   **No new field**: `schema` has existed since `SPEC-v0.3.md` §12.2. What is new is the proof
