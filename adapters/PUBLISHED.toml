@@ -11,10 +11,23 @@
 # `pip install ctrlrun-openai-agents` beside a current kernel then either refuses to resolve or
 # silently downgrades ctrlrun to 0.5.x.
 #
-# This file is the record of the published side, updated by hand **in the same commit that tags
-# a release**. `test_a_widened_kernel_range_is_not_shipped_without_a_new_version` compares it to
-# the tree: if an adapter's range has moved away from what was published, its version must have
-# moved too, or the release is one nobody can install.
+# This file is the record of the published side: **what `pip download` gets today**, never what a
+# tag about to be cut will publish. `test_a_widened_kernel_range_is_not_shipped_without_a_new_version`
+# compares it to the tree: if an adapter's range has moved away from what was published, its
+# version must have moved too, or the release is one nobody can install. Update a row **after**
+# the upload succeeds, not beside the change that motivates it.
+#
+# **The 0.11.0 release pass got that wrong and the guard said nothing.** It widened the tree to
+# `<0.12` and edited this file to `1.1.0 = <0.12` in the same commit, so the two sides agreed and
+# the comparison returned early. PyPI had, and still has, `ctrlrun-langgraph` 1.1.0 declaring
+# `ctrlrun<0.11`:
+#
+#     $ curl -s https://pypi.org/pypi/ctrlrun-langgraph/json | jq -r .info.requires_dist[]
+#     ctrlrun<0.11,>=0.5
+#
+# Which is the v0.10 defect this file was written for, recurring one release later, in the file.
+# A record edited to match a claim is not a record. `RECORDED` in `test_packaging.py` freezes the
+# range each published version declares, so raising one without a new version now fails.
 #
 # The tag carries NO `v`. `publish.yml` reads an adapter tag as everything after the last hyphen,
 # so `adapters-langgraph-1.1.0` names 1.1.0 and `adapters-langgraph-v1.1.0` names `v1.1.0` and is
@@ -27,9 +40,9 @@
 # that gets skipped in the run that mattered.
 
 [langgraph]
-version = "1.0.0"
-kernel = ">=0.5,<0.6"
+version = "1.1.0"
+kernel = ">=0.5,<0.11"
 
 [openai-agents]
-version = "1.0.0"
-kernel = ">=0.5,<0.6"
+version = "1.1.0"
+kernel = ">=0.5,<0.11"

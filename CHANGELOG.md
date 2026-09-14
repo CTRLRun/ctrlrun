@@ -9,6 +9,17 @@ any change to one appears here.
 
 ## [Unreleased]
 
+## [0.11.0] — Evidence
+
+One question: **can the record be trusted after the fact, and kept?**
+
+Every milestone so far added something the receipt records. None asked whether the receipt is
+still worth reading a year later, on a database an administrator can write to, after somebody
+pruned it. This is the first milestone whose subject is the evidence itself rather than the
+decision, and the first that opens by admitting a defect in the thing it is about: the chain has
+never detected truncation or append, both reachable in two SQL statements, and both written down
+since `SPEC-v0.6.md` §6.4.
+
 ### Added
 
 - **`docs/SPEC-v0.11.md`, the v0.11 "Evidence" contract.** Documentation only; the version bump is
@@ -85,6 +96,29 @@ any change to one appears here.
   without that, every anchor older than the retention window would be permanently
   `anchor_broken` and an anchoring deployment would have to choose between pruning and a
   permanent tamper signal.
+
+  **"Anchored" means the provider says so, at the pair the checkpoint claims.** The first
+  implementation took the union of what the provider returned and what the store's own `anchors`
+  table held, so one `INSERT` beside a forged checkpoint row bought supersession and the row's
+  hash was never compared to anything. Supersession now comes from `provider.since()` alone, and
+  the anchor's `(seq, hash)` must be the pair the checkpoint asserts. A local row the provider
+  does not confirm buys nothing. Found by the independent review the build order required for
+  this item, which also gave `SPEC-v0.11.md` §4.6 the sentence that says which reading is meant.
+
+  **A prune leaves two receipts, and they are distinguishable.** The first records the request,
+  `--through`, `--older-than` and `--reason`, staged `proposed`; the second records what became
+  of it, `completed` or `refused`. They were byte-identical at first, and `--older-than` was in
+  neither, which made the record of a refusal worth nothing.
+
+  **The bound comes from the receipts, not from `receipt_chain`.** That row is the one
+  `SPEC-v0.11.md` §2.1 assumes an attacker rewrites, and deciding `--through` from it meant one
+  `UPDATE` turned a prefix prune into a full-chain delete that both readers called clean.
+
+  **The prune's lock is held across the validation and the delete on both backends.** SQLite's
+  `pruning()` opened `BEGIN IMMEDIATE` and then every `put_anchor` went through `with connection:`
+  and committed it, so the prune held the lock for one statement; a failed prune could leave
+  `missing` and `link_broken` on a chain that was intact when it started. The defect had been
+  found on Postgres during the item and fixed only there, and SQLite is the default backend.
 
   **A checkpoint is a row, not a receipt field.** A receipt naming itself a checkpoint is a
   string in a document, and `SPEC-v0.3.md` §4.3.1 settled that shape. A prune writes a receipt
