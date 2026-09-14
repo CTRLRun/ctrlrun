@@ -810,6 +810,46 @@ ADAPTER_DIRECTORIES = ("langgraph", "openai-agents")
 
 
 @pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_the_tag_an_adapter_release_needs_is_one_publish_yml_accepts(adapter):
+    """The tag format differs between the kernel and an adapter, and the difference is a trap.
+
+    `publish.yml` strips a leading `v` from a kernel tag, and reads an adapter tag as **everything
+    after the last hyphen**. So `v0.10.0` names version `0.10.0`, while `adapters-langgraph-v1.1.0`
+    names `v1.1.0` and is refused against `1.1.0`. The `v` that is required on one is fatal on the
+    other, and the failure happens at the tag, after it is pushed.
+
+    This runs the workflow's own two rules against the version in the tree, so the tag a release
+    actually needs is asserted rather than remembered. `MAJOR.MINOR` is accepted as well as the
+    full version, which is `SPEC-v0.5 §6.2`: adapters version by version line and the distribution
+    carries the patch.
+    """
+    import tomllib as _tomllib
+
+    manifest = REPO_ROOT / "adapters" / adapter / "pyproject.toml"
+    if not manifest.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+    with manifest.open("rb") as handle:
+        version = _tomllib.load(handle)["project"]["version"]
+
+    def accepted(ref: str) -> bool:
+        """`publish.yml`'s `case` statement, transcribed."""
+        if ref.startswith("v"):
+            return ref[1:] == version
+        tag = ref.rsplit("-", 1)[-1]
+        return version == tag or version.startswith(tag + ".")
+
+    major_minor = ".".join(version.split(".")[:2])
+    assert accepted(f"adapters-{adapter}-{version}"), (
+        f"adapters-{adapter}-{version} is the tag this release needs and publish.yml refuses it"
+    )
+    assert accepted(f"adapters-{adapter}-{major_minor}"), "the MAJOR.MINOR form is SPEC-v0.5 §6.2's"
+    assert not accepted(f"adapters-{adapter}-v{version}"), (
+        "a `v` prefix on an adapter tag now resolves; if publish.yml changed, the guidance in "
+        "this file and in adapters/PUBLISHED.toml changes with it"
+    )
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
 def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
     """The test below checks the range in the tree. Nothing checked what is on PyPI.
 
@@ -824,6 +864,11 @@ def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
     moved away from what was published, its **version** must have moved too, or the widening is
     one nobody can install. Hand-written rather than fetched, because a check that needs the
     network is a check that gets skipped in the run that mattered.
+
+    **The tag carries no `v`.** `publish.yml` reads an adapter tag as everything after the last
+    hyphen, so `adapters-langgraph-v1.1.0` yields `v1.1.0` and is refused against version `1.1.0`.
+    The `v` prefix belongs to kernel tags, where the workflow strips it. The message below said
+    otherwise and would have sent a reader to a tag the workflow rejects.
     """
     import tomllib as _tomllib
 
@@ -846,7 +891,7 @@ def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
     assert project["version"] != published["version"], (
         f"adapters/{adapter} declares ctrlrun{declared} but {published['version']} on PyPI "
         f"declares ctrlrun{published['kernel']}, and the version has not moved. Bump it and tag "
-        f"`adapters-{adapter}-v<version>`, then record the new version and range in "
+        f"`adapters-{adapter}-<version>`, then record the new version and range in "
         "adapters/PUBLISHED.toml. A widened range nobody can install is not a widened range."
     )
 
