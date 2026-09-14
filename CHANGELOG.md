@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 Public API names are frozen in `docs/SPEC-v0.1.md` §8. Before 1.0 they may still change, and
 any change to one appears here.
 
+## [Unreleased]
+
+### Added
+
+- **`docs/SPEC-v0.11.md`, the v0.11 "Evidence" contract.** Documentation only; the version bump is
+  the release item's. It answers one question, can the record be trusted after the fact and kept,
+  and it opens by demonstrating the defect it exists to close: a truncation and a forged append both
+  verify as intact after two SQL statements, because the head that would catch them is a row in the
+  same database. Transcribed from a real store rather than argued.
+
 ## [0.10.0] — Multi-agent
 
 One question: when one agent hands work to another, what does the second one hold?
