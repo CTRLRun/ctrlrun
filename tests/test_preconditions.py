@@ -3366,9 +3366,7 @@ def test_R2_4_the_gateway_reads_a_withdrawal_as_an_answer_until_it_expires(tmp_p
     store.close()
 
 
-def test_R2_a_malformed_value_of_a_declared_key_no_longer_blinds_every_reader(
-    tmp_path, fake_clock
-):
+def test_R2_a_malformed_value_of_a_declared_key_no_longer_blinds_every_reader(tmp_path, fake_clock):
     """**SPEC-v0.7 §12.5's debt, paid in v0.11** (SPEC-v0.11 §5, rule 3).
 
     This test used to assert the opposite, and said so: *"this test asserts today's behaviour,
