@@ -411,6 +411,20 @@ def test_T515_the_operator_servers_read_tools_no_longer_blind(workspace) -> None
     counted = _tool(server, "stats", {})
     assert counted["actions"] == 3
     assert counted["unreadable_receipts"] == 1, counted
+
+    # And under `control_id`, which is a **filter and not a lookup** (SPEC-v0.6 §7.3). A row
+    # whose `controls` could not be read cannot be shown not to cite this id, so dropping it
+    # would let one `UPDATE` hide a row from exactly the query an operator runs to find a
+    # control's evidence. This half exists because a mutation survived without it.
+    filtered = _tool(server, "receipts", {"limit": 10, "control": "no-such-control"})
+    kept = [row for row in filtered["receipts"] if row.get("refusal")]
+    assert len(kept) == 1 and kept[0]["seq"] == 2, (
+        f"the refused row was filtered out of a control query that could not have excluded "
+        f"it: {filtered}"
+    )
+    assert len(filtered["receipts"]) == 1, (
+        f"the filter kept rows it could read and should have excluded: {filtered}"
+    )
     reopened.close()
 
 
