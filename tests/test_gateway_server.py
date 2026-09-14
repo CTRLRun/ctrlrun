@@ -694,6 +694,30 @@ def test_T25_an_action_needing_a_human_returns_41002_and_writes_no_receipt(clien
     assert upstream.calls == []
 
 
+def test_the_41002_message_tells_an_mcp_client_what_an_mcp_client_can_do(client, upstream, store):
+    """The error text is read by a client that is not Python, and often by a model.
+
+    `ApprovalRequired` carries the decorator's wording -- *run `ctrlrun approve …`, then retry
+    inside `ctrlrun.with_approval(…)`* -- and the gateway used to relay `str(exc)` verbatim. That
+    told an MCP client to enter a Python context manager it has no access to, on the one path
+    where the caller may be in any language. `gateway-in-5-minutes.mdx` documents the real next
+    step and the gateway now says it: a human approves, and the same call runs again.
+
+    Asserting the absence of `with_approval` is the half that matters. A message merely
+    *mentioning* the retry would pass a positive-only check while still sending a Go client
+    looking for a Python API.
+    """
+    body = _needs_approval()
+
+    response = client.post("/mcp", content=json.dumps(body).encode(), headers=_headers(body))
+    message = _error(response)["message"]
+
+    assert "with_approval" not in message, message
+    assert "ctrlrun approve" in message, message
+    assert "this same call runs" in message, message
+    assert _error(response)["data"]["request_id"] in message, message
+
+
 def test_T25_the_identical_call_executes_once_the_approval_is_granted(client, upstream, store):
     """§6.10 — a client comes back by re-sending the identical `tools/call`, and the gateway
     finds the granted approval by the action's hash."""

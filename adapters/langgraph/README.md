@@ -57,6 +57,19 @@ def issue_refund(payment_id: str, amount: int) -> str:
 `interrupt()` — instead of raising past your graph. It is the entire difference this adapter
 makes.
 
+**Every protected call needs a principal**, and `identity=...` above is where it comes from. In
+production that is a provider that verifies a credential; in development it is
+`with ctrlrun.context(agent="support-agent"):` around the call. Without one, the action is
+denied before the policy is consulted, with a message that names both fixes:
+
+```text
+ActionDenied: stripe.refund: no principal is available; wrap the call in
+'with ctrlrun.context(agent=...)', or install an identity provider that answers
+```
+
+That is fail-closed and deliberate: who is acting is an authorization input, and a library that
+guessed it would be inventing the one field a grant is matched against.
+
 Call `issue_refund` from a node, on a graph compiled with a checkpointer:
 
 ```python
