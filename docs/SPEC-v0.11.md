@@ -610,6 +610,28 @@ provider, which is outside the store. So the provider's own record shows that a 
 what `seq`, and when. **A prune becomes something an operator can see in the anchor history even
 though the receipts are gone**, which is the whole of what retention owes evidence.
 
+**"Itself anchored" means the provider says so, at the pair the checkpoint claims.** This sentence
+was added by item 6 because the implementation read the word *anchored* the only other way it can
+be read and the hole came straight back. `verify_anchors` built the set of anchored checkpoints
+from the union of what the provider returned and what the store's own `anchors` table held, so one
+`INSERT` beside the forged checkpoint row bought supersession, and the row's hash was never
+compared to anything:
+
+```
+forged checkpoint at seq 4, local anchors row at seq 4 with hash 'sha256:not-a-hash-at-all'
+-> ok=True superseded=1 breaks=[]
+```
+
+Two conditions, both required. The anchor must come from **`provider.since()` alone**, never from
+the local table, which is inside the blast radius by definition. And its `(seq, hash)` must be the
+pair the checkpoint asserts, because an anchor that is merely *present at that seq* proves nothing
+about the hash the prune is asking the reader to accept. A local row the provider does not confirm
+buys nothing.
+
+This is the third time in this document that §4.6 has been the section at fault, after round two
+wrote it and round three found it cancelling against §3.2. The class is stable: the anchor and the
+prune are each right alone.
+
 The ordering follows from it and is not negotiable: **anchor the checkpoint, then delete.** A crash
 between them leaves an anchored checkpoint for a prune that did not happen, which over-reports and is
 the safe direction. The reverse leaves a prefix erased with nothing accounting for it, which is
@@ -1053,7 +1075,49 @@ cannot, for §7's reason above.
 The rule worth stating: **a claim about what a feature does not do needs a test as much as a
 claim about what it does**, because nothing else will ever contradict it.
 
-### 13.4 What is still owed
+### 13.4 The review item 3 required, and the seven defects it found after the merge
+
+The build order said *independent review is REQUIRED for items 2 and 3*, and of the two, *item 3's
+is the one not to skip: a prune is the only operation in this library that destroys evidence, and a
+defect there is a loss rather than a refusal.* The review ran. It found **seven defects**, every one
+demonstrated with a script against the merged code, and it finished after the item had merged, which
+is its own finding and is recorded below.
+
+**The first one is the reason the instruction exists.** §4.6's supersession rule was implemented as
+the union of what the provider returned and what the store's own `anchors` table held. One `INSERT`
+beside a forged checkpoint row bought supersession, with a hash nothing ever compared. The section
+that named this attack in round three of the spec review reproduced it in code, which is as clear a
+statement as this project has yet produced that **a defect named in a document is not a defect
+closed.** §4.6 now says which of the two readings is meant.
+
+| Defect | What it cost |
+|---|---|
+| supersession decided from the local `anchors` table | §4.6 bought nothing: an erased prefix, a forged checkpoint and one local row read as `superseded` |
+| the SQLite prune dropped its lock at its first write | `with connection:` committed `BEGIN IMMEDIATE`. A failed prune left `missing` and `link_broken` on a chain intact when it started |
+| a hold placed during a prune was ignored | `put_hold` took no row lock and landed between the validation and the delete. Its receipts were deleted |
+| `--through` above the head was bounded by `receipt_chain` | one `UPDATE` to the row §2.1 assumes is rewritten turned a prefix prune into a full-chain delete both readers called clean |
+| rule 2's simulation dropped `UnreadableReceipt` and re-derived the head | one unparseable row cost the whole retention feature, refusing every honest prune |
+| the checkpoint could assert a `(seq, hash)` pair that never existed | the `seq` came from `--through` rather than from the boundary receipt, and the prune then anchored the invented pair |
+| a refused prune and a successful one left byte-identical receipts | and `--older-than` was in neither, so the record of a refusal recorded nothing |
+
+**Two of the seven are the same mistake in two places.** The SQLite lock defect had already been
+found on Postgres during the item, and was fixed where it was found. SQLite is the default backend.
+A fix applied to the instance and not to the class is §12.2's shape arriving in code.
+
+**The mutation run afterwards produced a finding about the code rather than the tests.** Deleting
+rule 2's comparison outright, `if caused:` to `if False:`, survived the entire file. Once the
+checkpoint names a pair that exists and the simulation is the store rather than a tidier version of
+it, **no store state can reach that branch**: every construction is refused earlier, by the head
+bound, the forward-only checkpoint, or the missing-hash refusal. The comparison stays as a backstop,
+and `T556c` drives it directly, because a guard nothing can trigger is still a guard somebody will
+edit.
+
+**What this says about ordering.** The build order put the required review inside the item and the
+merge did not wait for it, so `main` carried all seven for the length of two more items. The rule
+this milestone adds: **a required review is a merge gate, not a step in the item**, and an item that
+names one is not done when its tests pass.
+
+### 13.5 What is still owed
 
 - **`SPEC-v0.11.md` §9 assigns the frozen-name list to item 2 and item 1 created it.** Item 1 had
   two rows of its own and §9's whole point is that nothing turns red at release that could have

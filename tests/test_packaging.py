@@ -896,6 +896,62 @@ def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
     )
 
 
+#: What each **published** adapter version declares, frozen. Read off PyPI once and never
+#: derived from the tree:
+#:
+#:     $ curl -s https://pypi.org/pypi/ctrlrun-langgraph/json | jq -r .info.requires_dist[]
+#:     ctrlrun<0.11,>=0.5
+#:
+#: Checked 2026-09-14, during the 0.11.0 release pass, for both adapters at both versions.
+RECORDED: dict[str, dict[str, str]] = {
+    "langgraph": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11"},
+    "openai-agents": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11"},
+}
+
+
+@pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
+def test_the_published_record_is_a_record_and_not_a_plan(adapter):
+    """A released version's range is a historical fact. Editing it is how the guard above dies.
+
+    The test above compares `adapters/PUBLISHED.toml` to the tree and returns early when they
+    agree, which is correct **as long as the file says what is on PyPI**. The 0.11.0 release pass
+    widened the tree to `<0.12` and edited the file to `1.1.0 = <0.12` in the same commit, so the
+    two sides agreed, the comparison returned early, and the adapter version never moved. PyPI
+    still had 1.1.0 declaring `ctrlrun<0.11`, so `pip install ctrlrun-langgraph` beside a 0.11.0
+    kernel would refuse to resolve or downgrade the kernel to 0.10.x: exactly the defect
+    `PUBLISHED.toml` exists to prevent, one release after it was written to prevent it.
+
+    Both sides agreeing is the state a guard cannot distinguish from correct, so this fixes the
+    published half in place. A version already uploaded cannot change what it declares, so
+    raising its range here now fails, and the only way forward is the one that works: a new
+    version, a tag, and a row added after the upload lands.
+
+    **Hand-maintained deliberately**, on the same rule as `PUBLISHED.toml` itself: a check that
+    needs the network is a check that gets skipped in the run that mattered.
+    """
+    import tomllib as _tomllib
+
+    published_file = REPO_ROOT / "adapters" / "PUBLISHED.toml"
+    if not published_file.exists():
+        pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
+
+    with published_file.open("rb") as handle:
+        published = _tomllib.load(handle)[adapter]
+
+    version, kernel = published["version"], published["kernel"]
+    known = RECORDED[adapter]
+    assert version in known, (
+        f"adapters/PUBLISHED.toml records {adapter} {version}, which is not a version this "
+        f"suite has seen on PyPI ({', '.join(sorted(known))}). Record a version AFTER the "
+        "upload succeeds, and add it to RECORDED from PyPI's own requires_dist."
+    )
+    assert kernel == known[version], (
+        f"adapters/PUBLISHED.toml says {adapter} {version} declares ctrlrun{kernel}; PyPI says "
+        f"ctrlrun{known[version]}. A released version cannot change what it declares. If the "
+        "range needs widening, bump the adapter version and tag it."
+    )
+
+
 @pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
 def test_each_adapter_declares_a_kernel_range_that_contains_this_kernel(adapter):
     """SPEC-v0.5 §6.3's two ranges, checked against the kernel that is actually here.

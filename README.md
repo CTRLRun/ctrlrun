@@ -130,7 +130,9 @@ second. [Run it in your browser](https://docs.ctrlrun.dev/try-it) with nothing i
 **Where it stops.** It does not detect prompt injection: it contains the consequence rather
 than reading the cause. It cannot promise exactly-once against a remote it does not control, it
 refuses to *knowingly* act twice, and it rolls nothing back. Receipts are chained, so an alteration
-is detected. They are not signed: alteration is not authorship. The badge above means the
+is detected; a truncation at the end and a forged append are not, because the head that would catch
+them is a row in the same database, and closing that is what `ctrlrun anchor` is for. They are not
+signed: alteration is not authorship. The badge above means the
 **declared guarantees pass** in the setup they ran against, and it does not mean secure, safe,
 compliant, certified or audited:
 [what the badge means](https://docs.ctrlrun.dev/verify#what-the-badge-means)
