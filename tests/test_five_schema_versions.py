@@ -46,6 +46,9 @@ only a release rehearsal.
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,6 +66,7 @@ from ctrlrun.receipt import (
     new_receipt_id,
     verify_chain,
 )
+from ctrlrun.verify.report import Status
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 LEASE = timedelta(minutes=5)
@@ -332,3 +336,185 @@ def test_T525_the_released_wheel_script_strips_what_would_make_it_lie() -> None:
         assert version in source, f"the script no longer builds the chain with {version}"
     for schema in CHAINED_SCHEMAS:
         assert schema in source, f"the script no longer expects {schema}"
+
+
+# --- T521c: the same chain, read back off a real store ----------------------------------------
+
+
+def test_T521c_five_schemas_on_disk_rehash_to_their_stored_hashes(tmp_path, seed) -> None:
+    """The mechanism, not the arithmetic: a receipt read from a store is hashed as **the document
+    it was read from** (`SPEC-v0.7.md` §6.11), and that is the only reason one chain can hold
+    five shapes at all.
+
+    **`T521` does not cover this and a mutation proved it.** `T521` builds its receipts with
+    `replace()`, which drops the stored document, so `chain_hash()` there falls back to rendering
+    with `to_dict()` and the stored-document branch is never taken. Deleting that branch left
+    `T521` green. This test puts the five documents **on disk** and reads them back through the
+    store, which is the path an operator's chain actually takes.
+
+    The rows go in with SQL because `put_receipt` does `replace(receipt, schema=RECEIPT_SCHEMA)`:
+    a writer writes under its own schema, so an older receipt cannot be forged through the public
+    API. That is correct, and it is why this test writes the table the way 0.6 left it.
+    """
+    database = tmp_path / "five.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    store.close()
+
+    rows, head = a_chain_of_every_schema(seed)
+    connection = sqlite3.connect(database)
+    for row in rows:
+        connection.execute(
+            "INSERT INTO receipts (receipt_id, action_id, ts, json, seq, prev_hash, hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row.receipt_id,
+                row.action_id,
+                row.finished_at.isoformat(),
+                json.dumps(row.to_dict(), ensure_ascii=False, separators=(",", ":")),
+                row.seq,
+                row.prev_hash,
+                row.hash,
+            ),
+        )
+    connection.execute(
+        "INSERT INTO receipt_chain (id, seq, hash) VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash",
+        (len(rows), head),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    read_back = reopened.receipts()
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert len(read_back) == 5
+    assert sorted({row.schema for row in read_back}) == sorted(CHAINED_SCHEMAS)
+    # The stored document really is what came back, so the fallback is not what is being tested.
+    for row in read_back:
+        assert isinstance(row, Receipt)
+        assert row.chain_hash() == row.hash, (
+            f"the {row.schema} row at seq {row.seq} does not rehash to its stored hash, so it is "
+            "being rendered by this binary rather than read as it was written"
+        )
+    assert report.ok, [(item.name, item.seq) for item in report.breaks]
+    assert report.verified == 5
+
+
+# --- T522b: the version is a number, and two digits is where a string comparison breaks --------
+
+
+def test_T522b_schema_versions_are_ordered_as_numbers_and_not_as_strings() -> None:
+    """`"ctrlrun.receipt/v10"` sorts **below** `"ctrlrun.receipt/v3"` lexically.
+
+    A string comparison in `_OLDER_RECEIPT_SCHEMAS` gives the right answer for every version that
+    exists today and the wrong one from v0.13 on: it would drop `v10` and later out of the set
+    G31 grades, and G31 would go on passing over a shorter chain with nothing to say about it.
+    A mutation replacing the parse with `label >= "ctrlrun.receipt/v3"` survived the rest of this
+    file, because nothing here reaches two digits yet. This is what makes the guard load-bearing
+    now rather than in three milestones.
+    """
+    from ctrlrun.verify.scenarios import _schema_number
+
+    assert _schema_number("ctrlrun.receipt/v3") == 3
+    assert _schema_number("ctrlrun.receipt/v10") == 10
+    assert "ctrlrun.receipt/v10" < "ctrlrun.receipt/v3", (
+        "this test is about a lexical ordering that no longer holds; if that changed, the parse "
+        "may no longer be needed"
+    )
+    ordered = sorted(
+        ["ctrlrun.receipt/v10", "ctrlrun.receipt/v3", "ctrlrun.receipt/v9"], key=_schema_number
+    )
+    assert ordered == [
+        "ctrlrun.receipt/v3",
+        "ctrlrun.receipt/v9",
+        "ctrlrun.receipt/v10",
+    ], ordered
+
+
+# --- T525b: the script's guard, run rather than grepped ---------------------------------------
+
+
+def test_T525b_the_scripts_environment_guard_actually_strips_the_variables() -> None:
+    """**`T525` greps and a mutation walked through it.** Replacing the body of
+    `_clean_environment` with `pass` left every string `T525` looks for in place, so it passed
+    over a script that hands its own `sys.path` to the wheels it is testing.
+
+    That is the project's own rule about auditing by grep, applied to a script: searching for the
+    identifier finds the identifier. This imports the function and runs it.
+    """
+    import importlib.util
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "five_schema_chain.py"
+    spec = importlib.util.spec_from_file_location("five_schema_chain", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    leaked = dict(os.environ)
+    leaked["PYTHONPATH"] = "/somewhere/that/would/shadow/the/wheel/src"
+    leaked["PYTHONHOME"] = "/somewhere/else"
+    original = os.environ.copy()
+    try:
+        os.environ.update(leaked)
+        cleaned = module._clean_environment()
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+    assert "PYTHONPATH" not in cleaned, (
+        "the script would hand its own sys.path to each released wheel, so every wheel would "
+        "import THIS build and the run would report one schema version while looking like a pass"
+    )
+    assert "PYTHONHOME" not in cleaned
+    assert "PATH" in cleaned, "the child needs an environment it can still run in"
+    assert module.RELEASES[0][0] == "0.6.1"
+    assert tuple(schema for _version, schema in module.RELEASES) == CHAINED_SCHEMAS
+
+
+# --- T524b: G31's own control, forced ----------------------------------------------------------
+
+
+def test_T524b_G31_fails_its_control_when_the_chain_spans_one_schema(tmp_path, monkeypatch):
+    """**The guarantee that could not have failed, checked by making it fail.**
+
+    `G31`'s first control requires the chain it built to hold five distinct labels, because a
+    chain of five `v7` rows verifies perfectly and proves nothing. A mutation replacing that
+    control with `True` survived the whole suite: nothing ever drove `G31` with a one-version
+    chain, so the control was green and not load-bearing.
+
+    Forcing it is the only way to know the control works, and `control failed` is the right
+    status: it means the kernel, not the operator's document, is wrong
+    (`SPEC-v0.4.md` §1.3).
+    """
+    from ctrlrun.verify import scenarios
+
+    # Duplicates of the CURRENT schema, which is exactly what the failure looked like when it
+    # really happened: the first version of this scenario built its rows with `put_receipt`,
+    # which does `replace(receipt, schema=RECEIPT_SCHEMA, ...)`, so five rows came back carrying
+    # one label. Emptying the tuple instead would make the control trivially *satisfied* -- one
+    # expected label, one present -- which is a test of nothing.
+    monkeypatch.setattr(
+        scenarios, "_OLDER_RECEIPT_SCHEMAS", (RECEIPT_SCHEMA, RECEIPT_SCHEMA, RECEIPT_SCHEMA)
+    )
+
+    policy = tmp_path / "ctrlrun.yaml"
+    policy.write_text(
+        "schema: ctrlrun.policy/v2\n"
+        "actions:\n"
+        "  stripe.refund:\n"
+        "    decision: allow\n"
+        '    effect: "refund:{payment_id}"\n',
+        encoding="utf-8",
+    )
+    from ctrlrun.verify import run
+
+    report = run(policy, only=("G31",))
+    result = next(item for item in report.guarantees if item.id == "G31")
+
+    assert result.status is not Status.PASS, (
+        "G31 graded PASS over a chain holding one schema version, which is exactly the claim it "
+        "is supposed to refuse to make"
+    )
+    assert result.reason == "control failed", result.reason
