@@ -311,9 +311,11 @@ def test_T524_G31_is_in_the_catalogue_and_the_catalogue_moved_once() -> None:
     assert reg.CATALOGUE == "ctrlrun.guarantees/v7"
     assert reg.BY_ID["G31"].title == "five receipt schemas verify"
     assert reg.BY_ID["G31"].descends_from, "G31 names no acceptance test"
-    # §8 assigns ids in item order, so G31 lands before G28 to G30 exist. A stub row for them
-    # would report something before its check existed, which is the false green §8 forbids.
-    assert {"G28", "G29", "G30", "G32"}.isdisjoint({g.id for g in reg.GUARANTEES})
+    # §8 assigns ids in **item** order rather than landing order, so the catalogue legitimately
+    # has holes between items. `G28` landed with item 2; `G29`, `G30` and `G32` are item 3's and
+    # are still unbuilt. A stub row for one of those would report something before its check
+    # existed, which is the false green §8 forbids.
+    assert {"G29", "G30", "G32"}.isdisjoint({g.id for g in reg.GUARANTEES})
 
 
 # --- T525: the script that proves the premise --------------------------------------------------

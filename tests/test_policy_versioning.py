@@ -1598,6 +1598,9 @@ def test_T177c_the_command_list_is_exactly_the_one_the_spec_froze():
         # request, so `ctrlrun approve` answers it, and a second command would be a second
         # approval path.
         "policy",
+        # SPEC-v0.11 §9. An anchor is made on a schedule by an operator, where every other
+        # surface in this kernel is a library call made by an agent.
+        "anchor",
     ]
 
     assert sorted(cli.main.commands) == sorted(frozen_by_v0_6 + after_v0_6)
