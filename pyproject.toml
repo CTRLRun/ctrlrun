@@ -83,6 +83,12 @@ dev = [
     # `tests/data/junit-10.xsd`. JUnit XML has no normative schema, so the schema is a
     # de-facto one and the test asserts structurally as well; `xmlschema` is used by that
     # test and by nothing else, and `ctrlrun` never imports it.
+    # SPEC-v0.11 §13.2's corollary, one milestone on: the reader defect item 1 found -- one
+    # `UPDATE` reporting four breaks at three positions, two of them rows that do not exist --
+    # is a property, and five milestones of example tests never hit it because every example
+    # tampered in a way its author had already thought of. `tests/test_properties.py` states
+    # those invariants directly. Pinned to a deterministic profile there; see that module.
+    "hypothesis>=6",
     "xmlschema>=3",
     # SPEC-v0.5 §6.1 - T136 builds the wheel and the sdist and asserts neither carries an
     # adapter. Without `build` here the test skipped, and it skipped in *both* CI jobs: the
