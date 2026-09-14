@@ -1053,6 +1053,30 @@ class ChainSource(Protocol):
 
     def chain_head(self) -> tuple[int, str] | None: ...
 
+    # `checkpoint()` is read where a source has one (SPEC-v0.11 §4.2), and is **not** declared
+    # here. A source without one has not been pruned, which is what every store said before
+    # v0.11 and what every test double still says; requiring it would make this protocol's own
+    # amendment a breaking change for a method whose answer is almost always `None`.
+
+
+def _checkpoint_of(store: ChainSource) -> tuple[int, str] | None:
+    """The `seq` a prune pruned through and the hash at it, where this source has one (§4.2).
+
+    **The row, never a receipt field.** `SPEC-v0.3.md` §4.3.1 settled that shape: a grant may
+    legally be named `no_authority`, so evidence that could be spoofed by naming one is not
+    evidence, and a walk that believed `action == "ctrlrun.retention.prune"` would accept a
+    forged prefix-erasure written by anyone who can insert a row.
+
+    This does **not** make a checkpoint unforgeable: a writer who can insert receipts can write
+    one. What closes that is `SPEC-v0.11.md` §3's anchor, and only for the window between
+    anchors. The two features are one argument.
+    """
+    reader = getattr(store, "checkpoint", None)
+    if reader is None:
+        return None
+    found = reader()
+    return None if found is None else (int(found[0]), str(found[1]))
+
 
 def verify_chain(store: ChainSource) -> ChainReport:
     """Walk the store's receipt chain and name every break (SPEC-v0.6 §6.5).
@@ -1098,8 +1122,20 @@ def verify_chain(store: ChainSource) -> ChainReport:
             )
         )
 
-    expected_prev = GENESIS_HASH
-    expected_seq = 1
+    # SPEC-v0.11 §4.1: **three values, not one.** A prune moves the chain's start, and this walk
+    # seeds two genesis values and compares the head against a third. A checkpoint that replaced
+    # only the hash still reported `missing` at seq 1, so a faithful implementation of the first
+    # draft built a prune §1.1's rule 2 forbids:
+    #
+    #     after PREFIX delete of seq<=3  -> breaks: [('missing', 1), ('link_broken', 4)]
+    #     seeded from the checkpoint HASH only
+    #                                    -> breaks: [('missing', 1)]
+    #
+    # Read defensively, because a `ChainSource` is a protocol an operator's own backend and this
+    # project's own test doubles implement: one without a checkpoint has not been pruned.
+    checkpoint = _checkpoint_of(store)
+    expected_prev = GENESIS_HASH if checkpoint is None else checkpoint[1]
+    expected_seq = 1 if checkpoint is None else checkpoint[0] + 1
     for receipt in chained:
         seq = receipt.seq
         assert seq is not None  # filtered above; this narrows the type
@@ -1207,7 +1243,9 @@ def verify_chain(store: ChainSource) -> ChainReport:
             ChainBreak("head_mismatch", None, "the store has no chain head row to compare against")
         )
     else:
-        last_seq = chained[-1].seq if chained else 0
+        # With a checkpoint and an empty chain, the head is the checkpoint: everything the head
+        # named was pruned, and the checkpoint is what accounts for it.
+        last_seq = chained[-1].seq if chained else (0 if checkpoint is None else checkpoint[0])
         last_hash = expected_prev
         if head_seq != last_seq or head_hash != last_hash:
             breaks.append(

@@ -26,7 +26,7 @@ import threading
 import time
 import unicodedata
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,6 +71,7 @@ from .receipt import (
     _document_hash,
     _read_receipt,
 )
+from .retention import Checkpoint, Hold
 
 _LOG = logging.getLogger(__name__)
 
@@ -1776,6 +1777,110 @@ class SQLiteStateStore:
             .fetchone()
         )
         return None if row is None else (int(row["seq"]), str(row["hash"]))
+
+    # --- retention (SPEC-v0.11 §4) ----------------------------------------------------
+
+    def put_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Record what a prune pruned through. **Forward only** (§4.5).
+
+        The `WHERE` clause is the refusal, in SQL rather than only in `retention.prune`: two
+        racing prunes are each individually valid under §10, and the second overwriting the
+        first's row is what a review measured leaving `[('missing', 4), ('link_broken', 6)]`.
+        """
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash, "
+                "schema = excluded.schema, at = excluded.at WHERE excluded.seq > seq",
+                (checkpoint.seq, checkpoint.hash, checkpoint.schema, checkpoint.at.isoformat()),
+            )
+
+    def put_hold(self, hold: Hold) -> None:
+        """Place a hold over a range of receipts (SPEC-v0.11 §4.3)."""
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO holds (hold_id, from_seq, to_seq, reason, placed_by, placed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    hold.hold_id,
+                    hold.from_seq,
+                    hold.to_seq,
+                    hold.reason,
+                    hold.placed_by,
+                    hold.placed_at.isoformat(),
+                ),
+            )
+
+    def holds(self) -> tuple[Hold, ...]:
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT hold_id, from_seq, to_seq, reason, placed_by, placed_at, released_at, "
+                "released_by FROM holds ORDER BY from_seq, hold_id"
+            )
+            .fetchall()
+        )
+        return tuple(
+            Hold(
+                hold_id=str(row["hold_id"]),
+                from_seq=int(row["from_seq"]),
+                to_seq=None if row["to_seq"] is None else int(row["to_seq"]),
+                reason=str(row["reason"]),
+                placed_by=str(row["placed_by"]),
+                placed_at=datetime.fromisoformat(row["placed_at"]),
+                released_at=(
+                    None
+                    if row["released_at"] is None
+                    else datetime.fromisoformat(row["released_at"])
+                ),
+                released_by=row["released_by"],
+            )
+            for row in rows
+        )
+
+    def release_hold(self, hold_id: str, *, by: str, at: datetime) -> None:
+        """End a hold. **A person ends it, never a timer** (§4.3).
+
+        `SPEC-v0.9 §4`'s rule that an automatic expiry on a hold is the refund rule in a costume
+        applies unchanged: a hold that lapsed on a schedule would release evidence on a schedule
+        nobody reviewed. There is no sweeper here and there is not going to be one.
+        """
+        connection = self._connection()
+        with connection:
+            changed = connection.execute(
+                "UPDATE holds SET released_at = ?, released_by = ? "
+                "WHERE hold_id = ? AND released_at IS NULL",
+                (at.isoformat(), by, hold_id),
+            ).rowcount
+        if changed != 1:
+            raise InvalidArgument(f"no live hold {hold_id!r} in this store")
+
+    def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:
+        """Delete receipts through `seq` and the ledger rows named, in one transaction.
+
+        **Takes the receipt-write lock**, which is what makes a prune and a receipt write
+        mutually exclusive, and two prunes mutually exclusive (§4.5). On SQLite that happens
+        through `BEGIN IMMEDIATE`, which admits one writer; Postgres has to take it explicitly,
+        because a row lock on `receipt_chain` does not contend with a `DELETE` on `receipts`.
+
+        **Every refusal has already run.** This is the half that destroys, and it decides
+        nothing: `retention.prune` is where rule 2, the holds and §4.4's table are checked, and a
+        caller reaching here has passed all of them.
+        """
+        connection = self._connection()
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            receipts = connection.execute(
+                "DELETE FROM receipts WHERE seq IS NOT NULL AND seq <= ?", (through,)
+            ).rowcount
+            rows = 0
+            for key in effect_keys:
+                rows += connection.execute(
+                    "DELETE FROM budget_ledger WHERE effect_key = ?", (key,)
+                ).rowcount
+        return (receipts, rows)
 
     def events(self) -> tuple[Event, ...]:
         rows = self._connection().execute("SELECT * FROM events ORDER BY event_id").fetchall()
