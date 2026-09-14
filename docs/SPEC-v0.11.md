@@ -20,7 +20,7 @@ demonstration, and it is a transcript rather than an argument.
 |---|---|---|
 | 0 | this document | none |
 | 1 | a reader that names a bad row and blinds nothing else (§5) | none; its evidence is its tests |
-| 2 | the anchor, and the two break kinds it makes detectable (§3) | `G28` |
+| 2 | the anchor, and the break kinds it makes detectable (§3) | `G28` |
 | 3 | retention: a chain-preserving prune, its checkpoint, and a hold (§4) | `G29`, `G30` |
 | 4 | one chain across five receipt schema versions, walked end to end (§6) | `G31` |
 | 5 | enforcement coverage, from events already written (§7) | none; it reports |
@@ -44,9 +44,12 @@ Every item is measured against these.
    revocation, no signing. `SPEC-v0.3.md` §1.1's rule, that CTRLRun consumes identity and issues
    none, applied to time. It is the line between this milestone and the one `ROADMAP.md` keeps off
    the roadmap, and an anchor that minted anything would have crossed it.
-2. **A prune leaves the chain verifiable across the gap, or it is refused.** A prune that produces a
-   chain reporting `missing` has destroyed evidence and called it retention. There is no `--force`,
-   no `--allow-gap`, and no setting that admits a chain nobody can verify.
+2. **A prune introduces no break the chain did not already have, or it is refused.** A prune that
+   produces a `missing` has destroyed evidence and called it retention. Stated as a **delta** and not
+   as "the chain verifies", because `unchained` is a pre-existing condition on any store migrated
+   from v0.1 to v0.5, survives a prefix prune and can never be inside a prefix: the absolute version
+   made retention permanently impossible on the oldest and largest stores, which are the ones it is
+   for. There is no `--force`, no `--allow-gap`, and no setting that admits a break the prune caused.
 3. **A malformed row names itself and blinds nothing else.** One tampered row costs one row.
 4. **A clean coverage result is not a verdict.** No score, no percentage, no badge, and no sentence
    a reader could quote as one. `SPEC-v0.4.md` §3.9 on a new surface: verify never grades an
@@ -154,13 +157,15 @@ not reach.
 
 **An anchor freezes a prefix.** It records that at time T the chain's head was `(seq, hash)`, so
 anything at or below that `seq` can no longer be removed or altered without the anchored pair
-failing to reproduce.
+failing to reproduce, **unless an anchored checkpoint accounts for its removal** (§4.6). That clause
+is not a loophole and §4.6 is where it is kept from becoming one: a checkpoint must itself be
+anchored, through the provider, which is outside the store.
 
 That sentence is the whole claim, and everything else follows from it by arithmetic:
 
 | Attack | Detected? |
 |---|---|
-| §2.1's truncation, when the anchored `seq` is above the new head | **yes**: the anchored `seq` is absent |
+| §2.1's truncation, when the anchored `seq` is above the new head | **yes**: the anchored `seq` is absent, and no anchored checkpoint accounts for it (§4.6) |
 | any rewrite at or below an anchored `seq` | **yes**: the hash there differs |
 | §2.2's forged append | **no.** It lands at head + 1, above every anchored `seq`, so no anchored pair stops reproducing. A later anchor freezes the forged chain as readily as an honest one |
 | receipts written and erased entirely between two anchors | **no.** They were never at or below an anchored `seq` |
@@ -209,9 +214,24 @@ design avoided.
 
 | Call | Answers |
 |---|---|
-| `make(seq, hash)` | returns an opaque token, or raises |
+| `make(seq, hash, kind)` | returns an opaque token, or raises. `kind` is `interval` or `checkpoint` |
 | `check(seq, hash, token)` | whether that pair and that token correspond |
-| **`latest()`** | **the highest `seq` the provider itself holds an anchor for, and its token** |
+| `latest()` | the highest `seq` the provider holds an anchor for, and its token |
+| **`since(seq)`** | **every anchor the provider holds at or above `seq`.** Enumeration, not a single answer |
+
+**`since()` is why §4.6's argument is not circular.** §4.6 says an attacker who launders an erasure
+must leave an anchored checkpoint in the provider's record, so an operator can see a prune happened.
+With `latest()` alone the kernel can read only its own local table for that history, and §3.3 spends
+a subsection establishing the local table is a cache the writer under suspicion can trim: delete
+every local row at or below the laundering checkpoint and nothing above it is missing, so `latest()`
+reveals nothing. Enumeration moves the history to the side that cannot be rewritten.
+
+**An anchor carries its `kind`, and `interval` and `checkpoint` are ordered separately.** An earlier
+draft ordered all anchors by `seq` and required each to be above the last, which a review showed
+refuses the one anchor §4.6 requires: a deployment anchoring hourly and pruning at ninety days makes
+its checkpoint anchor far *below* its newest interval anchor, so the rule refused it, so the prune
+was refused, **forever**. §4.6 was written because an anchoring deployment should not have to choose
+between pruning and a permanent tamper signal, and as drafted it landed on the first horn.
 
 `latest()` is the one that closes the gap, because it is answered **outside**. CTRLRun's table is
 then a cache and not a record: if it names fewer anchors than the provider holds, the provider wins
@@ -229,10 +249,11 @@ and the missing one is checked anyway.
 - **An anchor whose time runs backwards against the one before it is refused.** A monotonic sequence
   is the only property the kernel can check about a timestamp it did not issue, and an anchor
   sequence that goes backwards is either a misconfiguration or the attack.
-- **An anchor whose `seq` is at or below the one before it is refused**, which is the same rule on
-  the other axis and §4.5's rule for a checkpoint. The first draft ordered only time, while
-  `latest()` is defined on `seq`, so nothing required the two orderings to agree and an anchor could
-  be made backwards in `seq` while moving forwards in time.
+- **An `interval` anchor whose `seq` is at or below the previous `interval` anchor is refused**, and
+  a `checkpoint` anchor is ordered only against other checkpoints. The first draft ordered only time
+  while `latest()` is defined on `seq`, so nothing required the two orderings to agree; the fix for
+  that then refused every checkpoint, which is why the two kinds are ordered separately rather than
+  jointly.
 
 ### 3.3 Where it lives, and the question that decides it
 
@@ -263,7 +284,7 @@ file is worth. The sentence `SPEC-v0.8.md` §6.6 and `THREAT_MODEL.md` both use 
 unchanged: it is worth what its source is worth, and the documentation says so where the feature is
 described.
 
-### 3.4 The two break kinds, and the report they are not in
+### 3.4 The three break kinds, and the report they are not in
 
 **`CHAIN_BREAKS` does not change. It stays closed at six, and `verify_chain` is not touched.**
 
@@ -286,9 +307,30 @@ So the anchor gets **its own report and its own closed set**, `ANCHOR_BREAKS`, a
 
 | Kind | When |
 |---|---|
-| `anchor_broken` | an anchored pair does not reproduce: the anchored `seq` is **present and hashes differently**, or it is absent and **not accounted for by a checkpoint** (§4.6). §2.4's table is what this does and does not cover, and an append is not in it |
-| `anchor_missing` | **a configuration that anchors holds no anchor at all**, or the provider's `latest()` names an anchor the local table does not have |
-| `anchor_unavailable` | the provider cannot be reached **at verification time**. Never a pass, and named rather than silent |
+| `anchor_broken` | an anchored pair does not reproduce: the anchored `seq` is **present and hashes differently**, or it is absent and **not accounted for by an anchored checkpoint** (§4.6). §2.4's table is what this does and does not cover, and an append is not in it |
+| `anchor_missing` | **a configuration that anchors holds no anchor at all**, or `since()` names an anchor the local table does not have |
+| `anchor_repudiated` | `check()` answered **no**: the provider does not recognise a pair the local table claims it anchored. A forged or revoked token, or a provider that disowns the pair |
+
+**`anchor_repudiated` exists because the outside record is allowed to say no.** The first draft's set
+had no name for `check()` returning false, which is the provider's one substantive answer and the
+entire reason for holding the record outside the store. A refusal with no name is the shape §3.4
+exists to fix.
+
+**`anchor_unavailable` is NOT in this set**, and an earlier draft put it there. It is a **transport
+failure**, not a finding about the evidence, and a set that conflates the two teaches an operator to
+ignore the ones that matter: a timestamp authority briefly unreachable would grade `G28` `fail`,
+indistinguishable in the report from a truncation. `SPEC-v0.10.md`'s `upstream_unverified` is the
+precedent and it cuts the other way: it is a **decision-time refusal**, not a break in a verification
+report. **Refusing to act when you cannot ask is fail-closed; reporting tampering when you cannot ask
+is a false positive**, and §3.4's own argument against the old `anchor_missing` applies one level
+out. So an unreachable provider makes the report `unavailable` rather than `ok` or broken, `G28`
+grades `N/A` with that reason, and §10 carries both rows.
+
+**Precedence, because two rows could both hold.** In the canonical attack, truncate the chain and
+delete the newest local anchor, both `anchor_broken` and `anchor_missing` apply. **`anchor_broken`
+wins**, and the report carries it: `anchor_missing` reads to an operator as a misconfiguration and
+`anchor_broken` reads as tamper, and naming the milder one first is how a real finding gets filed as
+a config ticket.
 
 **`anchor_missing` does not fire on the exposed window, and an earlier draft made it do exactly
 that.** That draft read *"the store's chain reaches a `seq` none of them covers"*, which is the state
@@ -308,11 +350,6 @@ check that fires on the honest case is not fail-closed, it is broken**, and `SPE
 rule about a guarantee that could not have failed has a mirror image here: a guarantee that could not
 have passed.
 
-**`anchor_unavailable` is in the set, and it was not.** §3.2 requires the provider to be consulted at
-verification time and requires a raise never to be a pass, and the first draft had no name for what
-the report carries when that happens: it named the reason in §10 from the `make` side only. A
-refusal with no name in the closed set is the shape §3.4 exists to fix, one report out.
-
 This is better than the amendment on three counts, and the third is the one that decides it. `G11`
 is genuinely untouched rather than argued to be. `SPEC-v0.6.md` §6.5's closed set stays closed, so
 this milestone amends one frozen surface instead of two. And §9's frozen table can name
@@ -323,7 +360,7 @@ claim the frozen-name test's shape cannot express.
 `upstream_unverified` in a new place: an anchor that is never made would otherwise switch the check
 off by being absent. `SPEC-v0.4.md` §3.8's false green is the failure this refuses.
 
-A configuration that does **not** anchor reports neither, and `G28` is `N/A` with a reason true of
+A configuration that does **not** anchor reports none of them, and `G28` is `N/A` with a reason true of
 the operator's document. Anchoring is opt-in and then fail-closed, which is the rule `SPEC-v0.3.md`
 states in its preamble and every item inherits.
 
@@ -465,6 +502,25 @@ implementer codes refusals from.
 
 `NEW` is not in the table because `effect.py` says it "is never written to a store".
 
+**The window is supplied to the prune, not resolved by it (O7).** A review found the first draft's
+version uncomputable: a ledger row carries `grant_id`, `metric`, `amount`, `effect_key`, `attempt`,
+`consumed_at` and `released_at`, and **no window and no limit**. Those travel on `Charge`, from the
+authority document, and `state.py` says why in as many words: *a store that resolved a grant's
+budgets would be reading the policy*, which `ARCHITECTURE.md` §6 forbids.
+
+So resolving the window inside the prune would reinstate exactly the dependency §4.2 removes, and it
+has two failure modes with no good answer: a row whose `grant_id` is no longer in the document has no
+window at all, and a window an operator lengthens later retroactively un-prunes rows already pruned.
+
+**`ctrlrun prune --older-than` takes a duration and the prune refuses any `COMMITTED` row newer than
+it.** The operator supplies the number, as they supply the range, and the kernel checks the rule
+rather than deriving the input. That is `SPEC-v0.9.md` §5.4's shape once more: the provider answers,
+the kernel matches. It also makes the refusal computable from the ledger alone, which is the property
+§4.2 needs.
+
+The operator is told what number to use, and it is the only advice this section gives: **the longest
+window on any budget of any grant**, which `SPEC-v0.9.md` §7.3 makes a safe over-approximation.
+
 A prune that released a hold by deleting it would be manufacturing authority, which is the hole
 `SPEC-v0.9.md` §4 exists to close. A prune that refused to touch `COMMITTED` rows would be a
 retention feature that retains everything.
@@ -513,6 +569,12 @@ Neither is refusable alone, and together they break rule 2. So:
   draft never said which came first, so the two rules were unsatisfiable together on the shipped
   store. Before, and the crash window is the safe one: a receipt for a prune that did not happen
   over-reports, where a prune with no receipt is indistinguishable from §2.1.
+- **That receipt records an intent, and its outcome is recorded against it.** Writing it first means
+  it is already in the chain when the hold check and every §10 refusal run, so a **refused** prune
+  would otherwise leave a receipt asserting an erasure that never happened. That is not the crash
+  window, it is the ordinary outcome of `ctrlrun prune` against a held range. The receipt carries
+  what was *asked for*, and its refusal is an ordinary `DENIED` result on that same action, which is
+  what every other refusal in this kernel already does.
 
 ### 4.6 An anchor and a prune, which cancelled each other
 
@@ -593,14 +655,17 @@ what lets a refused row carry a position at all and what makes the docstring tru
 message: `SPEC-v0.7.md` §6.11's rule, because the canonicalizer quotes what it refused and a lone
 surrogate in a report is a report that cannot be printed.
 
-Every reader then chooses. Every caller of that shared read chooses: `receipts` prints the row as unreadable and prints the others, and so does the operator server's `_receipts` tool.
+Every caller of that shared read chooses: `receipts` prints the row as unreadable and prints the others, and so does the operator server's `_receipts` tool.
 `verify_chain` reports `content_altered` at that `seq`, which is what it already does for a document
 it cannot hash, so one tamper reads as one break whichever half catches it. `inspect` on an
 unrelated action never sees it at all, which is the case §2.3 measured.
 
 ### 5.3 The negative control
 
-**A store with no bad row reports exactly what it reports today**, byte for byte, on every reader.
+**A store with no bad row keeps working for everybody whose store is intact**, and that is the
+claim rather than "byte for byte on every reader": item 1 deliberately changes one thing about a
+clean store's output, because §5.2's `SELECT seq` makes a receipt's position come from the column
+instead of from the document.
 This is the half that is easy to lose: a change that made a clean chain read differently would be a
 change to shipped output, and item 1 is not a change to shipped output for anybody whose store is
 intact.
@@ -613,11 +678,11 @@ intact.
 (0.7), `v5` (0.8), `v6` (0.9), `v7` (0.10). The count is taken from `receipt.py`'s constants, which
 is the only place it cannot be stale.
 
-`ROADMAP.md`'s v0.11 prose said four and was corrected. **Its Exit line still says four**, and that
-is the line `G31` is graded against, so item 4 corrects it there in the same edit. The same Exit line
-also requires that *the checkpoint receipt of a prune carries the version current when it was
-written*, which no guarantee in §8 covers: item 3 asserts it, because a checkpoint written today and
-read in two years is the case this milestone exists for.
+`ROADMAP.md`'s v0.11 prose said four, and so did its Exit line, which is what `G31` is graded
+against. Both are corrected there. The Exit line also requires that *the checkpoint receipt of a
+prune carries the version current when it was written*, which no guarantee in §8 covers: item 3
+asserts it, because a checkpoint written today and read in two years is the case this milestone
+exists for.
 
 **No new field.** The version string already exists, and the rule since `SPEC-v0.3.md` §12.2 is that
 every reader upgrades before any writer switches. What is new is the proof.
@@ -665,9 +730,10 @@ own output in the shape `CLAIMS.md` uses.
 | Id | Grades | Item |
 |---|---|---|
 | `G28` | a chain truncated at or below an anchored `seq` is refused against its anchor | 2 |
-| `G29` | a prune across a checkpoint leaves a chain that verifies | 3 |
+| `G29` | a prune leaves the chain with no break it did not already have | 3 |
 | `G30` | a held range refuses to prune | 3 |
 | `G31` | a chain spanning five receipt schema versions verifies end to end | 4 |
+| `G32` | **an honestly pruned chain leaves a clean anchor report** | 3 |
 
 Each with a positive control, each graded or `N/A` with a reason true of the operator's document, and
 **each grading the same under `--only` as in a full run**. `SPEC-v0.9.md` §13.8 records G22 passing
@@ -680,18 +746,25 @@ guarantee's text in `ctrlrun.guarantees/v7` and in `ctrlrun verify`'s output. Co
 that argues a claim and leaving the claim in the registry is worse than not correcting it: the
 argument is read once and the registry is read by every operator who runs `verify`.
 
-**The same uncorrected sentence is on `ROADMAP.md` line 389**, the Exit line `G28` is graded against:
-*"the truncation and append cases that `SPEC-v0.6.md` §6.4 lists as undetected now detect."* §6 of
-this document quotes that very line for a different reason and did not notice. **Item 2 corrects it
-there**, in the same edit that corrects line 378.
+**The same claim was on `ROADMAP.md`'s Exit line for v0.11**, which is what `G28` is graded against:
+*"the truncation and append cases that `SPEC-v0.6.md` §6.4 lists as undetected now detect."* It is
+corrected there now, along with the anchor bullet above it. **Cited by its words and not by a line
+number**: an earlier draft of this document gave three different line numbers for two sentences in
+another repository, and all three were wrong within a day.
 
 **`G28`'s positive control is the attack in §2.1**, run against a real store: truncate, fix the head,
 require the break. A guarantee whose scenario has never seen the attack it exists for is
 `SPEC-v0.4.md` §2.2's guarantee that could not have failed.
 
+**`G32` exists because §4.6's defect class would otherwise turn nothing red.** `G28` grades
+truncation against an anchor and `G29` grades a prune against the chain; the *interaction*, an honest
+prune leaving the anchor report clean, was graded by neither, and that interaction is the one a review
+found had made items 2 and 3 mutually exclusive. A guarantee for each half and none for the pair is
+how two correct sections ship cancelling each other.
+
 ### 8.1 `G11`'s contract does not change, and §3.4 is what makes that true (O6)
 
-O6 asked whether the two new break kinds are reported as `G11` failures or as a new guarantee. **A
+O6 asked whether the new break kinds are reported as `G11` failures or as a new guarantee. **A
 new guarantee, and `G11` is untouched.**
 
 `G11` is *an altered receipt is detected*, shipped and graded since v0.6. Routing `anchor_broken`
@@ -708,7 +781,7 @@ by an argument. `G11` grades the hash chain, which every deployment has, and can
 break. `G28` grades the anchor, is opt-in, and is `N/A` with a reason on a deployment that does not
 anchor.
 
-**Item 2 asserts this directly**: `G11` passes on a store whose anchor report carries both kinds. A
+**Item 2 asserts this directly**: `G11` passes on a store whose anchor report carries every kind in `ANCHOR_BREAKS`. A
 guarantee whose independence is argued rather than run is what this section already got wrong once.
 
 ---
@@ -720,19 +793,21 @@ One justification per row. Anything not here is a spec amendment before it is co
 **`SPEC-v0.10.md` §9.4 is why this section is written differently from its predecessors.** Three of
 v0.10's §9 rows were frozen and never built, and nothing turned red because no test asserted that a
 frozen name exists. That test now exists. **Every row below names the item that builds it**, and the
-release item adds each to the frozen-name list or records in §12 why it was deliberately not built.
+release item adds each to the frozen-name list or records in §13 why it was deliberately not built.
 
 | Symbol | Item | Why an existing name does not serve |
 |---|---|---|
 | `ctrlrun.anchor.AnchorProvider` | 2 | the operator's own code answering from the operator's own system, in the shape `SPEC-v0.9.md` §5.4 settled for a scope provider. Three calls, not two (§3.2), and `latest()` is the one that makes §3.3 true. A default implementation that fetched anything would put a network client in the wheel every user installs |
-| `ctrlrun.anchor.ANCHOR_BREAKS` | 2 | its own closed set, because putting the two kinds in `CHAIN_BREAKS` fails `G11`'s control (§3.4). A **symbol**, so the frozen-name test asserts it by import rather than by membership |
+| `ctrlrun.anchor.ANCHOR_BREAKS` | 2 | its own closed set, because putting them in `CHAIN_BREAKS` fails `G11`'s control (§3.4). A **symbol**, so the frozen-name test asserts it by import rather than by membership |
 | `ctrlrun.anchor.verify_anchors` | 2 | the walk that produces an `AnchorReport`. Separate from `verify_chain`, which is not touched |
 | `ctrlrun.anchor.AnchorReport` | 2 | what `verify_anchors` returns |
 | `anchor=` on `Control` | 2 | a deployment anchors or it does not; it is a property of the deployment, not of an action, so it does not go on `execute` |
+| `ctrlrun.receipt.UnreadableReceipt` | 1 | §5.2's refusal, carried **by type and never by message**. The first draft of §9 had no row for item 1 at all, which is `SPEC-v0.10.md` §9.4's failure in the mirror direction: a public name shipping with no frozen row |
+| `ctrlrun.state.StateStore.receipts` yields `Receipt | UnreadableReceipt` | 1 | **amends `SPEC-v0.6.md` §9.2's frozen protocol**, and both backends change: the read gains `SELECT seq` (§5.2) and stops raising on one bad row. The bar is cleared because a second backend cannot implement §5 without it |
 | `ctrlrun.state.StateStore.put_anchor` / `.anchors` | 2 | **amends `SPEC-v0.6.md` §9.2's frozen protocol.** The bar is *a second backend could not be written without it*, and an anchor's local cache cannot be reconstructed from the tables that exist |
 | `ctrlrun.state.StateStore.put_checkpoint` / `.checkpoint` | 3 | the same amendment. §4.2 is why a checkpoint the walk trusts cannot live in a receipt document |
 | `ctrlrun.state.StateStore.put_hold` / `.holds` / `.release_hold` | 3 | **the first draft froze `ctrlrun hold` with no storage at all**, and `G30` grades a held range refusing to prune against a table that did not exist. A review found it; this is the row that was missing |
-| `ctrlrun.migrations.MIGRATIONS` contains an entry whose `.id` is `0008_anchor_checkpoint_hold` | 2, 3 | the three tables above. **Written as a membership claim on a named symbol, because a migration id can never be an attribute path**: `hasattr(ctrlrun.migrations, "0008_…")` can never be true, a name starting with a digit is not an identifier, and a review showed the previous wording was still unwritable as a test row. So the frozen-name list gains a second shape, `(module, symbol, member)`, and this is its only user |
+| `ctrlrun.migrations.MIGRATIONS` contains an entry whose `.id` is `0008_anchor_checkpoint_hold` | 2, 3 | the three tables above. **A membership claim on a named symbol, because a migration id can never be an attribute path**: `hasattr(ctrlrun.migrations, "0008_…")` can never be true, since a name beginning with a digit is not an identifier. The frozen-name list's rows gain an explicit **kind** (`parameter` or `member`), because the existing three-tuple shape already exists and a bare third element cannot say which check to run: a review put this row into it and got `TypeError: ... is not a callable object` from `inspect.signature` |
 | `ctrlrun anchor`, `ctrlrun prune`, `ctrlrun hold` | 2, 3 | CLI commands. An anchor is made on a schedule by an operator and a prune is an operator's act (§4.2), where every other surface in this kernel is a library call made by an agent. §11 keeps the management plane off the roadmap and these are not one: each writes rows and prints lines |
 
 **Every row above names something a test can assert**, and the shape it needs is stated per row. A review put
@@ -762,12 +837,13 @@ that fills. The prune's own receipt is where approval belongs, and §4.2 puts it
 | Situation | Result |
 |---|---|
 | the anchor provider raises, times out, or answers a shape the canonicalizer refuses **when an anchor is made** | `anchor_unavailable`; the anchor is not made and nothing is recorded as anchored |
-| the same, **at verification time** | `anchor_unavailable` in the report, never a pass. The first draft wrote this row from the `make` side only and had no name for the verification side |
-| an anchor whose `seq` is at or below the one before it | refused (§3.2) |
+| the provider cannot be reached **at verification time** | the report is `unavailable`; `G28` is `N/A` with that reason. **Not a break, and not a pass.** An earlier draft made it a break, so a briefly unreachable timestamp authority graded `G28` `fail`, indistinguishable from a truncation |
+| an `interval` anchor whose `seq` is at or below the previous `interval` anchor | refused (§3.2). A `checkpoint` anchor is ordered only against other checkpoints, and an earlier draft's joint ordering refused every prune |
 | a configuration anchors and the store holds **no anchor at all**, or `latest()` names one the local table lacks | `anchor_missing`, a break, never a pass. **Not** the ordinary window `(last anchored seq, current head]`, which §2.4 blesses |
-| an anchored pair does not reproduce | `anchor_broken` |
+| an anchored pair does not reproduce, **and no anchored checkpoint accounts for it** | `anchor_broken` (§3.4, §4.6). An anchor below an anchored checkpoint is **superseded**, not broken |
+| `check()` answers no for a pair the local table claims was anchored | `anchor_repudiated` |
 | an anchor's time runs backwards against the one before it | refused |
-| a prune that would leave the chain reporting a break **the prune caused**: any of `CHAIN_BREAKS`' six that the same store did not report before it | refused, with the `seq` named. **Not "any break".** A review found that `unchained` is a pre-existing condition on any store migrated from v0.1 to v0.5, survives a prefix prune, and can never be removed by one, because the row has no `seq` to be in a prefix of. "Any break" makes retention permanently unavailable on the oldest and largest stores, which are the ones it is for |
+| a prune that would leave the chain reporting a break **the prune caused**: a `(kind, seq)` pair the same store did not report before it | refused, with the `seq` named. **Per pair, not per kind**: a store already reporting `missing` at `seq 7` must not thereby admit a new `missing` at `seq 1`. `unchained` carries no `seq` and is compared as `(unchained, None)` |
 | a prune through the chain's head | refused. It leaves no chained receipt for the head to name |
 | a checkpoint naming a `seq` at or below the one already recorded | refused (§4.5): this is the second of two racing prunes |
 | a prune that would delete a ledger row whose effect is `AMBIGUOUS`, `RESERVED` or `EXECUTING` | refused (§4.4) |
@@ -845,9 +921,9 @@ the dominant shape was *a fix applied to the argument and not to the artifact*:
 |---|---|
 | §2.4's append claim, rewritten as a table | the claim survived in **§8's `G28` row**, which is the text that becomes the graded guarantee, and on `ROADMAP.md`'s Exit line |
 | `anchor_missing` moved out of `CHAIN_BREAKS` so it stops failing `G11` | its **definition** was untouched, so it fired on every honest deployment and failed `G28` universally instead |
-| §4.4's release rule replaced with settlement | §10 carried the **unconditional** version, and pruning a `COMMITTED` row inside §7.3's window manufactures budget authority |
+| §4.4's release rule replaced with settlement | §10 carried the **unconditional** version, and pruning a `COMMITTED` row inside `SPEC-v0.9.md` §7.3's window manufactures budget authority |
 | §9's three unwritable rows named | the migration row **still cannot be an attribute path**; naming it did not change its shape |
-| §11.1 declared the citation class closed | **three new citation defects in the new text**, one quoting a paraphrase as if it were a file's words |
+| §12.1 declared the citation class closed | **three new citation defects in the new text**, one quoting a paraphrase as if it were a file's words |
 
 **And one nobody looked for in either round until it was searched for: §4.6.** Items 2 and 3 were
 specified in isolation, each verified alone, and cancelled each other. §3 did not contain the word
@@ -856,6 +932,36 @@ specified in isolation, each verified alone, and cancelled each other. §3 did n
 **What this says about review rounds.** v0.9 and v0.10 each needed three, and the reason is now
 legible: the first round finds what the author did not know, and the second finds what the author
 did while fixing it. A milestone that stops at one round ships the second set.
+
+---
+
+### 12.3 Round three: fourteen findings, and what the three rounds say about the document
+
+The pattern did not stop. Round two's new §4.6, written to fix two sections that cancelled each
+other, **cancelled against a rule round two added in the same commit**: §3.2 required every anchor's
+`seq` to exceed the last, and §4.6 requires anchoring a checkpoint far below the head, so no prune
+could ever run. The section that names the cross-module class reproduced it one round later.
+
+| Round | Findings | Of which introduced by the previous round's fixes |
+|---|---|---|
+| one | 12 | n/a |
+| two | 15 | 10 |
+| three | 14 | most of the high ones |
+
+**What the three rounds actually diagnose is scope.** Almost every high finding after round one lives
+in the *interaction* between the anchor (item 2) and retention (item 3): an honest prune breaking
+every older anchor, the checkpoint anchor refused by the anchor ordering, the laundering attack on
+"superseded", the ledger window that is not computable without reinstating a dependency §4.2 removed.
+The anchor alone and the reader alone generated few defects and no high ones after round one.
+
+**That is the evidence for the question §1 leaves open**, and it is now a much sharper question than
+it was when §1 was written. It remains the maintainer's, and this section exists so it is decided
+from measurements rather than from a sense of how big the milestone feels.
+
+**The sweep this round asked for, adopted as a rule.** After any change to a definition, re-derive
+§1.1's rules, §2.4's table, §8's registry and §10's rows from it, rather than editing the row that
+motivated the change. Every one of round three's `HIGH` findings and half its `MEDIUM` ones was a
+definition changed in one place and left standing in another.
 
 ---
 
