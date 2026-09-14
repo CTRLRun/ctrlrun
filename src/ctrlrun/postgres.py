@@ -37,7 +37,8 @@ import contextlib
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -85,6 +86,7 @@ from .receipt import (
     _read_receipt,
     _readable,
 )
+from .retention import Checkpoint, Hold
 from .state import (
     Charge,
     ClockSkew,
@@ -378,6 +380,9 @@ class PostgresStateStore:
             raise InvalidArgument(f"schema must be a plain identifier, got {schema!r}")
         self._url = url
         self._schema = schema
+        #: True while `pruning()` holds the receipt-write lock. Inner writes must not commit
+        #: through it: committing would release the lock in the middle of a prune (§4.5).
+        self._pruning = False
         self._clock = clock
         self._clock_skew_threshold = _checked_threshold(clock_skew_threshold)
         self._clock_skew: ClockSkew | None = None
@@ -657,7 +662,17 @@ class PostgresStateStore:
         A stated abort (`40001`, `40P01`) is the server telling us in band that it rolled back:
         nothing committed, the store write is `FAILED`, and it may be retried. Anything else
         raised by `COMMIT` means nobody knows.
+
+        **Inside `pruning()` this does nothing**, and that is not a convenience (SPEC-v0.11 §4.5).
+        `put_anchor` and `put_checkpoint` each commit, and a prune calls both: committing there
+        ends the transaction `pruning()` opened and **releases the row lock in the middle of the
+        prune**, so the next prune's validation runs against a half-applied one. A probe against
+        a real server found exactly that, with the second prune refused by the *anchor* ordering
+        rather than by the lock -- shared state, which is not a lock and is not the rule §4.5
+        states. `pruning()` commits once, at the end.
         """
+        if self._pruning:
+            return
         try:
             connection.commit()
         except BaseException as broke:
@@ -685,6 +700,8 @@ class PostgresStateStore:
                 connection.close()
 
     def _rollback(self, connection: Any) -> None:
+        # Inside `pruning()` the whole prune unwinds together, and `pruning()` is what rolls it
+        # back: an inner rollback here would discard the lock and leave the prune half-checked.
         # A broken connection cannot roll back; the server has already discarded the
         # transaction, which is the outcome the rollback was for.
         with contextlib.suppress(Exception):
@@ -2245,3 +2262,130 @@ class PostgresStateStore:
             cursor.execute(f"SELECT seq, hash FROM {self._q}.prune_checkpoint WHERE id = 1")
             row = cursor.fetchone()
         return None if row is None else (int(row[0]), str(row[1]))
+
+    # --- retention (SPEC-v0.11 §4) ----------------------------------------------------
+
+    def put_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Forward only (§4.5). The `WHERE` is the refusal, in SQL as well as in `prune`."""
+        connection = self._connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO {self._q}.prune_checkpoint (id, seq, hash, schema, at) "
+                    "VALUES (1, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
+                    "seq = EXCLUDED.seq, hash = EXCLUDED.hash, schema = EXCLUDED.schema, "
+                    f"at = EXCLUDED.at WHERE {self._q}.prune_checkpoint.seq < EXCLUDED.seq",
+                    (checkpoint.seq, checkpoint.hash, checkpoint.schema, checkpoint.at),
+                )
+        except BaseException:
+            self._rollback(connection)
+            raise
+        self._commit(connection)
+
+    def put_hold(self, hold: Hold) -> None:
+        connection = self._connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO {self._q}.holds "
+                    "(hold_id, from_seq, to_seq, reason, placed_by, placed_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        hold.hold_id,
+                        hold.from_seq,
+                        hold.to_seq,
+                        hold.reason,
+                        hold.placed_by,
+                        hold.placed_at,
+                    ),
+                )
+        except BaseException:
+            self._rollback(connection)
+            raise
+        self._commit(connection)
+
+    def holds(self) -> tuple[Hold, ...]:
+        with self._connection().cursor() as cursor:
+            cursor.execute(
+                f"SELECT hold_id, from_seq, to_seq, reason, placed_by, placed_at, released_at, "
+                f"released_by FROM {self._q}.holds ORDER BY from_seq, hold_id"
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            Hold(
+                hold_id=str(row[0]),
+                from_seq=int(row[1]),
+                to_seq=None if row[2] is None else int(row[2]),
+                reason=str(row[3]),
+                placed_by=str(row[4]),
+                placed_at=row[5],
+                released_at=row[6],
+                released_by=row[7],
+            )
+            for row in rows
+        )
+
+    def release_hold(self, hold_id: str, *, by: str, at: datetime) -> None:
+        connection = self._connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE {self._q}.holds SET released_at = %s, released_by = %s "
+                    "WHERE hold_id = %s AND released_at IS NULL",
+                    (at, by, hold_id),
+                )
+                changed = cursor.rowcount
+        except BaseException:
+            self._rollback(connection)
+            raise
+        self._commit(connection)
+        if changed != 1:
+            raise InvalidArgument(f"no live hold {hold_id!r} in this store")
+
+    @contextmanager
+    def pruning(self) -> Iterator[None]:
+        """Hold the receipt-write lock for the whole of a prune (SPEC-v0.11 §4.5).
+
+        **This backend has to take it explicitly, and SQLite does not.** On SQLite a prune and a
+        receipt write exclude each other by accident, because `put_receipt` uses
+        `BEGIN IMMEDIATE` and SQLite admits one writer. Here `put_receipt` takes a row lock on
+        `receipt_chain` and a `DELETE` on `receipts` does not contend with it, so without this a
+        prune and a receipt write would run concurrently.
+
+        **Across the validation and the delete, not only the delete.** A first implementation
+        took this inside `delete_prefix`, so two prunes could both validate and then both act; a
+        probe against a real server found that pair serialized by the *anchor* ordering instead,
+        which is shared state but is not a lock and is not the rule §4.5 states.
+        """
+        connection = self._connection()
+        # **`BEGIN` first, and this is the whole of it.** The connection is `autocommit=True`
+        # with every write taking an explicit `BEGIN` (see `_connect`, which says why), so a
+        # bare `SELECT ... FOR UPDATE` commits the instant it returns and holds no lock at all.
+        # A probe against a real server caught that: two prunes ran straight through each other
+        # and were serialized only by the anchors table, which is shared state and not a lock.
+        connection.execute("BEGIN")
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT seq FROM {self._q}.receipt_chain WHERE id = 1 FOR UPDATE")
+        self._pruning = True
+        try:
+            yield
+        except BaseException:
+            self._pruning = False
+            connection.rollback()
+            raise
+        self._pruning = False
+        connection.commit()
+
+    def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:
+        """Delete a prefix. The caller already holds `pruning()`'s row lock."""
+        connection = self._connection()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM {self._q}.receipts WHERE seq IS NOT NULL AND seq <= %s", (through,)
+            )
+            receipts = cursor.rowcount
+            rows = 0
+            for key in effect_keys:
+                cursor.execute(f"DELETE FROM {self._q}.budget_ledger WHERE effect_key = %s", (key,))
+                rows += cursor.rowcount
+        return (receipts, rows)

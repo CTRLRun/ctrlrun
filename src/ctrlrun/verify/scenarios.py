@@ -123,6 +123,7 @@ from ..receipt import (
     new_receipt_id,
     verify_chain,
 )
+from ..retention import Hold, prune
 from ..state import (
     ClockSkew,
     InMemoryStateStore,
@@ -4695,6 +4696,326 @@ class Engine:
 
         try:
             return self.graded("G28", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    # --- G29, G30, G32: retention ---------------------------------------------------------
+
+    def _pruneable(self, guarantee: str) -> tuple[Any, ...] | None:
+        """A scratch store with a chain long enough to prune a prefix of, or `None`.
+
+        A prune takes a **prefix** and must leave the head behind (§10), so a chain of one
+        receipt is not pruneable and a scenario that tried would grade a refusal it caused
+        itself.
+        """
+        selection = self.select(decisions=(Decision.ALLOW, Decision.APPROVE, Decision.DENY))
+        if selection is None:
+            return None
+        control, store, recorder, _ = self._control_for(guarantee, selection)
+        return (selection, control, store, recorder)
+
+    def _fill(self, control: Any, store: Any, selection: Any, tag: str, count: int = 5) -> None:
+        for index in range(count):
+            action = selection.build()
+            key = (
+                None
+                if selection.effect_key is None
+                else f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-{tag}-{index}"
+            )
+            with suppress(CTRLRunError):
+                self.execute(
+                    control,
+                    action,
+                    _Executor(lambda: f"{APPROVER}-result"),
+                    key,
+                    self.approve(control, store, action, selection),
+                )
+
+    def _after_everything(self, store: Any) -> datetime:
+        """A `now` for a prune that is after every row in this scratch store.
+
+        **Not `datetime.now(UTC)`**, and a run against a shipped example is what showed why:
+        verify's scratch store is opened with a clock offset, so its ledger rows carry timestamps
+        *ahead* of this process's clock, and every `COMMITTED` row then sits inside even a zero
+        `--older-than` window. The prune was refused for a reason that has nothing to do with
+        what these guarantees grade, and `G29` came out `internal error`.
+
+        Taking the time from the rows themselves is also the honest reading of `--older-than`
+        here: the operator's number is relative to their own clock, and the scenario's clock is
+        the store's.
+        """
+        latest = max(
+            (item.finished_at for item in _written(store)),
+            default=datetime.now(UTC),
+        )
+        return latest + timedelta(seconds=1)
+
+    def g29(self) -> GuaranteeResult:
+        """SPEC-v0.11 §4.1, §8. A prune leaves the chain with no break it did not already have.
+
+        **A delta, not "the chain verifies"** (rule 2). `unchained` is a pre-existing condition on
+        any store migrated from v0.1 to v0.5: it survives a prefix prune and can never be inside
+        a prefix, so the absolute version would make retention permanently impossible on the
+        oldest and largest stores, which are the ones it is for.
+
+        The control is the negative: a **naive** prefix delete, without a checkpoint, must break
+        the chain. Measured at `main`::
+
+            after DELETE seq<=3 -> ok: False breaks: [('missing', 1), ('link_broken', 4)]
+
+        Without that half, this guarantee passes against a store nothing was deleted from.
+        """
+        prepared = self._pruneable("G29")
+        if prepared is None:
+            return self.na("G29", self.unselected(reg.NO_ACTIONS))
+        selection, control, store, recorder = prepared
+
+        def body(detail: dict[str, Any]) -> None:
+            self._fill(control, store, selection, "prune")
+            written = _written(store)
+            _expect_control(
+                len(written) >= 3,
+                "the scenario wrote a chain long enough to prune a prefix of",
+                f"only {len(written)} receipts reached the store",
+            )
+            intact = verify_chain(store)
+            _expect_control(
+                intact.ok,
+                "the chain verify just wrote verifies before any prune",
+                f"it reported {[(b.name, b.seq) for b in intact.breaks]}",
+            )
+
+            through = 2
+            # The negative control: a prefix delete with **no** checkpoint breaks the chain.
+            naive = verify_chain(
+                _AlteredChain(
+                    tuple(item for item in written if item.seq is not None and item.seq > through),
+                    store.chain_head(),
+                )
+            )
+            detail["without_a_checkpoint"] = [
+                {"name": item.name, "seq": item.seq} for item in naive.breaks
+            ]
+            _expect_control(
+                not naive.ok,
+                "a prefix delete without a checkpoint breaks the chain",
+                "it verified, so this scenario is not deleting anything",
+            )
+
+            provider = _VerifyAnchorProvider()
+            before = {(item.name, item.seq) for item in verify_chain(store).breaks}
+            prune(
+                store,
+                through=through,
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
+                anchor=provider,
+                now=self._after_everything(store),
+            )
+            after_report = verify_chain(store)
+            after = {(item.name, item.seq) for item in after_report.breaks}
+            detail["after_the_prune"] = [
+                {"name": item.name, "seq": item.seq} for item in after_report.breaks
+            ]
+            _expect(
+                not (after - before),
+                "a prune leaves the chain with no break it did not already have",
+                f"it introduced {sorted(after - before, key=str)}",
+            )
+            _expect(
+                len(_written(store)) < len(written),
+                "the prune actually deleted receipts",
+                "the chain is the same length, so nothing was pruned",
+            )
+
+        try:
+            return self.graded("G29", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    def g30(self) -> GuaranteeResult:
+        """SPEC-v0.11 §4.3, §8. A held range refuses to prune.
+
+        The control is the same prune **without** the hold: it must succeed, or this guarantee
+        passes against a prune that was refused for some other reason entirely.
+        """
+        prepared = self._pruneable("G30")
+        if prepared is None:
+            return self.na("G30", self.unselected(reg.NO_ACTIONS))
+        selection, control, store, recorder = prepared
+
+        def body(detail: dict[str, Any]) -> None:
+            self._fill(control, store, selection, "hold")
+            written = _written(store)
+            _expect_control(
+                len(written) >= 3,
+                "the scenario wrote a chain long enough to prune a prefix of",
+                f"only {len(written)} receipts reached the store",
+            )
+
+            provider = _VerifyAnchorProvider()
+            hold = Hold(
+                hold_id=f"{reg.SYNTHETIC_PREFIX}-hold",
+                from_seq=1,
+                to_seq=3,
+                reason="verify's own scenario",
+                placed_by=f"{reg.SYNTHETIC_PREFIX}-operator",
+                placed_at=datetime.now(UTC),
+            )
+            store.put_hold(hold)
+            detail["hold"] = {"from_seq": hold.from_seq, "to_seq": hold.to_seq}
+
+            refused: str | None = None
+            try:
+                prune(
+                    store,
+                    through=2,
+                    # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                    # same run, so any positive window puts every `COMMITTED` row inside it and the
+                    # prune is refused for a reason that has nothing to do with what this grades.
+                    # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                    # and §4.4's window is graded by `T546b` against a store built for it.
+                    older_than=timedelta(0),
+                    anchor=provider,
+                    now=self._after_everything(store),
+                )
+            except InvalidArgument as denied:
+                refused = str(denied)
+            _expect(
+                refused is not None,
+                "a prune overlapping a held range is refused",
+                "the prune completed and deleted held evidence",
+            )
+            _expect(
+                refused is not None and hold.hold_id in refused,
+                "the refusal names the hold",
+                f"it said {refused!r}",
+            )
+            _expect(
+                len(_written(store)) == len(written),
+                "a refused prune deletes nothing",
+                "receipts were deleted by a prune that was refused",
+            )
+
+            # The control: released, the same prune succeeds. Without it this grades a prune
+            # that was refused for a reason having nothing to do with the hold.
+            store.release_hold(
+                hold.hold_id, by=f"{reg.SYNTHETIC_PREFIX}-operator", at=datetime.now(UTC)
+            )
+            prune(
+                store,
+                through=2,
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
+                anchor=provider,
+                now=self._after_everything(store),
+            )
+            _expect_control(
+                len(_written(store)) < len(written),
+                "the same prune succeeds once the hold is released",
+                "it was refused even with no hold, so the hold is not what refused it",
+            )
+
+        try:
+            return self.graded("G30", selection, store, recorder, body)
+        finally:
+            store.close()
+
+    def g32(self) -> GuaranteeResult:
+        """SPEC-v0.11 §4.6, §8. An honestly pruned chain leaves a clean anchor report.
+
+        **This exists because §4.6's defect class would otherwise turn nothing red.** `G28`
+        grades a truncation against an anchor and `G29` grades a prune against the chain; the
+        *interaction* was graded by neither, and it is the one a review found had made items 2
+        and 3 mutually exclusive:
+
+            C. after an honest prune through seq 3 (checkpoint written)
+               checkpoint-seeded verify_chain   ok=True verified=2 breaks=[]
+               an anchor taken at seq 2 before the prune
+               -> [('anchor_broken', 2, 'the anchored seq is absent')]
+
+        In steady state, anchoring hourly and pruning at ninety days, **every anchor older than
+        the retention window would be permanently `anchor_broken`**, so an anchoring deployment
+        would have to choose between refusing every prune and living with a permanent tamper
+        signal. A guarantee for each half and none for the pair is how two correct sections ship
+        cancelling each other.
+        """
+        prepared = self._pruneable("G32")
+        if prepared is None:
+            return self.na("G32", self.unselected(reg.NO_ACTIONS))
+        selection, control, store, recorder = prepared
+
+        def body(detail: dict[str, Any]) -> None:
+            self._fill(control, store, selection, "supersede")
+            written = _written(store)
+            _expect_control(
+                len(written) >= 3,
+                "the scenario wrote a chain long enough to prune a prefix of",
+                f"only {len(written)} receipts reached the store",
+            )
+
+            provider = _VerifyAnchorProvider()
+            # An anchor taken BEFORE the prune, over a seq the prune will delete. This is the
+            # anchor that a first draft left permanently broken.
+            low = written[0]
+            _expect_control(
+                low.seq is not None and low.hash is not None,
+                "the receipt the anchor is taken over has a seq and a hash",
+                f"it has seq={low.seq!r} hash={low.hash!r}",
+            )
+            assert low.seq is not None and low.hash is not None  # narrowed by the control
+            made = make_anchor(store, provider, at=(low.seq, low.hash))
+            _expect_control(
+                verify_anchors(store, provider).ok,
+                "the anchor reproduces before the prune",
+                "it did not, so the prune is not what this scenario is grading",
+            )
+
+            prune(
+                store,
+                through=2,
+                # **Zero, deliberately.** Verify's scratch store writes its ledger rows in this
+                # same run, so any positive window puts every `COMMITTED` row inside it and the
+                # prune is refused for a reason that has nothing to do with what this grades.
+                # `--older-than 0` refuses nothing, which is right here: `G29` grades rule 2,
+                # and §4.4's window is graded by `T546b` against a store built for it.
+                older_than=timedelta(0),
+                anchor=provider,
+                now=self._after_everything(store),
+            )
+            detail["anchored_seq"] = made.seq
+            report = verify_anchors(store, provider)
+            detail["anchor_report"] = {
+                "ok": report.ok,
+                "superseded": report.superseded,
+                "breaks": [{"name": b.name, "seq": b.seq} for b in report.breaks],
+            }
+            _expect(
+                report.ok and not report.unavailable,
+                "an honestly pruned chain leaves a clean anchor report",
+                f"it reported {[(b.name, b.seq) for b in report.breaks]}",
+            )
+            _expect(
+                report.superseded >= 1,
+                "the anchor below the checkpoint is superseded rather than silently dropped",
+                f"the report superseded {report.superseded}",
+            )
+            _expect_control(
+                verify_chain(store).ok,
+                "the pruned chain still verifies",
+                "the prune broke the chain, which G29 grades and this scenario assumes",
+            )
+
+        try:
+            return self.graded("G32", selection, store, recorder, body)
         finally:
             store.close()
 

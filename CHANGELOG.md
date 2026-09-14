@@ -42,6 +42,45 @@ any change to one appears here.
   trusted. Found by review; the tests that missed it all tampered with a row's *content*, and
   `{}` and a float among the controls are both valid JSON.
 
+- **Retention: a prune that leaves the chain verifiable across the gap, a checkpoint, and a
+  hold** (`SPEC-v0.11.md` §4 and rule 2). There has been no retention policy until now, and
+  `../ctrlrun-docs/docs/postgres.md` said so in the same breath as the reason one is hard:
+  deleting receipts from the middle or the end of the chain is detected as a break **by design**.
+
+  A prune removes a **prefix**, never a suffix and never a middle, and leaves a **checkpoint**
+  the chain reader seeds from. `ctrlrun prune --through --older-than --provider --by --reason`.
+
+  **It refuses rather than warns**, and there is no `--force`, no `--allow-gap` and no setting
+  that admits a break the prune caused. Refused: a prune that would leave a `(kind, seq)` pair
+  the store did not already report; one through the chain's head; one moving the checkpoint
+  backwards; one overlapping a held range; and one that would delete a ledger row whose charge
+  is still held, or a `COMMITTED` row inside `SPEC-v0.9.md` §7.3's window, because pruning that
+  hands back authority nobody granted.
+
+  **Rule 2 is a delta, not "the chain verifies afterwards."** `unchained` is a pre-existing
+  condition on any store migrated from v0.1 to v0.5 and can never be inside a prefix, so the
+  absolute version would make retention permanently impossible on the oldest and largest stores,
+  which are the ones it is for.
+
+  **The prune anchors its checkpoint before it deletes anything.** An attacker who erases a
+  prefix and writes a checkpoint to explain it must also anchor it, through the provider, which
+  is outside the store, so a prune stays visible in the anchor history even though the receipts
+  are gone. An anchor at or below an anchored checkpoint is then **superseded**, not broken:
+  without that, every anchor older than the retention window would be permanently
+  `anchor_broken` and an anchoring deployment would have to choose between pruning and a
+  permanent tamper signal.
+
+  **A checkpoint is a row, not a receipt field.** A receipt naming itself a checkpoint is a
+  string in a document, and `SPEC-v0.3.md` §4.3.1 settled that shape. A prune writes a receipt
+  for a human; the row is what the walk reads.
+
+- **`ctrlrun hold place` / `release` / `list`.** A hold names a range and refuses to prune it.
+  **No expiry**: a hold that lapsed on a timer would release evidence on a schedule nobody
+  reviewed, which is `SPEC-v0.9.md` §4's rule about a budget hold applied unchanged.
+- **`G29`, `G30` and `G32`.** `G32` grades the *interaction*: an honestly pruned chain leaves a
+  clean anchor report. `G28` grades a truncation against an anchor and `G29` grades a prune
+  against the chain, and the pair was graded by neither.
+
 - **An anchor: the chain's head, recorded where the store's writer cannot reach it**
   (`SPEC-v0.11.md` §2, §3). The receipt chain detects alteration. It does not detect
   **truncation**, because the head that would catch it is a row in the same database. Measured on

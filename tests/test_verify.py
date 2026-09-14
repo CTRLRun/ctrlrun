@@ -180,7 +180,7 @@ def test_T101_a_policy_with_no_approve_rule_makes_G1_and_G2_not_applicable(tmp_p
     # G14 among them, and the count is over those.
     # 13 since v0.11 item 2's `G28`, on top of item 4's `G31`: both need only an action, so
     # both are applicable wherever this document's others are.
-    assert report.applicable == 13
+    assert report.applicable == 16
     # Derived: every guarantee is applicable or not, exactly once. The literal moved with every
     # milestone that added an id (G19, then G25), and the invariant never did.
     assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
@@ -866,7 +866,7 @@ def test_observe_mode_is_refused_before_any_scenario_runs(tmp_path):
     assert "observe" in str(refused.value)
 
 
-def test_the_v1_payments_template_reports_thirteen_over_thirteen():
+def test_the_v1_payments_template_reports_sixteen_over_sixteen():
     """The definition of done, dogfooded rather than described (SPEC-v0.4 §4.1).
 
     Ten and not nine since v0.8 item 6, and nine and not eight since item 2. G18 is graded
@@ -879,10 +879,10 @@ def test_the_v1_payments_template_reports_thirteen_over_thirteen():
     assert report.exit_code == 0
     # 12 since v0.11 item 4 added `G31`, which needs only an action to build a chain from
     # and is therefore applicable wherever this template's other eleven are.
-    assert (report.passed, report.applicable) == (13, 13)
+    assert (report.passed, report.applicable) == (16, 16)
     assert report.applicable + report.not_applicable == len(reg.GUARANTEES)
     text = report.to_text()
-    assert "13/13 declared guarantees pass." in text
+    assert "16/16 declared guarantees pass." in text
     # G13 is N/A on SQLite, which has no clock of its own; G14 and G15 join G3, G4 and G5 where
     # the effect template lives in the @protect decorator verify does not read, and where the
     # document names no `max_attempts`. G16 and G18 are graded: verify brings its own provider

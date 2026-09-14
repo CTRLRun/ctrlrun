@@ -226,6 +226,22 @@ GUARANTEES: Final = (
         ("v0.11 §3", "v0.11 §3.6 T530", "v0.11 §3.6 T533"),
     ),
     Guarantee(
+        "G29",
+        # 31 characters against `report._TITLE_WIDTH`'s 32. **A delta and not "the chain
+        # verifies"**: `unchained` is a pre-existing condition on any store migrated from v0.1 to
+        # v0.5, survives a prefix prune and can never be inside a prefix, so the absolute version
+        # would make retention permanently impossible on the oldest and largest stores.
+        "a prune adds no new chain break",
+        ("v0.11 §4.1", "v0.11 §4.7 T540", "v0.11 §4.7 T543"),
+    ),
+    Guarantee(
+        "G30",
+        # 29 characters. The hold is consulted **inside** the prune's transaction (§4.5): a hold
+        # placed between a consult and a delete would be honoured by neither.
+        "a held range refuses to prune",
+        ("v0.11 §4.3", "v0.11 §4.7 T545"),
+    ),
+    Guarantee(
         "G31",
         # 27 characters against `report._TITLE_WIDTH`'s 32. It grades **the walk**, not the
         # field: `schema` has existed since v0.3 and `SPEC-v0.11 §6` adds no field. What was
@@ -233,6 +249,16 @@ GUARANTEES: Final = (
         # hash by hash, each row hashed by the rule its own version wrote.
         "five receipt schemas verify",
         ("v0.11 §6", "v0.11 §6.1 T521", "v0.11 §6.2 T523"),
+    ),
+    Guarantee(
+        "G32",
+        # 31 characters. **§4.6's interaction, which neither G28 nor G29 grades.** G28 grades a
+        # truncation against an anchor and G29 grades a prune against the chain; an honest prune
+        # leaving the anchor report clean was graded by neither, and that interaction is the one
+        # a review found had made items 2 and 3 mutually exclusive. A guarantee for each half and
+        # none for the pair is how two correct sections ship cancelling each other.
+        "an honest prune keeps anchors",
+        ("v0.11 §4.6", "v0.11 §4.7 T547"),
     ),
 )
 

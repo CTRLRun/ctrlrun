@@ -16,14 +16,15 @@ from __future__ import annotations
 import importlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, cast
 
 import click
 
-from ..action import Principal
+from ..action import Action, Principal
 from ..anchor import (
     ANCHOR_KINDS,
     INTERVAL,
@@ -42,15 +43,17 @@ from ..errors import (
     InvalidArgument,
     PolicyError,
 )
-from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Policy
+from ..policy import DEFAULT_POLICY_FILENAME, OBSERVE, Decision, Policy
 from ..receipt import (
     Event,
     EventType,
     JSONLEventSink,
     Receipt,
+    ReceiptResult,
     UnreadableReceipt,
     _readable,
     iso_timestamp,
+    new_receipt_id,
     verify_chain,
 )
 from ..reporting import (
@@ -63,6 +66,7 @@ from ..reporting import (
     since_boundary,
     stats_document,
 )
+from ..retention import PRUNE_ACTION, Hold, prune
 from ..state import RESOLUTIONS, DelegationRecord, SQLiteStateStore, StateStore
 from .demo import run_demo
 
@@ -672,6 +676,254 @@ def _report_anchors(store: StateStore, provider: AnchorProvider, *, as_json: boo
             click.echo("every anchor reproduces")
     if not report.ok:
         raise SystemExit(1)
+
+
+@main.command(name="prune")
+@click.option(
+    "--through", type=int, required=True, metavar="SEQ", help="Delete receipts through this seq."
+)
+@click.option(
+    "--older-than",
+    "older_than",
+    required=True,
+    metavar="DURATION",
+    help="Refuse any COMMITTED ledger row newer than this (e.g. 90d). Use the longest window "
+    "on any budget of any grant.",
+)
+@click.option(
+    "--provider",
+    "dotted",
+    required=True,
+    metavar="MODULE:ATTR",
+    help="Your anchor provider. The prune anchors its checkpoint before deleting anything.",
+)
+@click.option("--by", required=True, metavar="WHO", help="Who is running this prune.")
+@click.option("--reason", required=True, help="Why. It goes in the receipt.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+@STORE_URL_OPTION
+def prune_command(
+    through: int,
+    older_than: str,
+    dotted: str,
+    by: str,
+    reason: str,
+    as_json: bool,
+    store_url: str | None,
+) -> None:
+    """Delete receipts from the start of the chain, leaving it verifiable across the gap.
+
+    **This is the only command in this library that destroys evidence.** It takes a prefix,
+    never a suffix and never a middle: a suffix is the attack the anchor exists to catch, a
+    middle is a gap by construction, and only moving the chain's start can leave a chain
+    anybody can still verify.
+
+    It refuses rather than warns. A prune that would leave the chain reporting a break it did
+    not already report is refused with the seq named; so is one overlapping a hold, one through
+    the head, one moving the checkpoint backwards, and one that would delete a ledger row whose
+    charge is still held. There is no --force and there is not going to be one.
+
+    It anchors its checkpoint **before** it deletes anything, so a prune stays visible in your
+    anchor provider's own record even though the receipts are gone.
+    """
+    try:
+        window = _duration(older_than)
+    except InvalidArgument as exc:
+        raise click.UsageError(str(exc)) from exc
+    provider = _loaded_anchor_provider(dotted)
+    store = _store(store_url)
+    now = _utc_now()
+
+    # §4.5: **before** the lock, and this is forced rather than chosen. `put_receipt` opens
+    # `BEGIN IMMEDIATE` on the store's own connection, so a prune already holding that
+    # transaction cannot write through it:
+    #
+    #     writing the prune's receipt inside the prune's transaction ->
+    #         OperationalError: cannot start a transaction within a transaction
+    #
+    # The crash window is the safe one: a receipt for a prune that did not happen over-reports,
+    # where a prune with no receipt is indistinguishable from a truncation.
+    #
+    # The receipt records an **intent**, so a refused prune leaves one saying DENIED rather than
+    # one asserting an erasure that never happened.
+    intent = _prune_receipt(through=through, by=by, reason=reason, now=now)
+    try:
+        store.put_receipt(intent)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+
+    try:
+        result = prune(store, through=through, older_than=window, anchor=provider, now=now)
+    except CTRLRunError as exc:
+        with suppress(CTRLRunError):
+            store.put_receipt(
+                replace(
+                    intent,
+                    receipt_id=new_receipt_id(),
+                    seq=None,
+                    prev_hash=None,
+                    hash=None,
+                    decision=Decision.DENY,
+                    decision_reason="refused",
+                    result=ReceiptResult.DENIED,
+                    error=str(exc),
+                )
+            )
+        raise _fail(exc) from exc
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":")))
+        return
+    click.echo(f"pruned through seq {result.through}")
+    click.echo(f"  receipts deleted     {result.receipts_deleted}")
+    click.echo(f"  ledger rows deleted  {result.ledger_rows_deleted}")
+    if result.checkpoint is not None:
+        click.echo(
+            f"  checkpoint           seq {result.checkpoint.seq} ({result.checkpoint.schema})"
+        )
+    click.echo("  the checkpoint was anchored before anything was deleted")
+
+
+@main.group(name="hold")
+def hold_group() -> None:
+    """Refuse to prune a range of receipts, until a person says otherwise.
+
+    There is no expiry. A hold that lapsed on a timer would release evidence on a schedule
+    nobody reviewed, which is the rule SPEC-v0.9 §4 already states about a budget hold.
+    """
+
+
+@hold_group.command(name="place")
+@click.option("--id", "hold_id", required=True, help="A name for this hold.")
+@click.option("--from-seq", "from_seq", type=int, required=True, help="The first seq held.")
+@click.option(
+    "--to-seq",
+    "to_seq",
+    type=int,
+    default=None,
+    help="The last seq held. Omit to hold to the end of the chain and everything after it.",
+)
+@click.option("--reason", required=True, help="Why. A prune that overlaps this prints it.")
+@click.option("--by", required=True, metavar="WHO", help="Who placed it.")
+@STORE_URL_OPTION
+def hold_place(
+    hold_id: str,
+    from_seq: int,
+    to_seq: int | None,
+    reason: str,
+    by: str,
+    store_url: str | None,
+) -> None:
+    """Place a hold."""
+    if from_seq < 1:
+        raise click.UsageError(f"--from-seq must be at least 1, got {from_seq}")
+    if to_seq is not None and to_seq < from_seq:
+        raise click.UsageError(f"--to-seq {to_seq} is below --from-seq {from_seq}")
+    store = _store(store_url)
+    try:
+        store.put_hold(
+            Hold(
+                hold_id=hold_id,
+                from_seq=from_seq,
+                to_seq=to_seq,
+                reason=reason,
+                placed_by=by,
+                placed_at=_utc_now(),
+            )
+        )
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    where = f"{from_seq}.." + ("end" if to_seq is None else str(to_seq))
+    click.echo(f"held {where}: {reason}")
+
+
+@hold_group.command(name="release")
+@click.option("--id", "hold_id", required=True, help="The hold to end.")
+@click.option("--by", required=True, metavar="WHO", help="Who is ending it.")
+@STORE_URL_OPTION
+def hold_release(hold_id: str, by: str, store_url: str | None) -> None:
+    """End a hold. A person ends it; nothing else does."""
+    store = _store(store_url)
+    try:
+        store.release_hold(hold_id, by=by, at=_utc_now())
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    click.echo(f"released {hold_id}")
+
+
+@hold_group.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="Print the holds as JSON.")
+@STORE_URL_OPTION
+def hold_list(as_json: bool, store_url: str | None) -> None:
+    """Show every hold this store knows about, live or released."""
+    store = _store(store_url)
+    try:
+        found = store.holds()
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps([item.to_dict() for item in found], ensure_ascii=False))
+        return
+    if not found:
+        click.echo("no holds")
+        return
+    for item in found:
+        where = f"{item.from_seq}.." + ("end" if item.to_seq is None else str(item.to_seq))
+        state = "live" if item.live else f"released by {item.released_by}"
+        click.echo(f"{item.hold_id}  {where}  {state}  {item.reason}")
+
+
+def _duration(text: str) -> timedelta:
+    """`90d`, `36h`, `15m`. The operator supplies the window; the kernel does not derive it.
+
+    SPEC-v0.11 §4.4 (O7): a ledger row carries `grant_id`, `metric`, `amount`, `effect_key`,
+    `attempt`, `consumed_at` and `released_at`, and **no window and no limit**. Those travel on
+    `Charge`, from the authority document, and a store that resolved a grant's budgets would be
+    reading the policy, which ARCHITECTURE.md §6 forbids.
+
+    Deriving it here would also have two failure modes with no good answer: a row whose
+    `grant_id` has left the document has no window at all, and a window an operator lengthens
+    later would retroactively un-prune rows already pruned.
+    """
+    units = {"d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
+    if len(text) < 2 or text[-1] not in units or not text[:-1].isdigit():
+        raise InvalidArgument(
+            f"--older-than must be a number and one of d, h, m, s (e.g. 90d), got {text!r}"
+        )
+    return timedelta(**{units[text[-1]]: int(text[:-1])})
+
+
+def _prune_receipt(*, through: int, by: str, reason: str, now: datetime) -> Receipt:
+    """The receipt a prune writes before it takes the lock (§4.2, §4.5).
+
+    **Not routed through `Control.execute`**, and §4.2 is why: the gate is
+    `if self._require_approved_policy and action.name != POLICY_CHANGE_ACTION`, so a prune as an
+    ordinary action would be refused on a deployment that had not approved its current policy,
+    and a store that cannot prune is a store that fills. A prune is an operator's act at the CLI
+    and what authorises it is shell access to the store, which policy does not mediate.
+
+    **And the receipt is not what the walk trusts.** A receipt naming itself a checkpoint is a
+    string in a document; the checkpoint row is what `verify_chain` reads. This is for a human.
+    """
+    action = Action(
+        name=PRUNE_ACTION,
+        arguments={"through": through, "reason": reason},
+        principal=Principal(agent=by),
+    )
+    return Receipt(
+        receipt_id=new_receipt_id(),
+        action_id=action.action_id,
+        action=action.name,
+        action_hash=action.action_hash,
+        principal=action.principal,
+        resource=action.resource,
+        arguments=action.canonical_arguments,
+        environment=action.environment,
+        decision=Decision.ALLOW,
+        decision_reason="an operator's act at the CLI; policy does not mediate shell access",
+        result=ReceiptResult.COMMITTED,
+        started_at=now,
+        finished_at=now,
+    )
 
 
 @main.command()

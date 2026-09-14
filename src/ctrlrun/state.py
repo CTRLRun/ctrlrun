@@ -26,7 +26,8 @@ import threading
 import time
 import unicodedata
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,6 +72,7 @@ from .receipt import (
     _document_hash,
     _read_receipt,
 )
+from .retention import Checkpoint, Hold
 
 _LOG = logging.getLogger(__name__)
 
@@ -911,6 +913,48 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
+    def put_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Record what a prune pruned through (SPEC-v0.11 §4.2). **Forward only** (§4.5).
+
+        **Amends SPEC-v0.6 §9.2's frozen protocol**, and clears its bar: §4.2 is why a checkpoint
+        the walk trusts cannot live in a receipt document, so a second backend could not
+        implement retention without a table of its own.
+        """
+        ...
+
+    def put_hold(self, hold: Hold) -> None:
+        """Place a hold over a range of receipts (SPEC-v0.11 §4.3)."""
+        ...
+
+    def holds(self) -> tuple[Hold, ...]:
+        """Every hold, live or released, oldest range first."""
+        ...
+
+    def release_hold(self, hold_id: str, *, by: str, at: datetime) -> None:
+        """End a hold. **A person ends it, never a timer** (§4.3).
+
+        `SPEC-v0.9 §4`'s rule that an automatic expiry on a hold is the refund rule in a costume
+        applies unchanged. There is no sweeper and there is not going to be one.
+        """
+        ...
+
+    def pruning(self) -> AbstractContextManager[None]:
+        """Hold the receipt-write lock for the whole of a prune (SPEC-v0.11 §4.5).
+
+        **Across the validation and the delete.** Two prunes that both validated and then both
+        acted would each be individually valid under §10 and together break rule 2, which is the
+        case §4.5 measured.
+        """
+        ...
+
+    def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:
+        """Delete receipts through `seq` and the ledger rows named, inside `pruning()`.
+
+        **Every refusal has already run.** This is the half that destroys and it decides nothing:
+        `retention.prune` is where rule 2, the holds and §4.4's table are checked.
+        """
+        ...
+
     def events(self) -> tuple[Event, ...]:
         """Every event, oldest first (SPEC-v0.6 §9.2).
 
@@ -1029,6 +1073,7 @@ class InMemoryStateStore:
         #: the process, exactly as every other row in it is.
         self._anchors: list[Anchor] = []
         self._checkpoint: tuple[int, str] | None = None
+        self._holds: list[Hold] = []
         #: The chain head (§6.3), starting where `0002_receipt_chain` starts it: seq 0
         #: carrying the genesis hash, so an empty store is a chain of length zero rather
         #: than a truncated one.
@@ -1083,6 +1128,47 @@ class InMemoryStateStore:
     def checkpoint(self) -> tuple[int, str] | None:
         with self._lock:
             return self._checkpoint
+
+    def put_checkpoint(self, checkpoint: Checkpoint) -> None:
+        with self._lock:
+            if self._checkpoint is None or checkpoint.seq > self._checkpoint[0]:
+                self._checkpoint = (checkpoint.seq, checkpoint.hash)
+
+    def put_hold(self, hold: Hold) -> None:
+        with self._lock:
+            if any(held.hold_id == hold.hold_id for held in self._holds):
+                raise InvalidArgument(f"hold {hold.hold_id!r} already exists")
+            self._holds.append(hold)
+
+    def holds(self) -> tuple[Hold, ...]:
+        with self._lock:
+            return tuple(sorted(self._holds, key=lambda item: (item.from_seq, item.hold_id)))
+
+    def release_hold(self, hold_id: str, *, by: str, at: datetime) -> None:
+        with self._lock:
+            for index, held in enumerate(self._holds):
+                if held.hold_id == hold_id and held.live:
+                    self._holds[index] = replace(held, released_at=at, released_by=by)
+                    return
+        raise InvalidArgument(f"no live hold {hold_id!r} in this store")
+
+    @contextmanager
+    def pruning(self) -> Iterator[None]:
+        """One lock is all a store confined to one process can offer, and `reopen()` returning
+        `None` is how this backend declares that (§2.4)."""
+        with self._lock:
+            yield
+
+    def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:
+        """The in-memory half. The caller already holds `pruning()`'s lock."""
+        if True:
+            kept = [item for item in self._receipts if item.seq is None or item.seq > through]
+            receipts = len(self._receipts) - len(kept)
+            self._receipts = kept
+            wanted = set(effect_keys)
+            rows = sum(1 for row in self._ledger if row.effect_key in wanted)
+            self._ledger = [row for row in self._ledger if row.effect_key not in wanted]
+        return (receipts, rows)
 
     def events(self) -> tuple[Event, ...]:
         """An immutable snapshot of the event log, in append order."""
@@ -1776,6 +1862,128 @@ class SQLiteStateStore:
             .fetchone()
         )
         return None if row is None else (int(row["seq"]), str(row["hash"]))
+
+    # --- retention (SPEC-v0.11 §4) ----------------------------------------------------
+
+    def put_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Record what a prune pruned through. **Forward only** (§4.5).
+
+        The `WHERE` clause is the refusal, in SQL rather than only in `retention.prune`: two
+        racing prunes are each individually valid under §10, and the second overwriting the
+        first's row is what a review measured leaving `[('missing', 4), ('link_broken', 6)]`.
+        """
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash, "
+                "schema = excluded.schema, at = excluded.at WHERE excluded.seq > seq",
+                (checkpoint.seq, checkpoint.hash, checkpoint.schema, checkpoint.at.isoformat()),
+            )
+
+    def put_hold(self, hold: Hold) -> None:
+        """Place a hold over a range of receipts (SPEC-v0.11 §4.3)."""
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO holds (hold_id, from_seq, to_seq, reason, placed_by, placed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    hold.hold_id,
+                    hold.from_seq,
+                    hold.to_seq,
+                    hold.reason,
+                    hold.placed_by,
+                    hold.placed_at.isoformat(),
+                ),
+            )
+
+    def holds(self) -> tuple[Hold, ...]:
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT hold_id, from_seq, to_seq, reason, placed_by, placed_at, released_at, "
+                "released_by FROM holds ORDER BY from_seq, hold_id"
+            )
+            .fetchall()
+        )
+        return tuple(
+            Hold(
+                hold_id=str(row["hold_id"]),
+                from_seq=int(row["from_seq"]),
+                to_seq=None if row["to_seq"] is None else int(row["to_seq"]),
+                reason=str(row["reason"]),
+                placed_by=str(row["placed_by"]),
+                placed_at=datetime.fromisoformat(row["placed_at"]),
+                released_at=(
+                    None
+                    if row["released_at"] is None
+                    else datetime.fromisoformat(row["released_at"])
+                ),
+                released_by=row["released_by"],
+            )
+            for row in rows
+        )
+
+    def release_hold(self, hold_id: str, *, by: str, at: datetime) -> None:
+        """End a hold. **A person ends it, never a timer** (§4.3).
+
+        `SPEC-v0.9 §4`'s rule that an automatic expiry on a hold is the refund rule in a costume
+        applies unchanged: a hold that lapsed on a schedule would release evidence on a schedule
+        nobody reviewed. There is no sweeper here and there is not going to be one.
+        """
+        connection = self._connection()
+        with connection:
+            changed = connection.execute(
+                "UPDATE holds SET released_at = ?, released_by = ? "
+                "WHERE hold_id = ? AND released_at IS NULL",
+                (at.isoformat(), by, hold_id),
+            ).rowcount
+        if changed != 1:
+            raise InvalidArgument(f"no live hold {hold_id!r} in this store")
+
+    @contextmanager
+    def pruning(self) -> Iterator[None]:
+        """Hold the receipt-write lock for the whole of a prune (SPEC-v0.11 §4.5).
+
+        **Across the validation and the delete, not only the delete.** A first implementation
+        took the lock inside `delete_prefix`, so two prunes could both validate and then both
+        act, and a probe against a real server caught it: the pair happened to be serialized by
+        the *anchor* ordering instead, which is shared state but is not the rule §4.5 states and
+        is not a lock.
+
+        `BEGIN IMMEDIATE` is the same statement `put_receipt` opens with, and SQLite admits one
+        writer, so a prune and a receipt write exclude each other here without anything further.
+        That is also exactly why the prune's own receipt is written **before** this is entered:
+        `put_receipt` would open a second transaction on this connection and get
+        `cannot start a transaction within a transaction`.
+        """
+        connection = self._connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()
+
+    def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:
+        """Delete receipts through `seq` and the ledger rows named.
+
+        **Every refusal has already run**, and the lock is already held by `pruning()`. This is
+        the half that destroys, and it decides nothing: `retention.prune` is where rule 2, the
+        holds and §4.4's table are checked, and a caller reaching here has passed all of them.
+        """
+        connection = self._connection()
+        receipts = connection.execute(
+            "DELETE FROM receipts WHERE seq IS NOT NULL AND seq <= ?", (through,)
+        ).rowcount
+        rows = 0
+        for key in effect_keys:
+            rows += connection.execute(
+                "DELETE FROM budget_ledger WHERE effect_key = ?", (key,)
+            ).rowcount
+        return (receipts, rows)
 
     def events(self) -> tuple[Event, ...]:
         rows = self._connection().execute("SELECT * FROM events ORDER BY event_id").fetchall()
