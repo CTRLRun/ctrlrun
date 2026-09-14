@@ -85,6 +85,24 @@ CHAINED_SCHEMAS = (
 )
 
 
+#: `scripts/five_schema_chain.py` belongs to the **repository** and not to the package: it builds
+#: five virtual environments and needs a network, and `MANIFEST.in` prunes `scripts/` for the same
+#: reason it prunes `.github`, because a downstream packager builds a library. So the two tests
+#: about it skip where the file is absent, exactly as `test_verify_action.py` does for `action.yml`
+#: and the CI workflow, and run with everything asserted in a checkout and in CI's `check` job,
+#: which is where a change to the script is actually made.
+#:
+#: Found by the `package` job: the first version read the path unconditionally and both tests
+#: failed with `FileNotFoundError` inside the sdist.
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "five_schema_chain.py"
+
+
+def _repository_script() -> str:
+    if not SCRIPT.exists():  # pragma: no cover - only outside a checkout
+        pytest.skip("scripts/five_schema_chain.py is not in the sdist; this asserts a repo file")
+    return SCRIPT.read_text(encoding="utf-8")
+
+
 def an_action(payment_id: str) -> Action:
     return Action(
         name="stripe.refund",
@@ -313,8 +331,7 @@ def test_T525_the_released_wheel_script_strips_what_would_make_it_lie() -> None:
     checked is that the two guards which make its answer mean anything are still in it, because
     a script whose methodology quietly regressed would go on printing a convincing transcript.
     """
-    script = Path(__file__).resolve().parent.parent / "scripts" / "five_schema_chain.py"
-    source = script.read_text(encoding="utf-8")
+    source = _repository_script()
 
     assert "PYTHONPATH" in source, "the script no longer strips PYTHONPATH from its children"
     assert "_clean_environment" in source
@@ -518,8 +535,8 @@ def test_T525b_the_scripts_environment_guard_actually_strips_the_variables() -> 
     """
     import importlib.util
 
-    script = Path(__file__).resolve().parent.parent / "scripts" / "five_schema_chain.py"
-    spec = importlib.util.spec_from_file_location("five_schema_chain", script)
+    _repository_script()  # skips outside a checkout, for SCRIPT's reason
+    spec = importlib.util.spec_from_file_location("five_schema_chain", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
