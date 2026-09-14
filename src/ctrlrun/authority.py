@@ -38,7 +38,11 @@ from typing import Any, Final, Literal, cast
 
 from .action import Action, PlainValue, Principal
 from .errors import AuthorityEscalation, IdentityError, InvalidArgument, PolicyError
-from .policy import (
+
+# `grammar.py` and not `policy.py`: SPEC-v0.3 §4.5 requires the two axes to share one condition
+# evaluator, and it now lives below both rather than inside one of them. Importing it from
+# `policy.py` was the last cycle ARCHITECTURE §6 carried an exception for.
+from .grammar import (
     SUPPORTED_SCHEMAS,
     Condition,
     parse_conditions,
@@ -47,7 +51,7 @@ from .policy import (
     require_v7,
     strict_load,
 )
-from .policy import _equal as _type_strict_equal
+from .grammar import _equal as _type_strict_equal
 from .state import Charge, DelegationRecord, StateStore
 
 #: SPEC-v0.3 §4.4 — an action name is dotted (`v0.1 §2.1`) and a resource is `type:id`.

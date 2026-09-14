@@ -114,26 +114,25 @@ def test_the_import_order_graph_has_no_cycle() -> None:
     )
 
 
-#: The one layering cycle this repository has decided to keep, and the only one.
+#: **Empty, and it is meant to stay empty.**
 #:
-#: `authority.py` imports `Condition` and `parse_conditions` from `policy.py` deliberately and at
-#: module level: a grant's `constraints:` is a rule's `when:` syntax and `SPEC-v0.3.md` §4.5 says
-#: the two axes MUST share one evaluator. §6 records that as an exception. The reverse edge is
-#: `policy.py` reaching `authority.py` from inside `_canonical_authority` and
-#: `hash_with_authority`, and it cannot be removed by relocation: `_from_section` *constructs* an
-#: `Authority` and `canonical_grants` *consumes* one, so neither moves below `policy.py`, and
-#: moving the two callers up to `control.py` would change what `policy_hash` is taken over --
-#: which is evidence in every receipt, not an implementation detail.
+#: It held `policy <-> authority` for one commit. `authority.py` imports the condition evaluator
+#: from `policy.py` deliberately, because SPEC-v0.3 §4.5 requires the two axes to share one: a
+#: second evaluator would be a second place for `True` to start comparing equal to `1`. The
+#: reverse edge is `policy.py` reaching `authority.py` from `_canonical_authority` and
+#: `hash_with_authority`, and neither direction could be removed on its own.
 #:
-#: So it stays, named, until someone decides that question. An allow-list of one fails the moment
-#: a second appears, which a plain "no cycles" assertion softened to a skip never would.
-RECORDED_LAYERING_CYCLES: frozenset[frozenset[str]] = frozenset(
-    {frozenset({"policy", "authority"})}
-)
+#: Moving the **shared** half down to `grammar.py` removed the cycle without touching either.
+#: §4.5's requirement is better served than before, because the one evaluator is now owned by
+#: neither axis.
+#:
+#: A new entry here is a decision, not a fix. Add one only with the reason it cannot be
+#: relocated, the way that one carried its reason while it stood.
+RECORDED_LAYERING_CYCLES: frozenset[frozenset[str]] = frozenset()
 
 
 def test_the_layering_graph_has_only_the_one_recorded_cycle() -> None:
-    """§6's actual rule, including deferred imports, with one documented exception.
+    """§6's actual rule, including deferred imports, and there is no exception left.
 
     A function-level import is a real edge for the module map and not one for import order, and
     conflating them is exactly what let `state -> receipt -> policy -> authority -> state` read as
