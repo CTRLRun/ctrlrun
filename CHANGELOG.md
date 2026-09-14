@@ -9,6 +9,17 @@ any change to one appears here.
 
 ## [Unreleased]
 
+## [0.11.0] — Evidence
+
+One question: **can the record be trusted after the fact, and kept?**
+
+Every milestone so far added something the receipt records. None asked whether the receipt is
+still worth reading a year later, on a database an administrator can write to, after somebody
+pruned it. This is the first milestone whose subject is the evidence itself rather than the
+decision, and the first that opens by admitting a defect in the thing it is about: the chain has
+never detected truncation or append, both reachable in two SQL statements, and both written down
+since `SPEC-v0.6.md` §6.4.
+
 ### Added
 
 - **`docs/SPEC-v0.11.md`, the v0.11 "Evidence" contract.** Documentation only; the version bump is

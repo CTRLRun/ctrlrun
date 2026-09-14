@@ -973,3 +973,97 @@ Written by item 6, in one pass, from the CHANGELOG line each item leaves.
 truth depends on a later item is a test that item owes, named in its table, or it is not in the
 document. Every forward-looking sentence above is either a MUST in §1.1, a row in §9 naming its item,
 or a row in §10.
+
+---
+
+### 13.1 What the items found that the document did not
+
+Six items, and **every one of them found something by running the code rather than by reading
+it**. That is the pattern worth carrying forward more than any individual finding.
+
+**Item 1 found a second defect underneath the one it was sent for.** `verify_chain`'s docstring
+has claimed since v0.6 that *"position comes from the store's `seq` column"*, and it was false as
+shipped: both backends selected `json, hash` and ordered by a column they never read, so every
+position came out of the document, which is the half a tamperer controls. One `UPDATE` setting a
+document's `seq` to 99 reported `missing 2`, `content_altered 99`, `missing 100` and
+`link_broken 3`: four breaks at three positions, two of them rows that do not exist.
+
+**Item 1 shipped with a hole, and a review found it within the hour.** `json.loads` ran in the
+generator expression that fed the new reader, *outside* its guard, so a row whose stored `json`
+is not JSON at all raised through every reader exactly as before, and worse: `JSONDecodeError`
+is not a `CTRLRunError`, so the CLI printed a traceback where 0.10.0 printed a clean message.
+The tests missed it because **every tamper they ran changed a row's content**, and `{}` and a
+float among the controls are both valid JSON. `T520` now parametrizes over seven ways a row can
+fail to parse.
+
+**Item 2's mutation run found a design gap, not a test gap.** Restoring §3.2's rejected joint
+ordering of the two anchor kinds survived every test, because nothing could *produce* a
+checkpoint anchor below an interval one for the per-kind rule to have to allow: `make_anchor`
+anchored the head and nothing else. But §4.6 needs exactly that, since a prune's checkpoint sits
+below the head. The rule was right and unreachable.
+
+**Item 3 found that the prune held no lock at all**, in three stacked defects, by running two
+prunes against a real Postgres server. The lock was taken inside the delete, so the validation
+above it was unprotected; `put_anchor` and `put_checkpoint` each commit, so the transaction ended
+mid-prune; and the connection is `autocommit=True` with every write taking an explicit `BEGIN`,
+so a bare `SELECT ... FOR UPDATE` committed the instant it returned. **The symptom was a passing
+test**: the losing prune was refused by the *anchor ordering*, which is shared state reached by
+accident and would order differently under a different provider.
+
+**Item 4's proof was wrong in the way that looks exactly like a pass.** Run as
+`PYTHONPATH=src python scripts/five_schema_chain.py`, the variable is inherited by every child,
+so all five "released wheels" imported the build under test. It printed a chain of ten receipts
+that verified perfectly and reported **one** schema version. A run that checked nothing was
+indistinguishable from a run that checked everything, except in the number the script exists to
+produce.
+
+**Item 5 corrected this document's own §7 in passing.** §7 says *"from events already written"*.
+The action name is not on the event: `ACTION_PROPOSED` carries an `action_hash` and nothing that
+maps it back. The answer comes from receipts, which every decided action leaves, **a denial
+included** -- so an action that is always denied counts as exercised, and a design reading only
+`EXECUTION_COMMITTED` would have told operators to delete the deny rule that was working.
+
+### 13.2 The rule these six have in common
+
+**A test passing is not the evidence. Running the real thing is.** Five of the six findings above
+were invisible to a green suite, and three of them had a green test asserting the property that
+was broken. The mutation runs caught what they caught because a mutation that survives is a
+finding about the test; the rest needed a probe against a real store, a real server, or a real
+released wheel.
+
+The corollary this milestone adds to `SPEC-v0.10.md` §11: **an equivalent mutation is a design
+finding.** Item 2's joint-ordering mutation survived because the input that distinguishes the two
+rules could not be constructed, and that was not a gap in the tests, it was a gap in the code.
+Item 4's string-versus-number comparison survived for the same shape of reason, and the answer
+was to make the derivation take its inputs so a test could hand it `v10`.
+
+### 13.3 Two overclaims that were already published
+
+Neither was found by a test, because neither was in code.
+
+**`OWASP-SOLUTIONS-LANDSCAPE.md` said the anchor detects "truncation and append."** It does not
+detect an append: a forged receipt lands above every anchored `seq`, so no anchored pair stops
+reproducing and a later anchor freezes the forged chain as readily as an honest one. That
+document is the OWASP submission. `T531` now runs a forged append and requires both reports to
+stay clean, so the limit is a tested property rather than a sentence somebody has to remember.
+
+**`ROADMAP.md`'s v0.11 line said enforcement coverage comes "from events already written."** It
+cannot, for §7's reason above.
+
+The rule worth stating: **a claim about what a feature does not do needs a test as much as a
+claim about what it does**, because nothing else will ever contradict it.
+
+### 13.4 What is still owed
+
+- **`SPEC-v0.11.md` §9 assigns the frozen-name list to item 2 and item 1 created it.** Item 1 had
+  two rows of its own and §9's whole point is that nothing turns red at release that could have
+  turned red during the item. The document should say item 1.
+- **`pruning()` is not in §9's table.** It is the store method that makes §4.5's lock rule
+  implementable, and §4.5 requires the lock without naming a surface for it.
+- **`AnchorProvider.make` returns `(token, time)` and §3.2's table says "an opaque token."** §3.3
+  caches the time and §10 refuses an anchor whose time runs backwards; a time the provider does
+  not supply is one CTRLRun would read from its own clock, which rule 1 forbids. The three cannot
+  all hold with a bare token.
+- **`StateStore.checkpoint`'s read shipped in item 2, and §9 assigns it to item 3.** §4.6's
+  supersession rule is part of what `anchor_broken` means, so an anchor without it would report
+  every anchor older than the retention window as tampering, forever.

@@ -27,9 +27,9 @@
 # that gets skipped in the run that mattered.
 
 [langgraph]
-version = "1.0.0"
-kernel = ">=0.5,<0.6"
+version = "1.1.0"
+kernel = ">=0.5,<0.12"
 
 [openai-agents]
-version = "1.0.0"
-kernel = ">=0.5,<0.6"
+version = "1.1.0"
+kernel = ">=0.5,<0.12"
