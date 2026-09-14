@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol, TypeVar
 
 from .action import Action, Principal
+from .anchor import Anchor
 from .approval import (
     Approval,
     ApprovalRecord,
@@ -883,6 +884,33 @@ class StateStore(ApprovalStore, Protocol):
         """
         ...
 
+    def put_anchor(self, anchor: Anchor) -> None:
+        """Cache one anchor (SPEC-v0.11 §3.3). **Amends SPEC-v0.6 §9.2's frozen protocol.**
+
+        §9.2's bar for a new method is *a second backend could not be written without it*, and it
+        is cleared: an anchor's local cache cannot be reconstructed from the tables that exist.
+        No receipt carries a token, and the point of the cache is to hold what the provider
+        answered, which nothing else in this store has ever seen.
+        """
+        ...
+
+    def anchors(self) -> tuple[Anchor, ...]:
+        """Every cached anchor, oldest `seq` first (SPEC-v0.11 §3.3).
+
+        **A cache and not a record.** `verify_anchors` asks the provider what it holds before it
+        reads this, so a store whose anchors table was emptied verifies exactly as one that never
+        anchored: `anchor_missing`, which is a break.
+        """
+        ...
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        """The `seq` a prune pruned through and the hash at it, or `None` (SPEC-v0.11 §4.2).
+
+        The **read** ships with item 2 because §4.6's supersession rule is part of what
+        `anchor_broken` means; `put_checkpoint` ships with item 3, which is what writes one.
+        """
+        ...
+
     def events(self) -> tuple[Event, ...]:
         """Every event, oldest first (SPEC-v0.6 §9.2).
 
@@ -996,6 +1024,11 @@ class InMemoryStateStore:
         self._ledger: list[Consumption] = []
         self._events: list[Event] = []
         self._receipts: list[Receipt] = []
+        #: SPEC-v0.11 §3.3's cache, in memory. This backend's `reopen()` is `None`: it declares
+        #: that its storage does not outlive the object, so an anchor cached here is gone with
+        #: the process, exactly as every other row in it is.
+        self._anchors: list[Anchor] = []
+        self._checkpoint: tuple[int, str] | None = None
         #: The chain head (§6.3), starting where `0002_receipt_chain` starts it: seq 0
         #: carrying the genesis hash, so an empty store is a chain of length zero rather
         #: than a truncated one.
@@ -1037,6 +1070,19 @@ class InMemoryStateStore:
     def chain_head(self) -> tuple[int, str] | None:
         with self._lock:
             return (self._chain_seq, self._chain_hash)
+
+    def put_anchor(self, anchor: Anchor) -> None:
+        with self._lock:
+            if all(held.token != anchor.token for held in self._anchors):
+                self._anchors.append(anchor)
+
+    def anchors(self) -> tuple[Anchor, ...]:
+        with self._lock:
+            return tuple(sorted(self._anchors, key=lambda item: (item.seq, item.kind, item.token)))
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        with self._lock:
+            return self._checkpoint
 
     def events(self) -> tuple[Event, ...]:
         """An immutable snapshot of the event log, in append order."""
@@ -1673,6 +1719,60 @@ class SQLiteStateStore:
         row = (
             self._connection()
             .execute("SELECT seq, hash FROM receipt_chain WHERE id = 1")
+            .fetchone()
+        )
+        return None if row is None else (int(row["seq"]), str(row["hash"]))
+
+    # --- anchors (SPEC-v0.11 §3.3) ----------------------------------------------------
+
+    def put_anchor(self, anchor: Anchor) -> None:
+        """Cache one anchor the provider made. **A cache, never the record** (§3.3).
+
+        The record is the operator's provider, outside this store, and that is the whole of what
+        makes an anchor worth anything: `verify_anchors` asks the provider what it holds *before*
+        it reads this table, so a row deleted from here is checked anyway.
+
+        Keyed on `token`: a `seq` can carry both an `interval` and a `checkpoint` anchor, because
+        §3.2 orders the two kinds separately, and the token is the one value a provider promises
+        to recognise again.
+        """
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO anchors (token, seq, hash, kind, at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(token) DO NOTHING",
+                (anchor.token, anchor.seq, anchor.hash, anchor.kind, anchor.at.isoformat()),
+            )
+
+    def anchors(self) -> tuple[Anchor, ...]:
+        rows = (
+            self._connection()
+            .execute("SELECT token, seq, hash, kind, at FROM anchors ORDER BY seq, kind, token")
+            .fetchall()
+        )
+        return tuple(
+            Anchor(
+                seq=int(row["seq"]),
+                hash=str(row["hash"]),
+                token=str(row["token"]),
+                kind=str(row["kind"]),
+                at=datetime.fromisoformat(row["at"]),
+            )
+            for row in rows
+        )
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        """The `seq` a prune pruned through and the chain hash at it (SPEC-v0.11 §4.2).
+
+        **Read here in item 2 and written by item 3.** §4.6's rule is part of what
+        `anchor_broken` *means*, not an addition to it: an anchored `seq` below a checkpoint that
+        is itself anchored is **superseded**, not broken. An anchor shipped without that clause
+        would report every anchor older than the retention window as tampering, forever, on any
+        deployment that ever prunes, and §3.4's definition would be wider than its code.
+        """
+        row = (
+            self._connection()
+            .execute("SELECT seq, hash FROM prune_checkpoint WHERE id = 1")
             .fetchone()
         )
         return None if row is None else (int(row["seq"]), str(row["hash"]))

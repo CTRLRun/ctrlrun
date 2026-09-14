@@ -393,6 +393,89 @@ _BUDGET_LEDGER_PG: Final = (
     """,
 )
 
+#: SPEC-v0.11 §9 — the three tables items 2 and 3 need, in **one** migration, because §9 freezes
+#: the id `0008_anchor_checkpoint_hold` and a migration id is a name that cannot be amended once
+#: a store has applied it. Item 2 creates all three; item 3 fills `checkpoints` and `holds`.
+#:
+#: `anchors` is the **cache** and never the record (§3.3). The record is the operator's provider,
+#: outside the store, and that distinction is the whole of why an anchor is worth anything: a row
+#: here that somebody deleted is checked anyway, because `verify_anchors` asks the provider what
+#: it holds before it reads this table.
+#:
+#: `token` is the primary key rather than `seq`: a `seq` can legitimately carry both an `interval`
+#: and a `checkpoint` anchor (§3.2 orders the kinds separately), and a provider's token is the one
+#: value it promises to recognise again.
+_ANCHOR_CHECKPOINT_HOLD: Final = (
+    """
+    CREATE TABLE anchors (
+        token TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX ix_anchors_seq ON anchors (kind, seq)",
+    # One row, `id = 1`, exactly as `receipt_chain` is: a store has one pruned-through point, and
+    # a table that could hold two is a table a reader has to choose from (SPEC-v0.11 §4.2).
+    """
+    CREATE TABLE prune_checkpoint (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        schema TEXT NOT NULL,
+        at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE holds (
+        hold_id TEXT PRIMARY KEY,
+        from_seq INTEGER NOT NULL,
+        to_seq INTEGER,
+        reason TEXT NOT NULL,
+        placed_by TEXT NOT NULL,
+        placed_at TEXT NOT NULL,
+        released_at TEXT,
+        released_by TEXT
+    )
+    """,
+    "CREATE INDEX ix_holds_range ON holds (from_seq, to_seq)",
+)
+_ANCHOR_CHECKPOINT_HOLD_PG: Final = (
+    """
+    CREATE TABLE IF NOT EXISTS anchors (
+        token TEXT PRIMARY KEY COLLATE "C",
+        seq BIGINT NOT NULL,
+        hash TEXT NOT NULL COLLATE "C",
+        kind TEXT NOT NULL COLLATE "C",
+        at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_anchors_seq ON anchors (kind, seq)",
+    """
+    CREATE TABLE IF NOT EXISTS prune_checkpoint (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        seq BIGINT NOT NULL,
+        hash TEXT NOT NULL COLLATE "C",
+        schema TEXT NOT NULL COLLATE "C",
+        at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS holds (
+        hold_id TEXT PRIMARY KEY COLLATE "C",
+        from_seq BIGINT NOT NULL,
+        to_seq BIGINT,
+        reason TEXT NOT NULL COLLATE "C",
+        placed_by TEXT NOT NULL COLLATE "C",
+        placed_at TIMESTAMPTZ NOT NULL,
+        released_at TIMESTAMPTZ,
+        released_by TEXT COLLATE "C"
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_holds_range ON holds (from_seq, to_seq)",
+)
+
 #: The ordered set this binary knows. `NNNN_snake_name`: four digits, zero-padded, so
 #: lexicographic order is application order.
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -411,6 +494,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         postgres=_VERIFIED_APPROVER_PG,
     ),
     Migration("0007_budget_ledger", _BUDGET_LEDGER, postgres=_BUDGET_LEDGER_PG),
+    Migration(
+        "0008_anchor_checkpoint_hold",
+        _ANCHOR_CHECKPOINT_HOLD,
+        postgres=_ANCHOR_CHECKPOINT_HOLD_PG,
+    ),
 )
 
 HEAD: Final = MIGRATIONS[-1].id
