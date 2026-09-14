@@ -35,7 +35,7 @@ import struct
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -4736,16 +4736,30 @@ def _schema_number(label: str) -> int:
 
 
 _FIRST_CHAINED_SCHEMA: Final = 3
-_OLDER_RECEIPT_SCHEMAS: Final = tuple(
-    sorted(
-        (
-            label
-            for label in KNOWN_RECEIPT_SCHEMAS
-            if _schema_number(label) >= _FIRST_CHAINED_SCHEMA and label != RECEIPT_SCHEMA
-        ),
-        key=_schema_number,
+
+
+def _chainable_schemas(known: Iterable[str], current: str) -> tuple[str, ...]:
+    """The chainable receipt schemas older than `current`, oldest first.
+
+    **A function rather than a comprehension at module scope**, so a test can hand it a set
+    containing `ctrlrun.receipt/v10` and see what it does. The module constant is computed once
+    at import, so a test cannot reach the ordering by patching `KNOWN_RECEIPT_SCHEMAS`, and a
+    mutation replacing the numeric comparison with a string one survived the whole suite for
+    exactly that reason: every version that exists today is one digit, so the two agree.
+    """
+    return tuple(
+        sorted(
+            (
+                label
+                for label in known
+                if _schema_number(label) >= _FIRST_CHAINED_SCHEMA and label != current
+            ),
+            key=_schema_number,
+        )
     )
-)
+
+
+_OLDER_RECEIPT_SCHEMAS: Final = _chainable_schemas(KNOWN_RECEIPT_SCHEMAS, RECEIPT_SCHEMA)
 
 #: SPEC-v0.8 §3.4, §11.7 — the claim verify's own approver principals carry their roles in.
 #: Named for what it is, and `SYNTHETIC_PREFIX`ed nowhere, because it is a claim **name** and a

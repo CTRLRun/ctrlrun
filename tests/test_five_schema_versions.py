@@ -402,6 +402,78 @@ def test_T521c_five_schemas_on_disk_rehash_to_their_stored_hashes(tmp_path, seed
     assert report.verified == 5
 
 
+def test_T521d_a_stored_document_this_binary_would_not_render_still_rehashes(tmp_path, seed):
+    """The stored-document branch, on the only input that can distinguish it.
+
+    **`T521c` does not reach it either, and a mutation proved that too.** `T521c` writes
+    `json.dumps(row.to_dict())` to disk, so re-rendering with `to_dict()` produces the same bytes
+    and `chain_hash()` gives the same answer whichever branch it takes. The branch only matters
+    when the document on disk is something this binary would **not** produce: a key it has never
+    heard of, written by a version that came later.
+
+    That is the case `SPEC-v0.7.md` §6.11 exists for, and the one an operator hits when a newer
+    writer has touched their store. Deleting the stored-document branch makes this row's hash
+    unreproducible and the chain reports `content_altered` about evidence nobody altered.
+    """
+    database = tmp_path / "future.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    store.close()
+
+    document = dict(seed.to_dict())
+    document["schema"] = "ctrlrun.receipt/v9"
+    document["seq"] = 1
+    document["prev_hash"] = GENESIS_HASH
+    # The field that makes the document unrenderable by this binary: `to_dict` projects a fixed
+    # key set per schema, so nothing here can put this key back.
+    document["settled_at"] = "2026-09-14T00:00:00Z"
+    digest = _document_hash(document)
+
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO receipts (receipt_id, action_id, ts, json, seq, prev_hash, hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(document["receipt_id"]),
+            str(document["action_id"]),
+            seed.finished_at.isoformat(),
+            json.dumps(document, ensure_ascii=False, separators=(",", ":")),
+            1,
+            GENESIS_HASH,
+            digest,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO receipt_chain (id, seq, hash) VALUES (1, 1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash",
+        (digest,),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    rows = reopened.receipts()
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert isinstance(row, Receipt)
+    assert row.schema == "ctrlrun.receipt/v9"
+    assert "settled_at" not in row.to_dict(), (
+        "this binary rendered a key it does not know, so the document is NOT one it would "
+        "refuse to reproduce and this test proves nothing"
+    )
+    assert row.chain_hash() == digest, (
+        "a receipt carrying a key this binary has never heard of did not rehash to its stored "
+        "hash, so it is being re-rendered rather than read as it was written (SPEC-v0.7 §6.11)"
+    )
+    assert report.ok, (
+        "a receipt a later version wrote was reported as a break: "
+        f"{[(item.name, item.seq) for item in report.breaks]}"
+    )
+    assert report.verified == 1
+
+
 # --- T522b: the version is a number, and two digits is where a string comparison breaks --------
 
 
@@ -518,3 +590,38 @@ def test_T524b_G31_fails_its_control_when_the_chain_spans_one_schema(tmp_path, m
         "is supposed to refuse to make"
     )
     assert result.reason == "control failed", result.reason
+
+
+def test_T522c_the_derivation_orders_a_two_digit_version_correctly() -> None:
+    """The ordering, on a set that contains the case a string comparison gets wrong.
+
+    `_OLDER_RECEIPT_SCHEMAS` is computed once at import, so patching `KNOWN_RECEIPT_SCHEMAS`
+    cannot reach it, and a mutation replacing the numeric comparison with `label >=
+    "ctrlrun.receipt/v3"` survived every other test in this file: every version that exists
+    today is one digit and the two comparisons agree. `_chainable_schemas` takes its inputs so
+    that this can hand it `v10` and `v11`, which is where they stop agreeing.
+    """
+    from ctrlrun.verify.scenarios import _chainable_schemas
+
+    known = {
+        "ctrlrun.receipt/v1",
+        "ctrlrun.receipt/v2",
+        "ctrlrun.receipt/v3",
+        "ctrlrun.receipt/v9",
+        "ctrlrun.receipt/v10",
+        "ctrlrun.receipt/v11",
+    }
+
+    assert _chainable_schemas(known, "ctrlrun.receipt/v11") == (
+        "ctrlrun.receipt/v3",
+        "ctrlrun.receipt/v9",
+        "ctrlrun.receipt/v10",
+    ), (
+        "a two-digit receipt schema was dropped or misordered, which is what a lexical "
+        "comparison does: 'ctrlrun.receipt/v10' sorts below 'ctrlrun.receipt/v3'"
+    )
+    # And the real inputs still give the real answer, so the function is the constant's producer
+    # and not a second implementation beside it.
+    from ctrlrun.verify.scenarios import _OLDER_RECEIPT_SCHEMAS
+
+    assert _chainable_schemas(KNOWN_RECEIPT_SCHEMAS, RECEIPT_SCHEMA) == _OLDER_RECEIPT_SCHEMAS
