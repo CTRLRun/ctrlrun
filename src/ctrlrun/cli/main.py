@@ -13,16 +13,24 @@ agent is waiting on in another shell.
 
 from __future__ import annotations
 
+import importlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import click
 
 from ..action import Principal
+from ..anchor import (
+    ANCHOR_KINDS,
+    INTERVAL,
+    AnchorProvider,
+    make_anchor,
+    verify_anchors,
+)
 from ..approval import ApprovalRecord, LocalApprovalProvider
 from ..authority import Budget, Delegation, grant_from_json, grant_from_yaml
 from ..control import DEFAULT_STATE_DIR, Control, state_path
@@ -536,6 +544,132 @@ def _report_chain(store: StateStore, *, as_json: bool) -> None:
             click.echo(f"  {problem.name}{where}: {problem.detail}")
         if report.ok:
             click.echo("the chain is intact")
+    if not report.ok:
+        raise SystemExit(1)
+
+
+def _loaded_anchor_provider(dotted: str) -> AnchorProvider:
+    """The operator's own anchor provider, named as `module:attribute` (SPEC-v0.11 §3.2).
+
+    **An import path, because there is nothing else it could be.** §9 puts no RFC 3161 client in
+    the wheel: the kernel stays stdlib plus `pyyaml` and `click`, and a timestamp protocol client
+    is a network client. So the provider is the operator's code, and a command run from `cron`
+    needs a way to name it. `module:attribute` is the shape every Python tool uses for this.
+
+    The attribute may be the provider or a zero-argument callable returning one, because an
+    operator whose provider needs a connection has nowhere else to build it.
+
+    **The spec does not specify this**, and it is recorded as a decision rather than presented as
+    one: §9 freezes `ctrlrun anchor` as a command and says nothing about how it reaches the
+    provider.
+    """
+    module_name, _, attribute = dotted.partition(":")
+    if not module_name or not attribute:
+        raise click.UsageError(
+            f"--provider must be 'module:attribute', got {dotted!r}. It names the anchor provider "
+            "in your own code: CTRLRun ships none, because a timestamp client is a network client"
+        )
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise click.UsageError(
+            f"--provider {dotted}: {module_name} could not be imported: {exc}"
+        ) from exc
+    try:
+        found = getattr(module, attribute)
+    except AttributeError:
+        raise click.UsageError(
+            f"--provider {dotted}: {module_name} has no attribute {attribute!r}"
+        ) from None
+    provider = found() if callable(found) and not hasattr(found, "make") else found
+    for call in ("make", "check", "latest", "since"):
+        if not callable(getattr(provider, call, None)):
+            raise click.UsageError(
+                f"--provider {dotted}: an AnchorProvider needs make, check, latest and since "
+                f"(SPEC-v0.11 §3.2); this one has no {call}()"
+            )
+    return cast(AnchorProvider, provider)
+
+
+@main.command(name="anchor")
+@click.option(
+    "--provider",
+    "dotted",
+    required=True,
+    metavar="MODULE:ATTR",
+    help="Your anchor provider (SPEC-v0.11 §3.2). CTRLRun ships none.",
+)
+@click.option(
+    "--verify",
+    "verify_only",
+    is_flag=True,
+    help="Check every anchor the provider holds against this chain, and make none.",
+)
+@click.option(
+    "--kind",
+    type=click.Choice(list(ANCHOR_KINDS)),
+    default=INTERVAL,
+    help="interval (the scheduled anchor) or checkpoint (a prune's).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
+@STORE_URL_OPTION
+def anchor_command(
+    dotted: str, verify_only: bool, kind: str, as_json: bool, store_url: str | None
+) -> None:
+    """Anchor this store's chain head outside the store, or check the anchors already made.
+
+    The chain detects alteration. It does not detect truncation or append, because the head that
+    would catch them is a row in the same database (SPEC-v0.6 §6.4). An anchor records the pair
+    the head holds somewhere your database's writer does not control.
+
+    **What it proves:** anything at or below an anchored seq can no longer be removed or altered
+    without the anchored pair failing to reproduce. **What it does not:** an append is not
+    detected, because it lands above every anchored seq; nor are receipts created and destroyed
+    between two anchors; nor who wrote any of it. The window you are exposed to is
+    (last anchored seq, current head], and its size is your choice of interval.
+    """
+    provider = _loaded_anchor_provider(dotted)
+    store = _store(store_url)
+    if verify_only:
+        _report_anchors(store, provider, as_json=as_json)
+        return
+    try:
+        made = make_anchor(store, provider, kind=kind)
+    except CTRLRunError as exc:
+        raise _fail(exc) from exc
+    if as_json:
+        click.echo(json.dumps(made.to_dict(), ensure_ascii=False, separators=(",", ":")))
+        return
+    click.echo(f"anchored seq {made.seq} ({made.kind}) at {iso_timestamp(made.at)}")
+    click.echo(f"  hash  {made.hash}")
+    click.echo(f"  token {made.token}")
+
+
+def _report_anchors(store: StateStore, provider: AnchorProvider, *, as_json: bool) -> None:
+    """`--verify` against the operator's own store, in `_report_chain`'s shape.
+
+    **Three outcomes, not two.** An unreachable provider is `unavailable`, which is neither ok
+    nor broken: refusing to act when you cannot ask is fail-closed, and reporting tampering when
+    you cannot ask is a false positive (SPEC-v0.11 §3.4). It still exits non-zero, because an
+    operator scripting this needs to know the check did not happen.
+    """
+    report = verify_anchors(store, provider)
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), ensure_ascii=False, separators=(",", ":")))
+    elif report.unavailable:
+        click.echo(f"anchors: not checked. {report.reason}")
+    else:
+        click.echo(f"anchors: {report.checked} checked against this chain")
+        if report.superseded:
+            click.echo(
+                f"         {report.superseded} superseded by an anchored checkpoint "
+                "(a prune accounts for them)"
+            )
+        for problem in report.breaks:
+            where = "" if problem.seq is None else f" at seq {problem.seq}"
+            click.echo(f"  {problem.name}{where}: {problem.detail}")
+        if report.ok:
+            click.echo("every anchor reproduces")
     if not report.ok:
         raise SystemExit(1)
 
