@@ -11,13 +11,18 @@
 # verify the thing you ship. A manifest-derived SBOM would be this repository's opinion of its
 # own dependencies, and the whole point of the document is to be checkable against reality.
 #
-# **`pip` is uninstalled before the scan, and that is not cosmetic.** `python -m venv` puts pip
-# in the environment, and a scanner reading the environment cannot tell the difference between
-# "ctrlrun needs this" and "the venv came with this". An SBOM that lists pip as a dependency of
-# ctrlrun is wrong in the direction that matters: it overstates the attack surface a consumer is
-# taking on, and an SBOM nobody can trust is worse than none. `test_sbom.py` asserts the
-# component list is exactly the two declared runtime dependencies, so a future Python that seeds
-# a venv with something else fails the suite rather than shipping a wrong document.
+# **The seed packages are uninstalled before the scan, and that is not cosmetic.**
+# `python -m venv` puts pip in the environment, and on some versions setuptools and wheel too. A
+# scanner reading that environment cannot tell the difference between "ctrlrun needs this" and
+# "the venv came with this". An SBOM listing them as dependencies of ctrlrun is wrong in the
+# direction that matters: it overstates what a consumer is taking on, and nothing about a padded
+# SBOM looks broken.
+#
+# The list is three because a measurement said so, not because three felt safe. The first
+# version removed only pip, which is all Python 3.12 seeds, and it passed locally and went red in
+# CI on 3.11 with `['PyYAML', 'click', 'setuptools']`. That is the guard working: the assertion
+# in `test_sbom.py` and in the `package` job compares by **equality**, so a future interpreter
+# that seeds something else fails loudly rather than shipping a document nobody can trust.
 set -eu
 
 wheel="$1"
@@ -28,6 +33,8 @@ trap 'rm -rf "$scratch"' EXIT
 
 "${PYTHON:-python3}" -m venv "$scratch/venv"
 "$scratch/venv/bin/pip" install --quiet --no-cache-dir "$wheel"
+# `pip` last: it cannot uninstall the others once it has removed itself.
+"$scratch/venv/bin/pip" uninstall --yes --quiet setuptools wheel 2>/dev/null || true
 "$scratch/venv/bin/pip" uninstall --yes --quiet pip
 
 cyclonedx-py environment "$scratch/venv" \
