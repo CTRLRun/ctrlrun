@@ -2281,12 +2281,21 @@ def _effect_line(record: EffectRecord) -> str:
     "the list in force and exit.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit one ctrlrun.scan/v1 document.")
+@click.option(
+    "--coverage",
+    "coverage_flag",
+    is_flag=True,
+    help="Also report what this store has never exercised (SPEC-v0.11 §7). Opens the store.",
+)
+@STORE_URL_OPTION
 def scan(
     root: Path | None,
     policy_path: Path | None,
     excludes: tuple[str, ...],
     vocabulary_path: str | None,
     as_json: bool,
+    coverage_flag: bool,
+    store_url: str | None,
 ) -> None:
     """Report the consequential call sites and policy entries nothing is covering.
 
@@ -2296,6 +2305,12 @@ def scan(
 
     It is a finder and not a proof. Every run prints what it could not look at, and a clean
     scan means nothing was found where it looked.
+
+    With --coverage it also reads a store and reports what this deployment declared and has
+    never exercised. **That half is a list and not a score**: no percentage, no ratio, no badge.
+    A policy entry nothing exercised may be correctly unused, and it says so. It does not move
+    the exit code, for the same reason: a number that ranked a deployment would be a verdict on
+    the operator's document, which this tool does not give.
 
     Exit codes: 0 nothing was found; 1 something was, including a suppressed finding or a
     call whose name could not be resolved; 2 the scan could not run.
@@ -2330,12 +2345,43 @@ def scan(
         click.echo(f"ctrlrun scan: {refused}", err=True)
         raise SystemExit(2) from refused
 
+    measured = None
+    if coverage_flag:
+        from ..coverage import coverage as run_coverage
+        from ..coverage import coverage_lines
+
+        store = _store(store_url)
+        try:
+            loaded = _loaded_policy() if policy_path is None else Policy.from_file(policy_path)
+            measured = run_coverage(
+                store,
+                policy_actions=sorted(loaded.actions),
+                protected_actions=sorted(
+                    {finding.name for finding in report.findings if finding.name is not None}
+                ),
+                policy_path=str(policy_path) if policy_path else None,
+            )
+        except CTRLRunError as exc:
+            raise _fail(exc) from exc
+
     if as_json:
-        click.echo(json_module.dumps(report_document(report), indent=2))
+        document = report_document(report)
+        if measured is not None:
+            # A **key**, not a merged document: `ctrlrun.scan/v1` answers a question about
+            # source and `ctrlrun.coverage/v1` answers one about a store, and folding them
+            # would make a consumer parse two shapes under one name.
+            document["coverage"] = measured.to_dict()
+        click.echo(json_module.dumps(document, indent=2))
     else:
         for line in report_lines(report):
             click.echo(line)
+        if measured is not None:
+            for line in coverage_lines(measured):
+                click.echo(line)
 
+    # **`--coverage` does not move the exit code** (rule 4). An unexercised policy entry is a
+    # fact about the record, not a finding about the operator, and an exit code that moved with
+    # it would be the score this item is forbidden to produce, wearing a shell's clothes.
     if report.exit_code:
         raise SystemExit(report.exit_code)
 
