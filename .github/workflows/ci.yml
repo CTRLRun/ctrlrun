@@ -480,6 +480,22 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
           pytest -q
 
+      # An SBOM of the wheel, generated the same way the release generates it, so a change that
+      # would ship a wrong one goes red on the pull request rather than at the tag. The
+      # assertions live in `tests/test_sbom.py`; this is the half that proves the script runs in
+      # a clean checkout with only its own pinned requirements installed.
+      - name: The SBOM of the wheel
+        run: |
+          pip install --require-hashes -r requirements/sbom.txt
+          ./scripts/sbom.sh dist/*.whl /tmp/ctrlrun.cdx.json
+          python -c "
+          import json, sys
+          bom = json.load(open('/tmp/ctrlrun.cdx.json'))
+          names = sorted(c['name'] for c in bom.get('components', []))
+          assert names == ['PyYAML', 'click'], names
+          print('sbom:', bom['metadata']['component']['name'], bom['specVersion'], names)
+          "
+
       - name: The quick start works from the wheel
         run: |
           python -m venv /tmp/qs

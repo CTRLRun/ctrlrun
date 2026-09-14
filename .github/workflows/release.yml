@@ -81,6 +81,20 @@ jobs:
           python -m build --no-isolation
           python scripts/normalize_sdist.py dist/*.tar.gz
 
+      # The bill of materials for the wheel this release carries, written into `dist/` so the
+      # `gh release create dist/*` below attaches it. Generated from the built wheel in an empty
+      # environment rather than from `pyproject.toml`: a manifest-derived SBOM is the project's
+      # opinion of its own dependencies, and this one is a measurement of the bytes being
+      # released. It is attested along with everything else in `dist/`, because an unsigned
+      # inventory of a signed artifact is the weakest link in the pair.
+      - name: The bill of materials
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          pip install --require-hashes -r requirements/sbom.txt
+          ./scripts/sbom.sh dist/*.whl "dist/ctrlrun-$VERSION.cdx.json"
+
       # Signed provenance for the artifacts this release is about to carry. The action signs
       # against the workflow's OIDC identity, so what it attests is *this* workflow, at *this*
       # commit, having built *these* bytes -- there is no key anywhere, and nothing to leak or

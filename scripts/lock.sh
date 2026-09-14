@@ -38,4 +38,5 @@ compile requirements/adapters.txt  pyproject.toml $extras requirements/in/adapte
 compile requirements/docs.txt      pyproject.toml $extras --extra postgres requirements/in/docs.in requirements/in/backend.in
 compile requirements/fuzz.txt      pyproject.toml requirements/in/backend.in
 compile requirements/build.txt     requirements/in/build.in requirements/in/backend.in
+compile requirements/sbom.txt      requirements/in/sbom.in requirements/in/backend.in
 compile requirements/atheris.txt   requirements/in/atheris.in requirements/in/backend.in
