@@ -32,6 +32,16 @@ any change to one appears here.
   it, because `content_altered` already names a document that cannot be canonicalized and a second
   name for one fact would be two names for one break.
 
+- **A row that does not parse is one row too.** The first implementation of the reader above
+  called `json.loads` in the generator expression that fed it, **outside** the guard, so a row
+  whose stored `json` is not JSON at all raised through every reader exactly as before v0.11, and
+  worse: `JSONDecodeError` is not a `CTRLRunError`, so the CLI's handler did not catch it either
+  and `ctrlrun receipts` printed a traceback. One `UPDATE receipts SET json = 'not json'` was
+  enough. Parsing now happens inside the refusal's own guard, and a row that parses to something
+  that is not an object (`3`, `"a receipt"`, `[1,2,3]`, `null`) is refused as one row rather than
+  trusted. Found by review; the tests that missed it all tampered with a row's *content*, and
+  `{}` and a float among the controls are both valid JSON.
+
 ### Changed
 
 - **`StateStore.receipts()` returns `tuple[Receipt | UnreadableReceipt, ...]`**, amending

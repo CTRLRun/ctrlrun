@@ -2193,7 +2193,9 @@ class PostgresStateStore:
         # `json` here is `json.dumps(..., sort_keys=True)` and SQLite's is `to_json()`, which are
         # different byte strings -- and the chain does not care, because `chain_hash` recomputes
         # the canonical form from the parsed document rather than hashing whatever was stored.
-        return tuple(_read_receipt(json.loads(str(row[1])), row[2], row[0]) for row in rows)
+        # The stored **text**, not a parsed document, for `state.py`'s reason: parsing is one of
+        # the ways a row refuses, and a `json.loads` out here would raise through every caller.
+        return tuple(_read_receipt(str(row[1]), row[2], row[0]) for row in rows)
 
     def chain_head(self) -> tuple[int, str] | None:
         with self._connection().cursor() as cursor:

@@ -870,20 +870,37 @@ def _readable(rows: Iterable[Receipt | UnreadableReceipt]) -> tuple[Receipt, ...
 
 
 def _read_receipt(
-    document: Mapping[str, Any], stored_hash: str | None, stored_seq: int | None
+    stored_json: str, stored_hash: str | None, stored_seq: int | None
 ) -> Receipt | UnreadableReceipt:
     """One stored row, as a receipt or as a named refusal (SPEC-v0.11 §5.2).
 
     The one place a store turns a row into something a reader holds, so the two backends cannot
     come to disagree about what a row it cannot construct becomes.
 
-    `CTRLRunError` and nothing wider: `from_dict` raises `InvalidArgument` through the parsers it
-    calls, and a `KeyError` or a `TypeError` from a row that is not an object at all is the case
-    `from_dict`'s own docstring says raises as it did at 0.6.1. Both are caught, because a row a
-    tamperer truncated to `{}` is exactly as much "one bad row" as a float among the controls, and
-    a reader that recovered from one and not the other would still be blindable by one `UPDATE`.
+    **It takes the stored text and not a parsed document, because parsing is one of the ways a
+    row refuses.** The first version of this took a `Mapping` and both stores called
+    `json.loads(row["json"])` in the generator expression that fed it, so `json` set to anything
+    that is not JSON at all raised `JSONDecodeError` *outside* this guard and blinded every
+    reader exactly as before -- and worse than before, because `JSONDecodeError` is not a
+    `CTRLRunError`, so `cli/main.py`'s handler did not catch it either and `ctrlrun receipts`
+    printed a traceback. One `UPDATE receipts SET json = 'not json'` was enough. The rule this
+    broke is rule 3 itself, and the reason the first version's tests missed it is that they
+    tampered with a row's *content*: `{}` and a float among the controls are both valid JSON.
+
+    `CTRLRunError` and the four builtins `from_dict` can raise: `InvalidArgument` through the
+    parsers it calls, `KeyError` or `TypeError` from a row that is not an object at all, which
+    `from_dict`'s own docstring says raises as it did at 0.6.1, and `ValueError`, which
+    `JSONDecodeError` subclasses. A reader that recovered from one and not another would still be
+    blindable by one `UPDATE`.
     """
+    document: object = None
     try:
+        document = json.loads(stored_json)
+        # Narrowed here rather than trusted: `json.loads("3")` is an `int`, and `_stored_receipt`
+        # would raise `TypeError` on it, which this catches -- but naming the refusal at the
+        # parse says what is wrong with the row rather than what the next line tripped over.
+        if not isinstance(document, Mapping):
+            raise TypeError(f"a stored receipt must be an object, got {type(document).__name__}")
         return _stored_receipt(document, stored_hash, stored_seq)
     except (CTRLRunError, KeyError, TypeError, ValueError, AttributeError) as refused:
         identifier = document.get("receipt_id") if isinstance(document, Mapping) else None

@@ -648,3 +648,120 @@ def test_T519_the_store_conformance_kit_names_a_backend_that_cannot_read_its_own
     # that fails everything.
     clean = evidence_receipt.body(SQLiteBackend(tmp_path), 1)
     assert clean.status is SuiteStatus.PASS, clean
+
+
+# --- T520: a row that does not parse at all ----------------------------------------------------
+
+
+#: Every tamper that stops a row parsing **before** `Receipt.from_dict` is reached. `T510` to
+#: `T519` all tampered with a row's *content*, and `{}` and a float among the controls are both
+#: valid JSON, so the parse was never on trial. An independent review found the gap: `json.loads`
+#: ran in the generator expression that fed `_read_receipt`, outside its guard, so one `UPDATE`
+#: setting `json` to anything unparseable raised through every reader exactly as before v0.11.
+#: Worse than before, because `JSONDecodeError` is not a `CTRLRunError`, so `cli/main.py`'s
+#: handler did not catch it either and `ctrlrun receipts` printed a **traceback**.
+UNPARSEABLE = (
+    ("not JSON at all", "not json at all", "JSONDecodeError"),
+    ("empty", "", "JSONDecodeError"),
+    ("truncated mid-object", '{"receipt_id": "ctr_1', "JSONDecodeError"),
+    ("a JSON array, not an object", "[1, 2, 3]", "TypeError"),
+    ("a bare JSON number", "3", "TypeError"),
+    ("a bare JSON string", '"a receipt"', "TypeError"),
+    ("JSON null", "null", "TypeError"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "stored", "refusal"), UNPARSEABLE, ids=[t[0] for t in UNPARSEABLE]
+)
+def test_T520_a_row_that_does_not_parse_still_costs_one_row(workspace, label, stored, refusal):
+    """SPEC-v0.11 §5.2 and rule 3, through the door the first implementation left open.
+
+    Rule 3 is *a malformed row names itself and blinds nothing else*, and it says **row**, not
+    "row whose content is wrong". A tamperer writing `not json` is doing less work than one
+    writing a well-formed document with a float in it, so a reader that survives the second and
+    not the first has not paid the debt.
+
+    `TypeError` for the four that parse to something that is not an object: `json.loads("3")` is
+    an `int`, and the refusal names what is wrong with the row rather than what the next line
+    tripped over.
+    """
+    database = workspace / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    written = a_chain(store, 4)
+    ids = [receipt.receipt_id for receipt in written]
+    untouched = written[0].action_id
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE receipts SET json = ? WHERE seq = 2", (stored,))
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteStateStore(database, clock=lambda: T0)
+    rows = reopened.receipts()
+    report = verify_chain(reopened)
+    reopened.close()
+
+    assert len(rows) == 4, f"{label}: one bad row cost {4 - len(rows)} extra rows"
+    assert isinstance(rows[1], UnreadableReceipt), rows
+    assert rows[1].seq == 2, "the refusal does not know where it is"
+    assert rows[1].refusal == refusal, f"{label}: refused as {rows[1].refusal}"
+    assert rows[1].receipt_id is None, "a receipt_id was invented for a row that has none"
+    assert isinstance(rows[0], Receipt) and isinstance(rows[2], Receipt)
+    assert ("content_altered", 2) in [(item.name, item.seq) for item in report.breaks]
+
+    # And through the CLI, which is where this failed worst: `JSONDecodeError` is not a
+    # `CTRLRunError`, so the handler did not catch it and the command printed a traceback.
+    listed = _cli(workspace, database, "receipts")
+    assert listed.exit_code == 0, listed.output
+    assert "Traceback" not in listed.output, (
+        f"{label}: ctrlrun receipts printed a traceback:\n{listed.output}"
+    )
+    for receipt_id in [ids[0], ids[2], ids[3]]:
+        assert receipt_id in listed.output, f"{label}: an intact row is missing from the listing"
+
+    inspected = _cli(workspace, database, "inspect", untouched)
+    assert inspected.exit_code == 0, inspected.output
+    assert "Traceback" not in inspected.output, inspected.output
+
+    counted = _cli(workspace, database, "stats")
+    assert counted.exit_code == 0, counted.output
+    assert "Traceback" not in counted.output, counted.output
+    assert "unreadable receipts                1" in counted.output, counted.output
+
+
+@postgres
+def test_T520b_postgres_refuses_an_unparseable_row_the_same_way(workspace) -> None:
+    """The amendment is to `StateStore`, so a backend that raised here would blind every reader
+    in a deployment that uses it. `json` is a `text` column on both sides, so both can hold this.
+    """
+    import psycopg
+
+    from ctrlrun.postgres import PostgresStateStore
+
+    schema = f"unparseable_{uuid.uuid4().hex[:12]}"
+    PostgresStateStore.create_schema(POSTGRES_URL, schema)
+    try:
+        store = PostgresStateStore(POSTGRES_URL, schema=schema, clock=lambda: T0)
+        a_chain(store, 4)
+        store.close()
+
+        with psycopg.connect(POSTGRES_URL) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'UPDATE "{schema}".receipts SET json = %s WHERE seq = 2', ("not json at all",)
+                )
+            connection.commit()
+
+        reopened = PostgresStateStore(POSTGRES_URL, schema=schema, clock=lambda: T0)
+        rows = reopened.receipts()
+        report = verify_chain(reopened)
+        reopened.close()
+
+        assert len(rows) == 4, "one bad row cost the Postgres reader more than one row"
+        assert isinstance(rows[1], UnreadableReceipt)
+        assert rows[1].seq == 2 and rows[1].refusal == "JSONDecodeError"
+        assert ("content_altered", 2) in [(item.name, item.seq) for item in report.breaks]
+    finally:
+        PostgresStateStore.drop_schema(POSTGRES_URL, schema)
