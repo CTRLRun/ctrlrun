@@ -1,0 +1,4 @@
+# Generating the CycloneDX SBOM for a built wheel: CI's `package` job and publish.yml.
+# Its own lock rather than a line in `build.in`, because the SBOM is generated in a clean
+# environment and nothing else in that step should be resolvable from it.
+cyclonedx-bom
