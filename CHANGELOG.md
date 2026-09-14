@@ -45,6 +45,14 @@ One question: when one agent hands work to another, what does the second one hol
 - `ctrlrun inspect --hop` emits `ctrlrun.hop/v1`: who issued a hop, and **which dimensions each
   link narrowed**, which is the question an operator paged at 3am actually has.
 - `ctrlrun scan` names the principals holding a grant no hop bounds. It reports and does not score.
+- **`task=` and `hop=` on `ctrlrun.adapter.needs_approval`**, the pre-invocation predicate a
+  framework asks before it invokes a tool. Without them the predicate evaluated against the
+  receiver's whole candidate set while `execute` evaluates against the hop **alone**, so it answered
+  "a human is needed" for a call `execute` then refuses: the framework surfaced an approval item, a
+  human said yes, and the call failed anyway. Never a wider grant, because `Control.execute` is the
+  enforcement point and refuses either way; what it cost was the framework's own approval item and a
+  receipt nobody could explain. `SPEC-v0.10.md` §9 froze the name and §9.4 records that it shipped
+  after this section was first written, which is why it is here and not above.
 
 ### Changed
 
