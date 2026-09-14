@@ -4731,6 +4731,25 @@ class Engine:
                     self.approve(control, store, action, selection),
                 )
 
+    def _after_everything(self, store: Any) -> datetime:
+        """A `now` for a prune that is after every row in this scratch store.
+
+        **Not `datetime.now(UTC)`**, and a run against a shipped example is what showed why:
+        verify's scratch store is opened with a clock offset, so its ledger rows carry timestamps
+        *ahead* of this process's clock, and every `COMMITTED` row then sits inside even a zero
+        `--older-than` window. The prune was refused for a reason that has nothing to do with
+        what these guarantees grade, and `G29` came out `internal error`.
+
+        Taking the time from the rows themselves is also the honest reading of `--older-than`
+        here: the operator's number is relative to their own clock, and the scenario's clock is
+        the store's.
+        """
+        latest = max(
+            (item.finished_at for item in _written(store)),
+            default=datetime.now(UTC),
+        )
+        return latest + timedelta(seconds=1)
+
     def g29(self) -> GuaranteeResult:
         """SPEC-v0.11 §4.1, §8. A prune leaves the chain with no break it did not already have.
 
@@ -4795,7 +4814,7 @@ class Engine:
                 # and §4.4's window is graded by `T546b` against a store built for it.
                 older_than=timedelta(0),
                 anchor=provider,
-                now=datetime.now(UTC),
+                now=self._after_everything(store),
             )
             after_report = verify_chain(store)
             after = {(item.name, item.seq) for item in after_report.breaks}
@@ -4862,7 +4881,7 @@ class Engine:
                     # and §4.4's window is graded by `T546b` against a store built for it.
                     older_than=timedelta(0),
                     anchor=provider,
-                    now=datetime.now(UTC),
+                    now=self._after_everything(store),
                 )
             except InvalidArgument as denied:
                 refused = str(denied)
@@ -4897,7 +4916,7 @@ class Engine:
                 # and §4.4's window is graded by `T546b` against a store built for it.
                 older_than=timedelta(0),
                 anchor=provider,
-                now=datetime.now(UTC),
+                now=self._after_everything(store),
             )
             _expect_control(
                 len(_written(store)) < len(written),
@@ -4970,7 +4989,7 @@ class Engine:
                 # and §4.4's window is graded by `T546b` against a store built for it.
                 older_than=timedelta(0),
                 anchor=provider,
-                now=datetime.now(UTC),
+                now=self._after_everything(store),
             )
             detail["anchored_seq"] = made.seq
             report = verify_anchors(store, provider)
