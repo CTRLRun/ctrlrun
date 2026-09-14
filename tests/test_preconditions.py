@@ -3366,23 +3366,30 @@ def test_R2_4_the_gateway_reads_a_withdrawal_as_an_answer_until_it_expires(tmp_p
     store.close()
 
 
-def test_R2_deferred_a_malformed_value_of_a_declared_key_still_blinds_every_reader(
+def test_R2_a_malformed_value_of_a_declared_key_no_longer_blinds_every_reader(
     tmp_path, fake_clock
 ):
-    """**Deferred, and pinned so it cannot drift quietly** (SPEC-v0.7 §6.11, §12.5).
+    """**SPEC-v0.7 §12.5's debt, paid in v0.11** (SPEC-v0.11 §5, rule 3).
 
-    A float among a receipt's `controls` is a malformed *value* of a key the schema declares, so
-    `_controls_of` raises out of `from_dict` and every reader of that store stops: `receipts`,
-    `--verify-chain`, `stats` and G11 together, from one `UPDATE`. The schema-level and
-    added-key cases are each named at their `seq` and leave every other row readable; this one
-    is not, and 0.6.1 behaves the same way. v0.7 neither introduces nor widens it, and a fix
-    needs a name in `CHAIN_BREAKS` (a closed set on a `v0.6 §6.5` surface) or a raw-row reader.
+    This test used to assert the opposite, and said so: *"this test asserts today's behaviour,
+    so whoever fixes it has to come here and say so."* This is item 1 saying so.
 
-    This test asserts today's behaviour, so whoever fixes it has to come here and say so.
+    A float among a receipt's `controls` is a malformed *value* of a key the schema declares. It
+    raised out of `from_dict`, and because both stores build every row before any caller sees
+    one, that one `UPDATE` stopped `receipts`, `--verify-chain`, `inspect`, `stats` and the
+    operator server's two read tools together. §5.1 took §12.5's **second** candidate, a reader
+    that reports per row, and declined the first: `content_altered` already names a document
+    that cannot be canonicalized, so `CHAIN_BREAKS` did not grow and its frozen closed set
+    (`SPEC-v0.6 §6.5`) is untouched.
+
+    Kept here, where the finding was recorded, rather than moved: the v0.7 finding and its
+    answer belong in one place. The full reader-by-reader evidence is `T510` onward in
+    `tests/test_unreadable_receipt.py`.
     """
     from click.testing import CliRunner
 
     from ctrlrun.cli import main as cli
+    from ctrlrun.receipt import Receipt, UnreadableReceipt
 
     database = tmp_path / "state.db"
     store = SQLiteStateStore(database, clock=fake_clock)
@@ -3393,15 +3400,24 @@ def test_R2_deferred_a_malformed_value_of_a_declared_key_still_blinds_every_read
     _tamper_one(database, 2, lambda document: {**document, "controls": [1.5]})
 
     reopened = SQLiteStateStore(database, clock=fake_clock)
-    with pytest.raises(InvalidArgument):
-        reopened.receipts()
+    rows = reopened.receipts()
     reopened.close()
+    assert len(rows) == 3, f"one tampered row cost more than one row: {rows}"
+    assert isinstance(rows[1], UnreadableReceipt) and rows[1].seq == 2
+    assert isinstance(rows[0], Receipt) and isinstance(rows[2], Receipt)
 
     url = f"sqlite://{database}"
-    for arguments in (["receipts"], ["receipts", "--verify-chain"]):
-        result = CliRunner().invoke(cli.main, [*arguments, "--store-url", url])
-        assert result.exit_code != 0, (arguments, result.output)
-        assert "ctr_" not in result.output, "a row of the two that are intact was listed"
+    # `receipts` answers, and the two intact rows are listed. `--verify-chain` still exits
+    # non-zero, because recovering the reader must not turn a chain with a forgery in it into a
+    # clean exit: what changed is that it now produces a report instead of an error.
+    listing = CliRunner().invoke(cli.main, ["receipts", "--store-url", url])
+    assert listing.exit_code == 0, listing.output
+    assert listing.output.count("ctr_") == 3, listing.output
+    assert "UNREADABLE" in listing.output, listing.output
+
+    checked = CliRunner().invoke(cli.main, ["receipts", "--verify-chain", "--store-url", url])
+    assert checked.exit_code == 1, checked.output
+    assert "content_altered at seq 2" in checked.output, checked.output
 
 
 def test_R2_2_a_store_error_during_the_withdrawal_still_refuses_and_records_when_the_grant_cannot_be_spent(  # noqa: E501
