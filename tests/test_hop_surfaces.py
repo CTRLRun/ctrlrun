@@ -305,3 +305,43 @@ def test_T507_scan_names_the_principals_holding_a_root_grant(tmp_path):
     assert all("planner" not in finding.target for finding in report.findings), (
         "a root-grant holder was reported as a finding; v0.4 §3.9 forbids scan grading a document"
     )
+
+
+@pytest.mark.authority
+def test_T506b_the_spec_table_for_ctrlrun_hop_v1_names_every_key_the_code_emits(tmp_path):
+    """`SPEC-v0.10 §6.2` is a frozen schema's table, and it listed eight of eleven keys.
+
+    T506 asserts the emitted document against a literal in this file, which keeps the *code*
+    honest and says nothing about the *document*. The three it missed -- `schema`, `root_id`,
+    `missing_parent_id` -- were emitted for a whole milestone while §6.2 went on describing a
+    smaller shape. Under-describing is the safe direction for a reader and the wrong one for a
+    schema somebody writes a consumer against.
+
+    Parsed out of the spec rather than repeated here, so the two cannot agree by being edited
+    together.
+    """
+    import re
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC-v0.10.md").read_text(
+        encoding="utf-8"
+    )
+    section = spec.split("emitting `ctrlrun.hop/v1`:", 1)[1].split("\n\n**", 1)[0]
+    # A row's first cell may name more than one key -- §6.2 pairs `created_at`, `created_via` --
+    # so every backticked name in that cell counts, not just the first.
+    documented = {
+        name.removesuffix("[]")
+        for line in section.splitlines()
+        if line.startswith("| `")
+        for name in re.findall(r"`([a-z_]+(?:\[\])?)`", line.split("|")[1])
+    }
+    assert documented, "parsed no keys out of SPEC-v0.10 §6.2; the section moved"
+
+    _, store, authority, _, second = _chain(tmp_path)
+    document = hop_document(second.delegation_id, authority, store)
+    assert document is not None
+    emitted = set(document)
+    assert emitted == documented, (
+        f"§6.2 and the emitted document disagree. Only in the code: "
+        f"{sorted(emitted - documented)}. Only in the spec: {sorted(documented - emitted)}"
+    )

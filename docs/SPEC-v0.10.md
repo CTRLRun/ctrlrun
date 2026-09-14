@@ -1241,10 +1241,16 @@ budget from an observed run is untouched.
 | T499a | P7 as a test: an action tripping both `policy_unapproved` and a later refusal names `policy_unapproved` in **both** modes. The case that proves the list starts at `execute`'s entry, and the one a `_secure`-only refactor leaves broken while every other pair goes green |
 | T500 | Its second: `policy_unapproved` against a later refusal, both modes name the same reason |
 | T501 | Every pair the generator could not construct is named in the test's own output, and the list is asserted against the declared order so a shrinking pair set fails red |
-| T502 | The four v0.9 regressions as regression tests: the resumed observed receipt's spend, the doubled `_Observation` event, the `effect_key` on the budget-refusal event, and the picklability of every `InvalidArgument` subclass across `verify`'s JSON-over-stdin children |
+| T502 | The four v0.9 regressions as regression tests. **Two already existed under their own numbers** when this was audited at release: the `effect_key` on the budget-refusal event (`test_T461...`) and the picklability of `_UnmeasurableError` (`test_T462...`). The other two are `T502a`, the resumed *observed* receipt's spend — `T439` covers observe, `T447` covers resume, and neither covered the two together — and `T502b`, the doubled `ACTION_DENIED` on a resumed observed leg, which is the row that had no test under any name |
 
 T502's last row is the one nothing in this repository would otherwise catch, which is why §13.8
 named it, and it belongs to this item because this item rewrites the code that broke it.
+
+**A number, not a property, is what was owed here.** The audit that closed this found two of the
+four rows already tested under other numbers, which is the same defect §9.4 describes in a
+different place: a table that describes the tree, checked by a human reading both. `T502b` is the
+one that was genuinely absent, and it is absent-shaped for a reason worth keeping — every
+assertion near it checked that the event *appeared*, and an event that appears twice appears.
 
 ---
 
@@ -1273,6 +1279,9 @@ envelope did the peer actually hold, and which hop narrowed it**.
 | `depth` | derived by walking to the root, never read from the stored column (`v0.3 §5.5`) |
 | `chain[]` | one entry per ancestor to the root: `id`, `depth`, `revoked_at`, and **the dimension on which each step narrows** |
 | `revoked_at` | on the hop itself, or `null` |
+| `schema` | `ctrlrun.hop/v1`, so a reader that is handed one document knows which shape it got. `ctrlrun inspect` without `--hop` answers about an **action** and `--hop` answers about an **authority record**, and the two are not interchangeable |
+| `root_id` | the grant the walk ended at, so an operator can name the root without re-walking |
+| `missing_parent_id` | the record the store could **not** read, or `null`. A chain that cannot be verified is refused rather than trusted (§3.2), and this is the id that says where it stopped |
 
 **`chain[]` carrying which dimensions narrowed at each step is the part that answers the question.**
 An operator looking at a refused action knows the chain is valid or it is not; what they cannot see
@@ -1537,24 +1546,30 @@ One justification per row. Anything not here is a spec amendment before it is co
 ### 9.4 Three rows in this table did not ship, and the table said they had
 
 Written at release, against the shipped tree, because §9 is the section a reader trusts for the
-public surface and a frozen name that names nothing is worse than a missing row: a missing row is a
-gap, and a wrong one is an answer.
+public surface and **a frozen name that names nothing is worse than a missing row**: a missing row
+is a gap, and a wrong one is an answer.
 
 This is §11's finding in its sharpest form. Every row above was justified before it was code, and
-three of them were then not built. Nothing turned red, because **no test in this repository asserts
-that a name §9 freezes exists.** The rule §11 states covers a sentence about a later item; these
-are sentences about *this* document's own frozen table, and they need the same discipline.
+three of them were then not built. Nothing turned red, because **no test in this repository asserted
+that a name §9 freezes exists.** The rule §11 states covers a sentence about a later item; these are
+sentences about *this document's own frozen table*, and they need the same discipline.
 
-| Row | What shipped | What follows from the gap |
-|---|---|---|
-| `hop=` and `task=` on `ctrlrun.adapter.needs_approval` | **nothing.** The signature is still `needs_approval(control, action, arguments, *, resource=None)` | The predicate evaluates against the receiver's whole candidate set while `execute` evaluates against the hop alone, exactly as the row above warned. **It is not an authority hole**: `Control.execute` is the enforcement point and still decides against the hop alone, so a call this predicate waves through is refused there. What it costs is the framework's own approval item — a human is not asked before invocation for a call that then refuses, which is a worse experience and a confusing receipt, not a wider grant |
-| `ssl_context=` on `ctrlrun.gateway.transport.request` | **nothing on that function.** Check 3 was implemented on `ctrlrun.upstream.observe_upstream(url, *, verify=...)` and on the forwarder's `verify`, both new surfaces; `transport.request` still takes no context, no verify argument and no client | Check 3 runs where the gateway builds its forwarder, not inside the shared request helper. The module-level-default objection the row raises is satisfied by that placement rather than by the parameter, so the *reason* held and the *name* did not |
-| `ctrlrun.hop/v1`'s key set (§6.2) | the table's keys **and three more**: `schema`, `root_id`, `missing_parent_id` | A consumer written against §6.2 alone gets keys it did not expect. The document under-describes what it emits, which is the safe direction for a reader and the wrong one for a frozen schema. `ctrlrun.hop/v1` is the version to amend, not to re-cut, and v0.11 owns it |
+**Two of the three are now built rather than recorded.** A gap that can be closed is closed; only
+the one whose *name* was wrong and whose *reason* was right stays as a row.
 
-**What this asks of v0.11**, stated here so it is not rediscovered: a test that every name §9 freezes
-is importable with the signature the row gives. It is cheap, it is the same shape as
-`test_every_source_file_carries_its_copyright_and_license`, and it is the only thing that would have
-caught all three.
+| Row | Disposition |
+|---|---|
+| `hop=` and `task=` on `ctrlrun.adapter.needs_approval` | **Built.** The signature is `(control, action, arguments, *, resource=None, task=None, hop=None)` and both are threaded into `Control.evaluate`. Without them the predicate evaluated against the receiver's whole candidate set while `execute` evaluates against the hop **alone** (§2.3), so it answered "a human is needed" for a call `execute` then refuses: the framework surfaces an approval item, a human says yes, the call fails anyway. **It was never an authority hole** — `Control.execute` is the enforcement point and refuses either way, so nothing wider ever ran; what it cost was the framework's own approval item and a receipt nobody could explain. `T128c` drives both and asserts they agree, with the no-hop case as its negative control |
+| `ctrlrun.hop/v1`'s key set (§6.2) | **Fixed in §6.2**, which listed eight of the eleven keys the document carries. `schema`, `root_id` and `missing_parent_id` are now in the table. Under-describing is the safe direction for a reader and the wrong one for a schema somebody writes a consumer against. `T506b` parses the table out of this file and compares it to the emitted document, so the two cannot drift again; `ctrlrun.hop/v1` is not re-cut, because nothing it emitted changed |
+| `ssl_context=` on `ctrlrun.gateway.transport.request` | **Not built, deliberately, and this row is why.** Check 3 shipped on `ctrlrun.upstream.observe_upstream(url, *, verify=...)` and on the forwarder's `verify`; `transport.request` still takes no context, no verify argument and no client. The row's *reason* held and its *name* did not: its objection to a module-level default — one context pins every caller of a shared module to one certificate — is answered by putting check 3 where the gateway builds its forwarder, which is per-gateway rather than per-process. Adding the parameter now would add a second way to configure the same pin |
+
+**The test this asked v0.11 for is in the same commit as this section**, because asking a later
+milestone for it would be the exact mistake the section is about.
+`test_every_v0_10_name_the_spec_freezes_is_importable_with_the_parameter_it_names` walks the rows
+and checks each name imports with the parameter its row gives.
+`test_the_row_of_section_9_that_did_not_ship_still_has_not` pins `ssl_context=` in the other
+direction, so building it later fails there and this row comes out in the same commit: **the
+document and the tree are wrong together or right together, never one of each.**
 
 **No new error type.** `errors.py`'s closed set already covers every refusal here: `authority_hop`
 is an `AuthorityDenied` reason, and both upstream reasons are `ActionDenied` reasons. If an item

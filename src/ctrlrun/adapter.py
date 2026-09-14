@@ -433,6 +433,8 @@ def needs_approval(
     arguments: Mapping[str, Any],
     *,
     resource: str | None = None,
+    task: str | None = None,
+    hop: str | None = None,
 ) -> bool:
     """Does this call need a human? For a framework that asks before it invokes (SPEC-v0.5 §3.5).
 
@@ -459,6 +461,13 @@ def needs_approval(
     `resource:` is used where none is given -- the same precedence `@protect` applies. It
     matters: authority matches on resource patterns (SPEC-v0.3 §4.2), so a predicate that
     skipped it would evaluate a different action from the one that runs.
+
+    `task` and `hop` are that same argument one frame further out (SPEC-v0.10 §9). Without them
+    this predicate evaluates against the receiver's **whole candidate set** while `execute`
+    evaluates against the hop **alone** (§2.3), so it answers "no human needed" for a call
+    `execute` then refuses. That is not a wider grant -- `Control.execute` is the enforcement
+    point and decides against the hop either way -- but it costs the framework its own approval
+    item, and a human is not asked before an invocation that then fails.
     """
     principal = control.resolve_principal(action)
     template = resource if resource is not None else control.policy.resource_template(action)
@@ -469,7 +478,7 @@ def needs_approval(
         resource=None if template is None else resolve_resource(template, arguments),
         environment=control.environment,
     )
-    return control.evaluate(proposed).decision is Decision.APPROVE
+    return control.evaluate(proposed, task=task, hop=hop).decision is Decision.APPROVE
 
 
 def banner(control: Control) -> None:
