@@ -17,6 +17,37 @@ any change to one appears here.
   verify as intact after two SQL statements, because the head that would catch them is a row in the
   same database. Transcribed from a real store rather than argued.
 
+- **A reader that names a bad row and blinds nothing else** (`SPEC-v0.11.md` §5, rule 3). A single
+  malformed *value* of a declared key raised out of `Receipt.from_dict`, and because both stores
+  build every row before any caller sees one, that one `UPDATE` stopped `ctrlrun receipts`,
+  `receipts --verify-chain`, `ctrlrun inspect`, `ctrlrun stats` and the operator MCP server's
+  `receipts` and `stats` tools together. `inspect` on an action the tamper never touched is what
+  the blast radius really was: not "this receipt is unreadable" but "this store is unreadable".
+  `SPEC-v0.7.md` §12.5 recorded it and deferred it twice.
+
+  **One tampered row now costs one row.** `ctrlrun.receipt.UnreadableReceipt` is what a store hands
+  back for a row it cannot construct, carrying the row's `seq`, its `receipt_id` where that field
+  alone is readable, and the **type** of what refused it, never the message. `CHAIN_BREAKS` did not
+  change: §12.5 offered a new break name as one of two candidates and `SPEC-v0.11.md` §5.1 declines
+  it, because `content_altered` already names a document that cannot be canonicalized and a second
+  name for one fact would be two names for one break.
+
+### Changed
+
+- **`StateStore.receipts()` returns `tuple[Receipt | UnreadableReceipt, ...]`**, amending
+  `SPEC-v0.6.md` §9.2's frozen protocol. Before, it raised. Both backends change, and a second
+  backend could not implement §5 without it. A store with no bad row is unaffected: every row still
+  reads back as a `Receipt`.
+- **A receipt's position now comes from the `seq` column**, which is what `verify_chain`'s docstring
+  has claimed since v0.6 and what was not true as shipped. Both stores selected `json, hash` and
+  ordered by a column they never read, so every `Receipt.seq` came out of `document.get("seq")`, the
+  one field a tamperer controls. Rewriting one document's `seq` from 2 to 99 reported `missing 2`,
+  `content_altered 99`, `missing 100` and `link_broken 3`: four breaks at three positions, two of
+  them rows that do not exist. The same tamper now reports `content_altered` once, at 2.
+- `ctrlrun stats` reports `unreadable receipts` and the `ctrlrun.stats/v1` document carries
+  `unreadable_receipts`, **omitted entirely where there is none**, on `ledger_rows`' precedent. A
+  total that silently dropped a row nobody could read would be `SPEC-v0.4.md` §3.8's false green.
+
 ## [0.10.0] — Multi-agent
 
 One question: when one agent hands work to another, what does the second one hold?
