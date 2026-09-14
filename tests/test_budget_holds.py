@@ -1366,3 +1366,102 @@ def test_T463_observe_reports_one_refusal_and_not_every_check_that_would_have_fa
     assert reasons == ["out_of_scope"], (
         f"the pilot recorded a refusal enforce mode never reached: {reasons}"
     )
+
+
+# --- T502: the four v0.9 regressions, as regression tests (SPEC-v0.10 §5.4) --------------------
+
+
+def test_T502a_a_resumed_observed_leg_carries_the_counterfactual_its_first_leg_computed(
+    store, clock
+) -> None:
+    """T502, row one. `T439` proves observe mode charges nothing; `T447` proves a resumed leg
+    reports what its first leg charged. **Neither covers the two together**, and the two together
+    are the case that broke.
+
+    The first version of this test asserted the resumed observed receipt reports **no** spend,
+    reasoning that the ledger is empty. That is wrong, and `§4.2.1a` says why: under observation
+    every number on a receipt is a counterfactual, and if the receipt does not carry what the
+    action *would* have been charged then nothing anywhere records it and **a budget cannot be
+    sized from an observed run** -- which is the entire reason to run one. `T439d` pins that for
+    a single leg.
+
+    So the property here is that a **resumed** leg keeps it. The resumed receipt is the whole
+    evidence an MCP or ACS action ever gets, and `_resumed_charges` reads the ledger, which is
+    empty under observation. A resumed observed leg that reported `()` would silently drop the
+    counterfactual for exactly the actions that take more than one round trip.
+    """
+    from ctrlrun import Suspended
+
+    observing = _observing_control(store, clock)
+
+    def suspends() -> Any:
+        raise Suspended("observed-round")
+
+    with pytest.raises(Suspended):
+        observing.execute(_action("1", 100), suspends, "refund:1")
+    assert store.consumptions() == (), "observe mode wrote to the ledger on the first leg"
+
+    receipt = contextvars.Context().run(observing.resume, "observed-round", lambda: {"ok": True})
+
+    assert receipt.result is ReceiptResult.OBSERVED
+    assert receipt.budget_charges == ({"grant_id": "payer", "metric": "amount", "amount": 100},), (
+        f"the resumed observed leg dropped the counterfactual spend: {receipt.budget_charges}"
+    )
+    assert store.consumptions() == (), (
+        "the resumed observed leg wrote to the ledger; the number on the receipt is a "
+        "counterfactual and must stay one"
+    )
+
+
+def test_T502b_a_resumed_observed_leg_does_not_announce_the_refusal_twice(store, clock) -> None:
+    """T502, row two, and the only one of the four with no test under any name.
+
+    Row three is `test_T461...` and row four is `test_T462...`, both above and both under their
+    own numbers -- which is why §8 calls T502 owed while the tree already had most of it.
+
+    The regression: `_refuse_unmeasurable` announces `ACTION_DENIED` under observation, and a
+    resumed leg announced it **again** for the same action. The evidence then said the action was
+    denied twice while the `observed` receipt beside it said it ran. An answer and its evidence
+    disagreeing about one action is what `acs.py`'s clause forbids one boundary lower, and it is
+    why `announce=False` exists on the resumed path.
+
+    **Counted, not merely present.** A test asserting the event appears passes whether it appears
+    once or twice, which is how this shipped in the first place. `announce` guards the
+    *unmeasurable* refusal (§2.3, §2.4.1), so the action carries a metric the budget cannot read
+    -- a negative amount -- rather than one that exhausts it.
+    """
+    from ctrlrun import Suspended
+
+    observing = _observing_control(store, clock)
+    unmeasurable = Action(
+        name="payments.refund",
+        arguments={"amount": -250, "id": "1"},
+        principal=AGENT,
+        environment="prod",
+    )
+
+    def suspends() -> Any:
+        raise Suspended("observed-round")
+
+    with pytest.raises(Suspended):
+        observing.execute(unmeasurable, suspends, "refund:1")
+
+    def denials() -> list:
+        return [
+            event
+            for event in store.events()
+            if str(event.type) == "ACTION_DENIED"
+            and event.data.get("reason") == "budget_unmeasurable"
+        ]
+
+    assert len(denials()) == 1, (
+        f"the first leg did not announce the observed refusal exactly once: {len(denials())}"
+    )
+
+    receipt = contextvars.Context().run(observing.resume, "observed-round", lambda: {"ok": True})
+
+    assert receipt.result is ReceiptResult.OBSERVED, "observe mode refused a resumed leg"
+    assert len(denials()) == 1, (
+        f"the resumed leg announced the refusal again: {len(denials())} ACTION_DENIED rows for "
+        "one action, beside an `observed` receipt saying it ran"
+    )

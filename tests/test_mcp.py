@@ -523,3 +523,60 @@ def test_representable_arguments_have_no_pointer(arguments):
 
 def test_a_bool_is_not_mistaken_for_a_float_or_an_int():
     assert find_unrepresentable({"flag": False}) is None
+
+
+# --- T480: the payload cannot name its own principal ------------------------------------------
+
+
+def test_T480_a_metadata_agent_id_is_not_read_and_cannot_reach_a_decision():
+    """SPEC-v0.10 §3.1.2, and `v0.3`'s T91d at the hop.
+
+    A hop arrives in `params.metadata`, which is **the caller's own JSON**. If anything in that bag
+    could name the acting principal, an agent would choose who it is by typing a name, and every
+    authority decision downstream would be against a subject the attacker picked. `v0.3 §4.2` is
+    the rule: the principal comes from the `IdentityProvider` and nowhere else.
+
+    This holds by construction today — the parser lifts `hop` and `task` out of that bag and
+    nothing else — so what this test is, honestly, is the **regression guard**: the property was
+    true and untested for a whole milestone, and a future field read out of `metadata` is exactly
+    the change that would break it without anything else going red.
+
+    Asserted over the parsed request's own fields rather than by grepping for a string, so a read
+    added under any name fails it.
+    """
+    document = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "create_refund",
+            "arguments": {"payment_id": "txn_1", "amount": 2000},
+            "metadata": {
+                "hop": "dlg_" + "a" * 32,
+                "task": "refund-run:7",
+                "agent_id": "treasury-admin",
+                "principal": "treasury-admin",
+                "user": "root@example.com",
+                "subject": {"agent": "treasury-admin"},
+            },
+        },
+    }
+
+    parsed = parse_request(json.dumps(document).encode(), _headers())
+
+    assert not isinstance(parsed, Refusal), parsed
+    # The two the bag is allowed to carry, and they are carried.
+    assert parsed.hop == "dlg_" + "a" * 32
+    assert parsed.task == "refund-run:7"
+    # And nothing the caller wrote about identity became a field of the request. The whole
+    # parsed object is searched, so a read added under a new attribute name fails here too.
+    carried = {
+        name: value
+        for name, value in vars(parsed).items()
+        if name != "document" and isinstance(value, str)
+    }
+    assert "treasury-admin" not in carried.values(), (
+        f"a name out of params.metadata reached the parsed request: {carried}"
+    )
+    assert "root@example.com" not in carried.values(), carried
+    assert not hasattr(parsed, "agent_id") and not hasattr(parsed, "principal"), vars(parsed)

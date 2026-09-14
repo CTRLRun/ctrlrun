@@ -1195,3 +1195,103 @@ actions:
         assert issue_refund(payment_id="t", amount=1) == "ok"
 
     assert len(double.calls) == 1
+
+
+# --- T128c: the predicate and `execute` decide the same action --------------------------------
+
+#: A receiver that holds a wide root grant of its own **and** is handed a narrow hop. The
+#: disagreement `SPEC-v0.10 §9` names lives exactly here: without `hop=` the predicate evaluates
+#: against `broad` while `execute` evaluates against the hop alone (§2.3).
+HOP_AND_A_ROOT_GRANT = """
+schema: ctrlrun.policy/v3
+mode: enforce
+authority:
+  grants:
+    - id: broad
+      subject: {agent: finance-agent}
+      actions: ["stripe.*"]
+      resources: ["payment:*"]
+      environments: [production]
+    - id: issuer
+      subject: {agent: planner}
+      actions: ["stripe.*"]
+      resources: ["payment:*"]
+      environments: [production]
+      delegable: true
+      expires_at: "2027-01-01T00:00:00Z"
+actions:
+  stripe.refund:
+    resource: "payment:{payment_id}"
+    rules:
+      - when: {amount_lte: 500000}
+        decision: approve
+      - decision: deny
+"""
+
+
+@pytest.mark.authority
+def test_T128c_needs_approval_under_a_hop_decides_what_execute_decides(tmp_path):
+    """SPEC-v0.10 §9's `hop=`/`task=` row, and the defect it names.
+
+    A framework asks this predicate **before** it invokes. Without `hop=` the predicate evaluated
+    against the receiver's whole candidate set -- here a root grant covering `payment:*` -- while
+    `execute` evaluates against the hop **alone** (§2.3, no fallback). So it answered "a human is
+    needed" for a call `execute` then refuses outright: the framework surfaces an approval item, a
+    human says yes, and the tool call fails anyway.
+
+    **Not an authority hole, and the test says which it is.** `Control.execute` is the enforcement
+    point and refuses either way, so nothing wider ever runs. What the gap cost was the framework's
+    own approval item and a receipt nobody could explain.
+
+    The `without` case is what makes this discriminating: it proves the hop is what changed the
+    answer, rather than a fixture in which everything is denied anyway (mutation pattern 3).
+    """
+    from datetime import UTC, datetime
+
+    from ctrlrun.authority import grant_from_yaml
+
+    control, store, _ = build(HOP_AND_A_ROOT_GRANT)
+    assert control._authority is not None
+    narrow = grant_from_yaml(
+        """
+subject: {agent: finance-agent}
+actions: ["stripe.refund"]
+resources: ["payment:US-*"]
+environments: [production]
+expires_at: "2026-12-01T00:00:00Z"
+""",
+        source="<test>",
+    )
+    planned = control._authority.plan_delegation(
+        "issuer", narrow, by=Principal(agent="planner"), store=store, now=datetime.now(UTC)
+    )
+    store.put_delegation(planned.to_record())
+    hop = planned.delegation_id
+
+    off_envelope = {"payment_id": "EU-1", "amount": 2000}
+    with context("finance-agent"):
+        # Without the hop the root grant reaches it, so a human *is* needed. This is the answer
+        # the predicate used to give under a hop as well.
+        assert needs_approval(control, REFUND, off_envelope) is True
+
+        # Under the hop, the resource is outside the envelope and nothing falls back to `broad`.
+        assert needs_approval(control, REFUND, off_envelope, hop=hop) is False
+
+        # And that is the same answer `execute` reaches, which is the whole point.
+        with pytest.raises(AuthorityDenied):
+            control.execute(
+                Action(
+                    name=REFUND,
+                    arguments=off_envelope,
+                    principal=Principal(agent="finance-agent"),
+                    resource="payment:EU-1",
+                    environment="production",
+                ),
+                lambda: "ok",
+                hop=hop,
+            )
+
+        # The negative control: inside the envelope both still say a human is needed, so the
+        # hop narrows rather than refusing everything.
+        inside = {"payment_id": "US-9", "amount": 2000}
+        assert needs_approval(control, REFUND, inside, hop=hop) is True
