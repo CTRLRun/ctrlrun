@@ -518,3 +518,119 @@ def test_T517_a_policy_replay_names_the_row_it_could_not_read(workspace) -> None
     assert len(changed) == 3, (
         f"one bad row cost the replay more than one row: {len(changed)} of 3 rows replayed"
     )
+
+
+# --- T518: where filtering a refused row would be a FALSE GREEN --------------------------------
+
+
+def test_T518_a_scenario_store_fails_the_control_rather_than_filtering(workspace) -> None:
+    """SPEC-v0.4 §3.8, on the surface where it costs most.
+
+    `verify`'s scenarios run against a scratch store `verify` creates in this process and fills
+    through this library, so a row that cannot be read back **there** is not evidence of a
+    tamper: it is this library failing to read what it just wrote. `_readable` would drop it and
+    the guarantee would grade clean over a store the grader could not read, which is the false
+    green in its most expensive costume, because the clean result is the product.
+
+    **This test exists because a mutation survived.** `_written`'s control was replaced with an
+    unconditional pass and the whole suite stayed green, which is a finding about the tests and
+    not a row to skip.
+    """
+    from ctrlrun.receipt import _readable
+    from ctrlrun.verify.scenarios import _ControlFailed, _written
+
+    database = workspace / "state.db"
+    store = SQLiteStateStore(database, clock=lambda: T0)
+    a_chain(store, 3)
+
+    class _OneRowRefused:
+        """A store whose second row will not read back. Nothing else about it differs."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def receipts(self):
+            rows = list(self._real.receipts())
+            rows[1] = UnreadableReceipt(
+                seq=2, receipt_id="ctr_" + "9" * 12, refusal="InvalidArgument"
+            )
+            return tuple(rows)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    damaged = _OneRowRefused(store)
+
+    # The filtering helper would hand back a clean-looking two rows...
+    assert len(_readable(damaged.receipts())) == 2
+
+    # ...and `_written` refuses to, naming what it could not read.
+    with pytest.raises(_ControlFailed) as failed:
+        _written(damaged)
+    assert "could not be read back" in failed.value.observed, failed.value.observed
+    assert "2" in failed.value.observed, failed.value.observed
+
+    # And on an undamaged store it is simply the receipts, so the guard is not a blanket refusal.
+    assert len(_written(store)) == 3
+    store.close()
+
+
+# --- T519: a backend that cannot read back its own write -------------------------------------
+
+
+def test_T519_the_store_conformance_kit_names_a_backend_that_cannot_read_its_own_write(
+    tmp_path,
+) -> None:
+    """SPEC-v0.11 §5.2 lets a store hand back a refused row instead of raising. **A row the
+    store just wrote is not that case**, and a candidate backend that cannot read back its own
+    write must fail `receipt-round-trip` by name.
+
+    Without this the kit falls into the field-by-field diff below the check and reports a
+    missing attribute, which tells a backend author nothing about what they got wrong.
+
+    **This test exists because a mutation survived**: the guard was replaced with `if False`
+    and the conformance suite stayed green.
+    """
+    from ctrlrun.conformance.report import SuiteStatus
+    from ctrlrun.conformance.store.backends import SQLiteBackend
+    from ctrlrun.conformance.store.suites import evidence_receipt
+
+    class _CannotReadItsOwnWrite:
+        """A backend whose store writes correctly and reads every row back as a refusal."""
+
+        name = "cannot-read-its-own-write"
+
+        def __init__(self, root):
+            self._real = SQLiteBackend(root)
+
+        def open(self):
+            real = self._real.open()
+
+            class _Store:
+                def receipts(self):
+                    return tuple(
+                        UnreadableReceipt(
+                            seq=row.seq, receipt_id=row.receipt_id, refusal="InvalidArgument"
+                        )
+                        for row in real.receipts()
+                    )
+
+                def __getattr__(self, name):
+                    return getattr(real, name)
+
+            return _Store()
+
+        def reopen(self):
+            return None
+
+    result = evidence_receipt.body(_CannotReadItsOwnWrite(tmp_path), 1)
+
+    assert result.status is SuiteStatus.FAIL, result
+    assert result.id == "receipt-round-trip", result
+    assert "unreadable" in (result.reason or "").lower(), result.reason
+    assert "InvalidArgument" in (result.reason or ""), result.reason
+
+    # The positive control: the real backend still passes the same case, so this is not a kit
+    # that fails everything.
+    clean = evidence_receipt.body(SQLiteBackend(tmp_path), 1)
+    assert clean.status is SuiteStatus.PASS, clean
