@@ -225,14 +225,31 @@ def _pairs(report: ChainReport) -> set[tuple[str, int | None]]:
     return {(item.name, item.seq) for item in report.breaks}
 
 
-def _after_prune(receipts: Sequence[Receipt], through: int, checkpoint: Checkpoint) -> ChainReport:
+def _after_prune(
+    receipts: Sequence[Any], through: int, checkpoint: Checkpoint, head: tuple[int, str] | None
+) -> ChainReport:
     """What `verify_chain` would report on this store after the prune, without doing it.
 
     The prune is validated against this rather than against its own arithmetic, because rule 2 is
     a statement about what the **reader** says and the reader is the thing an operator runs.
+
+    **It must be the store and not a tidier version of it**, and an independent review found two
+    ways it was not. It filtered to `Receipt`, so every row `from_dict` refuses vanished from the
+    simulation and the prune refused honest prunes naming breaks that would not occur::
+
+        prune(through=3) REFUSED, claiming: ... would leave the chain reporting missing at seq 6
+        what the store ACTUALLY reports after that same prune: [('content_altered', 6),
+                                                                ('link_broken', 7)]
+        breaks the prune would really have caused: none
+
+    One tampered row cost the whole retention feature, against rule 3. And it re-derived the head
+    from the last kept receipt, where `delete_prefix` never touches `receipt_chain`, so a store
+    whose head row was damaged was refused for a `head_mismatch` it already had.
     """
-    kept = tuple(item for item in receipts if item.seq is None or item.seq > through)
-    return verify_chain(_PrunedChain(kept, checkpoint))
+    kept = tuple(
+        item for item in receipts if getattr(item, "seq", None) is None or item.seq > through
+    )
+    return verify_chain(_PrunedChain(kept, checkpoint, head))
 
 
 @dataclass(frozen=True)
@@ -250,17 +267,16 @@ class _PrunedChain:
                                         -> ok: False breaks: [('missing', 1)]
     """
 
-    _receipts: tuple[Receipt, ...]
+    _receipts: tuple[Any, ...]
     _checkpoint: Checkpoint
+    #: The store's **own** head row, unchanged: `delete_prefix` never writes `receipt_chain`.
+    _head: tuple[int, str] | None
 
-    def receipts(self) -> tuple[Receipt, ...]:
+    def receipts(self) -> tuple[Any, ...]:
         return self._receipts
 
     def chain_head(self) -> tuple[int, str] | None:
-        if not self._receipts:
-            return (self._checkpoint.seq, self._checkpoint.hash)
-        last = self._receipts[-1]
-        return None if last.seq is None or last.hash is None else (last.seq, last.hash)
+        return self._head
 
     def checkpoint(self) -> tuple[int, str] | None:
         return (self._checkpoint.seq, self._checkpoint.hash)
@@ -402,10 +418,29 @@ def _prune_locked(
     now: datetime,
 ) -> PruneResult:
     """Everything a prune does while it holds the receipt-write lock."""
+    receipts = tuple(item for item in store.receipts() if isinstance(item, Receipt))
+    positions = [item.seq for item in receipts if item.seq is not None]
+    if not positions:
+        raise InvalidArgument("this store holds no chained receipt; there is nothing to prune")
+
     head = store.chain_head()
     if head is None:
         raise InvalidArgument("this store has no chain head; there is nothing to prune")
-    head_seq, _ = head
+    # **The bound is the highest chained receipt, not the head row**, and an independent review
+    # is why. `chain_head()` reads `receipt_chain`, which is the row `SPEC-v0.11.md` §2.1 already
+    # assumes an attacker rewrites -- it is the whole reason the anchor exists. Deciding the
+    # prune's limit from it meant one `UPDATE receipt_chain SET seq = 99` turned
+    # `prune --through 8` into a delete of every receipt in the store, after which both
+    # `verify_chain` and `verify_anchors` reported clean:
+    #
+    #     after UPDATE receipt_chain SET seq=99, prune --through 8 COMPLETED, deleted 8
+    #     end state: receipts=0  verify_chain ok=True  verify_anchors ok=True
+    #
+    # The rule-2 delta permitted it because `head_mismatch` at 99 pre-existed, which is rule 2
+    # read literally producing total erasure. The receipts are the thing being deleted, so they
+    # are what bounds the deletion; the head is checked **as well**, below, because a prune that
+    # leaves the head naming a row it just deleted is §10's refusal too.
+    head_seq = max(positions)
     if through >= head_seq:
         # §10: a prune through the head leaves no chained receipt for the head to name, so the
         # store would report `head_mismatch` about a chain nothing is wrong with.
@@ -430,7 +465,6 @@ def _prune_locked(
             f"hold {held.hold_id!r} covers receipts this prune would delete: {held.reason}"
         )
 
-    receipts = tuple(item for item in store.receipts() if isinstance(item, Receipt))
     prefix = [item for item in receipts if item.seq is not None and item.seq <= through]
     if not prefix:
         raise InvalidArgument(f"no chained receipt at or below seq {through}; nothing to prune")
@@ -441,8 +475,24 @@ def _prune_locked(
             f"the receipt at seq {through} has no stored hash, so a checkpoint over it would "
             "name a hash nobody can compare against"
         )
+    # **The checkpoint names the pair that exists, not the number the operator typed**, and an
+    # independent review is why. This took `seq=through` with the hash of whatever readable
+    # receipt happened to be highest at or below it, so on a chain whose seq 3 had already been
+    # deleted by somebody else, `prune --through 3` wrote a checkpoint asserting `(3, hash@2)` --
+    # a pair that never existed -- and **that fabricated pair is what went to the provider**::
+    #
+    #     checkpoint written : seq=3 hash=sha256:874c40cb...
+    #     the real hash at seq 3 was : sha256:09694471...
+    #     the hash at seq 2 is       : sha256:874c40cb...
+    #
+    # §4.6's whole argument rests on the anchored checkpoint being a claim an operator can check
+    # against the chain, so a checkpoint that names a hash the chain never had corrupts exactly
+    # the external record the anchor exists to provide. The deletion still takes the operator's
+    # `through`; only the claim is narrowed to a row that was really there.
+    boundary_seq = boundary_receipt.seq
+    assert boundary_seq is not None  # `prefix` filtered on it
     checkpoint = Checkpoint(
-        seq=through,
+        seq=boundary_seq,
         hash=boundary_receipt.hash,
         # The version current when it was written, because a store pruned today and read in two
         # years is the case this milestone is about (§4.2).
@@ -456,7 +506,7 @@ def _prune_locked(
         raise InvalidArgument("this prune was refused: " + "; ".join(refusals))
 
     before = _pairs(verify_chain(store))
-    after = _pairs(_after_prune(receipts, through, checkpoint))
+    after = _pairs(_after_prune(store.receipts(), through, checkpoint, head))
     caused = after - before
     if caused:
         # Rule 2, as a **delta**: `unchained` is a pre-existing condition on any store migrated

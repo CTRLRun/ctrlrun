@@ -1647,6 +1647,10 @@ class SQLiteStateStore:
         self._local = threading.local()
         self._open: weakref.WeakSet[_HeldConnection] = weakref.WeakSet()
         self._open_lock = threading.Lock()
+        #: True while `pruning()` holds `BEGIN IMMEDIATE`. Inner writes must not commit through
+        #: it: `with connection:` commits, and committing there releases the receipt-write lock
+        #: in the middle of a prune (SPEC-v0.11 §4.5).
+        self._pruning = False
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # SPEC-v0.6 §3. The store's admission check: classify, then migrate or refuse. It runs
         # before any other table is read, and there is no argument, keyword or environment
@@ -1811,6 +1815,21 @@ class SQLiteStateStore:
 
     # --- anchors (SPEC-v0.11 §3.3) ----------------------------------------------------
 
+    @contextmanager
+    def _writing(self) -> Iterator[Any]:
+        """The connection, committed on exit **unless a prune holds the transaction** (§4.5).
+
+        `with connection:` commits, which is right for a standalone write and wrong for one
+        inside `pruning()`: committing there releases the receipt-write lock in the middle of a
+        prune. Every write that a prune calls goes through here instead.
+        """
+        connection = self._connection()
+        if self._pruning:
+            yield connection
+            return
+        with connection:
+            yield connection
+
     def put_anchor(self, anchor: Anchor) -> None:
         """Cache one anchor the provider made. **A cache, never the record** (§3.3).
 
@@ -1822,8 +1841,7 @@ class SQLiteStateStore:
         §3.2 orders the two kinds separately, and the token is the one value a provider promises
         to recognise again.
         """
-        connection = self._connection()
-        with connection:
+        with self._writing() as connection:
             connection.execute(
                 "INSERT INTO anchors (token, seq, hash, kind, at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(token) DO NOTHING",
@@ -1872,8 +1890,7 @@ class SQLiteStateStore:
         racing prunes are each individually valid under §10, and the second overwriting the
         first's row is what a review measured leaving `[('missing', 4), ('link_broken', 6)]`.
         """
-        connection = self._connection()
-        with connection:
+        with self._writing() as connection:
             connection.execute(
                 "INSERT INTO prune_checkpoint (id, seq, hash, schema, at) VALUES (1, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash, "
@@ -1960,11 +1977,32 @@ class SQLiteStateStore:
         """
         connection = self._connection()
         connection.execute("BEGIN IMMEDIATE")
+        # **Inner writes must not commit through this, and an independent review found they
+        # did.** `put_anchor` and `put_checkpoint` use `with connection:`, whose `__exit__` calls
+        # `commit()`, and a prune calls both -- so the transaction opened above ended at the
+        # first of them and the whole destructive half ran with no lock at all. Probed from a
+        # second OS process at each step:
+        #
+        #     before put_anchor    in_transaction=True   CHILD blocked
+        #     after  put_anchor    in_transaction=False  CHILD took BEGIN IMMEDIATE
+        #     before delete_prefix in_transaction=False  CHILD took BEGIN IMMEDIATE
+        #
+        # Worse than the missing exclusion: `pruning()`'s own `commit()` and its `rollback()`
+        # were then no-ops on a connection with no open transaction, so a prune that failed
+        # after writing the checkpoint left the row behind and the store reported
+        # `[('missing', 4), ('link_broken', 1)]` on a chain that was completely intact.
+        #
+        # Postgres had this guard in `_commit` from the start (`postgres.py`). SQLite did not,
+        # because the defect was found on Postgres and the fix was applied where it was found.
+        # SQLite is the **default** backend.
+        self._pruning = True
         try:
             yield
         except BaseException:
+            self._pruning = False
             connection.rollback()
             raise
+        self._pruning = False
         connection.commit()
 
     def delete_prefix(self, through: int, effect_keys: Sequence[str]) -> tuple[int, int]:

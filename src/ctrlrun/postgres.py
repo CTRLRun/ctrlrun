@@ -2283,9 +2283,28 @@ class PostgresStateStore:
         self._commit(connection)
 
     def put_hold(self, hold: Hold) -> None:
+        """Place a hold. **It takes the prune's lock**, and an independent review is why.
+
+        §4.5 says a hold is consulted *inside* the prune's transaction so that one placed between
+        the consult and the delete is not missed by both. That closes nothing on this backend:
+        `holds` does not contend with `SELECT seq FROM receipt_chain ... FOR UPDATE`, and the
+        prune's snapshot is READ COMMITTED. A review ran it multi-process and the prune deleted
+        three receipts a hold had been placed over mid-flight::
+
+            prune: holds consulted, []; now pausing where the operator's hold lands
+            CHILD  placing hold 1..3
+            CHILD  hold committed; store now holds [('litigation', 1, 3, True)]
+            prune COMPLETED: receipts deleted 3
+            holds in the store now: [('litigation', 1, 3, True)]   <- live, over nothing
+
+        Taking the same row lock here is what makes the prune's single consult authoritative: a
+        hold cannot land while a prune holds it, and a prune cannot start while a hold is landing.
+        SQLite needs nothing extra, because `BEGIN IMMEDIATE` admits one writer.
+        """
         connection = self._connection()
         try:
             with connection.cursor() as cursor:
+                cursor.execute(f"SELECT seq FROM {self._q}.receipt_chain WHERE id = 1 FOR UPDATE")
                 cursor.execute(
                     f"INSERT INTO {self._q}.holds "
                     "(hold_id, from_seq, to_seq, reason, placed_by, placed_at) "

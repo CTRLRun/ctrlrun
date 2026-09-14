@@ -464,8 +464,26 @@ def verify_anchors(store: AnchorSource, provider: AnchorProvider) -> AnchorRepor
     by_seq = _chain_hashes(store)
     checkpoint = store.checkpoint()
     checkpoint_seq = None if checkpoint is None else checkpoint[0]
-    anchored_checkpoints = {anchor.seq for anchor in held if anchor.kind == CHECKPOINT} | {
-        anchor.seq for anchor in cached.values() if anchor.kind == CHECKPOINT
+    # §4.6: the set of checkpoints that may supersede an anchor comes from the **provider alone**.
+    #
+    # **An earlier version unioned the local table into this, and an independent review bought
+    # supersession with one `INSERT` into it.** That is the laundering hole §4.6 exists to close,
+    # reopened by the same confusion §3.3 spends a subsection on: the local table is a cache the
+    # writer under suspicion can write, so a rule that reads it takes its answer from the side
+    # that cannot be trusted. The forged row did not even need a real hash -- only `(seq, kind)`
+    # was read -- and it was never checked against the provider, because the walk iterates what
+    # the provider holds.
+    #
+    # **And the pair must match**, not merely the `seq`. An anchored checkpoint supersedes only
+    # if the provider vouches for the hash the store's checkpoint row actually names; otherwise
+    # an attacker anchors any checkpoint at that `seq` and rewrites the row underneath it.
+    anchored_checkpoints = {
+        anchor.seq
+        for anchor in held
+        if anchor.kind == CHECKPOINT
+        and checkpoint is not None
+        and anchor.seq == checkpoint[0]
+        and anchor.hash == checkpoint[1]
     }
 
     checked = 0
