@@ -16,6 +16,12 @@
 # the tree: if an adapter's range has moved away from what was published, its version must have
 # moved too, or the release is one nobody can install.
 #
+# The tag carries NO `v`. `publish.yml` reads an adapter tag as everything after the last hyphen,
+# so `adapters-langgraph-1.1.0` names 1.1.0 and `adapters-langgraph-v1.1.0` names `v1.1.0` and is
+# refused. The `v` prefix belongs to kernel tags, where the workflow strips it. `MAJOR.MINOR` is
+# accepted too, per SPEC-v0.5 §6.2. `test_the_tag_an_adapter_release_needs_is_one_publish_yml_accepts`
+# runs the workflow's own rules against the version here, so this comment cannot go stale quietly.
+#
 # It is deliberately hand-written rather than fetched. A test that asked PyPI would need the
 # network, and `SPEC-v0.4 §3.9`'s discipline applies: a check that cannot run offline is a check
 # that gets skipped in the run that mattered.
