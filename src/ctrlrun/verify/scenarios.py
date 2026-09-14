@@ -113,6 +113,7 @@ from ..receipt import (
     EventType,
     Receipt,
     ReceiptResult,
+    UnreadableReceipt,
     iso_timestamp,
     new_receipt_id,
     verify_chain,
@@ -2627,7 +2628,7 @@ class Engine:
             # From the store, because a denied action raises and returns nothing while still
             # writing its receipt. `returned` is what `put_receipt` handed back, which is a
             # different claim and is checked separately below.
-            written = list(store.receipts())
+            written = list(_written(store))
 
             # The control, first: the chain the store just wrote must verify. A store that
             # assigned no `seq` at all, or a detector that always says "broken", dies here.
@@ -3181,7 +3182,7 @@ class Engine:
             ran = sorted(
                 (
                     receipt
-                    for receipt in store.receipts()
+                    for receipt in _written(store)
                     if receipt.effect_key == key
                     and receipt.result in (ReceiptResult.FAILED, ReceiptResult.COMMITTED)
                 ),
@@ -4891,6 +4892,31 @@ def _expect(held: bool, expected: str, observed: str) -> None:
         raise _Violation(expected, observed)
 
 
+def _written(store: StateStore) -> tuple[Receipt, ...]:
+    """Every receipt in a store `verify` itself wrote (SPEC-v0.11 §5.2).
+
+    Since v0.11 `receipts()` may hand back an `UnreadableReceipt` instead of raising, so that one
+    tampered row costs one row rather than blinding every reader (§5.2). **A scenario store is
+    not a store that can be tampered with**: `verify` creates it in this process, fills it
+    through this library and throws it away, so a row that cannot be read back there is not
+    evidence of a tamper, it is this library failing to read what it just wrote.
+
+    So this **fails the control** rather than filtering. Filtering would be the exact shape
+    `SPEC-v0.4.md` §3.8 forbids: a grader that quietly drops the row it cannot read and reports a
+    clean result, which is worse here than anywhere else in the codebase because the clean result
+    is the product.
+    """
+    rows = store.receipts()
+    refused = [row for row in rows if isinstance(row, UnreadableReceipt)]
+    _expect_control(
+        not refused,
+        "every receipt verify just wrote reads back as a receipt",
+        f"{len(refused)} row(s) this library wrote could not be read back: "
+        f"{[(row.seq, row.refusal) for row in refused]}",
+    )
+    return tuple(row for row in rows if isinstance(row, Receipt))
+
+
 def _expect_control(held: bool, expected: str, observed: str) -> None:
     """§1.3 — a control that does not behave as specified is FAIL, never PASS, never N/A."""
     if not held:
@@ -4905,7 +4931,7 @@ def _named_event(recorder: _Recorder, type_: EventType, **data: Any) -> bool:
 
 
 def _last_receipt(store: StateStore, action_id: str) -> Receipt | None:
-    for receipt in reversed(store.receipts()):
+    for receipt in reversed(_written(store)):
         if receipt.action_id == action_id:
             return receipt
     return None

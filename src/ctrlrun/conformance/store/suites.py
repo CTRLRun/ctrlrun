@@ -47,7 +47,7 @@ from ...errors import (
     NotExecuted,
 )
 from ...policy import Decision
-from ...receipt import Event, EventType, Receipt, ReceiptResult
+from ...receipt import Event, EventType, Receipt, ReceiptResult, UnreadableReceipt
 from ...state import (
     ClockSkew,
     DelegationRecord,
@@ -1766,6 +1766,18 @@ def evidence_receipt(backend: StoreBackend, processes: int = CONTENDERS) -> Case
     back = [held for held in store.receipts() if held.receipt_id == receipt.receipt_id]
     if not back:
         return failed("receipt-round-trip", title, "the receipt did not come back")
+    if isinstance(back[0], UnreadableReceipt):
+        # SPEC-v0.11 §5.2 lets a store hand back a row it cannot construct instead of raising,
+        # so that one tampered row costs one row. **A row this store just wrote is not that
+        # case.** A candidate backend that cannot read back its own write fails here, by name,
+        # rather than falling into the field-by-field diff below and reporting a missing
+        # attribute.
+        return failed(
+            "receipt-round-trip",
+            title,
+            f"the receipt came back as unreadable ({back[0].refusal}); a store that cannot read "
+            "back the receipt it just wrote has not stored it",
+        )
     receipt = written
     # Every field, not two of seventeen. A store that mangled `decision`, `approver`,
     # `arguments`, `attempt` or the timestamps passed this case while the two it compared

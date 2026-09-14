@@ -16,7 +16,7 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -785,16 +785,114 @@ def _document_hash(document: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(document)).hexdigest()
 
 
-def _stored_receipt(document: Mapping[str, Any], stored_hash: str | None) -> Receipt:
-    """A receipt as a store read it: its stored hash, and the document it was read from.
+def _stored_receipt(
+    document: Mapping[str, Any], stored_hash: str | None, stored_seq: int | None
+) -> Receipt:
+    """A receipt as a store read it: its stored hash, its stored `seq`, and the document.
 
     SPEC-v0.7 §6.11: the stored document is set **after** `replace(..., hash=...)`, because
     rule (a) makes `replace()` drop it; setting it first would build a receipt and then throw
     away the one thing the read was for. The only writer of the private field.
+
+    SPEC-v0.11 §5.2: `stored_seq` is the **column**, and it is what a receipt's position comes
+    from. Until v0.11 both stores selected `json, hash` and ordered by a column they never read,
+    so every `Receipt.seq` came from `document.get("seq")` -- the one field a tamperer controls.
+    `verify_chain`'s docstring said position came from the column and it was false as shipped:
+    one `UPDATE` to a document's `seq` turned one tamper into four breaks at three positions,
+    two of which named rows that do not exist.
+
+    Required rather than defaulted, because both callers are stores reading their own table and a
+    default would let a third caller silently reintroduce the document's value.
     """
-    receipt = replace(Receipt.from_dict(document), hash=stored_hash)
+    receipt = replace(Receipt.from_dict(document), hash=stored_hash, seq=stored_seq)
     object.__setattr__(receipt, "_stored_document", document)
     return receipt
+
+
+@dataclass(frozen=True)
+class UnreadableReceipt:
+    """A stored row `Receipt.from_dict` refused, named at its `seq` (SPEC-v0.11 §5.2).
+
+    **One tampered row costs one row** (SPEC-v0.11 §1.1, rule 3). Until v0.11 a single malformed
+    *value* of a declared key -- a float where a control id belongs -- raised out of
+    `Receipt.from_dict` while a store built every row, so `receipts()` returned nothing at all
+    and `ctrlrun receipts`, `receipts --verify-chain`, `ctrlrun inspect`, `ctrlrun stats` and the
+    operator server's `_receipts` and `_stats` tools went blind together. `inspect` on an action
+    the tamper never touched was the sharp case: the blast radius was not "this receipt is
+    unreadable" but "this store is unreadable".
+
+    A reader gets this instead of a raise. It carries where the row is and what refused it, and
+    nothing else it could not read.
+
+    **`refusal` is a type name and never a message** (SPEC-v0.7 §6.11's rule): the canonicalizer
+    quotes what it refused, and a lone surrogate echoed into a report is a report that cannot be
+    printed.
+
+    This is **not** a new `CHAIN_BREAKS` kind. `SPEC-v0.7.md` §12.5 offered that as one of two
+    candidates and `SPEC-v0.11.md` §5.1 declines it: `content_altered` already names a document
+    that cannot be canonicalized, and a second name for one fact would be two names for one break.
+    `verify_chain` reports a row it cannot construct exactly as it already reports a document it
+    cannot hash.
+    """
+
+    #: The row's position, from the store's `seq` **column**. `None` for a pre-chain row.
+    seq: int | None
+    #: `receipt_id` if that field alone was readable, else `None`. Never inferred.
+    receipt_id: str | None
+    #: The **type name** of what refused the row, never its message.
+    refusal: str
+    #: The row's stored hash, off the column. `None` where the column holds none.
+    hash: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """The refusal as plain data, in the shape a reader prints it."""
+        return {
+            "seq": self.seq,
+            "receipt_id": self.receipt_id,
+            "refusal": self.refusal,
+            "hash": self.hash,
+        }
+
+
+def _readable(rows: Iterable[Receipt | UnreadableReceipt]) -> tuple[Receipt, ...]:
+    """Only the rows that read back (SPEC-v0.11 §5.2).
+
+    **For a caller whose answer a refused row cannot change**, and for no other. A refused row
+    has no `action_id` to match, no `finished_at` to bucket and no `result` to count, so a reader
+    asking any of those questions can only leave it out.
+
+    Never where its absence would read as a pass. That is `SPEC-v0.4.md` §3.8's false green and
+    it is the way rule 3 is most likely to be broken by accident: a grader that quietly dropped a
+    row it could not read would report a clean result about a store with a forgery in it.
+    `verify_chain` therefore does **not** use this, and neither does anything that grades.
+    """
+    return tuple(row for row in rows if isinstance(row, Receipt))
+
+
+def _read_receipt(
+    document: Mapping[str, Any], stored_hash: str | None, stored_seq: int | None
+) -> Receipt | UnreadableReceipt:
+    """One stored row, as a receipt or as a named refusal (SPEC-v0.11 §5.2).
+
+    The one place a store turns a row into something a reader holds, so the two backends cannot
+    come to disagree about what a row it cannot construct becomes.
+
+    `CTRLRunError` and nothing wider: `from_dict` raises `InvalidArgument` through the parsers it
+    calls, and a `KeyError` or a `TypeError` from a row that is not an object at all is the case
+    `from_dict`'s own docstring says raises as it did at 0.6.1. Both are caught, because a row a
+    tamperer truncated to `{}` is exactly as much "one bad row" as a float among the controls, and
+    a reader that recovered from one and not the other would still be blindable by one `UPDATE`.
+    """
+    try:
+        return _stored_receipt(document, stored_hash, stored_seq)
+    except (CTRLRunError, KeyError, TypeError, ValueError, AttributeError) as refused:
+        identifier = document.get("receipt_id") if isinstance(document, Mapping) else None
+        return UnreadableReceipt(
+            seq=stored_seq,
+            receipt_id=identifier if isinstance(identifier, str) else None,
+            refusal=type(refused).__name__,
+            hash=stored_hash,
+        )
 
 
 class EventSink(Protocol):
@@ -934,7 +1032,7 @@ class ChainSource(Protocol):
     and `ARCHITECTURE.md` §6 says dependencies point downward.
     """
 
-    def receipts(self) -> tuple[Receipt, ...]: ...
+    def receipts(self) -> tuple[Receipt | UnreadableReceipt, ...]: ...
 
     def chain_head(self) -> tuple[int, str] | None: ...
 
@@ -942,7 +1040,14 @@ class ChainSource(Protocol):
 def verify_chain(store: ChainSource) -> ChainReport:
     """Walk the store's receipt chain and name every break (SPEC-v0.6 §6.5).
 
-    **Position comes from the store's `seq` column; content comes from the document.** The store
+    **Position comes from the store's `seq` column; content comes from the document.** True since
+    v0.11 and not before: both stores selected `json, hash` and ordered by a column they never
+    read, so every position this walked came out of the document after all (SPEC-v0.11 §5.2). One
+    `UPDATE` setting a document's `seq` to 99 then produced `missing 2`, `content_altered 99`,
+    `missing 100` and `link_broken 3` -- four breaks at three positions, two of them rows that do
+    not exist -- where the same tamper now reports `content_altered` once, at 2.
+
+    The store
     returns receipts ordered by that column, and this walks them in that order without re-sorting
     -- which is what makes the column load-bearing rather than decorative, and what makes §6.5's
     table true. A reader that re-sorted by the *document's* `seq` would be checking the document
@@ -959,7 +1064,7 @@ def verify_chain(store: ChainSource) -> ChainReport:
     *including the head* recomputes it and it verifies; `THREAT_MODEL.md` has always listed a
     malicious administrator as out of scope. What this closes is the partial tamper.
     """
-    receipts = list(store.receipts())
+    receipts: list[Receipt | UnreadableReceipt] = list(store.receipts())
     # In the store's order, which is by the `seq` **column**, and not re-sorted here. A reader
     # that re-sorted by the *document's* `seq` would be checking the document against itself.
     chained = [receipt for receipt in receipts if receipt.seq is not None]
@@ -993,6 +1098,26 @@ def verify_chain(store: ChainSource) -> ChainReport:
             # Resync on what is actually there, so one hole reports one gap rather than
             # renumbering every receipt after it.
             expected_seq = seq
+        if isinstance(receipt, UnreadableReceipt):
+            # SPEC-v0.11 §5.2: a row the store could not construct is reported exactly as a
+            # document that cannot be canonicalized is reported four lines below, and for the
+            # same reason: `put_receipt` builds what it stores, so a row `from_dict` refuses is a
+            # row nothing in this library wrote. §5.1 declines SPEC-v0.7 §12.5's other candidate
+            # here: a second break name for one fact would be two names for one break.
+            #
+            # By type, never by message (SPEC-v0.7 §6.11).
+            breaks.append(
+                ChainBreak(
+                    "content_altered",
+                    seq,
+                    f"the stored row cannot be read back as a receipt ({receipt.refusal}), so "
+                    "its hash cannot be recomputed; nothing that writes receipts could have "
+                    "stored it",
+                )
+            )
+            expected_prev = _NO_HASH
+            expected_seq = seq + 1
+            continue
         try:
             recomputed = receipt.chain_hash()
         except CTRLRunError as refused:

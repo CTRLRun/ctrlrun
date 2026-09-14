@@ -34,6 +34,7 @@ from .receipt import (
     EventType,
     Receipt,
     ReceiptResult,
+    _readable,
     iso_timestamp,
 )
 from .state import StateStore
@@ -74,7 +75,11 @@ def inspection_for(store: StateStore, action_id: str) -> dict[str, Any] | None:
     today and disagree later, which is the whole argument for this module.
     """
     events = tuple(event for event in store.events() if event.action_id == action_id)
-    receipt = next((found for found in store.receipts() if found.action_id == action_id), None)
+    # `_readable`: a refused row has no `action_id`, so it is never this action's receipt
+    # (SPEC-v0.11 §5.2). `inspect` on an untouched action is §2.3's sharp case.
+    receipt = next(
+        (found for found in _readable(store.receipts()) if found.action_id == action_id), None
+    )
     if not events and receipt is None:
         return None
 
@@ -199,6 +204,7 @@ def stats_document(
     mode: str,
     boundary: datetime | None,
     ledger_rows: int | None = None,
+    unreadable: int = 0,
 ) -> dict[str, Any]:
     """The numbers of SPEC-v0.3 §6.4, from `would_have` in observe mode and `result` in enforce.
 
@@ -216,6 +222,17 @@ def stats_document(
         "to": iso_timestamp(max(finished)) if finished else None,
         "actions": len(counted),
     }
+    if unreadable:
+        # SPEC-v0.11 §5.2. A refused row carries no `finished_at` and no result, so it cannot
+        # enter `actions` or the window -- and a total that dropped it in silence would be
+        # `SPEC-v0.4 §3.8`'s false green, a clean-looking count over a store with a forgery in
+        # it. Reported as its own number instead.
+        #
+        # **Omitted entirely at zero**, on `ledger_rows`' precedent directly below and for
+        # §5.3's reason: a store with no bad row produces the document it produced at 0.10.0,
+        # key for key, so this is not a change to shipped output for anybody whose store is
+        # intact.
+        document["unreadable_receipts"] = unreadable
     if ledger_rows is not None:
         # SPEC-v0.9 §7.3 — "`stats` reports the row count so growth is observable before it is a
         # problem." The ledger only grows: the kernel deletes no row, on §12's rule that it does
