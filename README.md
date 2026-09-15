@@ -416,7 +416,7 @@ full reference.
 |---|---|
 | Start here | [Why](https://docs.ctrlrun.dev/why) · [Protect your first action](https://docs.ctrlrun.dev/get-started/quickstart) |
 | The ideas, and doing something with them | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) · [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
-| Agents and MCP | [Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) · [MCP overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
+| Agents and MCP | [Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) · [MCP overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) · [Approve from your assistant](https://docs.ctrlrun.dev/mcp/approve-from-your-assistant) |
 | Running it for real | [Production](https://docs.ctrlrun.dev/production/index) · [Postgres](https://docs.ctrlrun.dev/production/postgres) · [Recovery](https://docs.ctrlrun.dev/production/recovery) · [Operations](https://docs.ctrlrun.dev/production/operations) |
 | Every key, flag and error | [Reference](https://docs.ctrlrun.dev/reference/policy-yaml) · [FAQ](https://docs.ctrlrun.dev/faq) |
 | Compared with | [Idempotency keys](https://docs.ctrlrun.dev/compare/idempotency-keys) · [Framework human-in-the-loop](https://docs.ctrlrun.dev/compare/framework-hitl) · [Guardrail libraries](https://docs.ctrlrun.dev/compare/guardrail-libraries) · [Durable workflows](https://docs.ctrlrun.dev/compare/durable-workflows) · [Governance toolkits](https://docs.ctrlrun.dev/compare/governance-toolkits) |
