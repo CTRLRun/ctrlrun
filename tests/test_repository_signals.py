@@ -360,7 +360,12 @@ def test_the_registry_manifest_agrees_with_the_version_and_the_readme_marker():
     # tab, two spaces or a lowercased namespace all read fine to a human and none of them match.
     marker = readme.find(f"mcp-name: {name}")
     assert marker != -1, f"README carries no 'mcp-name: {name}'"
-    assert re.match(r"(-->|\s|$)", readme[marker + len(f"mcp-name: {name}") :]), (
+    # Its boundary rule, in full: end of content, any character a server name cannot contain,
+    # or a comment close. Both spellings of the close, because the registry accepts both and a
+    # check that knew only `-->` would reject a README the registry is happy with.
+    rest = readme[marker + len(f"mcp-name: {name}") :]
+    boundary = rest == "" or not re.match(r"[A-Za-z0-9._/-]", rest) or re.match(r"--!?>", rest)
+    assert boundary, (
         "the marker is glued to a trailing character, which the registry reads as a longer name"
     )
 
