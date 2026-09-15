@@ -325,50 +325,109 @@ class _Tool:
         }
 
 
-_STRING: Final = {"type": "string"}
+def _string(description: str) -> dict[str, Any]:
+    return {"type": "string", "description": description}
 
 
-def _bounded(default: int) -> dict[str, Any]:
-    return {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT, "default": default}
+def _bounded(default: int, description: str) -> dict[str, Any]:
+    return {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": _MAX_LIMIT,
+        "default": default,
+        "description": description,
+    }
 
 
 #: §4.6 — a write tool's description says in its first clause that it writes, that it needs an
 #: authenticated human, and that the answer is recorded under their name. The assistant renders
 #: it, and an approver who did not know their name was going into the evidence log should learn
 #: it before they answer rather than after.
+#:
+#: Every argument carries a `description` too. An input schema says an argument is a string; it
+#: cannot say that `control` filters rather than selects, that `since` accepts `24h` as readily
+#: as a timestamp, or that a `failed` resolution is what unblocks a retry. A caller that has to
+#: infer those from the name guesses, and this server exists so that nobody guesses.
 TOOLS: Final[tuple[_Tool, ...]] = (
     _Tool(
         "list_pending_approvals",
         False,
         "Read-only. The approval requests waiting for a human, oldest first, with the action, "
-        "its arguments and when the request expires.",
-        {"limit": _bounded(_DEFAULT_PENDING_LIMIT)},
+        "its arguments and when the request expires. Start here: the request ids approve and "
+        "deny take come from this list.",
+        {
+            "limit": _bounded(
+                _DEFAULT_PENDING_LIMIT,
+                "How many pending requests to return, 1 to 200, default 50. This bounds the "
+                "response and not the scan, so a store holding many answered requests still "
+                "walks them to find the pending ones.",
+            )
+        },
     ),
     _Tool(
         "inspect_action",
         False,
         "Read-only. One action's whole history: what was proposed, what the policy decided, "
-        "which approval was involved, what happened to the effect, and the receipt.",
-        {"action_id": _STRING},
+        "which approval was involved, what happened to the effect, and the receipt. Use this "
+        "when you know which action you care about; use receipts to browse, stats for totals.",
+        {
+            "action_id": _string(
+                "The action to inspect. Action ids appear on receipts and on the pending "
+                "requests list_pending_approvals returns."
+            )
+        },
         ("action_id",),
     ),
     _Tool(
         "receipts",
         False,
-        "Read-only. The evidence this store holds, as portable JSON, oldest last.",
-        {"limit": _bounded(_DEFAULT_RECEIPT_LIMIT), "control": _STRING},
+        "Read-only. The individual receipts this store holds, as portable JSON, oldest last, "
+        "one for every attempt including the refusals. Use this to read what happened; use "
+        "stats for totals, and inspect_action for one action end to end.",
+        {
+            "limit": _bounded(
+                _DEFAULT_RECEIPT_LIMIT,
+                "How many receipts to return, 1 to 200, default 20, oldest last.",
+            ),
+            "control": _string(
+                "Return only receipts citing this control id, exactly as "
+                "`ctrlrun receipts --control` filters. Omit it to return every receipt."
+            ),
+        },
     ),
     _Tool(
         "effects",
         False,
-        "Read-only. The logical effects this store knows about, optionally one state only.",
-        {"state": {"type": "string", "enum": [str(state) for state in EffectState]}},
+        "Read-only. The logical effects this store knows about, one row per effect key. Use "
+        "this to find the effects whose outcome is unknown, which are the ones resolve can "
+        "move on and the ones blocking a retry.",
+        {
+            "state": {
+                "type": "string",
+                "enum": [str(state) for state in EffectState],
+                "description": (
+                    "Return only effects in this state, or omit it for every effect. "
+                    "'reserved' and 'executing' are in flight, 'committed' and 'failed' are "
+                    "settled, and 'ambiguous' is the one that needs a human: the effect may "
+                    "or may not have happened, and a retry stays refused until resolve says "
+                    "which."
+                ),
+            }
+        },
     ),
     _Tool(
         "stats",
         False,
-        "Read-only. What this store's receipts say, over an optional window.",
-        {"since": _STRING},
+        "Read-only. One summary of what this store's receipts say over an optional window: "
+        "how many actions were allowed, refused or sent to a human, and how their effects "
+        "ended. Use this for totals; use receipts when you need the records themselves.",
+        {
+            "since": _string(
+                "How far back to count: an ISO-8601 timestamp carrying an offset, or a "
+                "relative window written as <n>m, <n>h or <n>d, such as 30m, 24h or 7d. "
+                "Omit it to count every receipt in the store."
+            )
+        },
     ),
     _Tool(
         "approve",
@@ -376,7 +435,13 @@ TOOLS: Final[tuple[_Tool, ...]] = (
         "WRITES. Grants one pending approval request, letting the agent run that exact "
         "action once. Requires an authenticated human; the answer is recorded under their "
         "name and is visible in the receipt the action leaves.",
-        {"request_id": _STRING},
+        {
+            "request_id": _string(
+                "The pending request to grant, as returned by list_pending_approvals. The "
+                "grant is bound to the hash of the action that request already names, so "
+                "there is no argument here by which a different action could be approved."
+            )
+        },
         ("request_id",),
     ),
     _Tool(
@@ -384,7 +449,11 @@ TOOLS: Final[tuple[_Tool, ...]] = (
         True,
         "WRITES. Refuses one pending approval request. Requires an authenticated human; the "
         "answer is recorded under their name.",
-        {"request_id": _STRING},
+        {
+            "request_id": _string(
+                "The pending request to refuse, as returned by list_pending_approvals."
+            )
+        },
         ("request_id",),
     ),
     _Tool(
@@ -394,13 +463,30 @@ TOOLS: Final[tuple[_Tool, ...]] = (
         "Requires an authenticated human and a reason; the answer is recorded under that "
         "person's name, and a 'failed' resolution permits a retry that is currently blocked.",
         {
-            "effect_key": _STRING,
-            "outcome": {"type": "string", "enum": sorted(RESOLUTIONS)},
-            "reason": _STRING,
+            "effect_key": _string(
+                "The effect to settle, as it appears in the effects list, for example "
+                "refund:txn_1. Only an effect whose outcome is unknown can be resolved."
+            ),
+            "outcome": {
+                "type": "string",
+                "enum": sorted(RESOLUTIONS),
+                "description": (
+                    "What you established actually happened at the remote. 'committed' means "
+                    "the effect took hold and must never run again; 'failed' means it did "
+                    "not, and is what releases the blocked retry. Check the remote before "
+                    "answering: this is a claim about the world, not a guess."
+                ),
+            },
+            "reason": _string(
+                "How you know, in plain words. Must be non-empty. A resolution answered "
+                "through an assistant has a conversation behind it and no record of it, so "
+                "this reason is that record."
+            ),
         },
         ("effect_key", "outcome", "reason"),
     ),
 )
+
 
 _BY_NAME: Final = {tool.name: tool for tool in TOOLS}
 
