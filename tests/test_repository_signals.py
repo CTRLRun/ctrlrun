@@ -328,6 +328,36 @@ def test_the_citation_names_the_repository_the_version_and_the_tagline():
     assert citation["repository-code"] == "https://github.com/CTRLRun/ctrlrun"
 
 
+def test_the_registry_manifest_agrees_with_the_version_and_the_readme_marker():
+    """`server.json` is the fourth file carrying the version, after `pyproject.toml`,
+    `CHANGELOG.md` and `CITATION.cff`, and the only one the release notes would not make
+    obvious on a diff. It is also the one with a second copy of the number, because the
+    registry records the server version and the package version separately, and a manifest
+    naming a PyPI version that was never released is accepted here and rejected at publish
+    time, which is the wrong end to find out.
+
+    The name is pinned to the README's `mcp-name:` marker for the same reason in the other
+    direction. The official registry verifies the PyPI namespace by finding that token in the
+    package's long description, which is this README; if the two drift the manifest stays
+    valid, the README stays valid, and only the publish fails, with an ownership error that
+    does not name either file.
+    """
+    manifest = json.loads((REPO_ROOT / "server.json").read_text(encoding="utf-8"))
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        version = tomllib.load(handle)["project"]["version"]
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert manifest["version"] == version
+    packages = manifest["packages"]
+    assert [package["identifier"] for package in packages] == ["ctrlrun"]
+    assert packages[0]["registryType"] == "pypi"
+    assert packages[0]["registryBaseUrl"] == "https://pypi.org"
+    assert packages[0]["version"] == version
+
+    name = manifest["name"]
+    assert re.search(rf"mcp-name:\s*{re.escape(name)}(?![\w./-])", readme)
+
+
 def test_how_this_is_built_states_the_review_gap_and_the_tooling_once():
     """What the *page* says -- that there was no external audit, and how plainly it says who
     wrote the code -- is asserted in `CTRLRun/ctrlrun-docs`, by
