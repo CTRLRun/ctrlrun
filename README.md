@@ -439,4 +439,4 @@ where it is going. Releases carry PyPI provenance attestations from GitHub Actio
 
 Apache-2.0. The enforcement kernel is and will remain fully open source.
 
-<!-- mcp-name: io.github.ctrlrun/ctrlrun-mcp-operator -->
+<!-- mcp-name: io.github.CTRLRun/ctrlrun-mcp-operator -->
