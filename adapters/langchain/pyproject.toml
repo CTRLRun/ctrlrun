@@ -1,0 +1,43 @@
+# ctrlrun-langchain — a separate distribution on the adapters track (SPEC-v0.5 §6).
+#
+# `pip install ctrlrun` must not grow. This depends on `ctrlrun`, never the reverse, and the
+# `ctrlrun` wheel and sdist contain no `adapters/` path (T136).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctrlrun-langchain"
+version = "1.0.0"
+description = "Gate a LangChain agent's tool calls with a CTRLRun policy, through wrap_tool_call."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Arpan Ghoshal", email = "contact@arpanghoshal.com"}]
+license = "Apache-2.0"
+keywords = ["langchain", "ctrlrun", "middleware", "guardrails", "agent", "human-in-the-loop"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Security",
+]
+# The two ranges SPEC-v0.5 §6.3 requires. `wrap_tool_call` is a LangChain 1.x surface, and the
+# README states the same two, which T137's sibling asserts.
+dependencies = [
+    "ctrlrun>=0.12,<0.13",
+    "langchain>=1.0,<2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/CTRLRun/ctrlrun"
+Repository = "https://github.com/CTRLRun/ctrlrun"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# `langchain` ships no stubs mypy can resolve from outside its own tree. CI type-checks `src`
+# only (scripts/check.sh), so this is for anyone running mypy over the adapter directly.
+[[tool.mypy.overrides]]
+module = ["langchain.*", "langchain_core.*"]
+ignore_missing_imports = true
