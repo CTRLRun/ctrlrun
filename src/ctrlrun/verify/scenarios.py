@@ -143,6 +143,10 @@ _LOG = logging.getLogger(__name__)
 #: and named so no reader of the evidence mistakes it for one.
 APPROVER: Final = "ctrlrun-verify"
 
+#: How many spends of its vector a scenario is sized for unless it says otherwise: a control,
+#: the guarded attempt, and a retry or two (SPEC-v0.9 §2).
+DEFAULT_SPENDS: Final = 4
+
 #: SPEC-v0.8 §11.7: the approver identity G18 grades against. Verify builds its own scenarios,
 #: so it supplies the provider too; what it grades is the kernel's refusal, never whether the
 #: operator configured one, which is a fact about a constructor call and not about a document.
@@ -401,7 +405,13 @@ def _is_int(value: object) -> bool:
 
 def _negate_value(operand: object) -> Any:
     """§3.3's `X_neq` row: a value that is not the operand, in the operand's own shape."""
-    if isinstance(operand, int) and not isinstance(operand, bool):
+    if isinstance(operand, bool):
+        # Before this, a boolean fell through to the string below, so a rule on
+        # `counterparty_new_eq: true` was negated with a string that is neither answer. The
+        # vector still landed in the next rule, by accident of `eq`, and carried a value no
+        # document could mean.
+        return not operand
+    if isinstance(operand, int):
         return operand + 1
     if isinstance(operand, str):
         return f"{operand}-x"
@@ -712,25 +722,44 @@ class Engine:
     def _synthesize(
         self, name: str, decision: Decision, mutation: Mapping[str, Any] | None = None
     ) -> tuple[dict[str, Any], str] | None:
-        """An argument vector driving `name` to `decision`, and the rule reason it reached.
+        """The first argument vector driving `name` to `decision`, and the rule reason it
+        reached; `_synthesized` yields them all."""
+        return next(self._synthesized(name, decision, mutation), None)
+
+    def _synthesized(
+        self, name: str, decision: Decision, mutation: Mapping[str, Any] | None = None
+    ) -> Iterator[tuple[dict[str, Any], str]]:
+        """Every argument vector driving `name` to `decision`, rule by rule, with the rule
+        reason each reached.
 
         **The vector is checked before it is used** (§3.3). Having built one, the engine
         evaluates the action it just constructed and asserts the decision is the one it was
         aiming for; a vector that lands in a different rule is an internal error, not a FAIL,
         because it would run, refuse something, and report a guarantee that was never
         exercised.
+
+        **All of them, not the first.** `select` binds a vector to a grant, and a grant's
+        budget can refuse the first rule's vector for a reason the second rule's does not
+        share: a document whose first `approve` rule is `counterparty_new_eq: true` yields a
+        vector with no `amount`, which a budget on `amount` cannot measure, while its second
+        `approve` rule is the amount band the budget was written for. Stopping at the first
+        reported the whole guarantee not applicable, "a budget names a metric the action does
+        not carry", about a document whose next rule carried it.
         """
         entry: _ActionPolicy | None = self.policy.actions.get(name)
         if entry is None:
-            return None
+            return
         extras = _placeholders(self.policy, name)
         if entry.decision is not None:
             if entry.decision is not decision:
-                return None
+                return
             vector = dict(extras)
             if mutation:
                 vector.update(mutation)
-            return self._checked(name, vector, decision, "decision")
+            checked = self._checked(name, vector, decision, "decision")
+            if checked is not None:
+                yield checked
+            return
         for index, rule in enumerate(entry.rules):
             if rule.decision is not decision:
                 continue
@@ -740,8 +769,7 @@ class Engine:
                     vector.update(mutation)
                 checked = self._checked(name, vector, decision, f"rule[{index}]")
                 if checked is not None:
-                    return checked
-        return None
+                    yield checked
 
     def _checked(
         self, name: str, vector: dict[str, Any], decision: Decision, expected_reason: str
@@ -793,8 +821,16 @@ class Engine:
         #: a property of the action rather than of a grant, so `grant_filter` cannot express it.
         action_filter: Callable[[str], bool] | None = None,
         mutation: Mapping[str, Any] | None = None,
+        spends: int = DEFAULT_SPENDS,
     ) -> _Selection | None:
         """§3.2 — the first action, sorted by codepoint, that satisfies the requirements.
+
+        `spends` is how many times the scenario will spend the vector against the grant's
+        budgets, and the vector is sized so that many fit (`_fitted_to_budgets`). It is the
+        scenario's own number: G4 lands `PROCESSES + 1` and says so; everything else lands a
+        handful. One size for all of them was `PROCESSES * 2 + 2`, and a grant whose count
+        budget admitted twelve actions an hour, which is an ordinary number for a document to
+        carry, reported every guarantee not applicable because eighteen did not fit.
 
         Where an `authority:` section exists the principal comes from a grant that actually
         covers the action (§3.4), because an action nothing authorizes is refused by the
@@ -844,24 +880,23 @@ class Engine:
             if ceiling_bound is not None and ceiling is not None and ceiling > ceiling_bound:
                 continue
             for decision in decisions:
-                synthesized = self._synthesize(name, decision, mutation)
-                if synthesized is None:
-                    continue
-                arguments, reason = synthesized
-                self._declined_on_budget = False
-                selection = self._bind(name, arguments, decision, reason, grant_filter)
-                if selection is not None:
-                    return selection
-                # An action DID reach this decision and no grant covered it. Recorded so the
-                # caller's N/A reason can say so: a bare `None` here is indistinguishable from
-                # "no action reaches this decision", and every scenario used to resolve that
-                # ambiguity by asserting its own hardcoded sentence about the policy.
-                #
-                # **Unless a grant did cover it and its budget is what declined.** Recording a
-                # resource miss there put a sentence in the report that is false of the document:
-                # the pattern matched perfectly and the budget was the whole reason.
-                if not self._declined_on_budget:
-                    self._grant_miss = self._resource(name, arguments)
+                for arguments, reason in self._synthesized(name, decision, mutation):
+                    self._declined_on_budget = False
+                    selection = self._bind(name, arguments, decision, reason, grant_filter, spends)
+                    if selection is not None:
+                        return selection
+                    # An action DID reach this decision and no grant covered it. Recorded so
+                    # the caller's N/A reason can say so: a bare `None` here is
+                    # indistinguishable from "no action reaches this decision", and every
+                    # scenario used to resolve that ambiguity by asserting its own hardcoded
+                    # sentence about the policy.
+                    #
+                    # **Unless a grant did cover it and its budget is what declined.**
+                    # Recording a resource miss there put a sentence in the report that is
+                    # false of the document: the pattern matched perfectly and the budget was
+                    # the whole reason.
+                    if not self._declined_on_budget:
+                        self._grant_miss = self._resource(name, arguments)
         return None
 
     def _bind(
@@ -871,6 +906,7 @@ class Engine:
         decision: Decision,
         reason: str,
         grant_filter: Callable[[Grant], bool] | None,
+        spends: int = DEFAULT_SPENDS,
     ) -> _Selection | None:
         resource = self._resource(name, arguments)
         if self.authority is None:
@@ -913,7 +949,9 @@ class Engine:
             # smaller than the vector `_synthesize` picked refuses that action, and the refusal
             # reached G1 as an internal error. Verify owns the vector, so verify sizes it.
             self._unmeasurable = False
-            fitted = self._fitted_to_budgets(name, arguments, decision, reason, grant, action)
+            fitted = self._fitted_to_budgets(
+                name, arguments, decision, reason, grant, action, room=spends
+            )
             if fitted is None:
                 # Recorded, for `unselected`'s reason. A bare `continue` here reported the
                 # *grant* miss below, so a policy whose approve band starts above its grant's
@@ -975,10 +1013,11 @@ class Engine:
             return grant
         return None
 
-    #: How many spends of the chosen vector a scenario may take. G4's control leg runs
-    #: `PROCESSES` children on distinct keys and then contends `PROCESSES` more on one key, so
-    #: nine of them land; the margin above that is for every other scenario that acts twice.
-    _BUDGET_HEADROOM: Final = reg.PROCESSES * 2 + 2
+    #: How many spends of the chosen vector G4 takes: its control leg runs `PROCESSES`
+    #: children on distinct keys and then contends `PROCESSES` more on one key, so
+    #: `PROCESSES + 1` land, and one more is margin. Every other scenario passes nothing and
+    #: gets `DEFAULT_SPENDS`, which is what a scenario that acts a handful of times needs.
+    G4_SPENDS: Final = reg.PROCESSES + 2
 
     def _fits_budgets(self, grant: Grant, action: Action, *, room: int = 1) -> bool | None:
         """Whether every budget on this grant admits `room` spends of this action.
@@ -1022,7 +1061,12 @@ class Engine:
         return True
 
     def _shrunk(
-        self, arguments: dict[str, Any], grants: tuple[Grant, ...], action: Action, divisor: int
+        self,
+        arguments: dict[str, Any],
+        grants: tuple[Grant, ...],
+        action: Action,
+        divisor: int,
+        room: int,
     ) -> dict[str, Any] | None:
         """One vector with **every** over-limit metric brought under its own budget.
 
@@ -1039,7 +1083,7 @@ class Engine:
                     value = _metric_value(action, budget.metric, grant.id)
                 except InvalidArgument:
                     return None
-                if value * self._BUDGET_HEADROOM > budget.limit:
+                if value * room > budget.limit:
                     tried[budget.metric] = max(1, budget.limit // divisor)
         return tried if tried != arguments else None
 
@@ -1051,6 +1095,8 @@ class Engine:
         reason: str,
         grant: Grant,
         action: Action,
+        *,
+        room: int = DEFAULT_SPENDS,
     ) -> tuple[dict[str, Any], Action] | None:
         """Size verify's own action vector to the budgets that will decide it.
 
@@ -1069,7 +1115,6 @@ class Engine:
         """
         deciding = self._deciding_grant(action)
         bound = (grant,) if deciding is None else (grant, deciding)
-        room = self._BUDGET_HEADROOM
         verdict = self._budget_verdict(bound, action, room)
         if verdict is True:
             return arguments, action
@@ -1080,7 +1125,7 @@ class Engine:
             self._unmeasurable = True
             return None
         for divisor in (room, 8, 4, 2, 1):
-            tried = self._shrunk(arguments, bound, action, divisor)
+            tried = self._shrunk(arguments, bound, action, divisor, room)
             if tried is None:
                 continue
             rebuilt = replace(action, arguments=tried)
@@ -1735,7 +1780,7 @@ class Engine:
     # --- G4: concurrent attempts produce exactly one winner ------------------------------
 
     def g4(self) -> GuaranteeResult:
-        selection = self.select(needs_effect=True)
+        selection = self.select(needs_effect=True, spends=self.G4_SPENDS)
         if selection is None:
             return self.na(
                 "G4",
