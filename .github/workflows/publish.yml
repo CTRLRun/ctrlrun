@@ -191,3 +191,113 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  # The official MCP registry indexes where a server lives; it hosts no artifacts of its own. It
+  # verifies the claim by fetching the PyPI metadata for the exact version named in `server.json`
+  # and looking for `mcp-name: <name>` in the long description, which for this distribution is
+  # the README. So the registry can only be told about a version PyPI already serves, and this
+  # job waits on `pypi` rather than running beside it. A failure here cannot unpublish anything;
+  # the release is already out, and the job re-runs from the Actions tab.
+  #
+  # `server.json` needs no edit at release time. Its two version fields are pinned to
+  # `pyproject.toml`, and its name to the README marker, by
+  # `test_the_registry_manifest_agrees_with_the_version_and_the_readme_marker`.
+  registry:
+    needs: [build, pypi]
+    if: needs.build.outputs.kernel == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: mcp-registry
+      url: https://registry.modelcontextprotocol.io/v0/servers/io.github.CTRLRun%2Fctrlrun-mcp-operator/versions
+    permissions:
+      # The whole credential. GitHub mints an OIDC token, the registry reads `repository_owner`
+      # from it and grants `io.github.CTRLRun/*` for five minutes. No token is stored anywhere,
+      # which is the same argument trusted publishing makes for PyPI above.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned by version *and* by digest, for the same reason every action above is pinned to a
+      # commit: `releases/latest` is whatever the registry cut this morning. Bump both together
+      # when the registry's audience changes -- the CLI says "invalid audience" when it is too
+      # old, which is the only signal that a bump is due.
+      - name: Install mcp-publisher 1.8.1
+        env:
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          set -eu
+          url=https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          curl -fsSL --retry 3 -o mcp-publisher.tar.gz "$url"
+          echo "$MCP_PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum --check --strict
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      # Idempotent, like `release.yml`'s "Already released": a re-run of a job that succeeded
+      # would otherwise fail on a version the registry already has, and a red tick on a release
+      # that shipped correctly is a lie that costs someone an afternoon.
+      - name: Already in the registry
+        id: existing
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          name=$(python3 -c "import json;print(json.load(open('server.json'))['name'])")
+          url="https://registry.modelcontextprotocol.io/v0/servers/${name//\//%2F}/versions/$VERSION"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$url")
+          case "$code" in
+            404) echo "exists=false" >> "$GITHUB_OUTPUT"
+                 echo "$name $VERSION is not in the registry yet" ;;
+            200) echo "exists=true" >> "$GITHUB_OUTPUT"
+                 echo "$name $VERSION is already published; leaving it alone" ;;
+            # Anything else is the registry being unreachable or changing shape, and publishing
+            # blind on top of that is how a version gets published twice.
+            *)   echo "::error::$url answered $code"; exit 1 ;;
+          esac
+
+      # The ownership check the registry is about to make, made here first. PyPI serves the new
+      # version's metadata within seconds of the upload, but "within seconds" is a race, and the
+      # registry's own error for losing it ("the server name must appear as mcp-name: ...") reads
+      # as a missing marker rather than as a version that has not landed yet.
+      - name: PyPI serves this version, and it carries the marker
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          name=$(python3 -c "import json;print(json.load(open('server.json'))['name'])")
+          served=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsSL "https://pypi.org/pypi/ctrlrun/$VERSION/json" -o metadata.json; then
+              served=true
+              break
+            fi
+            echo "attempt $attempt: PyPI does not serve $VERSION yet"
+            sleep 15
+          done
+          if [ "$served" != true ]; then
+            echo "::error::PyPI still does not serve ctrlrun $VERSION after ten tries"
+            exit 1
+          fi
+          python3 - "$name" <<'PY'
+          import json, sys
+          name = sys.argv[1]
+          description = json.load(open("metadata.json"))["info"]["description"]
+          token = f"mcp-name: {name}"
+          if token not in description:
+              sys.exit(
+                  f"::error::the published README carries no {token!r}. The registry verifies "
+                  "the PyPI namespace by finding that exact string in the long description; add "
+                  "it to README.md and cut a release that carries it."
+              )
+          print(f"{token!r} is in the published description")
+          PY
+
+      # The namespace comes from the OIDC token's `repository_owner`, so this publishes as the
+      # organisation that owns this repository and nothing else.
+      - name: Publish to the MCP registry
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          set -eu
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

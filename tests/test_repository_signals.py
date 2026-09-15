@@ -355,7 +355,88 @@ def test_the_registry_manifest_agrees_with_the_version_and_the_readme_marker():
     assert packages[0]["version"] == version
 
     name = manifest["name"]
-    assert re.search(rf"mcp-name:\s*{re.escape(name)}(?![\w./-])", readme)
+    # The registry's matcher is `strings.Index(description, "mcp-name: " + name)` followed by a
+    # boundary check, so the separator is one space exactly and the case is the manifest's. A
+    # tab, two spaces or a lowercased namespace all read fine to a human and none of them match.
+    marker = readme.find(f"mcp-name: {name}")
+    assert marker != -1, f"README carries no 'mcp-name: {name}'"
+    assert re.match(r"(-->|\s|$)", readme[marker + len(f"mcp-name: {name}") :]), (
+        "the marker is glued to a trailing character, which the registry reads as a longer name"
+    )
+
+
+def test_the_registry_namespace_is_the_github_owner_with_its_own_case():
+    """The registry decides what a publisher may claim by reading `repository_owner` out of the
+    GitHub OIDC token (or the organisation's login, on the token path), formatting it into
+    `io.github.<owner>/*`, and matching that against `server.json`'s name with
+    `strings.HasPrefix`. That compare is case-sensitive and nothing lowercases either side, so a
+    manifest saying `io.github.ctrlrun/...` in a repository owned by `CTRLRun` is a 403 at
+    publish time and a name that reads perfectly well in review.
+
+    Checked against the live registry rather than argued from the source: of 1,200 `io.github.*`
+    entries, 795 carry a mixed-case namespace and not one differs in case from its own
+    repository owner. Publishing is also the point of no return -- a name cannot be changed
+    afterwards without stranding whoever pinned it -- so the pin belongs here, before the first
+    publish, and not in the release checklist.
+    """
+    manifest = json.loads((REPO_ROOT / "server.json").read_text(encoding="utf-8"))
+    owner = manifest["repository"]["url"].removeprefix("https://github.com/").split("/")[0]
+    namespace = manifest["name"].split("/")[0]
+
+    assert namespace == f"io.github.{owner}", (
+        f"{namespace} is not the namespace {owner} owns; the publish would be refused"
+    )
+
+
+def test_the_registry_manifest_fits_the_fields_the_registry_will_accept():
+    """`description` and `title` are capped at 100 characters, and the cap is enforced where it
+    cannot be seen: `mcp-publisher validate` returns a 422 naming the field, and nothing in this
+    repository would have said so first. The manifest shipped at 288 characters for a day.
+    """
+    manifest = json.loads((REPO_ROOT / "server.json").read_text(encoding="utf-8"))
+
+    for field in ("description", "title"):
+        assert 1 <= len(manifest[field]) <= 100, f"{field} is {len(manifest[field])} characters"
+
+
+def test_the_publish_workflow_tells_the_registry_after_pypi():
+    """The registry verifies ownership by fetching the PyPI metadata for the version the
+    manifest names and finding the README marker in it, so a job that raced the upload would
+    fail on an ownership error that has nothing to do with ownership. `needs: pypi` is what
+    orders them, and it is asserted here because the ordering is invisible in the file: the
+    jobs are siblings, and nothing but this key stops them running together.
+    """
+    workflow = _workflow("publish.yml")
+    job = workflow["jobs"]["registry"]
+
+    assert "pypi" in job["needs"], "the registry would be told about an unpublished version"
+    assert "kernel == 'true'" in job["if"], "an adapter tag publishes no MCP server"
+    # Exact, not a superset. `id-token` is the entire credential; the publish stores nothing.
+    assert job["permissions"] == {"id-token": "write", "contents": "read"}
+
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "mcp-publisher login github-oidc" in script, "a stored token would outlive the job"
+    assert "./mcp-publisher publish" in script
+
+
+def test_the_publisher_binary_is_pinned_and_checked():
+    """`releases/latest` is whatever the registry cut this morning, downloaded into a job that
+    holds a publish credential. The version is pinned in the URL and the bytes are checked
+    against a digest, which is `test_every_action_is_pinned_to_a_commit`'s argument for a
+    dependency that arrives by `curl` rather than by `uses:`.
+    """
+    steps = _workflow("publish.yml")["jobs"]["registry"]["steps"]
+    # The digest is passed through `env:` rather than written into the script, so the step is
+    # read whole; a check that only read `run:` would pass on a workflow carrying no digest.
+    script = "\n".join(
+        step.get("run", "") + "\n".join(str(value) for value in step.get("env", {}).values())
+        for step in steps
+    )
+
+    assert "releases/latest" not in script, "the publisher would change under the release"
+    assert re.search(r"releases/download/v\d+\.\d+\.\d+/mcp-publisher_", script)
+    assert re.search(r"\b[0-9a-f]{64}\b", script), "no digest to check the download against"
+    assert "sha256sum --check --strict" in script
 
 
 def test_how_this_is_built_states_the_review_gap_and_the_tooling_once():
