@@ -904,8 +904,8 @@ def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
 #:
 #: Checked 2026-09-14, during the 0.11.0 release pass, for both adapters at both versions.
 RECORDED: dict[str, dict[str, str]] = {
-    "langgraph": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11"},
-    "openai-agents": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11"},
+    "langgraph": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11", "1.2.0": ">=0.5,<0.12"},
+    "openai-agents": {"1.0.0": ">=0.5,<0.6", "1.1.0": ">=0.5,<0.11", "1.2.0": ">=0.5,<0.12"},
 }
 
 
