@@ -1437,9 +1437,16 @@ def test_T558b_a_hold_cannot_land_while_a_prune_holds_the_lock() -> None:
         "from ctrlrun.postgres import PostgresStateStore\n"
         "from ctrlrun.retention import Hold\n"
         f"s = PostgresStateStore({POSTGRES_URL!r}, schema={schema!r})\n"
+        # **The handshake, and why it is not optional.** Until this line the child is importing
+        # `ctrlrun` and opening a Postgres connection, and on a loaded runner that can outlast
+        # the parent's whole sleep. Without it the parent measures its own patience rather than
+        # the child's blocking: CI saw `waited 0.135s` on a run where the child reached the lock
+        # only after the prune had released it, and the test failed because it could not prove
+        # the property rather than because the property was false.
+        "print('ready', flush=True)\n"
         "start = time.time()\n"
         "s.put_hold(Hold('late', 1, 3, 'litigation', 'cli:bob', datetime.now(UTC)))\n"
-        "print('%.3f' % (time.time() - start))\n"
+        "print('%.3f' % (time.time() - start), flush=True)\n"
         "s.close()\n"
     )
     try:
@@ -1459,7 +1466,12 @@ def test_T558b_a_hold_cannot_land_while_a_prune_holds_the_lock() -> None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-            time.sleep(1.5)
+            # Read the child's `ready` before starting the clock: after this it is connected
+            # and its next statement is the one that must block.
+            handshake = child.stdout.readline().strip() if child.stdout else ""
+            assert handshake == "ready", f"the child never reached the lock: {handshake!r}"
+            held_for = 1.0
+            time.sleep(held_for)
             still_waiting = child.poll() is None
         output, _ = child.communicate(timeout=60)
         parent.close()
@@ -1468,12 +1480,12 @@ def test_T558b_a_hold_cannot_land_while_a_prune_holds_the_lock() -> None:
             "a hold landed while a prune held the lock, so it can be placed over receipts the "
             f"prune is about to delete: {output}"
         )
-        # The child's own measurement starts after its interpreter and imports, so it is
-        # necessarily less than the parent's sleep. `still_waiting` above is the real proof;
-        # this is the coarse floor that separates blocking from an unblocked call, which takes
-        # single-digit milliseconds.
+        # With the handshake above, the child's clock starts at the lock rather than at its
+        # interpreter, so this is now a measurement of blocking and not of startup. The floor is
+        # half the hold, which leaves room for scheduling on a busy runner while staying far
+        # above the single-digit milliseconds an uncontended `put_hold` takes.
         waited = float(output.strip().splitlines()[-1])
-        assert waited >= 0.25, f"the child did not block on the lock: waited {waited}s"
+        assert waited >= held_for / 2, f"the child did not block on the lock: waited {waited}s"
     finally:
         PostgresStateStore.drop_schema(POSTGRES_URL, schema)
 
