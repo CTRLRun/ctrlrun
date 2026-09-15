@@ -1,0 +1,120 @@
+---
+title: "CTRLRun integration"
+description: "Integrate with the CTRLRun middleware using LangChain Python."
+---
+
+<!--
+  DRAFT for langchain-ai/docs → src/oss/python/integrations/middleware/ctrlrun.mdx
+
+  Do not submit until `ctrlrun-langchain` is on PyPI: the details table renders live PyPI
+  version and download badges, and a page whose badges 404 is a page that gets closed.
+
+  Submitting also needs, in the same PR:
+    - src/docs.json — the page added to the Integrations nav under middleware
+    - the all-integrations table entry, per src/oss/python/integrations/middleware/index.mdx
+-->
+
+This guide provides a quick overview for getting started with the CTRLRun [middleware](/oss/langchain/middleware/overview/). CTRLRun checks every tool call your agent makes against a policy you write, before the call runs, and records what happened after.
+
+## Overview
+
+### Details
+
+| Class | Package | Serializable | Downloads | Version |
+| :--- | :--- | :---: | :---: | :---: |
+| `CTRLRunMiddleware` | [`ctrlrun-langchain`](https://pypi.org/project/ctrlrun-langchain/) | beta/❌ | ![PyPI - Downloads](https://img.shields.io/pypi/dm/ctrlrun-langchain?style=flat-square&label=%20) | ![PyPI - Version](https://img.shields.io/pypi/v/ctrlrun-langchain?style=flat-square&label=%20) |
+
+### Features
+
+- **Policy-gated tool calls** — a refused call never reaches the tool, and the model is told which rule refused it
+- **Once stays once** — an effect key executes at most once, across processes sharing a store
+- **Unknown outcomes stay unknown** — a tool that raises leaves the effect unresolved rather than retried
+- **Human approval** — a policy decision of `approve` holds the call for a person
+- **A receipt for every decision** — requests, decisions and results, refusals included
+
+---
+
+## Setup
+
+No account and no API key. CTRLRun is a library, and the policy is a file in your repository.
+
+### Installation
+
+```bash
+pip install ctrlrun-langchain
+```
+
+### Write a policy
+
+`ctrlrun.yaml` says how much autonomy each tool gets. Unknown tools are denied; there is no default-allow.
+
+```yaml
+schema: ctrlrun.policy/v2
+actions:
+  lookup_order:
+    decision: allow
+  issue_refund:
+    effect: "refund:{payment_id}"
+    rules:
+      - when: { amount_gte: 0, amount_lte: 5000 }   # up to €50.00, autonomous
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 } # up to €5,000.00, ask a human
+        decision: approve
+      - decision: deny
+```
+
+## Instantiation
+
+```python
+from langchain.agents import create_agent
+from ctrlrun import Control
+from ctrlrun_langchain import CTRLRunMiddleware
+
+control = Control.from_file("ctrlrun.yaml")
+
+agent = create_agent(
+    model="gpt-5.5",
+    tools=[lookup_order, issue_refund],
+    middleware=[CTRLRunMiddleware(control)],
+)
+```
+
+## Invocation
+
+```python
+import ctrlrun
+
+with ctrlrun.context(agent="support-agent"):
+    result = agent.invoke({"messages": [{"role": "user", "content": "refund order 4471"}]})
+```
+
+Every protected call needs a principal: who is acting is an authorization input, so a call without one is denied before the policy is consulted. `ctrlrun.context(...)` supplies it in development; in production an identity provider verifies a credential instead.
+
+## What the agent sees
+
+The middleware uses [`wrap_tool_call`](/oss/langchain/middleware/custom), so a refused call is short-circuited — the tool is never invoked, and the model receives a `ToolMessage` explaining why:
+
+```text
+issue_refund  amount=900000    CTRLRun refused this call: rule[2]. The tool did not run.
+rm_rf                          CTRLRun refused this call: unknown_action. The tool did not run.
+issue_refund  amount=1000      (the tool runs)
+issue_refund  amount=1000      CTRLRun refused this call: this effect is already committed
+```
+
+That last line is the property worth knowing about. Because `handler` is the executor, the effect is reserved before the tool runs and committed from what it returned. Two agents sharing a store cannot both execute the same effect key, and a tool that raises leaves the outcome `AMBIGUOUS` rather than `FAILED` — so the retry is refused until a person resolves it, instead of becoming a double charge.
+
+## Approvals
+
+Where the policy says `approve`, the call is held and the model is told how to release it:
+
+```text
+CTRLRun is holding this call for a human. Approve it with 'ctrlrun approve apr_...',
+then ask again. The tool did not run.
+```
+
+To have the human answered *inside* the run instead, use [`ctrlrun-langgraph`](https://pypi.org/project/ctrlrun-langgraph/), which routes the approval through LangGraph's `interrupt()` and re-presents the same proposal on resume.
+
+## API reference
+
+- [CTRLRun documentation](https://docs.ctrlrun.dev/)
+- [`ctrlrun-langchain` source](https://github.com/CTRLRun/ctrlrun/tree/main/adapters/langchain)
