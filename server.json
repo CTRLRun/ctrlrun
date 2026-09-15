@@ -8,13 +8,13 @@
     "url": "https://github.com/CTRLRun/ctrlrun",
     "source": "github"
   },
-  "version": "0.12.1",
+  "version": "0.12.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "ctrlrun",
-      "version": "0.12.1",
+      "version": "0.12.2",
       "transport": {
         "type": "streamable-http",
         "url": "http://127.0.0.1:8901/mcp"

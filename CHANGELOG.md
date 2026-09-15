@@ -9,6 +9,44 @@ any change to one appears here.
 
 ## [Unreleased]
 
+## [0.12.2] — the operator's tool descriptions, and the marker the registry reads
+
+A patch release with no change to the enforcement path. Two things sat on `main` with no way for
+anyone to install them: the operator's tool and argument descriptions, which are what an MCP
+client puts in front of a model, and the `mcp-name:` marker the official MCP registry reads out
+of this package's long description to verify the namespace. The second one can only work from a
+published release, because the description it reads is the README of a distribution on PyPI.
+
+### Changed
+
+- **Every operator tool argument now describes itself, and the read tools say which to reach
+  for.** An input schema could say `control` was a string; it could not say that it filters
+  rather than selects, that `since` takes `24h` as readily as a timestamp, or that a `failed`
+  resolution is what unblocks a retry. `list_pending_approvals` now says it is where the request
+  ids come from, and `limit` says it bounds the response and not the scan, so a store holding
+  many answered requests still walks them. A caller that has to infer any of this from an
+  argument's name is guessing, and this server exists so that nobody guesses.
+
+### Added
+
+- **`server.json`, the manifest for the official MCP registry**, naming
+  `io.github.CTRLRun/ctrlrun-mcp-operator` and the PyPI distribution that carries it, with the
+  matching `mcp-name:` marker in the README. The namespace carries the owning organisation's own
+  case because the registry matches it case-sensitively against the OIDC token's
+  `repository_owner`, and the two are pinned to each other, and both versions to
+  `pyproject.toml`, by tests.
+- **The registry listing publishes itself on a kernel tag.** A job in `publish.yml` that runs
+  after the PyPI upload, authenticates with a GitHub OIDC token rather than a stored credential,
+  installs the publisher binary pinned by version and checksum, and leaves alone a version the
+  registry already has.
+- **`glama.json`**, naming the maintainer of the Glama listing.
+
+### Fixed
+
+- **The README's MCP row pointed an approver at the server and not at their own page.** It now
+  links the page written for the person answering the request.
+
+
 ## [0.12.1] — the verify fixes 0.12.0 was tagged just before
 
 `0.12.0` was tagged at the release merge, and these three landed on `main` shortly after, so the
