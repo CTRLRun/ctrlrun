@@ -800,6 +800,35 @@ def test_T185_a_write_tools_description_says_what_it_costs_the_approver():
             assert tool.description.startswith("Read-only."), tool.name
 
 
+def test_every_tool_argument_carries_a_description_and_enums_explain_their_values():
+    """§4.6 says what a tool's own description must carry; this is the same argument one level
+    down. An input schema can say `control` is a string and `since` is a string, and it cannot
+    say that one filters rather than selects, or that the other takes `24h` as readily as a
+    timestamp. A caller that has to infer those from the name guesses, and the whole point of
+    this server is that the human answering does not guess.
+
+    The length floor is what stops the description being the parameter name again; it is
+    deliberately the only shape rule, because a first draft also banned the argument's own name
+    from its description and that failed on `control`, whose description has to say "control id"
+    to be any use at all. The enum rule is there because `state` and `outcome` are the two
+    arguments where the values, not the argument, are the thing needing explanation:
+    `ambiguous` is not self-evidently the state that blocks a retry, and `failed` is not
+    self-evidently the answer that releases one.
+    """
+    from ctrlrun.gateway.operator import TOOLS
+
+    for tool in TOOLS:
+        assert tool.properties, tool.name
+        for argument, schema in tool.properties.items():
+            where = f"{tool.name}.{argument}"
+            description = schema.get("description", "")
+            assert description, where
+            assert len(description) >= 40, where
+            if "enum" in schema:
+                named = [value for value in schema["enum"] if value in description]
+                assert len(named) >= 2, f"{where} explains {named} of {schema['enum']}"
+
+
 # --- T186 — expiry, on both sides of the clock ------------------------------------------
 
 
