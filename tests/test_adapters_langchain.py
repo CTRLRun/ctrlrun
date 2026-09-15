@@ -177,6 +177,41 @@ def test_a_tool_that_raises_leaves_the_outcome_unknown_rather_than_failed(contro
     assert "ctrlrun resolve" in _content(retry)
 
 
+# --- what CodeRabbit found on #225, each with the regression that keeps it fixed -------------
+
+
+def test_an_effect_template_naming_a_missing_argument_refuses_rather_than_raising(
+    control, handler, ran
+):
+    """`_effect_key` raises `InvalidArgument` when the template names an argument the call did
+    not supply. Resolved outside the guard it aborts the agent run; the contract here is a
+    refusal the model can read, so it is resolved inside it."""
+    with ctrlrun.context(agent="langchain-agent"):
+        result = CTRLRunMiddleware(control).wrap_tool_call(
+            Request("refund", {"amount": 1000}),
+            handler,  # no payment_id, which the effect names
+        )
+    assert ran == []
+    assert "did not run" in _content(result)
+
+
+def test_the_task_is_forwarded_to_execute_rather_than_stored_and_dropped(control, handler):
+    """A grant carrying `tasks` refuses a call that names none (SPEC-v0.9 §6.4), so a `task`
+    this middleware accepted and never passed on would deny exactly the calls it was set to
+    permit. The parameter existing is not the claim; arriving is."""
+    seen: dict[str, object] = {}
+    execute = control.execute
+
+    def spy(action, executor, effect_key=None, **kwargs):
+        seen.update(kwargs)
+        return execute(action, executor, effect_key, **kwargs)
+
+    control.execute = spy  # type: ignore[method-assign]
+    with ctrlrun.context(agent="langchain-agent"):
+        CTRLRunMiddleware(control, task="tkt-4471").wrap_tool_call(Request("lookup", {}), handler)
+    assert seen.get("task") == "tkt-4471"
+
+
 # --- the principal is read, never supplied ---------------------------------------------------
 
 

@@ -109,6 +109,10 @@ class CTRLRunMiddleware(AgentMiddleware):
 
         try:
             action = self._action(name, arguments)
+            # Resolved here rather than at the call below, because an effect template naming an
+            # argument this call did not supply raises `InvalidArgument`, and a refusal the
+            # model can read is what this hook owes. An exception here would abort the agent.
+            effect_key = self._effect_key(name, arguments)
         except Exception as exc:  # a policy that cannot name this tool is a refusal
             return _tool_message(request, _REFUSED.format(reason=f"could not be evaluated: {exc}"))
 
@@ -123,7 +127,7 @@ class CTRLRunMiddleware(AgentMiddleware):
             return result
 
         try:
-            self._control.execute(action, executor, self._effect_key(name, arguments))
+            self._control.execute(action, executor, effect_key, task=self._task)
         except ActionDenied as denied:
             return _tool_message(request, _REFUSED.format(reason=denied.reason))
         except ApprovalRequired as pending:

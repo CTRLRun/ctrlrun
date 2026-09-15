@@ -257,7 +257,8 @@ jobs:
         run: |
           pip install --require-hashes -r requirements/adapters.txt
           pip install --no-deps --no-build-isolation -e .
-          pip install --no-deps --no-build-isolation -e adapters/langgraph -e adapters/openai-agents
+          pip install --no-deps --no-build-isolation \
+            -e adapters/langgraph -e adapters/openai-agents -e adapters/langchain
 
       # The frameworks are installed, so a skip here is a failure and not a configuration.
       # `-p no:randomly` is not used and no marker is filtered: this is the whole of both files.
@@ -267,6 +268,7 @@ jobs:
           python -m pytest -q -rs \
             tests/test_adapters_langgraph.py \
             tests/test_adapters_openai_agents.py \
+            tests/test_adapters_langchain.py \
             --junitxml=adapters.xml
           python - <<'PY'
           import xml.etree.ElementTree as ET
