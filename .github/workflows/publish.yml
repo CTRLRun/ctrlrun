@@ -16,6 +16,7 @@ on:
       - "v*"
       - "adapters-langgraph-*"
       - "adapters-openai-agents-*"
+      - "adapters-langchain-*"
 
 permissions:
   contents: read
@@ -44,6 +45,7 @@ jobs:
             v*)                          target=ctrlrun;               path=.;                       kernel=true  ;;
             adapters-langgraph-*)        target=ctrlrun-langgraph;     path=adapters/langgraph;      kernel=false ;;
             adapters-openai-agents-*)    target=ctrlrun-openai-agents; path=adapters/openai-agents;  kernel=false ;;
+            adapters-langchain-*)        target=ctrlrun-langchain;     path=adapters/langchain;      kernel=false ;;
             *) echo "::error::$GITHUB_REF_NAME names no distribution"; exit 1 ;;
           esac
           echo "target=$target" >> "$GITHUB_OUTPUT"
