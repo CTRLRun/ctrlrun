@@ -36,3 +36,9 @@ venv/
 # `research/*/results/` are; the raw tool captures that produced them are not -- they are
 # the run, not the finding.
 audit/**/*.log
+
+# Build caches from the site tooling. `adopt-site/.vite/deps/` was committed by accident in
+# #138 and sat in the repository root for four milestones: two files, an empty dependency
+# cache, referenced by nothing.
+node_modules/
+.vite/

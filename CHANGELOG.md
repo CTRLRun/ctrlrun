@@ -9,6 +9,15 @@ any change to one appears here.
 
 ## [Unreleased]
 
+## [0.12.1] — the verify fixes 0.12.0 was tagged just before
+
+`0.12.0` was tagged at the release merge, and these three landed on `main` shortly after, so the
+published wheel carried none of them. Nothing here touches the enforcement path: the whole of it
+is `verify/scenarios.py`, the self-check tool. It under-reported rather than over-claimed, which
+is the safe direction, but the under-report was severe enough to read as a tool that checks
+nothing. On the document below, `0.12.0` grades **1 of 1** and calls thirty-one not applicable;
+this release grades **22 of 22**.
+
 ### Fixed
 
 - **`ctrlrun verify` sized every vector for eighteen spends, and a grant with an ordinary
@@ -28,6 +37,11 @@ any change to one appears here.
 - **A boolean condition was negated with a string.** `X_neq` on `counterparty_new_eq: true`
   produced `"ctrlrun-verify"`, neither answer; the vector landed in the next rule by accident of
   `eq` and carried a value no document could mean. A boolean is negated with the other boolean.
+- **`adopt-site/` was a committed build cache.** Two files, `.vite/deps/package.json` and an
+  empty `_metadata.json`, swept into the repository root by #138 and referenced by nothing for
+  four milestones. Removed, and `.vite/` and `node_modules/` are in `.gitignore` so it cannot
+  recur. It shipped in no distribution; this is the repository root a reader lands on.
+
 
 ## [0.12.0] — Hardening
 
