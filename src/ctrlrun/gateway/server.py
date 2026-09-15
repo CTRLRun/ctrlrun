@@ -1013,13 +1013,27 @@ class Gateway:
         )
 
     def _awaiting(self, action: Action, pending: ApprovalRequired, request_id: Any) -> _Response:
-        """§6.10 — "no" is an answer, and re-asking is not free."""
+        """§6.10 — "no" is an answer, and re-asking is not free.
+
+        **The message is written here rather than taken from the exception.** `ApprovalRequired`
+        carries the decorator's wording, *"run `ctrlrun approve …`, then retry inside
+        `ctrlrun.with_approval(…)`"*, and `with_approval` is a Python context manager. Relaying
+        that verbatim told an MCP client, which may be in any language and is often a model
+        reading the error as text, to call an API it has no access to. The correct next step on
+        this path is the one `docs/mcp/gateway-in-5-minutes.mdx` already documents: a human
+        approves and **the agent's next identical call runs**, because the approval is bound to
+        the hash of what the human saw.
+        """
         record = self._control.store.get_approval(pending.request_id)
         code, token, status = APPROVAL_REQUIRED
         data: dict[str, Any] = {"request_id": pending.request_id, "action_hash": action.action_hash}
         if record is not None:
             data["expires_at"] = record.expires_at.isoformat()
-        return _json(status, json_rpc_error(request_id, code, token, str(pending), **data))
+        message = (
+            f"{action.name} requires approval: a human runs "
+            f"'ctrlrun approve {pending.request_id}', then this same call runs"
+        )
+        return _json(status, json_rpc_error(request_id, code, token, message, **data))
 
     def _upstream_response(
         self,

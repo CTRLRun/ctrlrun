@@ -50,6 +50,19 @@ if result.interruptions:
     result = await gate.run(agent, state)
 ```
 
+**Every protected call needs a principal**, and `identity=...` above is where it comes from. In
+production that is a provider that verifies a credential; in development it is
+`with ctrlrun.context(agent="support-agent"):` around the call. Without one, the action is
+denied before the policy is consulted, with a message that names both fixes:
+
+```text
+ActionDenied: stripe.refund: no principal is available; wrap the call in
+'with ctrlrun.context(agent=...)', or install an identity provider that answers
+```
+
+That is fail-closed and deliberate: who is acting is an authorization input, and a library that
+guessed it would be inventing the one field a grant is matched against.
+
 **The operator constructs the `Control`** — this adapter never does (SPEC-v0.5 §2.3), so the
 identity provider, the authority document, the environment and the mode are all chosen on the
 line above, by the person deploying it.

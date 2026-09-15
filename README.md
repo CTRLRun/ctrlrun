@@ -123,7 +123,7 @@ Read them:    CTRLRUN_STATE=.ctrlrun/demo/state.db ctrlrun receipts
 
 Approval and delegation ids are generated per run; everything else is exactly what the demo
 prints, and a test fails if the two drift apart. No network, no external service, under a
-second. [Run it in your browser](https://docs.ctrlrun.dev/try-it) with nothing installed.
+second. `pip install ctrlrun && ctrlrun demo` runs it locally in about the same time.
 
 </details>
 
@@ -410,11 +410,11 @@ about your domain gets written down; CTRLRun is what makes it hold.
 ## Documentation
 
 **[docs.ctrlrun.dev](https://docs.ctrlrun.dev/)** is the documentation: concepts, guides, a cookbook, the
-full reference, and a browser demo that runs with no install.
+full reference.
 
 | | |
 |---|---|
-| Start here | [Why](https://docs.ctrlrun.dev/why) · [Protect your first action](https://docs.ctrlrun.dev/get-started/quickstart) · [Try it in your browser](https://docs.ctrlrun.dev/try-it) |
+| Start here | [Why](https://docs.ctrlrun.dev/why) · [Protect your first action](https://docs.ctrlrun.dev/get-started/quickstart) |
 | The ideas, and doing something with them | [Concepts](https://docs.ctrlrun.dev/concepts/outcomes-and-ambiguous) · [Guides](https://docs.ctrlrun.dev/guides/protect-a-function) · [Cookbook](https://docs.ctrlrun.dev/cookbook/index) |
 | Agents and MCP | [Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) · [MCP overview](https://docs.ctrlrun.dev/mcp/overview) · [The gateway in five minutes](https://docs.ctrlrun.dev/mcp/gateway-in-5-minutes) |
 | Running it for real | [Production](https://docs.ctrlrun.dev/production/index) · [Postgres](https://docs.ctrlrun.dev/production/postgres) · [Recovery](https://docs.ctrlrun.dev/production/recovery) · [Operations](https://docs.ctrlrun.dev/production/operations) |
