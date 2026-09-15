@@ -11,6 +11,9 @@ authors:
   - family-names: Ghoshal
     given-names: Arpan
     email: contact@arpanghoshal.com
+  - family-names: Kamath
+    given-names: Rohan
+    email: rkamath1610@gmail.com
 version: 0.12.1
 repository-code: https://github.com/CTRLRun/ctrlrun
 url: https://github.com/CTRLRun/ctrlrun
