@@ -9,6 +9,26 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ctrlrun verify` sized every vector for eighteen spends, and a grant with an ordinary
+  count budget graded nothing.** `select` fitted each candidate to the grant's budgets with
+  `PROCESSES * 2 + 2` of room, G4's nine landings doubled, for every guarantee. A document whose
+  grant said twelve refunds an hour, which is what a payments pack writes for a support agent,
+  reported twenty-three guarantees not applicable, "every action reaching this decision exceeds
+  a budget on the grant that covers it", about a budget that admitted the action twelve times.
+  The room is now the scenario's own: `DEFAULT_SPENDS`, four, unless the scenario says
+  otherwise, and G4 says `PROCESSES + 2`.
+- **The synthesizer stopped at the first rule of a decision.** A grant's budget can refuse the
+  first rule's vector for a reason the second rule's does not share: a document whose first
+  `approve` rule is `counterparty_new_eq: true` yields a vector with no `amount`, which a budget
+  on `amount` cannot measure, while the next `approve` rule is the amount band the budget was
+  written for. `select` now tries every candidate of a decision, rule by rule, before it
+  concludes nothing binds.
+- **A boolean condition was negated with a string.** `X_neq` on `counterparty_new_eq: true`
+  produced `"ctrlrun-verify"`, neither answer; the vector landed in the next rule by accident of
+  `eq` and carried a value no document could mean. A boolean is negated with the other boolean.
+
 ## [0.11.0] — Evidence
 
 One question: **can the record be trusted after the fact, and kept?**

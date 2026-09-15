@@ -18,7 +18,7 @@ import pytest
 from ctrlrun.authority import DIMENSIONS
 from ctrlrun.verify import Status, VerifyRefused, run
 from ctrlrun.verify import guarantees as reg
-from ctrlrun.verify.scenarios import EXPIRY_NOT_DECISIVE
+from ctrlrun.verify.scenarios import DEFAULT_SPENDS, EXPIRY_NOT_DECISIVE, _negate_value
 
 pytestmark = pytest.mark.authority
 
@@ -611,7 +611,7 @@ actions:
     if result.status is Status.PASS:
         graded = dict(result.arguments or {})
         # Nine spends have to fit inside 900, so a vector of 900, or of 450, would not do.
-        assert graded["amount"] * 18 <= 900, graded
+        assert graded["amount"] * (reg.PROCESSES + 1) <= 900, graded
 
 
 FLOORED_RULE = """
@@ -655,26 +655,29 @@ def test_T413g_a_band_whose_floor_leaves_no_headroom_is_N_A_and_never_FAIL(tmp_p
 
     assert result.status is not Status.FAIL, result.reason
     if result.status is Status.PASS:
-        assert dict(result.arguments or {})["amount"] * 18 <= 900, result.arguments
+        assert dict(result.arguments or {})["amount"] * (reg.PROCESSES + 1) <= 900, result.arguments
 
 
 def test_T413h_a_resize_never_silently_grades_a_different_rule(tmp_path):
     """`select`'s contract is the decision **and the rule** it was asked for.
 
-    Two bands reach `allow` here. `_synthesize` picks the upper one, and every value small
-    enough for the budget lands in the lower one, which is a different rule with a different
-    reason. Checking only the decision would let verify grade a rule nobody selected and report
-    it under the first band's name.
+    Two bands reach `allow` here. The upper one is tried first, and every value small enough
+    for the budget lands in the lower one, which is a different rule with a different reason.
+    Checking only the decision would let verify resize the upper band's vector below its own
+    floor and grade it under the upper band's name.
 
-    So the honest answer is that no vector fits, and the guarantee is `N/A`.
+    So a resize that leaves the rule is declined, and the honest answer is the next candidate:
+    the lower band's own vector, selected under the lower band's name, which fits the budget
+    as it stands. Where no candidate fits at all the guarantee is `N/A`.
     """
     path = _write(tmp_path, V7 + TIGHT_BUDGET + TWO_ALLOW_BANDS)
 
     result = _by_id(run(path, only=("G3",)))["G3"]
 
     if result.status is Status.PASS:
-        assert dict(result.arguments or {})["amount"] >= 1000, (
-            f"verify graded a band it was not asked for: {result.arguments}"
+        graded = dict(result.arguments or {})["amount"]
+        assert graded <= 999 and graded * DEFAULT_SPENDS <= 900, (
+            f"verify graded a vector no rule of the document admits at that size: {graded}"
         )
     else:
         assert result.status is Status.NOT_APPLICABLE, result.reason
@@ -775,8 +778,8 @@ def test_T413k_the_two_metric_vector_is_under_both_budgets(tmp_path):
     result = _by_id(run(path, only=("G3",)))["G3"]
 
     graded = dict(result.arguments or {})
-    assert graded["amount"] * 18 <= 100000, graded
-    assert graded["tip"] * 18 <= 100000, graded
+    assert graded["amount"] * DEFAULT_SPENDS <= 100000, graded
+    assert graded["tip"] * DEFAULT_SPENDS <= 100000, graded
 
 
 TASKED_SHADOW = """
@@ -1066,3 +1069,57 @@ def test_T413t_a_v09_guarantee_grades_the_same_alone_as_in_a_full_run(gid, tmp_p
         f"{gid} alone: {alone.status} ({alone.reason}); in a full run: {together.status} "
         f"({together.reason})"
     )
+
+
+# --- the room a vector is sized for is the scenario's own ---------------------------------
+
+TWELVE_AN_HOUR = """
+authority:
+  grants:
+    - id: support-agent
+      subject: { agent: "support-agent" }
+      actions: ["acme.refund"]
+      resources: ["payment:*"]
+      environments: ["production"]
+      budgets:
+        - {metric: amount, limit: 500000, window: PT24H}
+        - {metric: count, limit: 12, window: PT1H}
+actions:
+  acme.refund:
+    effect: "refund:{payment_id}"
+    resource: "payment:{payment_id}"
+    rules:
+      - when: { counterparty_new_eq: true }
+        decision: approve
+      - when: { amount_gte: 0, amount_lte: 50000 }
+        decision: allow
+      - when: { amount_gte: 0, amount_lte: 500000 }
+        decision: approve
+      - decision: deny
+"""
+
+
+def test_a_count_budget_of_twelve_an_hour_grades_the_guarantees_that_spend_a_handful(tmp_path):
+    """The payments pack's own grant: twelve refunds an hour, and every guarantee read N/A.
+
+    One size for every scenario was `PROCESSES * 2 + 2`, eighteen, which no count budget an
+    operator writes for an agent admits. G1 spends a handful and is sized for that; G4 spends
+    `PROCESSES + 1` and says so, and is sized for that.
+    """
+    path = _write(tmp_path, V7 + TWELVE_AN_HOUR)
+
+    results = _by_id(run(path, only=("G1", "G3", "G4", "G22")))
+
+    for gid in ("G1", "G3", "G4", "G22"):
+        assert results[gid].status is Status.PASS, (gid, results[gid].reason)
+    assert dict(results["G4"].arguments or {})["amount"] * (reg.PROCESSES + 1) <= 500000
+
+
+def test_a_boolean_condition_is_negated_with_the_other_boolean():
+    """`counterparty_new_eq: true` used to be negated with a string that is neither answer;
+    the vector landed in the next rule by accident of `eq` and carried a value no document
+    could mean."""
+    assert _negate_value(True) is False
+    assert _negate_value(False) is True
+    assert _negate_value(7) == 8
+    assert _negate_value("x") == "x-x"
