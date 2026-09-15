@@ -26,6 +26,14 @@
 #     ctrlrun<0.11,>=0.5
 #
 # Which is the v0.10 defect this file was written for, recurring one release later, in the file.
+#
+# **And it went stale a third time, in the opposite direction.** The 0.11.0 release tagged and
+# published both adapters at 1.2.0 with `<0.12`, and nobody came back here afterwards, so this
+# file spent a release claiming 1.1.0 / `<0.11` while PyPI served 1.2.0 / `<0.12`. The guard below
+# said nothing, because a tree that differs from the record *and* carries a higher version is
+# exactly the shape of a correct pending release. The rule in the line above -- update the row
+# **after** the upload succeeds -- is the one that was not followed, and it is easy to miss
+# precisely because the upload is the last thing that happens.
 # A record edited to match a claim is not a record. `RECORDED` in `test_packaging.py` freezes the
 # range each published version declares, so raising one without a new version now fails.
 #
@@ -40,9 +48,9 @@
 # that gets skipped in the run that mattered.
 
 [langgraph]
-version = "1.1.0"
-kernel = ">=0.5,<0.11"
+version = "1.2.0"
+kernel = ">=0.5,<0.12"
 
 [openai-agents]
-version = "1.1.0"
-kernel = ">=0.5,<0.11"
+version = "1.2.0"
+kernel = ">=0.5,<0.12"
