@@ -237,7 +237,10 @@ def test_the_readme_names_the_primitive_it_reuses_and_where_it_is_documented():
     was written."""
     text = readme()
     assert "wrap_tool_call" in text
-    assert "docs.langchain.com" in text
+    # The whole URL, not the host. A bare hostname reads as a URL-sanitization check to
+    # CodeQL (py/incomplete-url-substring-sanitization) and is the weaker assertion anyway:
+    # what §7 asks for is the page, so that is what this pins.
+    assert "https://docs.langchain.com/oss/langchain/middleware/custom" in text
     assert "Read 2026-09-16" in text
 
 
