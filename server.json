@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ctrlrun/ctrlrun-mcp-operator",
+  "title": "CTRLRun Operator",
+  "description": "Answer CTRLRun approvals from an MCP client. Lists the pending approval requests, inspects a held action, grants or denies one, resolves an ambiguous effect, and reads receipts, effects and stats. Read tools answer without a credential; write tools refuse without one that names a person.",
+  "websiteUrl": "https://docs.ctrlrun.dev/mcp/overview",
+  "repository": {
+    "url": "https://github.com/CTRLRun/ctrlrun",
+    "source": "github"
+  },
+  "version": "0.12.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "ctrlrun",
+      "version": "0.12.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:8901/mcp"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-operator",
+          "description": "Serve the operator's own commands as MCP tools, over loopback."
+        }
+      ]
+    }
+  ]
+}
