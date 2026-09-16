@@ -1,6 +1,6 @@
 ---
-title: "CTRLRun integration"
-description: "Integrate with the CTRLRun middleware using LangChain Python."
+title: "ctrlrun integration"
+description: "Integrate with the ctrlrun middleware using LangChain Python."
 ---
 
 <!--
@@ -14,7 +14,7 @@ description: "Integrate with the CTRLRun middleware using LangChain Python."
     - the all-integrations table entry, per src/oss/python/integrations/middleware/index.mdx
 -->
 
-This guide provides a quick overview for getting started with the CTRLRun [middleware](/oss/langchain/middleware/overview/). CTRLRun checks every tool call your agent makes against a policy you write, before the call runs, and records what happened after.
+This guide provides a quick overview for getting started with the ctrlrun [middleware](/oss/langchain/middleware/overview/). ctrlrun checks every tool call your agent makes against a policy you write, before the call runs, and records what happened after.
 
 ## Overview
 
@@ -36,7 +36,7 @@ This guide provides a quick overview for getting started with the CTRLRun [middl
 
 ## Setup
 
-No account and no API key. CTRLRun is a library, and the policy is a file in your repository.
+No account and no API key. ctrlrun is a library, and the policy is a file in your repository.
 
 ### Installation
 
@@ -95,10 +95,10 @@ Every protected call needs a principal: who is acting is an authorization input,
 The middleware uses [`wrap_tool_call`](/oss/langchain/middleware/custom), so a refused call is short-circuited — the tool is never invoked, and the model receives a `ToolMessage` explaining why:
 
 ```text
-issue_refund  amount=900000    CTRLRun refused this call: rule[2]. The tool did not run.
-rm_rf                          CTRLRun refused this call: unknown_action. The tool did not run.
+issue_refund  amount=900000    ctrlrun refused this call: rule[2]. The tool did not run.
+rm_rf                          ctrlrun refused this call: unknown_action. The tool did not run.
 issue_refund  amount=1000      (the tool runs)
-issue_refund  amount=1000      CTRLRun refused this call: this effect is already committed
+issue_refund  amount=1000      ctrlrun refused this call: this effect is already committed
 ```
 
 That last line is the property worth knowing about. Because `handler` is the executor, the effect is reserved before the tool runs and committed from what it returned. Two agents sharing a store cannot both execute the same effect key, and a tool that raises leaves the outcome `AMBIGUOUS` rather than `FAILED` — so the retry is refused until a person resolves it, instead of becoming a double charge.
@@ -108,7 +108,7 @@ That last line is the property worth knowing about. Because `handler` is the exe
 Where the policy says `approve`, the call is held and the model is told how to release it:
 
 ```text
-CTRLRun is holding this call for a human. Approve it with 'ctrlrun approve apr_...',
+ctrlrun is holding this call for a human. Approve it with 'ctrlrun approve apr_...',
 then ask again. The tool did not run.
 ```
 
@@ -116,5 +116,5 @@ To have the human answered *inside* the run instead, use [`ctrlrun-langgraph`](h
 
 ## API reference
 
-- [CTRLRun documentation](https://docs.ctrlrun.dev/)
+- [ctrlrun documentation](https://docs.ctrlrun.dev/)
 - [`ctrlrun-langchain` source](https://github.com/CTRLRun/ctrlrun/tree/main/adapters/langchain)

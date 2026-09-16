@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Deriving scenarios from a configuration, and running them. SPEC-v0.4 §3.
 
@@ -1946,7 +1946,7 @@ class Engine:
 
         def body(detail: dict[str, Any]) -> None:
             # The control carries more weight than any other in the catalogue: it is the only
-            # thing separating "CTRLRun blocks blind retries" from "CTRLRun blocks retries",
+            # thing separating "ctrlrun blocks blind retries" from "ctrlrun blocks retries",
             # and the second sentence describes a library nobody can deploy (§2.2).
             control_key = f"{selection.effect_key!s}-{reg.SYNTHETIC_PREFIX}-control"
             seen: list[int] = []
@@ -5430,7 +5430,7 @@ class _VerifyAnchorProvider:
 
     In memory, and deliberately the simplest thing that satisfies the protocol: it records what
     it was asked to vouch for and answers about it. It is **not** a timestamp authority and does
-    not pretend to be one. What `G28` grades is that CTRLRun asks the right questions of whatever
+    not pretend to be one. What `G28` grades is that ctrlrun asks the right questions of whatever
     the operator supplies and refuses on the right answers, exactly as `G23` grades a scope
     provider verify supplies rather than one it found.
 

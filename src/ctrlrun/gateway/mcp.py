@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Request parsing and header-body validation. Build-list item 6b; SPEC-v0.2 §6.2, §6.4, §6.6.
 
@@ -325,7 +325,7 @@ def _agrees(declared: str, value: object) -> bool:
     Anything that is not a string, an integer or a boolean has **no** header encoding at all:
     the revision permits `x-mcp-header` only on those three, and says a `null` parameter omits
     its header entirely. So a header naming an argument of any other type cannot agree with it,
-    and the answer is `False` rather than a comparison against a rendering CTRLRun made up.
+    and the answer is `False` rather than a comparison against a rendering ctrlrun made up.
     """
     if isinstance(value, str):
         return declared == value

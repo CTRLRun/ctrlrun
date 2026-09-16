@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The operator MCP server. SPEC-mcp-operator.md.
 
@@ -801,7 +801,7 @@ class OperatorServer:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": _version()},
             "instructions": (
-                "CTRLRun operator console. The read tools show what is waiting and what "
+                "ctrlrun operator console. The read tools show what is waiting and what "
                 "happened. approve, deny and resolve write, need an authenticated human, and "
                 "record the answer under that person's name. Nothing here can make an agent "
                 "act."

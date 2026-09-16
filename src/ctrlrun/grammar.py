@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The policy document grammar: schemas, strict loading, and the condition evaluator.
 
@@ -310,7 +310,7 @@ class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # PyYAML ships no s
 
 
 def strict_load(text: str, source: str) -> Any:  # noqa: ANN401 - any YAML scalar or node
-    """`yaml.safe_load`, refusing a repeated key. The one loader for every CTRLRun document.
+    """`yaml.safe_load`, refusing a repeated key. The one loader for every ctrlrun document.
 
     **`yaml.YAMLError` is not the whole contract.** PyYAML converts a scalar before it has
     decided the document is well formed, and three conversions raise the interpreter's own
@@ -414,7 +414,7 @@ def reject_nested_mode(mapping: Mapping[Any, Any], where: str) -> None:
     """Refuse a `mode:` anywhere but the top level of the policy document (SPEC-v0.3 §6.1).
 
     The closed key sets of `v0.1 §3.1` would already refuse it as unknown, wherever they
-    reach. This runs first and for its *message*: "unknown key 'mode'" reads as "CTRLRun has
+    reach. This runs first and for its *message*: "unknown key 'mode'" reads as "ctrlrun has
     no such setting", and the author who wrote it here believes they have observed one action
     while enforcing the rest. A partially-enforced configuration is the failure mode the
     top-level-only rule exists to prevent, so the error says which rule was broken.

@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`ctrlrun scan` — what a project is not covering. `docs/SPEC-scan.md`.
 
-Scan reads text. It reports the consequential call sites and policy entries CTRLRun is not
+Scan reads text. It reports the consequential call sites and policy entries ctrlrun is not
 covering, so that an operator can see the gap between *installed* and *in the path*. It is a
 finder and not a proof: §4 of the specification enumerates what it misses by construction, and
 `report_lines` prints that on every run, including the run with no findings.
@@ -192,12 +192,12 @@ class ScanReport:
     policy_read: bool
     #: SPEC-v0.10 §6.4 — the principals holding a grant no hop bounds, in codepoint order.
     #:
-    #: §2.3.2's residual is that CTRLRun cannot make a receiving agent present the hop it was
+    #: §2.3.2's residual is that ctrlrun cannot make a receiving agent present the hop it was
     #: given: one holding a grant of its own can decline and act on that instead. The deployment
     #: rule that collapses it is *an agent that only ever acts on handed-over work holds no root
     #: grant of its own*, and without a surface that rule is advice. This is the surface.
     #:
-    #: **It reports and does not score.** `v0.4 §3.9`'s rule that CTRLRun never grades an
+    #: **It reports and does not score.** `v0.4 §3.9`'s rule that ctrlrun never grades an
     #: operator's document holds here: a principal on this line is a fact, not a finding, and it
     #: does not move `exit_code`.
     root_grant_holders: tuple[str, ...] = ()

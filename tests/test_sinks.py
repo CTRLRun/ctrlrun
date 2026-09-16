@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`EventSink` and `JSONLEventSink`. Build-list item 4; SPEC-v0.2 §4, acceptance test T17.
 

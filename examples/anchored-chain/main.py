@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Erasing the end of the receipt log costs two SQL statements. An anchor makes it show.
 
@@ -40,7 +40,7 @@ STATE = Path(".ctrlrun/examples/anchored-chain")
 class FileAnchorProvider:
     """An anchor provider, in the shape `SPEC-v0.11.md` §3.2 defines and nothing more.
 
-    **CTRLRun ships none**, deliberately: `ROADMAP.md` names RFC 3161, and an RFC 3161 client is
+    **ctrlrun ships none**, deliberately: `ROADMAP.md` names RFC 3161, and an RFC 3161 client is
     a network client, which does not belong in a wheel whose rule is stdlib plus `pyyaml` and
     `click`. So the provider is yours. A real one would be a timestamp authority, a transparency
     log, an append-only bucket in another account, or a file on a host your database's writer
@@ -95,7 +95,7 @@ def four_refunds(database: Path) -> None:
 
 
 def erase_the_tail(database: Path, keep_through: int) -> None:
-    """The attack, in the two statements it really takes. Nothing here goes through CTRLRun."""
+    """The attack, in the two statements it really takes. Nothing here goes through ctrlrun."""
     connection = sqlite3.connect(database)
     connection.execute("DELETE FROM receipts WHERE seq > ?", (keep_through,))
     row = connection.execute("SELECT seq, hash FROM receipts ORDER BY seq DESC LIMIT 1").fetchone()

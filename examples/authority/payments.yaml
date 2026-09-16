@@ -78,7 +78,7 @@ authority:
 # SPEC-v0.8 §3. A control may name the role that answers for it, and an approval from a
 # principal whose verified claims do not carry that role is refused, with the control named.
 #
-# CTRLRun does not interpret the role. It does not know what `payments-approver` means, does
+# ctrlrun does not interpret the role. It does not know what `payments-approver` means, does
 # not check that such a role exists anywhere, and claims nothing about a standard or an audit
 # on the strength of one -- exactly as it does not interpret `source:`. What it does is compare one string from
 # this registry against one claim on a credential somebody else verified.

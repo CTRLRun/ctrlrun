@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Receipts and the event log. Build-list item 8; SPEC-v0.1 §6.
 
@@ -290,7 +290,7 @@ class EventType(StrEnum):
     EXECUTION_RESUMED = "EXECUTION_RESUMED"
     #: SPEC-v0.3 §7 — the five types authority and delegation add. `AUTHORITY_RESOLVED` is
     #: appended for *every* action that passes authority, not only for a delegated one:
-    #: evidence has to record that CTRLRun checked and found a grant, or a deployment with a
+    #: evidence has to record that ctrlrun checked and found a grant, or a deployment with a
     #: permissive grant is indistinguishable from one with no `authority:` section at all.
     #: The three `DELEGATION_*` types are produced by `Control.delegate` and `Control.revoke`,
     #: which land with build-list item 3; the vocabulary is closed here so a reader of an
@@ -342,7 +342,7 @@ class Event:
         }
 
     def to_json(self) -> str:
-        """One JSONL line. Enums render by value, for readers that never imported CTRLRun."""
+        """One JSONL line. Enums render by value, for readers that never imported ctrlrun."""
         return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
 
 

@@ -1,4 +1,4 @@
-# CTRLRun v0.8 Specification: Oversight
+# ctrlrun v0.8 Specification: Oversight
 
 **Status:** draft, build-list item 0.
 **Delta over:** `SPEC-v0.1.md`, `SPEC-v0.2.md`, `SPEC-v0.3.md`, `SPEC-v0.4.md`, `SPEC-v0.5.md`,
@@ -522,7 +522,7 @@ controls:
 (`title`, `source`), gated on `ctrlrun.policy/v6` so an older reader refuses the document rather
 than ignoring the key (§11.3, and `v0.6 §9.5`'s rule for `controls:` itself).
 
-**CTRLRun does not interpret it**, exactly as `v0.6 §7.3` says it does not interpret `source:`: it
+**ctrlrun does not interpret it**, exactly as `v0.6 §7.3` says it does not interpret `source:`: it
 does not know what `payments-owner` means, does not check that such a role exists anywhere, and
 makes no compliance claim on the strength of one.
 

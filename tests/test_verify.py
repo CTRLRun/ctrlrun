@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`ctrlrun verify` — the registry, the engine, G1-G6 and G10. SPEC-v0.4 §2, §3; T100-T107.
 

@@ -1,4 +1,4 @@
-# CTRLRun v0.1 Specification
+# ctrlrun v0.1 Specification
 
 This is the contract for v0.1. Tests are derived from §7. Public names are frozen in §8. Anything not in this document is out of scope for v0.1.
 
@@ -403,7 +403,7 @@ An action awaiting approval has no receipt; `APPROVAL_REQUESTED` is its evidence
 
 **When only one of the two writes succeeds.** SQLite is authoritative and the JSONL file is a convenience export of what it already holds, so the store is written first and the file second. A failed file write MUST be logged on the `ctrlrun` logger and MUST NOT be raised. By the time it runs, the effect has committed at the remote and the record is durable; raising there would reach the caller as an exception on a successful action, and an agent that reads it as a failure retries — which is the one mistake this library exists to prevent. Nothing is hidden by the loss: `ctrlrun receipts` and `ctrlrun effects` read the database, not the files. The reverse order is not available: a store that refuses the write has not recorded the action, and there is nothing to export.
 
-Enums MUST render by value everywhere evidence is produced — receipt JSON, event `data`, and CLI output: `"approve"`, never `"Decision.APPROVE"`. This is why `Decision` (§3.3) and `EffectState` (§5.2) are `StrEnum`; the guard is `test_decision_renders_by_value` in `tests/test_policy.py`, which pins `str()` and f-string interpolation. A receipt is read by tools that never imported CTRLRun.
+Enums MUST render by value everywhere evidence is produced — receipt JSON, event `data`, and CLI output: `"approve"`, never `"Decision.APPROVE"`. This is why `Decision` (§3.3) and `EffectState` (§5.2) are `StrEnum`; the guard is `test_decision_renders_by_value` in `tests/test_policy.py`, which pins `str()` and f-string interpolation. A receipt is read by tools that never imported ctrlrun.
 
 ### 6.2 Events
 

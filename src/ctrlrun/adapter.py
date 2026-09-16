@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The adapter surface. Build-list item 2; SPEC-v0.5 §2, §3.
 
@@ -199,7 +199,7 @@ class FrameworkInterrupt(Protocol):
     #: A **declaration about the framework**, not a setting. `True` makes the binding check
     #: mandatory, and an answer that omits `approved_arguments` is refused. `False` says the
     #: resumption carries nothing the adapter can inspect, so the binding across the interrupt
-    #: is the framework's checkpoint rather than CTRLRun's -- attribution, not prevention -- and
+    #: is the framework's checkpoint rather than ctrlrun's -- attribution, not prevention -- and
     #: it is not free: the conformance kit reports `binding: not_applicable` with the adapter's
     #: reason, permanently, where a reviewer reads first. A flag hides a weakening; this
     #: publishes one.

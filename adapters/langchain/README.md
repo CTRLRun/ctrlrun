@@ -1,6 +1,6 @@
 # ctrlrun-langchain
 
-Gate a LangChain agent's tool calls with a CTRLRun policy, through **LangChain's own
+Gate a LangChain agent's tool calls with a ctrlrun policy, through **LangChain's own
 `wrap_tool_call`** middleware hook.
 
 - **Supported kernel range:** `ctrlrun>=0.12,<0.13`
@@ -83,10 +83,10 @@ the agent's own tool calls are decided before they run:
 
 ```text
 lookup                              the tool runs
-issue_refund  amount=900000         CTRLRun refused this call: rule[1]. The tool did not run.
-rm_rf                               CTRLRun refused this call: unknown_action. The tool did not run.
+issue_refund  amount=900000         ctrlrun refused this call: rule[1]. The tool did not run.
+rm_rf                               ctrlrun refused this call: unknown_action. The tool did not run.
 issue_refund  amount=1000           the tool runs
-issue_refund  amount=1000  (again)  CTRLRun refused this call: this effect is already committed
+issue_refund  amount=1000  (again)  ctrlrun refused this call: this effect is already committed
 ```
 
 Nothing is default-allow: a tool the policy does not name is refused, which is why `rm_rf` above
@@ -110,7 +110,7 @@ Where the policy says `approve`, this middleware refuses the call and tells the 
 request id, rather than blocking the agent while a human deliberates:
 
 ```text
-CTRLRun is holding this call for a human. Approve it with 'ctrlrun approve apr_...',
+ctrlrun is holding this call for a human. Approve it with 'ctrlrun approve apr_...',
 then ask again. The tool did not run.
 ```
 

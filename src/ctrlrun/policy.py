@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Policy loading and rule evaluation to a Decision. Build-list item 2; SPEC-v0.1 §3.
 
@@ -225,7 +225,7 @@ def _refuse_reserved(names: Iterable[str], where: str, what: str) -> None:
     offending = sorted(name for name in names if name in DERIVED_SUBJECTS)
     if offending:
         raise PolicyError(
-            f"{where}: {', '.join(repr(name) for name in offending)} is derived by CTRLRun and "
+            f"{where}: {', '.join(repr(name) for name in offending)} is derived by ctrlrun and "
             f"may not be {what}. §7.4 resolves it at evaluation from the arguments actually "
             "supplied, so an argument of the same name would mean two things in one rule; "
             "rename the argument"
@@ -298,7 +298,7 @@ class _Rule:
 class DataLabel:
     """What class of data one argument carries (SPEC-v0.6 §7.4).
 
-    `label` is the operator's own word -- `phi`, `internal`, `pci`. CTRLRun does not know what
+    `label` is the operator's own word -- `phi`, `internal`, `pci`. ctrlrun does not know what
     any of them mean; it derives the *set* present in an action's arguments so a rule can see it.
 
     **There is no `redact`.** §7.4 put it on probation and §7.5's throwaway sector configuration
@@ -320,7 +320,7 @@ class PolicyControl:
     as a name nobody should have to disambiguate at a call site, and which §9.1 would have frozen
     for a long time. Renamed in the same change that adds it to §9.1.1's list.
 
-    **CTRLRun does not interpret a control.** `source:` is a string the operator wrote. The
+    **ctrlrun does not interpret a control.** `source:` is a string the operator wrote. The
     kernel does not know what PCI DSS is, does not check the clause exists, and makes no
     compliance, conformance or alignment claim on the strength of one -- validating a citation
     would be the beginning of interpreting it.
@@ -335,7 +335,7 @@ class PolicyControl:
     title: str
     source: str | None = None
     #: SPEC-v0.8 §3.2 — which role may answer an approval this control was cited on. An opaque
-    #: string: CTRLRun does not know what it means, does not check that such a role exists, and
+    #: string: ctrlrun does not know what it means, does not check that such a role exists, and
     #: makes no compliance claim on the strength of one, exactly as it does not interpret
     #: `source`. What it does is decide **who may answer an approval the decision already
     #: required**, which is the first thing a control has ever decided (§3.2).
@@ -892,7 +892,7 @@ def _plain(value: object) -> PlainValue:
         # `yaml.safe_load` turns an unquoted `expires_at: 2020-01-01T00:00:00Z` into a
         # `datetime`, and such documents load today -- a grant with an expiry is the ordinary
         # case. ISO-8601 is what the same value would have been had it been quoted, and what
-        # CTRLRun writes everywhere else, so this loses nothing and invents nothing.
+        # ctrlrun writes everywhere else, so this loses nothing and invents nothing.
         #
         # An earlier version of this function *refused* here, which broke every authority
         # document with an unquoted expiry. The conformance kit's own `EXPIRED_GRANT` caught it.
@@ -1498,7 +1498,7 @@ def _parse_mcp(value: object, where: str) -> McpOptions:
     _reject_unknown_keys(value, _MCP_KEYS, f"{where}: mcp")
     claimed = value.get("not_executed_on_error", False)
     # SPEC-v0.2 §3.1 — a bool, and `1` is not one. This is an assertion about a remote that
-    # CTRLRun cannot check (§6.8), so it is made deliberately or not at all.
+    # ctrlrun cannot check (§6.8), so it is made deliberately or not at all.
     if not isinstance(claimed, bool):
         raise PolicyError(
             f"{where}: mcp: 'not_executed_on_error' must be true or false, "

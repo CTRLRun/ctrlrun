@@ -45,7 +45,7 @@ milestone about limits attracts more scope than any before it.
   is evidenced in a document somebody reviewed, attenuates down a delegation chain, and holds its
   consumption through an unresolved outcome. The two are different objects that happen to count.
 - **Not a quota service.** Nothing is served, nothing is published, no endpoint answers "how much is
-  left". `v0.3 §1.1`'s rule that CTRLRun consumes and issues nothing is not relaxed here.
+  left". `v0.3 §1.1`'s rule that ctrlrun consumes and issues nothing is not relaxed here.
 - **Not a consequence taxonomy.** A budget names a metric. The kernel does not know what `amount`
   means, does not know which of two actions is more serious, and does not rank, score or grade.
   Grading an operator's actions is the same claim `v0.4 §3.9` refuses to make about their policy.
@@ -1374,7 +1374,7 @@ operational one.
 **Rows older than the longest window on any budget of a grant cannot affect any future decision.**
 That is the sentence an operator needs, and it is a consequence of §2.5 rather than a promise this
 milestone implements: it means such rows may be archived out of the live store by whatever an
-operator already uses to archive a database, without changing what the kernel decides. CTRLRun
+operator already uses to archive a database, without changing what the kernel decides. ctrlrun
 ships no retention command, no vacuum, and no policy key that expires evidence. **What it owes here
 is the invariant that makes somebody else's retention safe**, and that invariant is stated in the
 paragraph above.
@@ -1785,7 +1785,7 @@ because an earlier draft attributed all of them to the roadmap, and nine of thir
 - **A fleet-wide budget across stores.** One store, one ledger. `v0.7 §4.6` gave the same answer for
   idempotency tokens: the kernel's consistency claim stops at its store's transaction.
 - **Anything that reads a prompt to decide which task an agent is on** (§6.3).
-- **A quota endpoint, a spend API, or a published balance.** `v0.3 §1.1`: CTRLRun consumes and issues
+- **A quota endpoint, a spend API, or a published balance.** `v0.3 §1.1`: ctrlrun consumes and issues
   nothing.
 - **An automatic expiry on a hold.** It is the refund R2 refuses, on a delay (§4.6).
 - **A fourth guarantee id** (§8).

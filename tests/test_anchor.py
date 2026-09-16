@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The anchor, and the two things it makes detectable. SPEC-v0.11 §2, §3; T530-T541.
 
@@ -575,7 +575,7 @@ def test_T535b_a_checkpoint_anchor_is_ordered_only_against_other_checkpoints(tmp
 def test_T535c_an_anchor_whose_time_runs_backwards_is_refused(tmp_path) -> None:
     """§3.2. A monotonic sequence is the only property the kernel can check about a timestamp it
     did not issue, and a sequence that goes backwards is either a misconfiguration or the attack;
-    CTRLRun cannot tell which, so it refuses."""
+    ctrlrun cannot tell which, so it refuses."""
     database = tmp_path / "state.db"
     store = a_chain(database, 3)
     provider = Provider()
@@ -650,7 +650,7 @@ def test_T536_the_anchor_module_issues_nothing() -> None:
     # And the time an anchor carries is the provider's, never this process's clock.
     assert "datetime.now" not in source, (
         "the anchor read a clock of its own. An anchor's time must be the provider's: a time "
-        "CTRLRun generated would be CTRLRun vouching for itself"
+        "ctrlrun generated would be ctrlrun vouching for itself"
     )
 
 

@@ -53,7 +53,7 @@ actions:
   # server behind the same name, or a tool whose schema moved under an approved action name, is
   # a DENY rather than an authorised call to something nobody reviewed.
   #
-  # The honest slice of `ASI04` and nothing more: CTRLRun decides actions and never inspects a
+  # The honest slice of `ASI04` and nothing more: ctrlrun decides actions and never inspects a
   # package, a model, a registry or a build.
   #
   # **This entry is here to be read and graded, and `main.py` does not call it**, which is the

@@ -1,6 +1,6 @@
 # ctrlrun-openai-agents
 
-Route a CTRLRun `APPROVE` through the **OpenAI Agents SDK's own tool-approval interruption**, so
+Route a ctrlrun `APPROVE` through the **OpenAI Agents SDK's own tool-approval interruption**, so
 the human answers where this SDK's users already answer.
 
 - **Supported kernel range:** `ctrlrun>=0.5,<0.13`
@@ -74,11 +74,11 @@ line above, by the person deploying it.
 catches a tool's exception and returns *"An error occurred while running the tool. Please try
 again."* **to the model**. Under that default an `ActionDenied`, a `DuplicateEffect` or an
 `AmbiguousEffect` reaches your agent as a suggestion to retry — which is the exact failure
-`SPEC-v0.2 §6.10` argues about in the gateway: a refusal by CTRLRun is not an outcome of the
+`SPEC-v0.2 §6.10` argues about in the gateway: a refusal by ctrlrun is not an outcome of the
 tool, it is the statement that the tool did not run, and putting it in a channel whose contents
 reach the model as text invites the retry the refusal exists to prevent.
 
-**`gate.run(...)` / `gate.run_sync(...)`** are `Runner.run` with CTRLRun's exceptions arriving as
+**`gate.run(...)` / `gate.run_sync(...)`** are `Runner.run` with ctrlrun's exceptions arriving as
 themselves. The SDK wraps whatever a tool raises in `agents.exceptions.UserError` and chains the
 original as `__cause__`, so a plain `except DuplicateEffect` at your call site never fires. These
 walk the chain and give it back; they decide nothing and hold nothing. `unwrap(error)` is the
@@ -95,24 +95,24 @@ that a call was approved, keyed by tool name and `call_id`, and not what its arg
 adapter that handed back the tool's own parameters would be handing back what it was just given,
 which SPEC-v0.5 §3.4 names as manufacturing the check.
 
-So CTRLRun still binds the approval to the action that executes — that is `v0.1 §4.2 A1` and it
-holds unconditionally — but **the binding across the interrupt is the SDK's, not CTRLRun's**. In
+So ctrlrun still binds the approval to the action that executes — that is `v0.1 §4.2 A1` and it
+holds unconditionally — but **the binding across the interrupt is the SDK's, not ctrlrun's**. In
 that word: *attribution*. The conformance kit reports `binding: not_applicable` with the reason,
 never a pass.
 
 **What closes the gap instead is real, and it is the SDK's.** The approval item and the
 invocation are the **same tool call**, bound by `call_id`, and the SDK invokes with exactly that
 call's arguments — it does not re-ask the model in between. That is a strong property. It is
-simply not one CTRLRun can verify, which is the whole distinction §3.4 draws.
+simply not one ctrlrun can verify, which is the whole distinction §3.4 draws.
 
-## A rejection leaves no CTRLRun evidence
+## A rejection leaves no ctrlrun evidence
 
 The one place this adapter's evidence differs from `@protect`'s, and worth knowing before you go
 looking for an empty log.
 
-The SDK does **not invoke** a tool whose approval was refused. So no CTRLRun action is proposed:
+The SDK does **not invoke** a tool whose approval was refused. So no ctrlrun action is proposed:
 there is no `APPROVAL_DENIED`, no `ACTION_DENIED` and **no receipt**. The refusal is real and it
-is in the SDK's own run output; CTRLRun was never asked about it. The conformance kit reports
+is in the SDK's own run output; ctrlrun was never asked about it. The conformance kit reports
 `denial: not_applicable` for the same reason.
 
 If you need refusals in the evidence log, record them where you call `state.reject(item)`.
@@ -183,11 +183,11 @@ reimplements nothing — no prompt, no queue, no polling loop, no resume token o
 same two store calls `ctrlrun approve` makes. It **constructs no `Control`** and **supplies no
 principal**.
 
-And it is **not a compliance claim**. "Conformance" names a suite of the CTRLRun repository's own
+And it is **not a compliance claim**. "Conformance" names a suite of the ctrlrun repository's own
 acceptance tests, run against this adapter. It certifies nothing.
 
 ## Versioning
 
 `adapters-openai-agents-MAJOR.MINOR`, never a kernel version. This adapter answers to two
-upstreams and neither is the CTRLRun roadmap. The two ranges at the top are what its CI actually
+upstreams and neither is the ctrlrun roadmap. The two ranges at the top are what its CI actually
 ran against.

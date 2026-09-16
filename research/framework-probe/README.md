@@ -1,11 +1,11 @@
-# The CTRLRun framework probe
+# The ctrlrun framework probe
 
 **This table reports behaviour, not quality.** A framework that retries a lost response is
 doing what its documentation says it does. The finding here is about what an agent stack does
 *without* an effect-level guard — and it would be dishonest to present it as a judgment on any
 of these projects, none of which claims to solve this problem.
 
-It answers a question CTRLRun has so far only asserted: *what actually happens when the
+It answers a question ctrlrun has so far only asserted: *what actually happens when the
 response is lost and the framework retries?*
 
 > **Two of the four framework adapters have now been run against a model. Two have not.**
@@ -104,7 +104,7 @@ against langchain 1.4.0, not assumed — so one string serves both.
 ## The scenarios
 
 Both are already in `examples/`, run here through somebody else's agent loop instead of
-through CTRLRun.
+through ctrlrun.
 
 **double-refund.** The remote commits the refund and then closes the connection without a
 response. Does the framework retry, and does the effect land twice?

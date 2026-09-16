@@ -201,7 +201,7 @@ def _human(seconds: float) -> str:
 def render(document: dict[str, object]) -> str:
     """The table a human reads, and the one the maintainer reads before it goes in a PR."""
     lines = [
-        f"CTRLRun soak — {document['backend']}",
+        f"ctrlrun soak — {document['backend']}",
         f"  ran            {document['elapsed_human']} "
         f"({document['started_at']} → {document['ended_at']})",
         f"  actions        {document['actions']}",

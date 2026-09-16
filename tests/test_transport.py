@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`ctrlrun.transport`, the `NotExecuted` classifier. SPEC-v0.7 §2; T220 to T229b, T231.
 
@@ -2010,7 +2010,7 @@ def test_T231b_a_gateway_continuation_never_records_FAILED(tmp_path, case):
         # Relayed unchanged, the tool's own error included: only the record changes.
         assert answer["result"]["isError"] is True, answer
     else:
-        # The upstream's own answer is relayed unchanged; only what CTRLRun records changes.
+        # The upstream's own answer is relayed unchanged; only what ctrlrun records changes.
         assert answer["error"]["code"] in (-32601, -32000), answer
 
 

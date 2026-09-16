@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The webhook approval provider. Build-list item 7; SPEC-v0.2 §7.
 
@@ -186,7 +186,7 @@ class WebhookApprovalProvider:
         """Record the request, then tell somebody. The record is written first.
 
         A notification for a request the store never accepted would point at nothing, and a
-        human who answered it would be answering a question CTRLRun cannot connect to an
+        human who answered it would be answering a question ctrlrun cannot connect to an
         action.
         """
         request = self._local.request(action, ttl)

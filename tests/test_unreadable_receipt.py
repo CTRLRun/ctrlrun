@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """A reader that names a bad row and blinds nothing else. SPEC-v0.11 §5; T510-T519.
 
@@ -66,7 +66,7 @@ def a_chain(store, count: int = 4) -> list:
 
 
 #: The tamper, in SQL, underneath the store: an `UPDATE` by somebody with write access who has
-#: no interest in going through CTRLRun. A **declared** key set to a value of the wrong type,
+#: no interest in going through ctrlrun. A **declared** key set to a value of the wrong type,
 #: which is the case SPEC-v0.7 §12.5 named and neither of the two it says already worked (an
 #: unknown schema label, and an added key, are each already reported at their `seq`).
 def _tamper_one_value(database: Path, at: int = 2) -> None:

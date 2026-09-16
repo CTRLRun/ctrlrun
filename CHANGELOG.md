@@ -343,7 +343,7 @@ since `SPEC-v0.6.md` §6.4.
   no revocation, no signing. Signing stays off the roadmap for the reason `SPEC-v0.6.md` §11
   gives, and a test greps this module's own source to keep that true.
 
-- `ctrlrun.anchor`: `AnchorProvider` (a four-call protocol you implement, because CTRLRun ships no
+- `ctrlrun.anchor`: `AnchorProvider` (a four-call protocol you implement, because ctrlrun ships no
   timestamp client and a network client does not belong in this wheel), `verify_anchors`,
   `AnchorReport`, `ANCHOR_BREAKS`, and `anchor=` on `Control`.
 - **`ANCHOR_BREAKS` is its own closed set and `CHAIN_BREAKS` does not change.** `anchor_broken`,
@@ -488,7 +488,7 @@ that installs 0.10.0 and creates no hop can still roll back.
   sides' receipts carry the same hop id. And **nothing infers who the peer is**: the receiving
   agent's identity is resolved by the `IdentityProvider` and never read off the payload.
 
-  The four open questions are answered in the specification rather than left to an item. CTRLRun
+  The four open questions are answered in the specification rather than left to an item. ctrlrun
   defines no wire format and consumes none; what crosses a hop is a reference of two strings. A hop
   is a record in the store and not a claim in a token, which the budget rule forces and which costs
   cross-store propagation, refused fail-closed and by name. Depth across hops is
@@ -984,7 +984,7 @@ policy cannot be changed by whoever holds the file.
       approver_role: payments-owner
   ```
 
-  **CTRLRun does not interpret the role.** It does not know what `payments-owner` means, does not
+  **ctrlrun does not interpret the role.** It does not know what `payments-owner` means, does not
   check that such a role exists anywhere, and makes no compliance claim on the strength of one,
   exactly as it does not interpret `source:`. What changed about `SPEC-v0.6.md` §7.3's
   "attribution, not prevention" is one sentence: a control still decides no *action*, and now
@@ -1124,7 +1124,7 @@ policy cannot be changed by whoever holds the file.
 
 ## [0.7.0] - 2026-09-11 - Execution boundary
 
-Every milestone before this one asked what holds *inside* CTRLRun. v0.7 asks whether it holds at
+Every milestone before this one asked what holds *inside* ctrlrun. v0.7 asks whether it holds at
 the edges the kernel does not control. The kernel does not decide whether the remote acted, an
 executor does. It does not own the clock its leases are measured against, once the store is on
 another host. It does not know whether the world still looks the way it did when a human said
@@ -1702,10 +1702,10 @@ policy or authority document — and both are listed below with what they did be
   bullet list and the readiness block. Prose is down from 3,205 words to 2,662, with the demo
   transcript, the guarantee matrix, both receipt-chain disclaimers and the whole *It can't*
   section untouched.
-- The documentation home page leads with what CTRLRun is rather than with its own name, and
+- The documentation home page leads with what ctrlrun is rather than with its own name, and
   says the promise once instead of twice above the fold. Its `title` is the category line and
   its `description` the tagline, which is what `docs/IA.md` assigns to each; the browser tab no
-  longer reads *CTRLRun - CTRLRun*.
+  longer reads *ctrlrun - ctrlrun*.
 - `try-it` puts its controls above its explanation, in a wide column, with the policy below
   them rather than between the reader and the button.
 - Four badges: CodeQL, the documentation site, Ruff and `mypy --strict`. Downloads and stars
@@ -1779,7 +1779,7 @@ have recovered or retrying work nothing can.
   cannot drift into permitting something SQLite refuses.
 - **`--store-url` accepts a `postgresql://` URL**, and is now on every command that reads or
   resolves the operator's own store — `receipts`, `effects`, `inspect`, `resolve`, `approve`,
-  `deny` — reading `CTRLRUN_STORE_URL`. CTRLRun's own `?ctrlrun_schema=` parameter selects the
+  `deny` — reading `CTRLRUN_STORE_URL`. ctrlrun's own `?ctrlrun_schema=` parameter selects the
   schema and is peeled off before the URL reaches the driver.
 
   **It creates nothing and migrates nothing.** A review found the first version doing both: a
@@ -1818,7 +1818,7 @@ have recovered or retrying work nothing can.
   a load error:
   - **`controls:`** — a registry of ids, each with a `title` and an optional `source`. An action
     cites some, a rule may narrow or add, and the receipt carries the union of the action's and
-    the **matched rule's** in registry order. **CTRLRun does not interpret a control**: `source:`
+    the **matched rule's** in registry order. **ctrlrun does not interpret a control**: `source:`
     is a string the operator wrote and the registry records and never enforces. It maps to no
     standard, and citing one is not a claim about it.
   - **`data:`** — an action declares which of its arguments carry which class of data.
@@ -1861,7 +1861,7 @@ have recovered or retrying work nothing can.
 
   The **reservation is still taken**, and the asymmetry is deliberate: in observe mode the action
   genuinely executes, so the effect record has to exist or the duplicate refusal has nothing to
-  refuse with. Observe mode suppresses CTRLRun's *decisions*; it does not suppress the record of
+  refuse with. Observe mode suppresses ctrlrun's *decisions*; it does not suppress the record of
   an effect that really happened. The `APPROVAL_CONSUMED` event on that path is **gone rather
   than renamed** — v0.6 adds no event type, and an event naming a write that did not happen is
   worse than no event.
@@ -1977,7 +1977,7 @@ version line of its own.
 
 `docs/SPEC-scan.md` is the contract; it was written first and its §8 tests were red before any
 of it existed. `scan` reads a Python tree and a policy document and reports the consequential
-call sites and policy entries CTRLRun is not covering — the gap between *installed* and *in the
+call sites and policy entries ctrlrun is not covering — the gap between *installed* and *in the
 path*, which until now had no command.
 
 - **The honest half is the load-bearing half.** A scanner reports what it found where it
@@ -2126,7 +2126,7 @@ exercise, not the two adapters, is what v0.5 is for.
 Three independent reviews and item 6 found five authorization defects in
 `ctrlrun-openai-agents` before it shipped. All are fixed, mutation-tested, and recorded here
 because the pattern matters more than any one of them: **the SDK's approval record is keyed to a
-tool call, and a CTRLRun grant binds to an action hash**, so every defect was the same shape —
+tool call, and a ctrlrun grant binds to an action hash**, so every defect was the same shape —
 reading a coarser answer as though it answered a finer question.
 
 - `interrupt()` returned `granted=True` unconditionally.
@@ -2138,7 +2138,7 @@ reading a coarser answer as though it answered a finer question.
   masked an AMBIGUOUS refund — *safe to retry* reported for an effect that may have landed.
 - **Observe mode interrupted and blocked the action.** Found by item 6 without reading the
   adapter. §3.6's rule followed for one framework shape and had to be *required* of the other;
-  a deployment evaluating CTRLRun in the mode built for evaluating it would have had its agent
+  a deployment evaluating ctrlrun in the mode built for evaluating it would have had its agent
   halted.
 
 ### Added
@@ -2203,7 +2203,7 @@ reading a coarser answer as though it answered a finer question.
 
 ## [0.4.0] - 2026-09-04
 
-**Does it hold in *your* setup?** Everything CTRLRun guarantees was proven, until now, by this
+**Does it hold in *your* setup?** Everything ctrlrun guarantees was proven, until now, by this
 repository's tests against this repository's configurations. That is the right place to start
 and the wrong place to stop: what an operator deploys is *their* policy, *their* grants and
 *their* store, and a guarantee that has never been exercised against those is a guarantee
@@ -2287,7 +2287,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
   would need `contents: write` in every consumer's workflow, and asking for write access to a
   repository as the price of a verification badge is a bad trade for a tool whose subject is
   least privilege; `docs/docs/verify.md` shows the one-job publishing pattern once, with its cost
-  visible. Rendered, it reads exactly `CTRLRun verified N/M`, where `M` is **applicable**
+  visible. Rendered, it reads exactly `ctrlrun verified N/M`, where `M` is **applicable**
   guarantees and never the catalogue size. A partial run and a run that exited 2 or 3 write no
   badge at all.
 
@@ -2305,13 +2305,13 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
 - **`docs/docs/OWASP-AGENTIC-TOP10.md`** (SPEC-v0.4 §6) — a reading of the OWASP Top 10 for Agentic
   Applications (2026 edition, announced 2025-12-09) against the ten guarantees. Its first line,
   before any table, says what it is not: not a compliance claim, not a conformance claim, not a
-  certification, and not a statement that CTRLRun covers the Top 10.
+  certification, and not a statement that ctrlrun covers the Top 10.
 
   Two tables, and the second is what makes the first credible. `ASI04` supply chain, `ASI05`
-  code execution and `ASI06` memory and context poisoning are **not CTRLRun's subject** —
+  code execution and `ASI06` memory and context poisoning are **not ctrlrun's subject** —
   nothing here inspects a package, sandboxes an interpreter or reads a model's memory — and
   `ASI07` inter-agent communication waits on v0.7. `ASI01` agent goal hijack and `ASI09`
-  human-agent trust exploitation appear in **both** tables, because CTRLRun constrains what a
+  human-agent trust exploitation appear in **both** tables, because ctrlrun constrains what a
   hijacked agent can do without detecting the hijack, and binds an approval to one action
   without authenticating the approver or noticing that they were misled.
 
@@ -2380,7 +2380,7 @@ than to storage: `ctrlrun.verify/v1`, `ctrlrun.guarantees/v1` and `ctrlrun.frame
 
 - **`docs/SPEC-v0.4.md`** — the v0.4 contract, a delta over v0.1, v0.2 and v0.3. v0.4 answers
   the question the first three releases could not: *does it hold in **my** setup?* Everything
-  CTRLRun guarantees is proven today by this repository's tests against this repository's
+  ctrlrun guarantees is proven today by this repository's tests against this repository's
   configurations, which is the right place to start and the wrong place to stop.
   `ctrlrun verify` runs those failure scenarios against the operator's own policy, grants and
   store type, and reports what passed, what failed, and what could not be tested at all.
@@ -2417,7 +2417,7 @@ no half-way and no flag that makes a missing grant permissive.
 its parent, on every dimension, at creation *and* at every evaluation. Omission never means
 unlimited: a child that drops a dimension its parent constrains is rejected.
 
-**Identity is consumed, not invented.** CTRLRun verifies tokens it is handed and maps verified
+**Identity is consumed, not invented.** ctrlrun verifies tokens it is handed and maps verified
 claims onto a `Principal`. It issues nothing and defines no identity format. Claims are receipt
 data rather than action identity — they are not in the canonical form, so an approval survives
 a token rotation.
@@ -2558,7 +2558,7 @@ a token rotation.
 - **Observe mode still refuses what it cannot describe.** A missing principal, a provider that
   raises, an unresolvable effect key, an argument an Action cannot represent, and a delegation
   that would escalate are refused in both modes: the first four are wiring bugs that would run
-  an action CTRLRun could not describe, and the fifth is an act of authority rather than a
+  an action ctrlrun could not describe, and the fifth is an act of authority rather than a
   decision about an action. It asks no human either — a policy reaching `approve` records
   `approval_required` and runs, creating no request and appending no `APPROVAL_REQUESTED` —
   and it never calls the `reconcile` hook, whose `"committed"` answer would move a record a
@@ -2708,7 +2708,7 @@ a token rotation.
   authority that decision picks the principal.
 - **BREAKING for a reader: `ReceiptResult` gains `observed`.** `Receipt.from_dict` parses
   `result` into a closed `StrEnum` and `SQLiteStateStore` reads every stored receipt through
-  it, so a CTRLRun ≤ 0.2 process running `ctrlrun receipts` or `ctrlrun inspect` against a
+  it, so a ctrlrun ≤ 0.2 process running `ctrlrun receipts` or `ctrlrun inspect` against a
   store an 0.3 **observe-mode** process wrote raises on the unknown value. Two processes
   sharing one store is the intended deployment: **upgrade every reader before switching any
   writer to `mode: observe`.** An enforce-mode 0.3 writer emits no `observed` receipt and is
@@ -2826,8 +2826,8 @@ reconstruct:
   parser: `parseInt("2_000")` is 2 in JavaScript and `strconv.Atoi` errors in Go.
 
   That is the exact hazard SPEC-v0.2 §6.4 exists to prevent. The gateway's job there is to
-  certify that a routing intermediary and CTRLRun are looking at the same value, and it was
-  certifying agreement that held only under Python's rules. CTRLRun's own decisions were never
+  certify that a routing intermediary and ctrlrun are looking at the same value, and it was
+  certifying agreement that held only under Python's rules. ctrlrun's own decisions were never
   affected — the action is built from the body, and the headers are only checked — so this
   costs an intermediary's correctness rather than an approval binding.
 
@@ -2835,7 +2835,7 @@ reconstruct:
   parser in the comparison — and only a string, an integer or a boolean has one. The revision
   permits `x-mcp-header` on those three types alone and omits the header for a `null`, so a
   header naming an argument of any other type is refused rather than compared against a
-  rendering CTRLRun invented for it. This also declines the revision's SHOULD that servers compare
+  rendering ctrlrun invented for it. This also declines the revision's SHOULD that servers compare
   integers numerically (`42.0` equals `42`): v0.1 §2.3 refuses a float in the body outright, so
   the leniency has no legitimate case here. SPEC-v0.2 §6.4 states both rules and the reasoning.
 
@@ -2847,7 +2847,7 @@ Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml
 ### Added
 
 - **MCP gateway** — `ctrlrun gateway --upstream <url> --alias <name>`, in `ctrlrun[gateway]`.
-  An existing MCP tool server gets CTRLRun semantics with no agent changes: `tools/call`
+  An existing MCP tool server gets ctrlrun semantics with no agent changes: `tools/call`
   becomes an Action, everything else is relayed unchanged. The request forwarded upstream is
   built from the action's *canonical* arguments, so what was hashed, reserved and recorded is
   byte-for-byte what the tool receives. Serves `2026-07-28` and `2025-03-26`–`2025-11-25` in
@@ -2947,7 +2947,7 @@ Everything below ships. `pip install ctrlrun` still installs nothing but `pyyaml
   `schema: ctrlrun.policy/v2`. `ctrlrun.policy/v1` files keep loading unchanged; a `v2` file
   will not load on 0.1.0, which is the point — 0.1.0 would ignore the effect template and
   execute with no duplicate protection.
-- MCP tool arguments that CTRLRun cannot canonicalize — any JSON number with a fraction — will
+- MCP tool arguments that ctrlrun cannot canonicalize — any JSON number with a fraction — will
   be refused by the gateway, never rounded or coerced. Tools that move money through the
   gateway need integer minor units or decimal strings in their schema.
 

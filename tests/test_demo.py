@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Receipts on disk, the CLI and `ctrlrun demo`. SPEC-v0.1 §6, §8; acceptance tests T10, T11.
 
-The JSONL evidence is the half of §6 a reader outside CTRLRun ever sees, so these tests read
+The JSONL evidence is the half of §6 a reader outside ctrlrun ever sees, so these tests read
 the files rather than the store wherever the spec names a file.
 """
 

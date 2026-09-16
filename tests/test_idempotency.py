@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The provider idempotency token. Build-list item 3 of v0.7; SPEC-v0.7 §4, §8.3 T232-T239.
 

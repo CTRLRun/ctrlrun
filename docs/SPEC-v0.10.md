@@ -57,7 +57,7 @@ green test in this milestone.
 hands it with a correctly narrowed envelope, and the kernel records a correct hop. `v0.9 §1.1` said
 the same thing about task binding and it is no less true here: this is blast radius, not detection.
 
-**CTRLRun does not become an A2A implementation.** It defines no wire format, no agent card, no task
+**ctrlrun does not become an A2A implementation.** It defines no wire format, no agent card, no task
 lifecycle and no transport (§3.1). It consumes two strings from whatever envelope the deployment
 already carries, and it claims no conformance with anything. `ROADMAP.md`'s "A2A, as code. No
 conformance claim" is the whole of the claim.
@@ -99,7 +99,7 @@ another would ship two models.
 
 | | Question | Answer | Section |
 |---|---|---|---|
-| O1 | Does CTRLRun define a wire format or consume A2A's? | **Neither. What crosses is a reference, two strings, in whatever metadata the transport already has** | §3.1 |
+| O1 | Does ctrlrun define a wire format or consume A2A's? | **Neither. What crosses is a reference, two strings, in whatever metadata the transport already has** | §3.1 |
 | O2 | Is a hop a record in the store or a claim in a token? | **A record. Rule 2 forces it, and the cost is that both sides decide against one store** | §3.2 |
 | O3 | What does depth mean across hops? | **`max_delegation_depth`, unchanged. A hop is a link in the same chain, not a second counter** | §2.5 |
 | O4 | Does a receipt record the whole chain or its predecessor? | **The hop it ran under, and nothing derivable from it** | §3.4 |
@@ -309,7 +309,7 @@ it already names the grant, so an operator already has the id, and folding it in
 would lose which of the grant's own conditions failed. The line between the two reasons is whether
 the hop reached the action at all.
 
-**What it does not promise, and this is the residual of the whole milestone.** CTRLRun cannot make a
+**What it does not promise, and this is the residual of the whole milestone.** ctrlrun cannot make a
 receiving agent present the hop it was given. An agent that holds a grant of its own can simply not
 present the hop and act on its own authority. What the kernel guarantees is the disjunction, and the
 disjunction is worth having:
@@ -430,7 +430,7 @@ patch would most plausibly soften.
 
 ### 3.1 The wire, which is O1
 
-**CTRLRun defines no wire format for authority, and consumes none.**
+**ctrlrun defines no wire format for authority, and consumes none.**
 
 What crosses a hop is a **reference**: two strings, `hop` and `task`, carried in whatever field the
 transport already has for caller-supplied metadata. For A2A that is the message's `metadata` object.
@@ -441,7 +441,7 @@ Three reasons, and the third is the load-bearing one.
 
 1. **An envelope on the wire is an assertion; a reference is a lookup.** A receiver handed a
    serialized grant has to decide whether to believe it, which means signatures, which means keys,
-   which means issuing. `v0.3 §1.1` is unchanged: CTRLRun consumes identity and issues none.
+   which means issuing. `v0.3 §1.1` is unchanged: ctrlrun consumes identity and issues none.
 2. **A format is a compatibility surface.** A2A is moving, and a kernel that defined `ctrlrun.hop/v1`
    as a wire object would own a translation layer for every transport a deployment uses. Two strings
    in a metadata bag need no translation and no version.
@@ -872,7 +872,7 @@ the tool sitting under the approved action name so that `amount` now means somet
 grant still matches, every constraint still holds, the receipt still says `stripe.refund`, and the
 action is authorised against a server nobody reviewed.
 
-**This is the honest slice of `ASI04` and it is smaller than the category.** CTRLRun still decides
+**This is the honest slice of `ASI04` and it is smaller than the category.** ctrlrun still decides
 actions. It never inspects a package, a model, a registry, a build or a signature chain, and
 `OWASP-AGENTIC-TOP10.md`'s `ASI04` row keeps its "out of scope" verdict for supply chain at large,
 gaining one sentence for what this does cover. §8 refuses the wider claim by name, and the release
@@ -1341,7 +1341,7 @@ command: `ctrlrun scan` already reads a document and reports what it found, so t
 holders go there, as a line saying which principals hold authority that no hop bounds.
 
 A deployment following §2.3.2 shows its worker agents absent from that line. One that does not shows
-them present, which is the fact and not a verdict: `SPEC-v0.4.md` §3.9's rule that CTRLRun never
+them present, which is the fact and not a verdict: `SPEC-v0.4.md` §3.9's rule that ctrlrun never
 grades an operator's document holds here, so `scan` reports and does not score.
 
 ### 6.5 Acceptance tests for item 5

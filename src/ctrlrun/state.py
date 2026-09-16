@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """StateStore protocol, SQLite and in-memory stores. Build-list item 6; SPEC-v0.1 §5.3.
 
@@ -152,7 +152,7 @@ def _require_sqlite() -> None:
     # error set has no member for "the environment is too old", and `MissingDependency`
     # renders a fixed "it ships in the X extra" sentence that would be false here.
     raise InvalidArgument(
-        f"this Python is linked against SQLite {sqlite3.sqlite_version}, and CTRLRun needs "
+        f"this Python is linked against SQLite {sqlite3.sqlite_version}, and ctrlrun needs "
         f"{wanted} or newer: the receipt chain is written with `UPDATE ... RETURNING`, which "
         f"older SQLite cannot parse. Upgrade the system SQLite, use a Python built against a "
         f"newer one, or run the Postgres backend (pip install 'ctrlrun[postgres]')."
@@ -1664,7 +1664,7 @@ class SQLiteStateStore:
             # at the wrong file is an ordinary misconfiguration and deserves an ordinary
             # refusal.
             raise InvalidArgument(
-                f"{str(self._path)!r} is not a CTRLRun state database: {exc}. Point "
+                f"{str(self._path)!r} is not a ctrlrun state database: {exc}. Point "
                 "$CTRLRUN_STATE or --store-url at the database your agents write, or let "
                 "the agent process create one."
             ) from exc

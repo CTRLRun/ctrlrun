@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The gateway in the execution path. Build-list item 6c; SPEC-v0.2 §6.1, §6.3, §6.5-§6.10.
 
@@ -226,7 +226,7 @@ def test_T19_the_action_is_named_for_the_alias_and_the_tool(client, upstream, st
 
 
 def test_T19_the_response_carries_the_ctrlrun_receipt_meta(client, upstream, store):
-    """§6.8 — so a client is not left guessing what CTRLRun recorded."""
+    """§6.8 — so a client is not left guessing what ctrlrun recorded."""
     upstream.respond({"resultType": "complete", "content": []})
 
     response = _post(client)

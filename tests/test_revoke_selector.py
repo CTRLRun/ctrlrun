@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """T272 to T280: `ctrlrun revoke --created-by` and `--under` (SPEC-v0.8 §7).
 
@@ -132,7 +132,7 @@ def workspace(request, tmp_path, monkeypatch):
 
 
 def _with_schema(url: str, schema: str) -> str:
-    """`url` with CTRLRun's schema parameter added, keeping every parameter it already has.
+    """`url` with ctrlrun's schema parameter added, keeping every parameter it already has.
 
     A naive f-string appends a second '?' to a URL carrying `?sslmode=require`, and
     `_peel_schema` then reads `ctrlrun_schema` as part of the `sslmode` value and falls back to

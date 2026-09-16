@@ -1,18 +1,18 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/wordmark-dark.svg">
-    <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/wordmark-light.svg" alt="CTRLRun" width="300">
+    <img src="https://raw.githubusercontent.com/CTRLRun/ctrlrun/main/docs/assets/wordmark-light.svg" alt="ctrlrun" width="300">
   </picture>
 </p>
 
 <p align="center">
-  <strong>CTRLRun stops AI agents from taking wrong, restricted, or malicious actions in your workflows.</strong><br>
+  <strong>ctrlrun stops AI agents from taking wrong, restricted, or malicious actions in your workflows.</strong><br>
   Every action is checked against your rules before it runs. Allowed actions go through.<br>
   Sensitive ones wait for a person. Forbidden ones are blocked.<br>
   <br>
   Execution safety for AI agents. A Python library that sits between the decision to act and the call that acts.<br>
   A consequential action happens at most once, exactly as approved, and leaves a receipt.<br>
-  When the outcome is unknown, CTRLRun says so instead of guessing.<br>
+  When the outcome is unknown, ctrlrun says so instead of guessing.<br>
   <br>
   Runs in production on a single file, or on Postgres across hosts. Apache-2.0.
 </p>
@@ -27,7 +27,7 @@
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/actions/workflows/fuzz.yml"><img src="https://github.com/CTRLRun/ctrlrun/actions/workflows/fuzz.yml/badge.svg?branch=main" alt="Fuzz"></a>
   <a href="https://docs.ctrlrun.dev/how-this-is-built"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/tests-badge.json" alt="Tests"></a>
-  <a href="https://docs.ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="CTRLRun verified"></a>
+  <a href="https://docs.ctrlrun.dev/security/verify-guarantees"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/CTRLRun/ctrlrun/badges/verify-badge.json" alt="ctrlrun verified"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/CTRLRun/ctrlrun"><img src="https://api.scorecard.dev/projects/github.com/CTRLRun/ctrlrun/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://www.bestpractices.dev/projects/14615"><img src="https://www.bestpractices.dev/projects/14615/badge" alt="OpenSSF Best Practices"></a>
   <a href="https://github.com/CTRLRun/ctrlrun/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/ctrlrun?color=B8730A" alt="License"></a>
@@ -44,16 +44,16 @@ pip install ctrlrun && ctrlrun demo
 
 ## What it does
 
-**The model guesses. CTRLRun does not.** The ticket says refund €500. The agent asks for
+**The model guesses. ctrlrun does not.** The ticket says refund €500. The agent asks for
 €5,000, one extra zero. The tool is in its list, the arguments are well formed, and the model
 is completely confident. Nothing above the call disagrees, because nothing above the call is a
 check: a tool being callable is not permission to call it with those arguments.
 
-| Without CTRLRun | With CTRLRun |
+| Without ctrlrun | With ctrlrun |
 |---|---|
 | Nothing checks the amount. The call goes through. **€4,500 too much.** | Your rule checks the amount. The call never leaves. **€0 wrongly paid.** |
 
-CTRLRun is that check. It reads the arguments about to leave your process and answers what may
+ctrlrun is that check. It reads the arguments about to leave your process and answers what may
 happen to them: let it run, ask a human, or stop it cold. Four rules do the work, and each one
 is a test in this repository before it is a sentence here.
 
@@ -66,7 +66,7 @@ is a test in this repository before it is a sentence here.
 
 The third one is the half people forget. A correct €500 refund commits at the provider and the
 reply is lost coming back, so the agent retries. Retry libraries, agent frameworks and tool
-loops collapse *this failed* into *I do not know what happened*. CTRLRun keeps them apart: a
+loops collapse *this failed* into *I do not know what happened*. ctrlrun keeps them apart: a
 lost reply is `AMBIGUOUS`, never `FAILED`, and a retry against an `AMBIGUOUS` effect is refused
 until a human, or a `reconcile` hook, says what happened.
 
@@ -75,7 +75,7 @@ until a human, or a `reconcile` hook, says what happened.
 
 ```console
 $ ctrlrun demo
-CTRLRun demo — five ways an agent action goes wrong, and what stops it.
+ctrlrun demo — five ways an agent action goes wrong, and what stops it.
 Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, above that are denied.
 
 1. Duplicate effect after a lost response
@@ -139,7 +139,7 @@ compliant, certified or audited:
 · [`OWASP-AGENTIC-TOP10.md`](https://docs.ctrlrun.dev/OWASP-AGENTIC-TOP10)
 names the four entries this does not address.
 
-If an agent only reads and answers, you do not need CTRLRun. The moment it can **send, pay,
+If an agent only reads and answers, you do not need ctrlrun. The moment it can **send, pay,
 refund, delete, deploy, grant, revoke, approve, submit, purchase or cancel**, you do.
 
 ## Use it in three steps
@@ -293,7 +293,7 @@ that reaches its tools over MCP, in any language.
 | A framework with its own approval interrupt | an adapter | the framework to have a human-in-the-loop primitive |
 
 **It works with agents you can and can't modify.** WhatsApp, Slack and Teams bots, ChatGPT,
-Cursor, Codex, OpenAI Agents: any AI agent you have. CTRLRun checks the action, not the
+Cursor, Codex, OpenAI Agents: any AI agent you have. ctrlrun checks the action, not the
 agent, so if the agent acts through a tool server or an API you run, the action is checked, and
 the agent is not rebuilt, redeployed or told.
 [Agents you can't modify](https://docs.ctrlrun.dev/agents-you-cant-modify) says where the
@@ -376,7 +376,7 @@ grades the transport classifier.
 
 ## The same shape in nine domains
 
-Nothing in CTRLRun knows what a refund is. An action is a **name**, **canonical arguments**, an
+Nothing in ctrlrun knows what a refund is. An action is a **name**, **canonical arguments**, an
 **effect key** and a **resource**, and the three questions asked of it are the same whichever
 domain it came from: how much autonomy does *this action* get, did a human approve *this exact*
 action, and has this effect already happened. Two things carry your domain, and you write both.
@@ -405,7 +405,7 @@ action, and has this effect already happened. Two things carry your domain, and 
 Read any row left to right and it is one rule wearing different nouns. The security row is the
 one to read twice: adding a **deny** rule to a firewall is autonomous and adding an **allow**
 rule is not, which no amount threshold would have told you. The policy is where your judgement
-about your domain gets written down; CTRLRun is what makes it hold.
+about your domain gets written down; ctrlrun is what makes it hold.
 
 ## Documentation
 

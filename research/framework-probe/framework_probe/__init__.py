@@ -1,4 +1,4 @@
-"""The CTRLRun framework probe. SPEC-v0.4 §7. Research, not part of the package.
+"""The ctrlrun framework probe. SPEC-v0.4 §7. Research, not part of the package.
 
 This directory lives **outside `src/`**. It is not packaged, never imported by `ctrlrun`, and
 its per-framework dependencies are never installed by `ctrlrun` or by any of its extras

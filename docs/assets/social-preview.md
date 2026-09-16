@@ -13,7 +13,7 @@ AI agents." headline) rather than the earlier dark GitHub-only card.
 | Size | 1280 × 640 px (GitHub's recommended size; rendered at 2:1 everywhere it is shown) |
 | Safe area | Keep text inside 72 px margins; previews are cropped to 1.91:1 on some services |
 | Background | `#ffffff`, no photograph, no gradient |
-| Wordmark | The amber keycap (`#F5A623`, edge `#B8730A`) and `CTRLRun` in `#14161b`, top left, matching `docs/images/wordmark-light.svg` |
+| Wordmark | The amber keycap (`#F5A623`, edge `#B8730A`) and `ctrlrun` in `#14161b`, top left, matching `docs/images/wordmark-light.svg` |
 | Eyebrow | `CONTROL THE ACTION. KEEP THE AUTONOMY.` at 20 px, letter-spaced, `#8a8f98` |
 | Headline | Two lines at 76 px bold, `#14161b`: *Execution safety / for AI agents.* — the final period in `#F5A623` |
 | Subheadline | The homepage's tagline at 28 px, `#6b7280`: *Let agents act. Keep control of what happens next.* |

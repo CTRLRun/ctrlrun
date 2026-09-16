@@ -1,4 +1,4 @@
-# CTRLRun v0.2 Specification
+# ctrlrun v0.2 Specification
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md)**. Everything in v0.1 still holds; this
 document states only what v0.2 adds or changes. A reference to the kernel contract is written
@@ -42,7 +42,7 @@ Item 2 sits early because it needs nothing this release adds. `ROADMAP.md` speci
 
 - `examples/` — standalone scripts, one per failure scenario: `double-refund/`,
   `approval-mutation/`, `agent-race/`, `approval-replay/`. In v0.1 `ctrlrun demo` was the
-  example; separate scripts earn their keep now there is more than one way to wire CTRLRun in.
+  example; separate scripts earn their keep now there is more than one way to wire ctrlrun in.
 - `examples/policies/<sector>.yaml` for devops, payments, e-commerce, insurance, healthcare,
   legal, security, government and hr. Each carries the header comment *"Starting point on the
   v0.1 kernel. Adapt before use."*
@@ -170,7 +170,7 @@ A `BaseException` that is not an `Exception` raised by the hook propagates, for 
 §2.3.
 
 `"committed"` and `"not_executed"` are assertions about the remote, exactly as `NotExecuted`
-is (v0.1 §5.5). CTRLRun cannot check them. The hook's author takes that responsibility
+is (v0.1 §5.5). ctrlrun cannot check them. The hook's author takes that responsibility
 knowingly, which is why the hook is an explicit argument and not a default behaviour.
 
 ### 2.5 Events
@@ -186,7 +186,7 @@ RECONCILIATION_RESOLVED
 `RECONCILIATION_RESOLVED` carries `data.outcome ∈ {"committed", "not_executed", "unknown"}`
 and, when the outcome was forced to `"unknown"`, `data.reason ∈ {"raised", "invalid_return"}`
 with `data.error` naming it. `RECONCILIATION_RESOLVED` MUST be appended for every
-`RECONCILIATION_STARTED`, `"unknown"` included: evidence has to record that CTRLRun asked and
+`RECONCILIATION_STARTED`, `"unknown"` included: evidence has to record that ctrlrun asked and
 learned nothing, or a silent hook is indistinguishable from no hook.
 
 Where the outcome moved the record, `EFFECT_RESOLVED` with `data.resolved_by = "reconcile"`
@@ -194,7 +194,7 @@ follows `RECONCILIATION_RESOLVED`.
 
 ### 2.6 What is not bounded
 
-CTRLRun gives the hook no timeout, exactly as it gives the executor none (v0.1 §5.5). A hook that
+ctrlrun gives the hook no timeout, exactly as it gives the executor none (v0.1 §5.5). A hook that
 hangs hangs the attempt that called it, and in the blocking case that is a *retry* hanging on
 a call the caller did not write. This is a stated limit, not an oversight: a timeout here
 would need a thread or a signal, and killing a half-finished reconciliation query is how you
@@ -378,7 +378,7 @@ ctrlrun gateway --upstream <url> --alias <name> [options]
 ```
 
 An HTTP process that speaks MCP on both sides. An MCP client points at it instead of at the
-tool server; it applies CTRLRun's decision, effect and evidence semantics to `tools/call` and
+tool server; it applies ctrlrun's decision, effect and evidence semantics to `tools/call` and
 relays everything else. No agent changes.
 
 Ships in `ctrlrun[gateway]`, whose only dependency is an HTTP client (§6.11).
@@ -430,7 +430,7 @@ revision's note that *"Intermediaries that enforce policy based on mirrored head
 reject the request rather than trusting unvalidated header values."* That note does not bind
 this gateway, and reading it as though it did was a mistake worth naming. It governs
 intermediaries whose enforcement *is* the header — a load balancer routing by tenant, a rate
-limiter counting by method. CTRLRun decides from the parsed body (§6.4) and never from a
+limiter counting by method. ctrlrun decides from the parsed body (§6.4) and never from a
 header, so an unvalidated header value cannot influence a decision here. **Header trust is
 never the guarantee**, and a rule that refuses every client in existence today would contradict
 the whole claim of this release: an existing MCP server plus one gateway.
@@ -490,7 +490,7 @@ including a `subscriptions/listen` stream that stays open.
 "Unchanged" is about the JSON-RPC payload, not about scrutiny: §6.4 applies to every request
 the gateway forwards, intercepted or not.
 
-A relayed method has **no CTRLRun outcome**. No Action is built, no policy is evaluated, no
+A relayed method has **no ctrlrun outcome**. No Action is built, no policy is evaluated, no
 effect is reserved, no receipt is written, and an unreachable upstream is an HTTP error and
 nothing more. `tools/list` is not an action; only calling a tool is.
 
@@ -509,7 +509,7 @@ bodies, and requires servers that process a body to reject any disagreement with
 sources of truth (e.g., a load balancer routing on the header value while the MCP server
 executes based on the body value)"*.
 
-That is precisely the hazard CTRLRun would create if it took the shortcut the headers exist
+That is precisely the hazard ctrlrun would create if it took the shortcut the headers exist
 for. So:
 
 - The gateway MUST parse the body of every request it forwards and MUST validate
@@ -523,7 +523,7 @@ for. So:
   only be applied to parameters with primitive types (integer, string, boolean)"*, with a
   `null` parameter omitting its header entirely. A `Mcp-Param-{Name}` naming an argument of any
   other type — a list, a mapping, a `null` — therefore cannot agree with it, and is refused
-  rather than compared against a rendering CTRLRun invented for it.
+  rather than compared against a rendering ctrlrun invented for it.
 
   This is stricter than the revision's *"servers SHOULD compare the header value and the body
   value numerically rather than as strings (e.g., `42.0` and `42` are considered equal)"*, and
@@ -704,7 +704,7 @@ The pre-dispatch set is closed and small:
 does not recognize.
 
 This is the one row-group in the table resting on a peer obeying a contract rather than on
-something CTRLRun observed. An upstream that validates lazily — doing work and *then* returning
+something ctrlrun observed. An upstream that validates lazily — doing work and *then* returning
 `-32602` — will get a retry it should not have. That residual is recorded in
 `THREAT_MODEL.md`, alongside the gateway's other unverifiable assertions:
 `not_executed_on_error` is an operator's claim about their upstream (v0.1 §5.5's asymmetry,
@@ -738,7 +738,7 @@ assertion, made by the person who knows, with the same consequences if they are 
 **The upstream's own answer is returned unchanged.** Where the gateway received a well-formed
 JSON-RPC response, it relays it verbatim; rewriting a tool's result or error would corrupt the
 contract between the agent and the tool. The gateway synthesizes a response only when it never
-got one. So that a client is not left guessing what CTRLRun recorded, the gateway MUST add to
+got one. So that a client is not left guessing what ctrlrun recorded, the gateway MUST add to
 every response it returns for an intercepted call:
 
 ```json
@@ -949,7 +949,7 @@ question, alongside the authority model.
 
 ### 6.10 Decision, approval, and what the client sees
 
-| CTRLRun outcome | JSON-RPC code | HTTP | `data` |
+| ctrlrun outcome | JSON-RPC code | HTTP | `data` |
 |---|---|---|---|
 | `ALLOW` | — | as upstream | — |
 | `DENY` | `-41001` `ctrlrun.denied` | 403 | `reason`, `action_id` |
@@ -972,7 +972,7 @@ specification **SHOULD** be allocated outside the JSON-RPC reserved range (`-327
 
 **Why a JSON-RPC error and not `isError: true`.** A tool result with `isError: true` is fed to
 the model to let it self-correct, and it is indistinguishable from the tool's own failure. A
-refusal by CTRLRun is not an outcome of the tool; it is the statement that the tool did not
+refusal by ctrlrun is not an outcome of the tool; it is the statement that the tool did not
 run. A JSON-RPC error says that unambiguously, and keeps a policy denial out of a channel
 whose contents reach the model as text.
 
@@ -1031,7 +1031,7 @@ It is one process with a thread per connection, fronting one upstream. It is not
 balancer, not a reverse proxy for a fleet, and not an authorization server. Reservation is
 still single-host (v0.1 §5.3 E1), so two gateways in front of one upstream do **not** share
 reservations unless they share a state file on one machine. Put it behind a real proxy for
-TLS termination, rate limiting and authentication; CTRLRun decides, and does not aspire to
+TLS termination, rate limiting and authentication; ctrlrun decides, and does not aspire to
 terminate.
 
 The extra's only dependency is an HTTP client with a connect/write/read exception taxonomy
@@ -1179,11 +1179,11 @@ conventions while mapping security events to OCSF.
 
 `docs/ACS.md` states:
 
-- where CTRLRun would sit in that model — the tool-call checkpoint, and only that one;
+- where ctrlrun would sit in that model — the tool-call checkpoint, and only that one;
 - what an adapter would carry across, and what has no counterpart on the ACS side: effect
-  identity, atomic reservation, and `AMBIGUOUS` as a terminal state are CTRLRun's, not the
+  identity, atomic reservation, and `AMBIGUOUS` as a terminal state are ctrlrun's, not the
   standard's, and an adapter that flattened them would export the wrong thing;
-- what CTRLRun's OTel attributes (§8) would have to be renamed to, to align with ACS's
+- what ctrlrun's OTel attributes (§8) would have to be renamed to, to align with ACS's
   conventions, and the cost of doing that to receipts already written.
 
 `ROADMAP.md`'s standards rule governs: integrate first, map second, never claim compliance.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """What the kit reports. SPEC-v0.5 §5.2.
 
@@ -22,7 +22,7 @@ OK: Literal["ok"] = "ok"
 
 class SuiteStatus(StrEnum):
     """`StrEnum` for `v0.1 §6.1`'s reason: these render into reports read by tools that never
-    imported CTRLRun, and `"SuiteStatus.PASS"` is not a status."""
+    imported ctrlrun, and `"SuiteStatus.PASS"` is not a status."""
 
     PASS = "pass"
     FAIL = "fail"

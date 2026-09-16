@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """click command group for the ctrlrun CLI. Build-list item 8; SPEC-v0.1 §8.
 
 The CLI is the human end of the kernel: it answers approval requests, shows the evidence,
 and resolves the one state no machine may resolve for itself (§5.2). It is also the only
-place in CTRLRun that prints.
+place in ctrlrun that prints.
 
 Every command works on the store an agent is already using — `.ctrlrun/state.db` beside the
 policy, or wherever `$CTRLRUN_STATE` says (§8) — so approving here answers the request an
@@ -140,7 +140,7 @@ STORE_URL_OPTION = click.option(
     ),
 )
 
-#: CTRLRun's own parameter on a Postgres URL, peeled off before the URL reaches the driver. The
+#: ctrlrun's own parameter on a Postgres URL, peeled off before the URL reaches the driver. The
 #: same spelling `ctrlrun.conformance.store` uses, because an operator who has seen one should not
 #: have to learn the other.
 SCHEMA_PARAM: Final = "ctrlrun_schema"
@@ -224,7 +224,7 @@ def _opened(path: Path) -> StateStore:
 
 
 def _require_head(url: str, schema: str) -> None:
-    """Refuse unless `schema` already holds a CTRLRun database at HEAD. Reads only.
+    """Refuse unless `schema` already holds a ctrlrun database at HEAD. Reads only.
 
     Three refusals, each naming what the operator should do instead, because "that schema is
     empty" and "your fleet is mid-upgrade" have nothing in common as remedies.
@@ -249,7 +249,7 @@ def _require_head(url: str, schema: str) -> None:
             )
             if cursor.fetchone() is None:
                 raise click.ClickException(
-                    f"schema {schema!r} holds no CTRLRun database. A read command does not "
+                    f"schema {schema!r} holds no ctrlrun database. A read command does not "
                     "create one; the store is created by the process that runs your agents."
                 )
             cursor.execute(
@@ -266,19 +266,19 @@ def _require_head(url: str, schema: str) -> None:
     if found in (Classification.FORWARD, Classification.EMPTY, Classification.BASELINE):
         missing = [item.id for item in MIGRATIONS if item.id not in applied]
         raise click.ClickException(
-            f"the database in schema {schema!r} is behind this CTRLRun: "
+            f"the database in schema {schema!r} is behind this ctrlrun: "
             f"{', '.join(missing)} has not been applied. A read command will not apply it -- "
             "every other process on that database is still running the version that has not "
             "got it. Upgrade a writer and let it migrate at open (SPEC-v0.6 §3.6)."
         )
     raise click.ClickException(
-        f"the database in schema {schema!r} classifies as {found.value} against this CTRLRun "
+        f"the database in schema {schema!r} classifies as {found.value} against this ctrlrun "
         f"({len(applied)} migrations recorded). It is not safe to read as though it were HEAD."
     )
 
 
 def _peel_schema(url: str) -> tuple[str, str]:
-    """Take CTRLRun's own schema parameter off a Postgres URL before the driver sees it."""
+    """Take ctrlrun's own schema parameter off a Postgres URL before the driver sees it."""
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
     parts = urlsplit(url)
@@ -364,7 +364,7 @@ def _event(
 @click.group()
 @click.version_option(package_name="ctrlrun")
 def main() -> None:
-    """CTRLRun — the execution safety layer for AI agents."""
+    """ctrlrun — the execution safety layer for AI agents."""
 
 
 @main.command()
@@ -571,7 +571,7 @@ def _loaded_anchor_provider(dotted: str) -> AnchorProvider:
     if not module_name or not attribute:
         raise click.UsageError(
             f"--provider must be 'module:attribute', got {dotted!r}. It names the anchor provider "
-            "in your own code: CTRLRun ships none, because a timestamp client is a network client"
+            "in your own code: ctrlrun ships none, because a timestamp client is a network client"
         )
     try:
         module = importlib.import_module(module_name)
@@ -601,7 +601,7 @@ def _loaded_anchor_provider(dotted: str) -> AnchorProvider:
     "dotted",
     required=True,
     metavar="MODULE:ATTR",
-    help="Your anchor provider (SPEC-v0.11 §3.2). CTRLRun ships none.",
+    help="Your anchor provider (SPEC-v0.11 §3.2). ctrlrun ships none.",
 )
 @click.option(
     "--verify",
@@ -1401,7 +1401,7 @@ def stats(since: str | None, as_json: bool, store_url: str | None) -> None:
 def _stats_lines(document: Mapping[str, Any]) -> list[str]:
     """§6.4's report. Every number comes from the document, so `--json` cannot disagree."""
     window = f"{document['from'] or '-'} .. {document['to'] or '-'}"
-    lines = [f"CTRLRun — {window}   ({document['mode']} mode)", ""]
+    lines = [f"ctrlrun — {window}   ({document['mode']} mode)", ""]
     lines.append(_stat("actions", document["actions"]))
     if document["mode"] == OBSERVE:
         lines.append(_stat("would have been denied", document["would_have_been_denied"]))
