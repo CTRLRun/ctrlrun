@@ -26,14 +26,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
+import sys
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Final
+from typing import IO, Any, Final
 
 from ..action import Principal
 from ..approval import (
@@ -63,7 +65,17 @@ from ..reporting import (
     ledger_rows as _ledger_rows,
 )
 from ..state import RESOLUTIONS, StateStore
-from .mcp import DEFAULT_MAX_BODY_BYTES, ParsedRequest, Refusal, parse_request
+from .mcp import (
+    ACCEPTED_REVISIONS,
+    CURRENT_REVISION,
+    DEFAULT_MAX_BODY_BYTES,
+    INVALID_REQUEST,
+    LEGACY_DEFAULT_REVISION,
+    ParsedRequest,
+    Refusal,
+    encode_header_value,
+    parse_request,
+)
 from .wire import (
     _header,
     _json,
@@ -108,6 +120,11 @@ VIA: Final = "mcp-operator"
 _ATTRIBUTION: Final = "mcp-operator:{user}"
 
 SERVER_NAME: Final = "ctrlrun-mcp-operator"
+
+#: §3.1 — what `OsLoginIdentityProvider` writes as the principal's issuer: the login was issued
+#: by the operating system of the named host, and evidence can tell it from a proxy's header or
+#: a token's `iss` at a glance.
+OS_LOGIN_ISSUER: Final = "os-login"
 
 #: §9.3 — two codes added to `v0.2 §6.10`'s table, both in the `-410xx` range that release
 #: reserved, neither reachable from the gateway.
@@ -173,6 +190,10 @@ class OperatorConfig:
     identity_jwt_leeway: float = 60.0
     identity_jwt_jwks_min_refresh: float = 30.0
     identity_jwt_http_timeout: float = 5.0
+    #: §2.3 — speak MCP on stdin and stdout to the one client that launched this process, and
+    #: open no socket at all. The approver is then the account the process runs as, read from
+    #: the real uid and from nothing the client sends or sets (§3.1).
+    stdio: bool = False
 
     def __post_init__(self) -> None:
         if self.host not in LOOPBACK:
@@ -188,6 +209,41 @@ class OperatorConfig:
             )
         if not self.path.startswith("/"):
             raise InvalidArgument(f"--path {self.path!r} must start with '/'")
+        if self.max_body_bytes < 1:
+            # A bound of zero refuses every message and a negative one reads to EOF over HTTP
+            # and nothing at all over stdio; neither is a server, and both are cheaper to find
+            # here. A review found the floor missing on both transports.
+            raise InvalidArgument("--max-body-bytes must be at least 1")
+        if self.stdio:
+            # §2.3 — there are no headers over stdio, so every flag that names one is a flag that
+            # could not take effect, and a flag the operator believes took effect is the failure
+            # the gateway refuses by name (`v0.3 §8.2`). `--approver-roles-claim` is in the list
+            # for the same reason: an OS login carries no claims to read a role from.
+            offered = [
+                flag
+                for flag, given in (
+                    ("--principal-header", self.principal_header is not None),
+                    ("--user-header", self.user_header is not None),
+                    ("--identity-jwt", self.identity_jwt),
+                    ("--allow-origin", bool(self.allow_origins)),
+                    ("--approver-roles-claim", self.approver_roles_claim is not None),
+                )
+                if given
+            ]
+            if offered:
+                raise InvalidArgument(
+                    f"--stdio takes no {', '.join(offered)}: there are no headers over stdio. "
+                    "The approver is the OS login of this process, which the client that "
+                    "launched it cannot choose (SPEC-mcp-operator §2.3, §3.1)"
+                )
+            if (self.host, self.port) != DEFAULT_LISTEN or self.path != DEFAULT_PATH:
+                raise InvalidArgument(
+                    "--stdio opens no socket, so --listen and --path cannot take effect "
+                    "(SPEC-mcp-operator §2.3)"
+                )
+            # A stray `--identity-jwt-*` flag is still refused by name, by the same shared check.
+            check_jwt_flags(self)
+            return
         sources = [self.principal_header is not None, self.identity_jwt]
         if sum(sources) != 1:
             # §3.1 — `--principal` is not among them. `StaticIdentityProvider` answers with the
@@ -228,13 +284,113 @@ class OperatorConfig:
             )
 
 
+def _os_account() -> tuple[int | None, str]:
+    """The **real** uid of this process and its login name, from the system and never from the
+    environment.
+
+    `getpass.getuser()` reads `LOGNAME`, `USER`, `LNAME` and `USERNAME` before it asks the
+    system, and every one of those is set by whoever launched the process -- which over stdio
+    is the client. A name the client can set is `--principal-from-client-info` (`v0.3 §8.1`)
+    again, and §10 refused that shape for a reason. `os.getlogin()` on POSIX reads the
+    controlling terminal, which a process launched by a desktop client does not have. What is
+    left is the password database keyed by the real uid. The **real** uid, not the effective
+    one: it names the account that launched the process, not what a setuid file grants, and
+    `SUDO_USER` is ignored for the same reason the rest of the environment is.
+
+    This is the account the client is running as, and no more than that. The uid itself cannot
+    be chosen by the client; the *name the process reports for it* is only as trustworthy as
+    the process, and a client that controls the interpreter's environment (`PYTHONPATH`, a
+    preloaded library, what `uvx` installs beside the package) controls the process. What makes
+    that acceptable is the boundary, not the lookup: a client that can do any of that can
+    already open the store as this account and answer with `ctrlrun approve`, so the attribution
+    string was already in its reach at the file. §3.1 says exactly this and no more.
+
+    On Windows `os.getlogin()` is `GetUserNameW`, the token's user, and there is no uid.
+    """
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - Windows
+        try:
+            return None, os.getlogin()
+        except OSError as exc:
+            raise InvalidArgument(
+                f"the login of this process could not be read ({exc}), so there is nobody to "
+                "record an answer under; --stdio refuses to start (SPEC-mcp-operator §3.1)"
+            ) from exc
+    uid = os.getuid()
+    try:
+        return uid, pwd.getpwuid(uid).pw_name
+    except KeyError as exc:
+        raise InvalidArgument(
+            f"uid {uid} has no login in the password database, so there is nobody to record "
+            "an answer under; --stdio refuses to start (SPEC-mcp-operator §3.1)"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class OsLoginIdentityProvider:
+    """The OS login of the process, for `--stdio` (SPEC-mcp-operator §3.1).
+
+    Not `StaticIdentityProvider` in another costume, and the difference is where the name comes
+    from. A static principal is whatever was typed after `--principal`, so every approval carries
+    a string that distinguishes nobody. This one is the account the process is running as, read
+    from the real uid and from nothing the client sends or sets: two people on one host get two
+    logins. It is the boundary the store file already has -- a process that can run this as you
+    can already open the store as you -- so it adds no surface, and it is stricter than §2.1 in
+    one respect: it opens no port. `_os_account` says what that boundary does and does not
+    promise about the *name*.
+
+    What it cannot do is stated rather than implied. An OS login carries no claims, so no role
+    can be read from it and every control naming an `approver_role` refuses over stdio (the
+    startup warning in `OperatorServer` covers it). It has no `expires_at`, because a login
+    session is not a credential with a lifetime the process can see -- which means the client
+    process holds `approve`, `deny` and `resolve` under this name for as long as it runs, and
+    the confirmation the client shows before a write is the only human step left; §2.3 states
+    that cost and the `initialize` instructions repeat it to the model. And **root is an
+    account, not a person**: under uid 0 the principal carries no `user`, every write is refused
+    as `-41013` the way a machine credential is, and reads still answer.
+    """
+
+    login: str
+    host: str
+    uid: int | None = None
+    _principal: Principal = field(init=False, repr=False, compare=False)
+
+    @classmethod
+    def from_process(cls) -> OsLoginIdentityProvider:
+        uid, login = _os_account()
+        return cls(login=login, host=socket.gethostname(), uid=uid)
+
+    @property
+    def is_root(self) -> bool:
+        return self.uid == 0
+
+    def __post_init__(self) -> None:
+        if not self.login:
+            raise InvalidArgument(
+                "the OS login is empty; there is nobody to attribute an answer to"
+            )
+        issuer = OS_LOGIN_ISSUER if not self.host else f"{OS_LOGIN_ISSUER}:{self.host}"
+        user = None if self.is_root else self.login
+        object.__setattr__(
+            self, "_principal", Principal(agent=self.login, user=user, issuer=issuer)
+        )
+
+    def resolve(self, context: IdentityContext) -> Principal | None:
+        # The context is ignored on purpose: every field of it that could name a person came
+        # from the client, and the whole point of this provider is that the client cannot.
+        return self._principal
+
+
 def operator_identity_provider(config: OperatorConfig) -> IdentityProvider:
     """The provider this server's flags name (SPEC-mcp-operator §3.1).
 
-    Two constructors, not the gateway's three. The JWT import is deferred so that `import
-    ctrlrun` never pulls in `jwt` and an operator who selected the extra without installing it
-    gets `MissingDependency` naming the command.
+    Three constructors, not the gateway's three: the OS login for `--stdio`, a header, or a JWT.
+    The JWT import is deferred so that `import ctrlrun` never pulls in `jwt` and an operator
+    who selected the extra without installing it gets `MissingDependency` naming the command.
     """
+    if config.stdio:
+        return OsLoginIdentityProvider.from_process()
     if config.principal_header is not None:
         return HeaderIdentityProvider(
             agent_header=config.principal_header, user_header=config.user_header
@@ -649,6 +805,14 @@ class OperatorServer:
                 "happened. approve, deny and resolve write, need an authenticated human, and "
                 "record the answer under that person's name. Nothing here can make an agent "
                 "act."
+                + (
+                    " Over stdio this process holds approve, deny and resolve under the OS "
+                    "login of whoever launched it for as long as it runs, and the confirmation "
+                    "the client shows before a write is the only human step: it must stay on "
+                    "for these three tools."
+                    if self._config.stdio
+                    else ""
+                )
             ),
         }
 
@@ -1320,8 +1484,156 @@ def _repeated_identity_header(
     return None
 
 
+def serve_operator_stdio(
+    server: OperatorServer,
+    *,
+    stdin: IO[bytes] | None = None,
+    stdout: IO[bytes] | None = None,
+) -> None:
+    """Speak MCP on stdin and stdout until the client closes them (SPEC-mcp-operator §2.3).
+
+    One JSON-RPC message per line, UTF-8, as the stdio transport specifies; every line written
+    to `stdout` is a JSON-RPC message and nothing else is, because the client parses the stream
+    and a stray line of text is a protocol error to it. The startup block and every log line go
+    to stderr for that reason.
+
+    Every message goes through `handle`, exactly as a POST body does, so the same parser, the
+    same refusals and the same identity gate apply. What this loop adds is the part HTTP carried
+    in headers: the protocol revision, negotiated once at `initialize` from the body rather than
+    read from a header on every message, and the mirrored `Mcp-Method` and `Mcp-Name`, which
+    `2026-07-28` requires and which are synthesised from the body they would have to agree with.
+
+    Two things HTTP could refuse with a bare status become messages here, because a request with
+    an id that gets no line would hang the client: an oversized line is refused **unread** -- it
+    is bounded by `readline(limit + 2)`, two being the longest line ending, and drained without
+    being decoded -- and any empty-body refusal becomes `-32600` with whatever id the line
+    carried. Anything `handle` raises outside `_call`'s own net is `-32603` with the id, so §7's
+    last row holds over this transport too. A client that closes stdout is a client that went
+    away, and the loop returns rather than dying on the write.
+    """
+    reader = sys.stdin.buffer if stdin is None else stdin
+    writer = sys.stdout.buffer if stdout is None else stdout
+    limit = server.config.max_body_bytes
+    revision = LEGACY_DEFAULT_REVISION
+    while True:
+        line = reader.readline(limit + 2)
+        if not line:
+            return
+        truncated = not line.endswith(b"\n") and len(line) == limit + 2
+        body = line.rstrip(b"\r\n")
+        if truncated or len(body) > limit:
+            if truncated:
+                _drain_line(reader)
+            _LOG.warning("refused a line over %d bytes without reading it", limit)
+            refusal = json_rpc_error(
+                None,
+                INVALID_REQUEST,
+                "ctrlrun.invalid_request",
+                f"a message over {limit} bytes was discarded unread",
+            )
+            if not _emit(writer, refusal):
+                return
+            continue
+        body = body.strip()
+        if not body:
+            continue
+        document = _loaded(body)
+        initializing = isinstance(document, dict) and document.get("method") == "initialize"
+        candidate = _negotiated(document) if initializing else revision
+        try:
+            response = server.handle(body, _stdio_headers(document, candidate))
+        except Exception:
+            _LOG.exception("a message could not be handled")
+            response = _error(
+                _request_id(body),
+                _INTERNAL_ERROR,
+                "ctrlrun.internal_error",
+                500,
+                "the message could not be handled; see the server log",
+            )
+        if initializing and response.status == 200:
+            # Only a successful initialize moves the revision: a malformed one is refused and
+            # must not leave the loop on a revision the client never negotiated.
+            revision = candidate
+        if response.body:
+            if not _write_line(writer, response.body):
+                return
+        elif response.status not in (200, 202):
+            refusal = json_rpc_error(
+                _request_id(body),
+                INVALID_REQUEST,
+                "ctrlrun.invalid_request",
+                f"the message was refused ({response.status})",
+            )
+            if not _emit(writer, refusal):
+                return
+
+
+def _loaded(body: bytes) -> Any:
+    try:
+        return json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _negotiated(document: Mapping[str, Any]) -> str:
+    """§2.3 — the client's revision where it is one this server accepts, else the current one.
+
+    The transport specification's rule: a server that does not support the requested version
+    answers with one it does, and the client decides whether to go on. Refusing outright, which
+    is what the HTTP path does with an unaccepted header, would leave a desktop client with no
+    version at all to decide about.
+    """
+    params = document.get("params")
+    requested = params.get("protocolVersion") if isinstance(params, Mapping) else None
+    return requested if requested in ACCEPTED_REVISIONS else CURRENT_REVISION
+
+
+def _stdio_headers(document: Any, revision: str) -> dict[str, str]:
+    """What the HTTP transport would have carried, built from the body it must agree with."""
+    headers = {"mcp-protocol-version": revision}
+    if not isinstance(document, dict):
+        return headers
+    method = document.get("method")
+    if isinstance(method, str) and method:
+        headers["mcp-method"] = encode_header_value(method)
+    params = document.get("params")
+    name = params.get("name") if isinstance(params, Mapping) else None
+    if isinstance(name, str) and name:
+        headers["mcp-name"] = encode_header_value(name)
+    return headers
+
+
+def _drain_line(reader: IO[bytes]) -> None:
+    """Discard the rest of a line that was too long to read, without holding any of it."""
+    while True:
+        chunk = reader.readline(65536)
+        if not chunk or chunk.endswith(b"\n"):
+            return
+
+
+def _emit(writer: IO[bytes], document: Mapping[str, Any]) -> bool:
+    return _write_line(
+        writer, json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+
+def _write_line(writer: IO[bytes], payload: bytes) -> bool:
+    """One line to the client, or `False` when there is no client any more (§2.3, §7)."""
+    try:
+        writer.write(payload + b"\n")
+        writer.flush()
+    except BrokenPipeError:
+        _LOG.info("the client closed stdout; exiting")
+        return False
+    return True
+
+
 def serve_operator_forever(server: OperatorServer) -> None:
-    """Run until interrupted. `ctrlrun mcp-operator` calls this."""
+    """Run until interrupted, over whichever transport the config names (§2, §2.3)."""
+    if server.config.stdio:
+        serve_operator_stdio(server)
+        return
     httpd = build_operator_server(server)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

@@ -9,6 +9,31 @@ any change to one appears here.
 
 ## [Unreleased]
 
+### Added
+
+- **`ctrlrun mcp-operator --stdio`: the operator console for the client that launched it.**
+  Desktop assistants, Cursor and the editors launch an MCP server as a subprocess and speak to it on
+  stdin and stdout; until now this server spoke only HTTP on loopback, so the registry listing
+  that went live at 0.12.2 described a server none of those clients could start. `--stdio` opens
+  no socket at all, which is stricter than the loopback rule and not a loosening of it, and every
+  message still goes through the same parser, the same refusals and the same store calls as a
+  POST body does. The approver is the account the process runs as, read from the **real uid**
+  and from nothing the client sends or sets: not `getpass.getuser()`, which believes the
+  environment, not `clientInfo`, not `SUDO_USER`. What that does and does not promise is stated
+  rather than implied: a client that can subvert the process can already open the store as that
+  account, so nothing is added to what it can do, only a name on what it did. Root is an account
+  and not a person, so under uid 0 every write is refused and reads still answer. The login
+  carries no roles and no expiry, and says so: a control naming an `approver_role` refuses over
+  stdio, and the client process holds approve, deny and resolve under the login for as long as it
+  runs, which the `initialize` instructions and the startup block both say, because the
+  confirmation the client shows before a write is then the only human step. Every flag that
+  names a header is refused with it, by name, and `--max-body-bytes` now has a floor on both
+  transports. `SPEC-mcp-operator.md` §2.3 and §3.1 carry the
+  design, and §10's exclusion of stdio is struck through with the reasoning that replaced it
+  rather than deleted. The registry manifest now describes this: `uvx ctrlrun mcp-operator
+  --stdio` with `CTRLRUN_CONFIG` pointing at your policy, which is a config block a desktop
+  client can install.
+
 ## [0.12.2] — the operator's tool descriptions, and the marker the registry reads
 
 A patch release with no change to the enforcement path. Two things sat on `main` with no way for

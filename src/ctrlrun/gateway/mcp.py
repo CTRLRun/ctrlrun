@@ -285,10 +285,18 @@ def _decoded(value: str) -> str | None:
 
 
 def encode_header_value(value: str) -> str:
-    """Wrap a value in the revision's base64 sentinel where it is not ASCII-safe (§6.4)."""
+    """Wrap a value in the revision's base64 sentinel where it is not ASCII-safe (§6.4).
+
+    A value that is ASCII but *looks like* the sentinel is wrapped too, or `_decoded` on the far
+    side would try to decode the bare value and refuse a header that faithfully mirrored the
+    body. A review found the gap when the operator's stdio loop started mirroring tool names.
+    """
     try:
         value.encode("ascii")
+        wrap = value.startswith(_SENTINEL_OPEN) and value.endswith(_SENTINEL_CLOSE)
     except UnicodeEncodeError:
+        wrap = True
+    if wrap:
         encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
         return f"{_SENTINEL_OPEN}{encoded}{_SENTINEL_CLOSE}"
     return value

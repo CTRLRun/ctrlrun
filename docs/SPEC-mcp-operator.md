@@ -113,11 +113,62 @@ says so (§6). It is the same boundary the store file already has.
 the whole deployment this exists for — and two servers whose default ports collide produce a
 bind error at the worst moment, or worse, a client pointed at the wrong one.
 
+### 2.3 stdio — added 2026-09-16
+
+`ctrlrun mcp-operator --stdio` speaks MCP on stdin and stdout to the one client that launched
+the process, and opens **no socket**. That is what a desktop client does — a desktop assistant,
+Cursor, an editor — and it is the shape the registry listing has to describe for any of them to
+install this at all. §10 excluded it, and the exclusion is struck below with the reasoning that
+replaced it; the short version is that a transport with no port is stricter than §2.1, not a
+loosening of it, and that the identity question §10 asked has an answer §3.1 now gives.
+
+**The framing** is the transport specification's: one JSON-RPC message per line, UTF-8, no
+embedded newline. Every line this server writes to stdout is a JSON-RPC message and nothing
+else is, because the client parses the stream and a line of text on it is a broken message to
+the client rather than information — the first stdio client this was tried behind logged
+*"ignoring non-JSON output"* for every line of the §6 block. So over stdio the §6 block, the
+observe banner and every log line go to **stderr**, and T574 asserts stdout parses whole.
+
+**Every message goes through `handle`**, exactly as a POST body does — the same parser, the same
+refusals, the same identity gate (§3.3) and the same store calls. What the loop adds is only what
+HTTP carried in headers and a pipe cannot:
+
+| Over HTTP | Over stdio |
+|---|---|
+| `MCP-Protocol-Version` on every request; an unaccepted one is refused `-32022` | Negotiated **once**, at `initialize`, from `params.protocolVersion`: the client's revision where it is one this server accepts, else `2026-07-28`. The transport specification's rule, not the HTTP path's: a server that does not support the requested version answers with one it does and the client decides, because a desktop client refused outright has no version at all to decide about (T570) |
+| `Mcp-Method` and `Mcp-Name`, required on `2026-07-28`, validated against the body (§6.4) | Synthesised **from the body** they would have to agree with, so the validation runs and cannot fail. The check exists because an HTTP proxy can set a header independently of the body; a pipe has no proxy |
+| `Origin`, validated against `--allow-origin` | No origin over a pipe. `--allow-origin` is refused with `--stdio` (§9.4) |
+| A body over `--max-body-bytes` is HTTP 413, read no further | A line over `--max-body-bytes` is refused **unread**: `readline(limit + 2)` bounds the allocation (two being the longest line ending, so a CRLF client keeps its whole budget), the rest of the line is drained without being decoded, and the client gets `-32600` with a null id. The bound is on the allocation and not only the decision, over this transport as over the other (T573) |
+| A refusal is the store's, or `_call`'s, or `-32603` for anything else (§7) | The same, and anything `handle` raises outside `_call`'s own net is `-32603` with the message's id rather than the process dying, so §7's last row holds here too |
+| A client that goes away closes the socket | A client that closes stdout is a client that went away: the write fails, the loop returns, the process exits 0, exactly as at EOF on stdin |
+| A refusal with no body (403, 413) | Becomes a JSON-RPC error with whatever id the line carried. A request that gets no line is a request the client waits on for ever |
+| A notification is HTTP 202, no body | No line |
+| `Mcp-Session-Id` never minted | Still never. There is one client and it is the one that launched the process |
+
+Reaching EOF on stdin is the client going away, and the process exits 0.
+
+**What stdio costs, and where it is said.** Over HTTP a human's credential is per request and
+expires; over stdio the client process holds `approve`, `deny` and `resolve` under the human's
+name for as long as it runs, `-41007`, `-41013` (bar root, §3.1) and `-41014` are unreachable,
+and the only human step left is the confirmation the client shows before a write — which
+CTRLRun does not control and which a user can switch off. That is the auto-approve §1.1
+refuses, reachable by client configuration, and this document does not pretend otherwise. It is
+said in three places so that each party sees it: here; in the `initialize` `instructions`, which
+the model reads; and in the §6 block, which the person reads. A lifetime after which writes
+refuse until relaunch (`--stdio-max-age`) was proposed by the review and is not built: it is a
+new flag with its own semantics to specify, and a client that re-launches the process on a
+timer defeats it, so it would be a promise with a hole in it. Recorded in §10.
+
+**What does not change**: the eight tools, their schemas, every refusal code, every store call,
+the evidence written. `serve_operator_forever` runs whichever transport the config names, and
+the rest of the server cannot tell which it is under.
+
 ## 3. Identity
 
 ### 3.1 The provider is the operator's, and there are two of them
 
 Exactly one of `--principal-header` or `--identity-jwt` MUST be given. There is no default.
+Over `--stdio` neither is accepted, and the provider is the third one, below.
 
 **`--principal` is refused**, and this is the second place the operator server is stricter than
 the gateway. `StaticIdentityProvider` answers with the same `Principal` for every request
@@ -129,6 +180,55 @@ at startup rather than discovered in a receipt.
 `--principal-header` and `--identity-jwt` mean exactly what they mean at the gateway
 (`v0.3 §8.2`), construct exactly the same providers, and carry exactly the same warnings. A
 header is worth what the proxy that sets it is worth.
+
+**Over `--stdio` the provider is `OsLoginIdentityProvider` — added 2026-09-16.** There are no
+headers on a pipe, so neither flag above can apply, and §10's original objection stands as
+written: a process launched by the assistant has no credential to verify, and *every identity
+the client could offer* is asserted by it — `clientInfo`, an argument, an environment variable.
+None of those is used. What is used is the account the process is running as: the login the
+password database gives for the process's **real uid**, `pwd.getpwuid(os.getuid())` on POSIX,
+and the token's user on Windows. Not `getpass.getuser()`, which believes `USER` and `LOGNAME`
+first, and the environment is the client's to set; not `os.getlogin()` on POSIX, which reads a
+controlling terminal a desktop-launched process does not have; not `SUDO_USER`, which is the
+environment again. The **real** uid and not the effective one, because it names the account
+that launched the process rather than what a setuid file grants. T571 sets every one of those
+variables to a forged name and asserts the principal is unmoved.
+
+**And no more than that.** The uid cannot be chosen by the client. The *name the process
+reports for it* is only as trustworthy as the process, and a client that controls the
+interpreter's environment — `PYTHONPATH` and a `sitecustomize`, a preloaded library, what `uvx`
+installs beside the package — controls the process. The review that found this is right, and
+the earlier draft's "the one name the client cannot choose" was an overclaim and is gone. What
+makes the design sound is the boundary, not the lookup: a client that can do any of that can
+already open the store as this account and answer with `ctrlrun approve`, so the attribution
+string was already within its reach at the file. Nothing is added to what it can do; what is
+added is a name on what it did.
+
+**Root is an account, not a person.** `sudo ctrlrun mcp-operator --stdio`, or a container
+running as uid 0, would record every answer as `root`, which distinguishes nobody — this
+document's own objection to `--principal`. So under uid 0 the principal carries no `user`, every
+write is refused as `-41013` exactly as a machine credential is, the reads still answer, and the
+§6 block says so in capitals. T571 pins it with `SUDO_USER` set, to make the point that it is
+ignored.
+
+It is not `--principal` in another costume, and the difference is where the name comes from. A
+static principal is whatever was typed after the flag, so every approval carries a string that
+distinguishes nobody. This one distinguishes people at the process boundary: two people on one
+host get two logins, and over stdio one client is one process is one login, so the boundary is
+the same one a per-request credential draws over HTTP. And it is the boundary the store file
+already has — §2.1's own words, "loopback is not a trust boundary against other processes on the
+same host" — because a process that can run this as you can already open the store as you and
+answer with `ctrlrun approve`. It adds no surface; it opens no port.
+
+The principal it returns: `agent` and `user` both the login, `issuer` `os-login:<hostname>`, so
+evidence can tell an answer given this way from one behind a proxy's header or a token's `iss`
+at a glance. **What it cannot do is stated rather than implied.** An OS login carries no claims,
+so no role can be read from it, `--approver-roles-claim` is refused with `--stdio` (§9.4), and
+every control naming an `approver_role` refuses over stdio — the fail-closed direction, and
+`OperatorServer`'s startup warning names the controls. It has no `expires_at`: a login session is
+not a credential with a lifetime the process can see. And a uid with no entry in the password
+database refuses to start, naming the uid, on §3.2's logic — a server whose write tools could
+never succeed is refused where it can still be fixed.
 
 ### 3.2 The credential must name a human
 
@@ -429,6 +529,11 @@ write tools  approve, deny, resolve — each needs a credential naming a human, 
              answer is recorded under that name
 ```
 
+Over `--stdio` the same block goes to **stderr** (§2.3), the first line reads
+`ctrlrun mcp-operator — stdio; no socket, one client, the one that launched this`, the identity
+lines name the login the answers will be recorded under and say the client could not choose it,
+and the write-tools line names that login rather than describing a credential.
+
 The observe-mode banner (`v0.3 §6.5`) is printed by the CLI before this block, as it is for
 every command that loads the operator's policy. An operator server against an observing
 deployment is worth the line: the approvals it lists were requested by a `Control` that is not
@@ -454,6 +559,13 @@ enforcing, and answering one changes nothing in the world.
 | `resolve` on a record that is not `AMBIGUOUS`, or an unknown key | HTTP 200, `-41003`, with the store's reason |
 | `resolve` with a blank reason | HTTP 200, `-32602` |
 | The store raises anything else | HTTP 500, `-32603`, and the exception is logged, never returned |
+| *Over stdio:* a line over `--max-body-bytes` | `-32600`, id `null`, the line drained unread (§2.3) |
+| *Over stdio:* a line that is not JSON | `-32700`, id `null` — never silence, which the client would wait on |
+| *Over stdio:* a notification | No line |
+| *Over stdio:* EOF on stdin | Exit 0; the client went away |
+| *Over stdio:* stdout closed by the client | Exit 0, the same |
+| *Over stdio:* `handle` raises outside `_call` | `-32603` with the message's id, logged |
+| *Over stdio:* a write under uid 0 | `-41013`; root is an account, not a person (§3.1) |
 
 A CTRLRun refusal is a JSON-RPC **error**, never a `result` with `isError: true`, for `v0.2
 §6.10`'s reason: `isError` reaches the model as text, and a refusal to let a human's assistant do
@@ -572,6 +684,55 @@ the test proves this server actually routes through it rather than reimplementin
 `ctrlrun stats --json` and `stats` return the same document for the same window. Asserted by
 equality, not by shape: §1.1's "not a second composer" is worth nothing if the two drift.
 
+### T570 — stdio: initialize, list, read, write, attributed to the OS login
+
+T191 over the other transport, with T184's attribution half: `initialize` answers with the
+client's revision, the notification gets no line, `tools/list` lists eight, a read returns the
+pending request, `approve` grants it, and the record's `approver` is `mcp-operator:<login>`
+with the principal recorded beside it carrying `issuer` `os-login:<host>`; the receipt the agent
+leaves afterwards names the same person. A second case walks the negotiation table of §2.3: an
+accepted revision is echoed, an unaccepted or absent one gets `2026-07-28`, and a `tools/list`
+after each proves the mirrored headers that revision requires were synthesised. A third case,
+against a policy whose control names an `approver_role`: `approve` over stdio is `-41015` and the
+request stays pending, which is §3.1's stated cost pinned rather than described.
+
+### T571 — The login is the real uid and never the environment
+
+`USER`, `LOGNAME`, `LNAME` and `USERNAME` are all set to a forged name; the control asserts
+`getpass.getuser()` now returns it; the provider's login is `pwd.getpwuid(os.getuid()).pw_name`
+and is not the forgery. A context naming the forgery in every field it has resolves to the same
+principal, with no claims and no expiry. A uid with no password entry refuses to start naming the
+uid. `operator_identity_provider` returns this provider for a stdio config. And under uid 0,
+with `SUDO_USER` set to a real name, the principal has no `user`, `approve` is `-41013` with the
+store byte-identical, and a read still answers.
+
+### T572 — `--stdio` refuses every flag that names a header, by name
+
+`--principal-header`, `--user-header`, `--identity-jwt`, `--allow-origin` and
+`--approver-roles-claim` each raise `InvalidArgument` naming the flag; so do a `--listen` or
+`--path` that is not the default, as flags that cannot take effect; a stray `--identity-jwt-*`
+flag is still refused by the shared check. `--max-body-bytes 0` is refused on both transports.
+And T183's assertion, repeated beside the new flag: the command has `--stdio` and still has no
+`--allow-remote` and no `--principal`.
+
+### T573 — Stdout carries only JSON-RPC lines
+
+A notification produces no line, a blank line is skipped, a line that is not JSON is `-32700`
+with a null id, and the stream goes on. An oversized line that is a *well-formed request with an
+id* is refused with a **null** id — the proof it was never parsed — and the next message is
+answered. A last line with no trailing newline is still a message. A message of exactly `limit`
+bytes is accepted whether the line ends in LF or CRLF, and one of `limit + 1` is refused either
+way. A client that closes stdout ends the loop without a traceback. A tool name shaped like the
+header sentinel is an unknown tool, not a header mismatch. A malformed `initialize` naming a
+legacy revision is refused and leaves the loop on the revision the client actually negotiated,
+observed through the one mechanic that differs between them.
+
+### T574 — The process speaks JSON on stdout and everything else on stderr
+
+`ctrlrun mcp-operator --stdio` as a real subprocess fed by pipe: exit 0 at EOF, every line of
+stdout parses as JSON-RPC, and the §6 block is on stderr naming the login. A flag that cannot
+take effect exits non-zero before the stream opens, with nothing on stdout.
+
 ## 9. Public API and CLI additions (frozen)
 
 ### 9.1 The names
@@ -582,7 +743,10 @@ equality, not by shape: §1.1's "not a second composer" is worth nothing if the 
 #   ctrlrun.gateway.operator.OperatorServer
 #   ctrlrun.gateway.operator.operator_identity_provider
 #   ctrlrun.gateway.operator.build_operator_server
-#   ctrlrun.gateway.operator.serve_operator_forever
+#   ctrlrun.gateway.operator.serve_operator_forever      — runs whichever transport the config names
+#   ctrlrun.gateway.operator.serve_operator_stdio        — added 2026-09-16 (§2.3)
+#   ctrlrun.gateway.operator.OsLoginIdentityProvider     — added 2026-09-16 (§3.1)
+#   ctrlrun.gateway.operator.OS_LOGIN_ISSUER             — "os-login"
 
 # ctrlrun.gateway — the entry point the CLI calls
 #   ctrlrun.gateway.serve_operator(**options) -> None
@@ -663,9 +827,16 @@ ctrlrun mcp-operator [--listen HOST:PORT] [--path PATH] [--environment ENV]
                      [--allow-origin ORIGIN]... [--max-body-bytes N]
                      [--store-url URL]
                      ( --principal-header NAME --user-header NAME
-                     | --identity-jwt [--identity-jwt-* ...] )
+                     | --identity-jwt [--identity-jwt-* ...]
+                     | --stdio )
                      [--authority PATH]
 ```
+
+`--stdio` (added 2026-09-16, §2.3) takes no `--listen`, `--path`, `--allow-origin`,
+`--principal-header`, `--user-header`, `--identity-jwt` or `--approver-roles-claim`: each is
+refused at startup **by name** as a flag that could not take effect, and a flag the operator
+believes took effect is the failure the gateway refuses the same way (`v0.3 §8.2`). It relaxes
+no check. It removes a transport, and with it the one thing §2.1 exists to prevent.
 
 Every `--identity-jwt-*` flag is `ctrlrun gateway`'s, spelled identically and meaning the same
 thing — and validated by the same function, not by a copy of it: `--identity-jwt` requires the
@@ -712,6 +883,27 @@ principal; the attributed name cannot forge a row (`v0.1 §5.3`'s `_approver` re
 character that could); `GET`/`DELETE` never reach `handle`; and `--since` behaves exactly as it
 did before the move to `ctrlrun.reporting`, exit code included.
 
+**The stdio review, 2026-09-16.** §2.3 and §3.1 are an identity change, so they got the same
+review, in a session that did not write them. Eleven findings; eight accepted, three declined,
+none a blocker. Accepted, and each is now in the text above or in a test: "the one name the
+client cannot choose" was an overclaim (§3.1, *and no more than that*); the lifetime cost of a
+credential with no expiry was mechanism without consequence (§2.3, the `initialize` instructions,
+the §6 block); root and `sudo` were unaddressed (§3.1, T571); the `-41015`-over-stdio row was
+asserted and not tested (T570); a client closing stdout was a traceback and exit 1 (§7, T573);
+the revision moved on a refused `initialize` (T573); the line bound charged a CRLF client two
+bytes (§2.3, T573); a tool name shaped like the header sentinel was refused as a mismatch, a
+pre-existing gap in `encode_header_value` now fixed at the source (T573); `--max-body-bytes`
+had no floor on either transport (§11, T572); and `os.getlogin()` on Windows can raise
+`OSError`, now `InvalidArgument`. Declined: `--stdio-max-age` (§2.3 says why); an `os-login`
+issuer whose hostname contains a colon, because the prefix is the first segment and unambiguous;
+and the body being JSON-parsed three times per message, which at the rate humans answer
+approvals is not a cost. The review also confirmed, and it is recorded for the same reason as
+the four above: the HTTP path is byte-identical; no stdio path reaches a store write without a
+resolved human principal; nothing but JSON-RPC can reach stdout, including under `KeyboardInterrupt`;
+each input line yields at most one output line, so ids cannot desynchronise; and the manifest's
+`uvx ctrlrun mcp-operator --stdio` resolves to the `ctrlrun` console script with `CTRLRUN_CONFIG`
+read by `discover_policy_path`.
+
 ## 10. Explicitly out of scope
 
 Everything `v0.6 §11` excludes, plus:
@@ -732,10 +924,24 @@ Everything `v0.6 §11` excludes, plus:
   and are not this server's. And the check is bounded the way `SPEC-v0.8.md` §3.8 bounds it: what
   it compares is one operator-written string against one claim, and what the kernel later refuses
   is an approval whose **recorded** entitlement does not cover the role.
-- **stdio transport.** An MCP server launched over stdio by the assistant has no credential to
+- **stdio transport.** ~~An MCP server launched over stdio by the assistant has no credential to
   verify — the process is whatever the client started, and every candidate identity is asserted
   by it. That is `--principal-from-client-info` (`v0.3 §8.1`) in a fourth costume, and it is the
-  one thing this server cannot afford. HTTP with a proxy is the shape that has an answer.
+  one thing this server cannot afford. HTTP with a proxy is the shape that has an answer.~~
+  **Amended 2026-09-16 by §2.3 and §3.1**, and the strikethrough is deliberate for the reason
+  the entitlement line above gives: this was true of every release through 0.12.2, and a reader
+  of an older deployment's documentation should see which sentence applied.
+
+  What was right in it is kept whole: every identity *the client could offer* is asserted by the
+  client, and none of them is used. What it missed is that the client does not choose everything
+  about the process it starts. It chooses the command line and the environment; the kernel
+  chooses the uid, and the account behind that uid is one the client already holds — it can
+  already open the store as it. That is the identity §3.1 now uses, with what it does not
+  promise stated beside it. HTTP with a proxy is still the shape for an approver who is not the
+  person at the keyboard; stdio is the shape for the one who is.
+- **A lifetime for the stdio session.** A `--stdio-max-age` after which writes refuse until the
+  client relaunches the process was proposed by the stdio review and is not built; §2.3 says
+  why. The cost it would bound is stated in three places instead.
 - **Notifications, subscriptions or a push of pending approvals.** An approver asks; the server
   answers. A server that pushed would need a session, and §2 has none.
 - **Resources or prompts.** Tools only.
@@ -756,6 +962,11 @@ Everything `v0.6 §11` excludes, plus:
 | `--principal-header` without `--user-header` | Refuses to start (§3.2) |
 | `--identity-jwt` without `--identity-jwt-user-claim` | Refuses to start (§3.2) |
 | A non-loopback `--listen` | Refuses to start (§2.1) |
+| `--stdio` with any of `--principal-header`, `--user-header`, `--identity-jwt`, `--allow-origin`, `--approver-roles-claim`, or a non-default `--listen`/`--path` | Refuses to start, naming the flag (§2.3, §9.4) |
+| `--stdio` and the real uid has no login in the password database | Refuses to start, naming the uid (§3.1) |
+| `--stdio` under uid 0, a write tool | `-41013`, store unchanged: root is an account, not a person (§3.1) |
+| `--max-body-bytes` below 1, either transport | Refuses to start |
+| `--stdio`, a write tool, and the cited control names an `approver_role` | `-41015`, store unchanged: an OS login carries no roles (§3.1) |
 | A write tool, no credential | `-41007`, store unchanged |
 | A write tool, credential declined or rejected | `-41007`, store unchanged |
 | A write tool, credential names no human | `-41013`, store unchanged |

@@ -353,6 +353,15 @@ def test_the_registry_manifest_agrees_with_the_version_and_the_readme_marker():
     assert packages[0]["registryType"] == "pypi"
     assert packages[0]["registryBaseUrl"] == "https://pypi.org"
     assert packages[0]["version"] == version
+    # The package a registry client installs is the stdio one (SPEC-mcp-operator §2.3): the
+    # loopback-HTTP mode needs a proxy in front of it and is not something a client can start
+    # from a manifest. The listing said `streamable-http` on 127.0.0.1 for one release and no
+    # desktop client could use it.
+    assert packages[0]["transport"] == {"type": "stdio"}
+    assert packages[0]["runtimeHint"] == "uvx"
+    arguments = [a.get("value") or a.get("name") for a in packages[0]["packageArguments"]]
+    assert arguments == ["mcp-operator", "--stdio"]
+    assert [v["name"] for v in packages[0]["environmentVariables"]] == ["CTRLRUN_CONFIG"]
 
     name = manifest["name"]
     # The registry's matcher is `strings.Index(description, "mcp-name: " + name)` followed by a

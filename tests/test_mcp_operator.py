@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 The CTRLRun contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The operator MCP server. SPEC-mcp-operator.md; acceptance tests T182-T193.
+"""The operator MCP server. SPEC-mcp-operator.md; acceptance tests T182-T193 and T570-T574.
 
 An approver answers from the assistant they are already talking to, through the same two
 store calls `ctrlrun approve` and `ctrlrun deny` make. So most of what is under test here is
@@ -41,12 +41,15 @@ from ctrlrun.cli.main import main
 from ctrlrun.effect import RESOLVED_BY_HUMAN
 from ctrlrun.gateway.operator import (
     LOOPBACK,
+    OS_LOGIN_ISSUER,
     OperatorConfig,
     OperatorServer,
+    OsLoginIdentityProvider,
     build_operator_server,
     operator_identity_provider,
+    serve_operator_stdio,
 )
-from ctrlrun.identity import IdentityProvider
+from ctrlrun.identity import IdentityContext, IdentityProvider
 from ctrlrun.receipt import EventType, JSONLEventSink
 
 CURRENT = "2026-07-28"
@@ -1525,3 +1528,502 @@ def test_each_gateway_module_imports_on_its_own_in_either_order():
             text=True,
         )
         assert finished.returncode == 0, f"{first} then {second}: {finished.stderr[-400:]}"
+
+
+# --- T570-T574 — stdio: no socket, and the approver is the OS login ------------------------
+#
+# §10 refused stdio for a reason, and the reason is still true: a process launched by the
+# assistant has no credential, and every candidate identity *the client could offer* is asserted
+# by it. What these tests pin is that none of those is used -- the name comes from the real uid
+# and from nothing the client sends or sets -- and that the loop puts nothing on stdout but
+# JSON-RPC. What the real uid's name does and does not promise is `_os_account`'s docstring.
+
+
+def _stdio_config(**overrides) -> OperatorConfig:
+    return OperatorConfig(stdio=True, **overrides)
+
+
+@pytest.fixture
+def os_login():
+    return OsLoginIdentityProvider.from_process()
+
+
+@pytest.fixture
+def stdio_server(control, os_login):
+    return OperatorServer(_stdio_config(), control, os_login)
+
+
+def _session(server, messages):
+    """Feed messages down stdin (dicts, or raw bytes for a malformed line) and return every
+    line that came out of stdout, parsed -- so a line that is not JSON fails here, which is the
+    property T573 is about."""
+    import io
+
+    lines = [m if isinstance(m, bytes) else json.dumps(m).encode() for m in messages]
+    stdin = io.BytesIO(b"\n".join(lines) + b"\n")
+    stdout = io.BytesIO()
+    serve_operator_stdio(server, stdin=stdin, stdout=stdout)
+    out = stdout.getvalue()
+    assert out == b"" or out.endswith(b"\n"), out
+    return [json.loads(line) for line in out.split(b"\n") if line]
+
+
+def _issuer(provider):
+    return OS_LOGIN_ISSUER if not provider.host else f"{OS_LOGIN_ISSUER}:{provider.host}"
+
+
+def test_T570_initialize_list_read_write_attributed_to_the_os_login(
+    stdio_server, control, store, os_login
+):
+    """T191 over the other transport, and the attribution half of T184 with it: the answer is
+    recorded under the OS login, the record carries the principal with an `os-login` issuer so
+    evidence can tell it from a proxy's header, and the receipt the agent leaves afterwards
+    names the same person. The notification in the middle gets no line."""
+    action, request_id = _pending(control)
+
+    replies = _session(
+        stdio_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "desktop", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_pending_approvals", "arguments": {}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "approve", "arguments": {"request_id": request_id}},
+            },
+        ],
+    )
+
+    assert [reply["id"] for reply in replies] == [1, 2, 3, 4]
+    assert replies[0]["result"]["protocolVersion"] == "2025-06-18"
+    assert replies[0]["result"]["serverInfo"]["name"] == "ctrlrun-mcp-operator"
+    assert len(replies[1]["result"]["tools"]) == 8
+    pending = replies[2]["result"]["structuredContent"]["pending"]
+    assert [entry["request_id"] for entry in pending] == [request_id]
+    assert replies[3]["result"]["structuredContent"]["status"] == "granted"
+
+    who = f"mcp-operator:{os_login.login}"
+    record = store.get_approval(request_id)
+    assert record.status is ApprovalStatus.GRANTED
+    assert record.approver == who
+    assert [(w.agent, w.user, w.issuer) for w in record.approvers] == [
+        (os_login.login, os_login.login, _issuer(os_login))
+    ]
+    assert os_login.login != "desktop", "clientInfo is the client's word and must not be the name"
+
+    granted = [e for e in store.events() if e.type is EventType.APPROVAL_GRANTED]
+    assert len(granted) == 1
+    assert granted[0].data["approver"] == who
+    assert granted[0].data["via"] == "mcp-operator"
+
+    with with_approval(request_id):
+        control.execute(action, lambda: "re_1", "refund:txn_1")
+    receipt = next(r for r in store.receipts() if r.action_id == action.action_id)
+    assert receipt.approver == who
+
+
+@pytest.mark.parametrize(
+    "requested, answered",
+    [
+        ("2026-07-28", "2026-07-28"),
+        ("2025-03-26", "2025-03-26"),
+        ("1999-01-01", "2026-07-28"),
+        (None, "2026-07-28"),
+    ],
+)
+def test_T570_the_revision_is_the_clients_where_accepted_and_the_current_one_otherwise(
+    stdio_server, requested, answered
+):
+    """§2.3. The HTTP path refuses an unaccepted header outright; over stdio the transport's
+    rule applies instead -- answer with a version this server supports and let the client
+    decide. The `tools/list` afterwards proves the mirrored headers `2026-07-28` requires were
+    synthesised from the body rather than left for the client to send over a pipe."""
+    params = {} if requested is None else {"protocolVersion": requested}
+    replies = _session(
+        stdio_server,
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ],
+    )
+    assert replies[0]["result"]["protocolVersion"] == answered
+    assert len(replies[1]["result"]["tools"]) == 8
+
+
+def test_T571_the_login_is_the_real_uid_and_never_the_environment(monkeypatch):
+    """§3.1's whole argument in one assertion. `getpass.getuser()` believes the environment,
+    the environment is the launching client's to set, and a client that could set the
+    approver's name would be `--principal-from-client-info` in a fourth costume -- the thing
+    §10 refused. The control proves the environment really does say `mallory`."""
+    import getpass
+    import os
+
+    pwd = pytest.importorskip("pwd")
+    for name in ("USER", "LOGNAME", "LNAME", "USERNAME"):
+        monkeypatch.setenv(name, "mallory")
+    assert getpass.getuser() == "mallory"
+
+    provider = OsLoginIdentityProvider.from_process()
+    real = pwd.getpwuid(os.getuid()).pw_name
+    assert provider.login == real
+    assert provider.login != "mallory"
+
+    # Nor from anything in the request: a context naming mallory in every field it has.
+    principal = provider.resolve(
+        IdentityContext(
+            action="mcp-operator.approve",
+            environment="production",
+            headers={"x-approver": "mallory", "x-approver-user": "mallory"},
+            agent="mallory",
+            user="mallory",
+        )
+    )
+    assert (principal.agent, principal.user, principal.issuer) == (real, real, _issuer(provider))
+    assert principal.expires_at is None, "a login session has no lifetime the process can see"
+    assert dict(principal.claims) == {}, "an OS login carries no claims, so no role can be read"
+
+
+def test_T571_a_uid_with_no_login_refuses_to_start(monkeypatch):
+    """A server whose write tools could never succeed is refused where it can still be fixed
+    (§3.2's logic), and the refusal names the uid rather than failing at the first answer."""
+    pwd = pytest.importorskip("pwd")
+
+    def nobody(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd, "getpwuid", nobody)
+    with pytest.raises(InvalidArgument) as raised:
+        OsLoginIdentityProvider.from_process()
+    assert "no login" in str(raised.value)
+
+
+def test_T571_the_config_names_the_os_login_provider_for_stdio():
+    provider = operator_identity_provider(_stdio_config())
+    assert isinstance(provider, OsLoginIdentityProvider)
+    assert provider.login
+
+
+@pytest.mark.parametrize(
+    "flag, settings",
+    [
+        ("--principal-header", {"principal_header": "x-approver", "user_header": "x-u"}),
+        ("--user-header", {"user_header": "x-u"}),
+        ("--identity-jwt", dict(JWT_OK)),
+        ("--allow-origin", {"allow_origins": ("http://localhost",)}),
+        ("--approver-roles-claim", {"approver_roles_claim": "roles"}),
+    ],
+)
+def test_T572_stdio_refuses_every_flag_that_names_a_header_by_name(flag, settings):
+    """There are no headers over stdio, so each of these is a flag that could not take effect,
+    and a flag the operator believes took effect is the failure the gateway refuses by name."""
+    with pytest.raises(InvalidArgument) as raised:
+        _stdio_config(**settings)
+    assert flag in str(raised.value)
+
+
+@pytest.mark.parametrize("settings", [{"host": "localhost"}, {"port": 9000}, {"path": "/other"}])
+def test_T572_stdio_refuses_a_listen_or_path_that_cannot_take_effect(settings):
+    with pytest.raises(InvalidArgument) as raised:
+        _stdio_config(**settings)
+    assert "cannot take effect" in str(raised.value)
+
+
+def test_T572_a_stray_jwt_flag_is_still_refused_with_stdio():
+    """The shared `check_jwt_flags` runs on this path too, so `--stdio` cannot become the way
+    to start a server with an `--identity-jwt-*` flag nobody validated."""
+    with pytest.raises(InvalidArgument) as raised:
+        _stdio_config(identity_jwt_algorithms=("none",))
+    assert "needs --identity-jwt" in str(raised.value)
+
+
+def test_T572_the_cli_has_stdio_and_still_no_allow_remote_and_no_principal():
+    """T183's assertion, repeated beside the new flag: stdio removed a transport and added no
+    way to bind, and no way to name the approver from the command line."""
+    command = main.commands["mcp-operator"]
+    flags = {flag for parameter in command.params for flag in parameter.opts}
+    assert "--stdio" in flags
+    assert "--allow-remote" not in flags
+    assert "--principal" not in flags
+
+
+def test_T573_stdout_carries_only_json_rpc_lines(stdio_server):
+    """A notification gets no line, a blank line is skipped, a line that is not JSON is
+    `-32700` with a null id rather than silence -- a request the client cannot match to an id
+    is one it will wait on for ever -- and the stream goes on afterwards."""
+    replies = _session(
+        stdio_server,
+        [
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            b"this is not json",
+            b"",
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+        ],
+    )
+    assert [reply.get("id") for reply in replies] == [None, 7]
+    assert replies[0]["error"]["code"] == -32700
+    assert len(replies[1]["result"]["tools"]) == 8
+
+
+def test_T573_an_oversized_line_is_refused_unread_and_the_stream_goes_on(control, os_login):
+    """`--max-body-bytes` bounds the allocation and not only the decision (§2), over stdio as
+    over HTTP. The oversized line is a well-formed request with an id, so had it been read and
+    parsed the reply would carry `99`; it carries `null`, and the next message is answered."""
+    server = OperatorServer(_stdio_config(max_body_bytes=256), control, os_login)
+    big = {"jsonrpc": "2.0", "id": 99, "method": "tools/list", "params": {"pad": "x" * 1000}}
+
+    replies = _session(server, [big, {"jsonrpc": "2.0", "id": 100, "method": "tools/list"}])
+
+    assert [reply.get("id") for reply in replies] == [None, 100]
+    assert replies[0]["error"]["code"] == -32600
+    assert "unread" in replies[0]["error"]["message"]
+
+
+def test_T573_a_last_line_with_no_newline_is_still_a_message(stdio_server):
+    import io
+
+    stdin = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode())
+    stdout = io.BytesIO()
+    serve_operator_stdio(stdio_server, stdin=stdin, stdout=stdout)
+    assert json.loads(stdout.getvalue())["id"] == 1
+
+
+def test_T574_the_process_speaks_json_on_stdout_and_everything_else_on_stderr(workspace):
+    """The end-to-end half, as T191 is for HTTP: `ctrlrun mcp-operator --stdio` as a real
+    subprocess, fed by pipe, exiting cleanly when the pipe closes. Every line of stdout parses;
+    the startup block, which the HTTP path prints to stdout, is on stderr here and names the
+    login -- the first stdio client this was tried behind logged "ignoring non-JSON output"
+    for every line of a block printed to stdout."""
+    import os
+    import subprocess
+    import sys
+
+    pwd = pytest.importorskip("pwd")
+    login = pwd.getpwuid(os.getuid()).pw_name
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": CURRENT}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    finished = subprocess.run(
+        [sys.executable, "-m", "ctrlrun.cli.main", "mcp-operator", "--stdio"],
+        input=b"".join(json.dumps(m).encode() + b"\n" for m in messages),
+        capture_output=True,
+        cwd=workspace,
+        timeout=120,
+    )
+    assert finished.returncode == 0, finished.stderr.decode(errors="replace")
+
+    documents = [json.loads(line) for line in finished.stdout.split(b"\n") if line]
+    assert [document["id"] for document in documents] == [1, 2]
+    assert documents[0]["result"]["protocolVersion"] == CURRENT
+
+    stderr = finished.stderr.decode()
+    assert "ctrlrun mcp-operator — stdio" in stderr
+    assert "identity     OsLoginIdentityProvider" in stderr
+    assert repr(login) in stderr
+
+
+def test_T574_a_flag_that_cannot_take_effect_exits_before_the_stream_opens(workspace):
+    import subprocess
+    import sys
+
+    finished = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ctrlrun.cli.main",
+            "mcp-operator",
+            "--stdio",
+            "--allow-origin",
+            "x",
+        ],
+        input=b"",
+        capture_output=True,
+        cwd=workspace,
+        timeout=120,
+    )
+    assert finished.returncode != 0
+    assert finished.stdout == b"", "nothing but JSON-RPC may reach stdout, refusals included"
+    assert "--allow-origin" in finished.stderr.decode()
+
+
+def test_T570_a_gated_control_refuses_over_stdio_because_a_login_carries_no_roles(gated, os_login):
+    """§3.1's stated cost, pinned: an OS login carries no claims, so a control naming an
+    `approver_role` refuses the answer with `-41015` and the request stays pending. The
+    fail-closed direction, asserted rather than described."""
+    server = OperatorServer(_stdio_config(), gated, os_login)
+    request_id = _pending_on(gated)
+
+    replies = _session(
+        server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "approve", "arguments": {"request_id": request_id}},
+            }
+        ],
+    )
+
+    assert replies[0]["error"]["code"] == -41015
+    assert "payments-owner" in replies[0]["error"]["message"]
+    assert gated.store.get_approval(request_id).status is ApprovalStatus.PENDING
+
+
+def test_T571_root_is_an_account_and_not_a_person(monkeypatch, control, store):
+    """`sudo ctrlrun mcp-operator --stdio`, or a root container, would record every answer as
+    `root`, which distinguishes nobody -- §3.1's own objection to `--principal`. So under uid 0
+    the principal carries no `user`, a write is refused exactly as a machine credential is, and
+    a read still answers. `SUDO_USER` is set to make the point that it is ignored."""
+    import os
+
+    pytest.importorskip("pwd")
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    provider = OsLoginIdentityProvider.from_process()
+    assert provider.is_root
+    principal = provider.resolve(IdentityContext(action="mcp-operator.approve", environment="p"))
+    assert principal.user is None
+
+    server = OperatorServer(_stdio_config(), control, provider)
+    _, request_id = _pending(control)
+    before = len(list(store.events()))
+    replies = _session(
+        server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "approve", "arguments": {"request_id": request_id}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "list_pending_approvals", "arguments": {}},
+            },
+        ],
+    )
+    assert replies[0]["error"]["code"] == -41013
+    assert store.get_approval(request_id).status is ApprovalStatus.PENDING
+    assert len(list(store.events())) == before
+    assert [e["request_id"] for e in replies[1]["result"]["structuredContent"]["pending"]] == [
+        request_id
+    ]
+
+
+@pytest.mark.parametrize("make", [_config, _stdio_config])
+def test_T572_max_body_bytes_has_a_floor_on_both_transports(make):
+    """Zero refuses every message and a negative value reads to EOF over HTTP and nothing at
+    all over stdio. Neither is a server. A review found the floor missing on both."""
+    with pytest.raises(InvalidArgument) as raised:
+        make(max_body_bytes=0)
+    assert "--max-body-bytes" in str(raised.value)
+
+
+def test_T573_the_limit_counts_the_message_and_not_its_line_ending(control, os_login):
+    """A message of exactly `limit` bytes is accepted whether the line ends in LF or CRLF, and
+    one of `limit + 1` bytes is refused however it ends. The first version measured the raw
+    line, so a CRLF client lost two bytes of budget; a review found it."""
+    import io
+
+    limit = 200
+    server = OperatorServer(_stdio_config(max_body_bytes=limit), control, os_login)
+
+    def padded(size):
+        stem = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"'
+        return stem + b"x" * (size - len(stem) - 3) + b'"}}'
+
+    exact, over = padded(limit), padded(limit + 1)
+    assert (len(exact), len(over)) == (limit, limit + 1)
+
+    for ending in (b"\n", b"\r\n"):
+        stdout = io.BytesIO()
+        serve_operator_stdio(server, stdin=io.BytesIO(exact + ending), stdout=stdout)
+        assert json.loads(stdout.getvalue())["id"] == 1, ending
+        stdout = io.BytesIO()
+        serve_operator_stdio(server, stdin=io.BytesIO(over + ending), stdout=stdout)
+        assert json.loads(stdout.getvalue())["error"]["code"] == -32600, ending
+
+
+def test_T573_a_client_that_closes_stdout_ends_the_loop_without_a_traceback(stdio_server):
+    """The client died or closed the pipe. That is the client going away, the same as EOF on
+    stdin, and the answer is to return, not to exit 1 with `BrokenPipeError` on stderr."""
+    import io
+
+    class Closed(io.BytesIO):
+        def write(self, data):
+            raise BrokenPipeError
+
+    stdin = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode())
+    serve_operator_stdio(stdio_server, stdin=stdin, stdout=Closed())
+
+
+def test_T573_a_tool_name_shaped_like_the_header_sentinel_is_an_unknown_tool(stdio_server):
+    """The mirrored `Mcp-Name` is built from the body. A name that happens to look like the
+    revision's base64 sentinel must round-trip through the encoder and the decoder to the same
+    string, or the server refuses its own header with `-32020` instead of saying what is true:
+    no such tool."""
+    replies = _session(
+        stdio_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "=?base64?not-really?=", "arguments": {}},
+            },
+        ],
+    )
+    assert replies[1]["error"]["code"] == -32602
+    assert "no tool named" in replies[1]["error"]["message"]
+
+
+def test_T573_a_malformed_initialize_does_not_move_the_revision(stdio_server):
+    """The revision changes only when the initialize it came in on was accepted; a refused one
+    must not leave the loop on a revision the client never negotiated. Observed through the
+    legacy revision's one distinguishing mechanic: a JSON-RPC *response* body is permitted on
+    `2025-03-26` and refused on `2026-07-28`."""
+    replies = _session(
+        stdio_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT},
+            },
+            {"id": 2, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+            {"jsonrpc": "2.0", "id": 3, "result": {}},
+        ],
+    )
+    assert replies[0]["result"]["protocolVersion"] == CURRENT
+    assert replies[1]["error"]["code"] == -32600
+    assert replies[2]["error"]["code"] == -32600, (
+        "still on 2026-07-28, where a response body is refused"
+    )

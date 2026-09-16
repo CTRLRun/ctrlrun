@@ -15,15 +15,28 @@
       "registryBaseUrl": "https://pypi.org",
       "identifier": "ctrlrun",
       "version": "0.12.2",
+      "runtimeHint": "uvx",
       "transport": {
-        "type": "streamable-http",
-        "url": "http://127.0.0.1:8901/mcp"
+        "type": "stdio"
       },
       "packageArguments": [
         {
           "type": "positional",
           "value": "mcp-operator",
-          "description": "Serve the operator's own commands as MCP tools, over loopback."
+          "description": "Serve the operator's own commands as MCP tools."
+        },
+        {
+          "type": "named",
+          "name": "--stdio",
+          "description": "Speak MCP on stdin and stdout, open no socket, and record each answer under the OS login of the person whose client launched this."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "CTRLRUN_CONFIG",
+          "description": "Path to the ctrlrun.yaml your agents run against. The store is found beside it.",
+          "isRequired": true,
+          "format": "filepath"
         }
       ]
     }

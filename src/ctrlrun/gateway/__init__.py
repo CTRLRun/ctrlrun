@@ -283,39 +283,70 @@ def _announce_operator(control: Any, config: Any, identity: Any, store: Any) -> 
     `print` rather than the logger, because this is the CLI's own output and a logger with no
     configured handler would swallow it — which is the failure mode the block exists to
     prevent, in miniature.
+
+    **Over stdio the whole block goes to stderr** (§2.3). Stdout is the protocol stream there,
+    the client parses every line of it as JSON-RPC, and a startup block on it is read as a
+    broken message rather than as information: the first stdio client this was tried behind
+    logged "ignoring non-JSON output" for every line of it.
     """
-    print(
-        f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}",
-        flush=True,
-    )
-    print(f"environment  {control.environment}", flush=True)
+    out = sys.stderr if config.stdio else sys.stdout
+
+    def line(text: str) -> None:
+        print(text, file=out, flush=True)
+
+    if config.stdio:
+        line("ctrlrun mcp-operator — stdio; no socket, one client, the one that launched this")
+    else:
+        line(f"ctrlrun mcp-operator — listening on {config.host}:{config.port}{config.path}")
+    line(f"environment  {control.environment}")
     # SPEC-mcp-operator §6 — for a server whose whole premise is "both processes on one host
     # against one store", and which has a `--store-url` that silently changes it, this is the
     # line an operator most needs. A review found the block printing everything but this.
-    print(f"store        {getattr(store, 'path', store)}", flush=True)
-    print(f"identity     {type(identity).__name__}", flush=True)
+    line(f"store        {getattr(store, 'path', store)}")
+    line(f"identity     {type(identity).__name__}")
     if config.principal_header is not None:
-        print(
+        line(
             f"             trusts the header {config.principal_header!r}: it is worth what "
             "the proxy that sets it is worth,"
         )
-        print(
+        line(
             "             and that proxy must authenticate the caller and overwrite the "
             "header on every request (SPEC-v0.3 §3.3)"
         )
-    print(
+    if config.stdio:
+        line(
+            f"             the account this process runs as, {identity.login!r}, read from the "
+            "real uid and from nothing the client"
+        )
+        line(
+            "             sends or sets. It carries no roles and no expiry, so this process "
+            "holds approve, deny and resolve under"
+        )
+        line(
+            "             that name for as long as it runs; the confirmation the client shows "
+            "before a write is the only human step"
+        )
+        if identity.is_root:
+            line(
+                "             RUNNING AS ROOT: an account, not a person. Every write is "
+                "refused (-41013); reads still answer"
+            )
+    line(
         "read tools   answer without a credential; loopback is not a boundary against "
         "other processes on this host"
     )
-    print(
-        "write tools  approve, deny, resolve — each needs a credential naming a human, "
-        "and each answer is recorded under that name"
-    )
-    if control.authority is not None:
-        print(
-            f"authority    {len(control.authority.grants)} grant(s), evaluated by the agent",
-            flush=True,
+    if config.stdio:
+        line(
+            "write tools  approve, deny, resolve — each answer is recorded under "
+            f"{identity.login!r}"
         )
+    else:
+        line(
+            "write tools  approve, deny, resolve — each needs a credential naming a human, "
+            "and each answer is recorded under that name"
+        )
+    if control.authority is not None:
+        line(f"authority    {len(control.authority.grants)} grant(s), evaluated by the agent")
 
 
 def _observe_the_upstream(control: Any, config: Any) -> None:
