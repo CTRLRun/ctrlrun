@@ -834,7 +834,10 @@ def test_every_adapter_in_the_tree_is_one_publish_yml_can_release():
     explicit, and neither had a row. Nothing failed, because the tag test above transcribes the
     *version* rule and never asks whether the workflow knows the adapter exists.
     """
-    workflow = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    source = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+    if not source.is_file():  # pragma: no cover - the sdist carries neither .github/ nor adapters/
+        pytest.skip("publish.yml is not in this distribution; the sdist prunes .github/")
+    workflow = source.read_text(encoding="utf-8")
     for adapter in ADAPTER_DIRECTORIES:
         assert f'"adapters-{adapter}-*"' in workflow, (
             f"adapters/{adapter} has no tag trigger in publish.yml, so no tag can release it"
