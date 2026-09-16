@@ -1883,6 +1883,14 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
 @click.option("--listen", default="127.0.0.1:8901", show_default=True, help="HOST:PORT.")
 @click.option("--path", default="/mcp", show_default=True, help="The MCP endpoint path.")
 @click.option(
+    "--stdio",
+    is_flag=True,
+    help="Speak MCP on stdin and stdout to the client that launched this process (a "
+    "desktop assistant, Cursor, an editor). Opens no socket. The approver is the account this "
+    "process runs as, read from the real uid; takes no header, JWT or origin flag "
+    "(SPEC-mcp-operator §2.3).",
+)
+@click.option(
     "--principal-header",
     default=None,
     help="Take the approver's agent from this header, set by a proxy that authenticates them.",
@@ -1963,6 +1971,7 @@ def _delegation_dict(delegation: Delegation) -> dict[str, Any]:
 def mcp_operator(
     listen: str,
     path: str,
+    stdio: bool,
     principal_header: str | None,
     user_header: str | None,
     environment: str | None,
@@ -1987,11 +1996,13 @@ def mcp_operator(
     identity_jwt_http_timeout: float,
     store_url: str | None,
 ) -> None:
-    """Answer approvals from an MCP client, over loopback (SPEC-mcp-operator.md).
+    """Answer approvals from an MCP client, over loopback or stdio (SPEC-mcp-operator.md).
 
     There is no --principal and no --allow-remote, and both absences are load-bearing: a
     static principal cannot attribute an answer to a person (§3.1), and a server whose read
-    tools answer without a credential must not be the one that opens a port (§2.1).
+    tools answer without a credential must not be the one that opens a port (§2.1). --stdio
+    opens none at all, and its approver is the one name the launching client cannot set: the
+    OS login of the process (§2.3).
     """
     host, _, port = listen.rpartition(":")
     try:
@@ -2005,6 +2016,7 @@ def mcp_operator(
             host=host or "127.0.0.1",
             port=int(port),
             path=path,
+            stdio=stdio,
             principal_header=principal_header,
             user_header=user_header,
             environment=environment,
