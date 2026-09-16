@@ -961,6 +961,11 @@ RECORDED: dict[str, dict[str, str]] = {
         "1.2.0": ">=0.5,<0.12",
         "1.3.0": ">=0.5,<0.13",
     },
+    # Read from PyPI's own requires_dist for 1.0.0 after the upload succeeded, not from the
+    # tree: the point of this table is to be the other side of that comparison.
+    "langchain": {
+        "1.0.0": ">=0.12,<0.13",
+    },
 }
 
 
