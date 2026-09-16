@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 # An SBOM of the distribution this repository ships, measured from the built wheel.
 #

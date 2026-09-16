@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
-"""The double-refund scenario, through ACS hooks, with CTRLRun behind them.
+"""The double-refund scenario, through ACS hooks, with ctrlrun behind them.
 
 ACS is advisory: a Guardian returns a decision and the *platform* runs the tool. So one tool
 call fires two hooks — `steps/toolCallRequest` before, `steps/toolCallResult` after — and
-CTRLRun holds the reservation between them. That is what makes the second attempt refusable:
+ctrlrun holds the reservation between them. That is what makes the second attempt refusable:
 the first call's effect record is still open when the second arrives.
 
 The remote commits the refund and then the response goes missing. ACS reports that as
 `exit_status: "timeout"`, and ACS says nothing about what a timeout means for the side
-effect. CTRLRun records it as AMBIGUOUS — the fail-closed reading — and refuses the retry.
+effect. ctrlrun records it as AMBIGUOUS — the fail-closed reading — and refuses the retry.
 
     python examples/acs/main.py
 
@@ -55,7 +55,7 @@ class FakeAcsRuntime:
         if decision != "allow":
             return f"{decision}: {verdict['result'].get('reasoning', '')}"
 
-        # The platform runs the tool. CTRLRun did not, and does not know what happened until
+        # The platform runs the tool. ctrlrun did not, and does not know what happened until
         # the result hook tells it.
         self.tool_calls += 1
         exit_status = "timeout" if lose_response else "success"

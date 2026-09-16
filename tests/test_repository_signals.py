@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The repository's trust signals, as assertions rather than intentions.
 
@@ -895,7 +895,7 @@ def test_normalize_sdist_refuses_without_an_epoch_and_refuses_a_wheel(tmp_path):
 # --- every source file says who holds it and under what licence -------------------------------
 
 _SOURCE_DIRS = ("src", "tests", "fuzz", "scripts", "adapters", "examples")
-_COPYRIGHT_LINE = "# SPDX-FileCopyrightText: 2026 The CTRLRun contributors"
+_COPYRIGHT_LINE = "# SPDX-FileCopyrightText: 2026 The ctrlrun contributors"
 _LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
 
 

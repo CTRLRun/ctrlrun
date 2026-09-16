@@ -79,7 +79,7 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$REPOSITORY/traffic/clones")
           if [ "$status" = "403" ] || [ "$status" = "404" ]; then
-            echo "::warning::TRAFFIC_TOKEN cannot read $REPOSITORY traffic (HTTP $status). It needs Administration: Read-only on this repository (fine-grained, resource owner CTRLRun) or the classic repo scope; a fine-grained token may also be waiting on org approval. The clones badge keeps its last value until then."
+            echo "::warning::TRAFFIC_TOKEN cannot read $REPOSITORY traffic (HTTP $status). It needs Administration: Read-only on this repository (fine-grained, resource owner ctrlrun) or the classic repo scope; a fine-grained token may also be waiting on org approval. The clones badge keeps its last value until then."
             echo "read=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

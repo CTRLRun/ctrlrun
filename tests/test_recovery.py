@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Recovery on restart. Build-list item 5; SPEC-v0.6 §5, §8 T159-T163.
 
@@ -771,7 +771,7 @@ def test_T161_an_operator_command_creates_nothing_and_migrates_nothing(tmp_path)
             cli.main, [*command, "--store-url", f"{POSTGRES_URL}?ctrlrun_schema={empty}"]
         )
         assert result.exit_code != 0, (
-            f"`ctrlrun {command[0]}` accepted a schema holding no CTRLRun database:\n"
+            f"`ctrlrun {command[0]}` accepted a schema holding no ctrlrun database:\n"
             f"{result.output}"
         )
         assert tables(empty) == [], (

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """A lost response is not a failure, and a blind retry is a second refund.
 
 The remote commits the refund and *then* the reply goes missing. That order is the whole
 point: a remote that fails before doing anything is easy, and an executor can say so by
-raising `NotExecuted`. This one is the dangerous kind, so CTRLRun records the outcome as
+raising `NotExecuted`. This one is the dangerous kind, so ctrlrun records the outcome as
 AMBIGUOUS rather than failed and refuses the retry. Nothing in this process knows whether
 the money moved, and the one thing worse than not knowing is guessing.
 

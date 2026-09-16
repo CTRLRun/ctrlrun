@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The README's header assets: the animation, its tape, what it records, and the social preview.
 
@@ -12,7 +12,7 @@ a line the README quotes. When the output changes, the tests fail first, then th
 
 Until 2026-09-14 the animation was `ctrlrun demo`'s first two scenarios, piped through `sed` and
 a pacing loop. It was a true recording and a hard one to read: a stranger saw a transcript with
-two pipes in the command line and no code, and could not tell from it what CTRLRun *is*. The
+two pipes in the command line and no code, and could not tell from it what ctrlrun *is*. The
 recording is now the integration itself: the policy file, the agent that runs one refund and is
 stopped on the next, the human answering from the shell, and the same approval refused for a
 different amount. The demo transcript is still in the README, in the collapsed block that
@@ -254,7 +254,7 @@ def test_the_social_preview_is_1280_by_640_and_rendered_from_its_svg():
 #: `CTRLRun/ctrlrun-docs` asserts the same strings against `index.mdx`, so a change to either
 #: surface fails on the other.
 HOMEPAGE_H1 = (
-    "CTRLRun stops AI agents from taking wrong, restricted, or malicious actions in your workflows."
+    "ctrlrun stops AI agents from taking wrong, restricted, or malicious actions in your workflows."
 )
 HOMEPAGE_LEDE = (
     "Every action is checked against your rules before it runs. Allowed actions go through. "
@@ -275,7 +275,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
 
     It carried the capability matrix too, and this test required it there. That is the front
     door decision the matrix was moved for: a six-by-four table is the right document for
-    somebody evaluating CTRLRun and the wrong one for somebody deciding whether to keep
+    somebody evaluating ctrlrun and the wrong one for somebody deciding whether to keep
     reading, so the first section after the animation is the failure itself. The requirement
     is inverted rather than deleted: no table above the first H2, the marker still in the
     file, and the first section named, because a header that quietly grew a table again would
@@ -283,7 +283,7 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
 
     The fixed lines are pinned so the header cannot drift untested. The first two are the
     homepage's H1 and lede, verbatim; the category noun is still asserted, because a reader
-    had to reverse-engineer what CTRLRun *is* from three slogans before 0.6; and the
+    had to reverse-engineer what ctrlrun *is* from three slogans before 0.6; and the
     at-most-once and unknown sentences are the two claims `CLAIMS.md` maps to their tests.
     """
     text = README.read_text(encoding="utf-8")
@@ -298,9 +298,9 @@ def test_the_header_carries_the_fixed_copy_and_the_five_badges():
         "A consequential action happens at most once, exactly as approved, and leaves a "
         "receipt." in head
     )
-    assert "When the outcome is unknown, CTRLRun says so instead of guessing." in head
+    assert "When the outcome is unknown, ctrlrun says so instead of guessing." in head
     # The homepage's example heading opens the first section.
-    assert "**The model guesses. CTRLRun does not.**" in text
+    assert "**The model guesses. ctrlrun does not.**" in text
     # The row was cut from thirteen to ten on 2026-09-11: `pypi/pyversions` is metadata rather
     # than a claim, and `ruff` and `mypy --strict` say how the library is written, which is not
     # what a stranger is deciding on the first screen. `scripts/check.sh` still runs all three

@@ -1,4 +1,4 @@
-# CTRLRun v0.5 Specification
+# ctrlrun v0.5 Specification
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md), [`SPEC-v0.2.md`](SPEC-v0.2.md),
 [`SPEC-v0.3.md`](SPEC-v0.3.md) and [`SPEC-v0.4.md`](SPEC-v0.4.md)**. Everything in all four
@@ -563,7 +563,7 @@ adapter would like to check:
   is `InvalidArgument` at the gate rather than a silent inequality (`v0.1 §2.3`). A second
   equality implementation here would be a second place for the binding to drift.
 - **`False`.** The framework's resumption carries nothing the adapter can inspect. The binding
-  across the interrupt is then **the framework's checkpoint, not CTRLRun's**: that is
+  across the interrupt is then **the framework's checkpoint, not ctrlrun's**: that is
   *attribution*, evidence will show what was approved and what ran, and a divergence is findable
   afterwards rather than refused beforehand. The adapter's README MUST say so in those words
   (§7 item 4) and MUST NOT describe it as prevention, and the kit reports
@@ -571,7 +571,7 @@ adapter would like to check:
 
 **Why arguments and not the hash.** The webhook's answerer echoes the `action_hash` it was shown,
 because it was shown one. A framework's approval item was not: it records the arguments the model
-proposed and knows nothing of CTRLRun's canonical form, and an adapter that computed a hash to
+proposed and knows nothing of ctrlrun's canonical form, and an adapter that computed a hash to
 echo would have to build an `Action`, which needs a `Principal`, which §4.2 forbids — the same
 hole `needs_approval` closed in §2.2. So the carried value is the one a framework actually holds.
 It is not a weaker check, and the rebuild above is why: what is compared is the full
@@ -742,7 +742,7 @@ this. It is the one place an adapter is required to branch on the mode.
 The consequence of getting it wrong is worse than the rule it breaks, which is why it is stated
 rather than left to follow: a framework of that shape does not invoke a tool whose approval was
 declined, so a human's *no* under `mode: observe` **stops the action** — and observe mode's whole
-promise is that every decision is recorded and none is enforced. A deployment evaluating CTRLRun
+promise is that every decision is recorded and none is enforced. A deployment evaluating ctrlrun
 in the mode built for evaluating it would have its agent halted. §12.9 has the finding; the kit
 cannot catch it, because §3.6 makes `run()` refuse an observing `Control`, so an adapter that
 interrupts in observe mode scores full marks.
@@ -799,7 +799,7 @@ being verified is not the thing that ships.
 
 The one thing an adapter may configure is **how it reaches its framework's primitive** — which
 node, which context key, which callback — because that is the framework's shape and not a
-CTRLRun check.
+ctrlrun check.
 
 ---
 
@@ -941,7 +941,7 @@ class ConformanceAdapter(Protocol):
     #: constructs a `Control` and a kit that let it would be testing a shape that does not ship.
     interrupt: FrameworkInterrupt
     #: `True` where the framework does not invoke a tool whose approval was declined, so a
-    #: human's `no` proposes no CTRLRun action and there is no `APPROVAL_DENIED` to record
+    #: human's `no` proposes no ctrlrun action and there is no `APPROVAL_DENIED` to record
     #: (§12.6). Defaults to `False`, which is the shape most frameworks have -- a declaration
     #: nobody needs to make is one nobody gets wrong.
     #:
@@ -955,10 +955,10 @@ class ConformanceAdapter(Protocol):
     def invoke(self, request: CallRequest) -> Any: ...
         # Returns whatever the executor returned. Where the framework **refused before it
         # invoked** — a declined pre-invocation approval, so the executor never ran and no
-        # CTRLRun action was proposed — let the framework's own refusal **propagate**. Do not
+        # ctrlrun action was proposed — let the framework's own refusal **propagate**. Do not
         # return a value (that is `never-executes`) and do not return `None` (undefined). The
         # kit catches it and decides the case from the evidence: `denial` asserts that the
-        # executor was not reached and that CTRLRun was not asked (§5.4). Item 6 could not
+        # executor was not reached and that ctrlrun was not asked (§5.4). Item 6 could not
         # determine this from the contract and had to guess.
 
 
@@ -1038,7 +1038,7 @@ suite passed. A suite asserting a refusal cannot tell *the human said no through
 from *the framework was never asked*, and only the count can.
 
 `invoke` runs **one** protected call end to end through the framework and returns the executor's
-value. Every CTRLRun exception propagates: the kit asserts on `ApprovalMismatch`,
+value. Every ctrlrun exception propagates: the kit asserts on `ApprovalMismatch`,
 `DuplicateEffect`, `AmbiguousEffect`, `ActionDenied`, `AuthorityDenied` and `NotExecuted` by
 type and by `reason`, so an adapter that swallowed one fails rather than passing quietly.
 
@@ -1070,7 +1070,7 @@ folded into the count, one level down.
 
 **`denial` is B3 alone for the same reason**, and it is a suite because of the second reference
 adapter rather than by foresight — §12.6 has the finding. A framework that refuses *before* it
-invokes never proposes a CTRLRun action, so there is nothing to deny and nothing to log; B3 left
+invokes never proposes a ctrlrun action, so there is nothing to deny and nothing to log; B3 left
 in `kernel` beside six cases that always run would have reported that adapter `pass` on the one
 case it cannot exercise. The declaration is `refuses_before_invoking`, defaulting to `False`.
 
@@ -1173,9 +1173,9 @@ then establishes the declaration from the evidence.
 **The first attempt at this checked the wrong thing**, and a second independent review broke it
 with one class attribute: `refuses_before_invoking = True` on `denial-as-error` — a fixture this
 table requires to *fail* — reported `not_applicable` with every other suite green. It had asked
-whether the executor ran, which a framework that refuses *inside* CTRLRun satisfies just as well.
+whether the executor ran, which a framework that refuses *inside* ctrlrun satisfies just as well.
 
-The discriminator is **whether CTRLRun was asked at all**. A framework that genuinely refuses
+The discriminator is **whether ctrlrun was asked at all**. A framework that genuinely refuses
 before invoking proposes no action: no `ACTION_PROPOSED`, no `APPROVAL_REQUESTED`, and the
 framework's own primitive is never reached, because `@protect` never gets far enough to raise
 `ApprovalRequired`. Two checks, and the pair is not redundant — one fixture reaches each and
@@ -1183,7 +1183,7 @@ neither reaches the other:
 
 - **The executor ran.** Catches an adapter that bypasses `Control` altogether, which leaves no
   events to be caught by.
-- **CTRLRun was asked** — any of `ACTION_PROPOSED`, `APPROVAL_REQUESTED`, or a non-zero interrupt
+- **ctrlrun was asked** — any of `ACTION_PROPOSED`, `APPROVAL_REQUESTED`, or a non-zero interrupt
   count. Catches an adapter that went through the whole flow and then mislabelled the result.
 
 Only `APPROVAL_DENIED` is excused, because that is the one such a framework genuinely cannot
@@ -1214,7 +1214,7 @@ reason.
   response is doing what its documentation says. That is item 1's measurement, not a kit failure.
 - **Not the operator's executor.** The kit supplies its own, always.
 - **Not where the adapter was wired.** An agent that calls the unprotected function bypasses
-  CTRLRun entirely, and no amount of driving the adapter finds that.
+  ctrlrun entirely, and no amount of driving the adapter finds that.
 - **Not whether the adapter logged the observe banner.** §3.6 requires it, and the kit
   **refuses** an observing `Control` outright — so no case ever runs under one, and an adapter
   that never calls `ctrlrun.adapter.banner` passes every suite. The requirement is real and the
@@ -1679,7 +1679,7 @@ specifically:
   already provide.** §3.4 says which half is prevention and which is attribution, and inventing
   a token to close the gap is the second approval path under another name.
 - **An expiry on the human's deliberation in a resumed-in-place shape.** §3.2.1 states the cost
-  and does not fix it: the framework owns the checkpoint's lifetime, and a CTRLRun timer that
+  and does not fix it: the framework owns the checkpoint's lifetime, and a ctrlrun timer that
   refused a resumption would be refusing an action the kernel re-decides in full at step 13
   anyway.
 - **Appending an event from an approval provider.** §2.4 states the limitation; giving
@@ -1799,9 +1799,9 @@ for is telling "the framework was asked" from "it was not", and `>= 1` does that
 which is its right home: only they know the framework can carry it.
 
 **A framework that refuses *before* invoking produces no denial to observe.** The Agents SDK
-does not call a tool whose approval was declined, so no CTRLRun action is proposed: no
+does not call a tool whose approval was declined, so no ctrlrun action is proposed: no
 `APPROVAL_DENIED`, no `ACTION_DENIED`, no receipt. The refusal is real and it is in the
-framework's own output; CTRLRun was simply never asked. `B3` is therefore its own suite,
+framework's own output; ctrlrun was simply never asked. `B3` is therefore its own suite,
 `denial`, reported `not_applicable` for such a framework with the reason on the report and in
 the adapter's README — never a pass, and never folded into the count. `ConformanceAdapter` gains
 `refuses_before_invoking`, which defaults to `False` because that is the shape most frameworks
@@ -1816,7 +1816,7 @@ either alone cannot pass the `kernel` suite — nor should it.
 exception and returns *"An error occurred while running the tool. Please try again."* **to the
 model**. Under that default an `ActionDenied`, a `DuplicateEffect` or an `AmbiguousEffect`
 reaches an agent as a suggestion to retry — which is exactly the failure `v0.2 §6.10` argues
-about in the gateway, one layer up: *a refusal by CTRLRun is not an outcome of the tool, it is
+about in the gateway, one layer up: *a refusal by ctrlrun is not an outcome of the tool, it is
 the statement that the tool did not run*, and a channel whose contents reach the model as text
 invites the retry the refusal exists to prevent.
 
@@ -1883,7 +1883,7 @@ an adapter that interrupts in observe mode scores full marks.
 The consequence is worse than the rule. A framework of that shape does not invoke a tool whose
 approval was declined — so a human's *no* under `mode: observe` **stops the action**, and observe
 mode's entire promise is that every decision is recorded and none is enforced. The deployment
-most likely to be running it is the one evaluating CTRLRun before trusting it, and what it would
+most likely to be running it is the one evaluating ctrlrun before trusting it, and what it would
 have seen is its agent halted by the tool that promised to change nothing.
 
 §3.6 now **requires** the predicate to return "no approval needed" under `mode: observe`, rather

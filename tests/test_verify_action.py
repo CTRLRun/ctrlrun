@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The composite action, the badge and `https://ctrlrun.dev/docs/verify`. SPEC-v0.4 §5; T118-T120.
 
@@ -41,7 +41,7 @@ AUTHORITY_PAYMENTS = REPO_ROOT / "examples" / "authority" / "payments.yaml"
 V1_PAYMENTS = REPO_ROOT / "examples" / "policies" / "payments.yaml"
 
 #: SPEC-v0.4 §5.3 and §6.1 — the vocabulary the badge, the summary and the page may not use as
-#: a claim about CTRLRun or about the operator's system. The same list `v0.2 §10` T31 holds the
+#: a claim about ctrlrun or about the operator's system. The same list `v0.2 §10` T31 holds the
 #: sector templates to.
 FORBIDDEN = ("secure", "safe", "compliant", "certified", "audited")
 
@@ -196,10 +196,10 @@ def test_T119_the_rendered_badge_text_is_exactly_CTRLRun_verified_N_over_M(tmp_p
 
     assert badge is not None
     rendered = f"{badge['label']} {badge['message']}"
-    assert rendered == f"CTRLRun verified {report.passed}/{report.applicable}"
-    assert re.fullmatch(r"CTRLRun verified \d+/\d+", rendered)
+    assert rendered == f"ctrlrun verified {report.passed}/{report.applicable}"
+    assert re.fullmatch(r"ctrlrun verified \d+/\d+", rendered)
     assert BADGE_MESSAGE.fullmatch(badge["message"])
-    assert badge["label"] == BADGE_LABEL == "CTRLRun"
+    assert badge["label"] == BADGE_LABEL == "ctrlrun"
     assert badge["schemaVersion"] == 1
 
 
@@ -342,7 +342,7 @@ def test_T120_the_renderer_writes_no_badge_file_where_none_is_allowed(tmp_path):
 
     assert main(["--report", str(document), "--badge", str(badge), "--summary", str(summary)]) == 0
     assert not badge.exists()
-    assert summary.read_text(encoding="utf-8").startswith("### CTRLRun verify")
+    assert summary.read_text(encoding="utf-8").startswith("### ctrlrun verify")
 
 
 def test_T120_the_renderer_writes_the_badge_where_one_is_allowed(tmp_path):
@@ -392,7 +392,7 @@ def test_the_job_summary_carries_the_not_applicable_rows_in_full():
 # --- the verify page quotes the real output (SPEC-v0.4 §4.1; the CLAIMS.md standard) --------
 
 #: The README carried a copy of this report until 2026-09-09, when the page was cut to what
-#: CTRLRun does, how to use it and how it works, and the report went with the rest of the
+#: ctrlrun does, how to use it and how it works, and the report went with the rest of the
 #: verify section. The guard moved rather than went: the verify page is now the single
 #: home of the verbatim output, so the "two copies can drift" test below has nothing left to
 #: compare and is gone, and this one reads the page instead of the README.
@@ -536,7 +536,7 @@ def test_the_publish_script_fast_forwards_on_the_second_run(tmp_path):
         # be failing on its own setup rather than on the script.
         (work / "badge").mkdir()
         (work / "badge" / "verify-badge.json").write_text(
-            json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": message}),
+            json.dumps({"schemaVersion": 1, "label": "ctrlrun", "message": message}),
             encoding="utf-8",
         )
         # The second artifact, from the `check` job. The script refuses without it rather than
@@ -623,7 +623,7 @@ def test_the_publish_script_is_a_no_op_when_the_badge_has_not_changed(tmp_path):
         )
         (work / "badge").mkdir(parents=True)
         (work / "badge" / "verify-badge.json").write_text(
-            json.dumps({"schemaVersion": 1, "label": "CTRLRun", "message": "verified 9/9"}),
+            json.dumps({"schemaVersion": 1, "label": "ctrlrun", "message": "verified 9/9"}),
             encoding="utf-8",
         )
         (work / "badge" / "tests-badge.json").write_text(

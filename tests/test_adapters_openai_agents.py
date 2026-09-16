@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The OpenAI Agents SDK reference adapter. SPEC-v0.5 §3.5, §6, §7; T135, T135b, T137.
 
@@ -182,10 +182,10 @@ def test_rejecting_through_the_sdk_never_reaches_ctrlrun_at_all():
     """§7's "where the framework's behaviour is visible through the contract", and the one place
     this adapter's evidence differs from `@protect`'s.
 
-    The SDK does not invoke a tool whose approval was refused, so no CTRLRun action is ever
+    The SDK does not invoke a tool whose approval was refused, so no ctrlrun action is ever
     proposed: there is no `ACTION_DENIED`, no `APPROVAL_DENIED` and no receipt. The refusal is
-    real and it is in the SDK's own output; it is simply not in CTRLRun's evidence log, because
-    CTRLRun was never asked about it. The README says so rather than leaving an operator to
+    real and it is in the SDK's own output; it is simply not in ctrlrun's evidence log, because
+    ctrlrun was never asked about it. The README says so rather than leaving an operator to
     discover an empty log.
     """
     control, store = build()
@@ -256,7 +256,7 @@ class AgentsConformanceAdapter:
 
     framework = "openai-agents"
     #: SPEC-v0.5 §5.2. This SDK does not invoke a tool whose approval was refused, so a
-    #: rejection proposes no CTRLRun action and there is nothing to deny. The `denial` suite is
+    #: rejection proposes no ctrlrun action and there is nothing to deny. The `denial` suite is
     #: `not_applicable` with that reason, and never a pass.
     refuses_before_invoking = True
 
@@ -311,7 +311,7 @@ class AgentsConformanceAdapter:
         import json
 
         # `protected_tool` and not a bare `function_tool`: it sets `failure_error_function=None`
-        # so a CTRLRun refusal reaches the caller instead of the model (§12.6). Without it every
+        # so a ctrlrun refusal reaches the caller instead of the model (§12.6). Without it every
         # `kernel` case reports "did not raise", which is what this SDK's default does to an
         # exception -- and it is why the helper exists.
         tool = protected_tool(
@@ -329,7 +329,7 @@ def _returned(result: Any) -> Any:
     """What the executor returned, out of the SDK's run output.
 
     The SDK reports a tool that raised through `failure_error_function` rather than propagating,
-    so a CTRLRun refusal would be swallowed into a model-readable message -- which is precisely
+    so a ctrlrun refusal would be swallowed into a model-readable message -- which is precisely
     what the kit must see. The tool here is built without one, so the exception propagates out
     of `Runner.run`.
     """
@@ -344,7 +344,7 @@ def test_T135_the_agents_adapter_passes_the_conformance_kit():
 
 def test_T135_a_refusal_before_invocation_makes_the_denial_suite_not_applicable():
     """The second thing this adapter forced into the contract. A framework that never invokes a
-    refused tool proposes no CTRLRun action, so there is nothing to deny -- and a `denial` case
+    refused tool proposes no ctrlrun action, so there is nothing to deny -- and a `denial` case
     sitting inside `kernel` would have reported `pass` for an adapter that cannot exercise it."""
     report = run(AgentsConformanceAdapter())
 
@@ -822,7 +822,7 @@ def test_the_predicate_and_the_kernel_disagreeing_does_not_execute_unapproved():
     agent = Agent(name="refunds", instructions="You handle refunds.", tools=[tool], model=model)
 
     # The refusal reaches the caller rather than the model: `protected_tool` sets
-    # `failure_error_function=None` so a CTRLRun refusal is not turned into text an agent can
+    # `failure_error_function=None` so a ctrlrun refusal is not turned into text an agent can
     # retry against (§12.7). `unwrap` gives back what was actually raised.
     with pytest.raises(Exception) as raised:
         Runner.run_sync(agent, "refund txn_1")
@@ -969,7 +969,7 @@ def test_a_sticky_always_approve_is_not_an_answer_for_a_later_call():
     that tool (`run_context.py`: `if approval_entry.approved is True: return True`, reached
     after the exact-call lookup misses).
 
-    A human who said *always approve refunds* has not seen this refund. CTRLRun's entire claim
+    A human who said *always approve refunds* has not seen this refund. ctrlrun's entire claim
     is that an approval binds to one action -- `v0.1 §4.2` consumes a grant against an
     `action_hash` -- and a blanket yes for a tool is the thing that claim exists to refuse. With
     `carries_approved_arguments=False` there is no binding check in core to catch it either, so
@@ -1186,7 +1186,7 @@ def test_observe_mode_never_interrupts_and_never_blocks(caplog):
     The consequence is worse than the rule it breaks: a framework of this shape does not invoke
     a tool whose approval was declined, so a human's *no* under `mode: observe` **stops the
     action** -- and observe mode's whole promise is that every decision is recorded and none is
-    enforced. A deployment evaluating CTRLRun in the mode built for evaluating it had its agent
+    enforced. A deployment evaluating ctrlrun in the mode built for evaluating it had its agent
     halted.
     """
     import logging

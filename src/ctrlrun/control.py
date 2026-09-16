@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The @protect decorator, Control and the ambient action context. Build-list item 3.
 
@@ -1743,7 +1743,7 @@ class Control:
         held_key = None if reservation is None else effect_key
         attempt = 1 if reservation is None else reservation.attempt
         # SPEC-v0.7 §5.7 — the check, in observe mode: recorded and not enforced, because
-        # observe mode suppresses CTRLRun's decisions and not the record of an effect that
+        # observe mode suppresses ctrlrun's decisions and not the record of an effect that
         # happened. The fast path's half is recorded in `execute`, before this is reached.
         if reservation is not None and self._over_the_ceiling(
             self._policy.max_attempts(action.name), reservation.attempt
@@ -1957,7 +1957,7 @@ class Control:
 
         The **reservation is still taken**, and that asymmetry is deliberate. In observe mode
         the action genuinely executes, so the effect record has to exist or `v0.1 §5.4`'s
-        duplicate refusal has nothing to refuse with. What observe mode suppresses is CTRLRun's
+        duplicate refusal has nothing to refuse with. What observe mode suppresses is ctrlrun's
         *decisions*; it does not suppress the record of an effect that really happened.
 
         The verdict is computed with the same pure `check_consumable` every store applies, so
@@ -3809,7 +3809,7 @@ class Control:
 
         **In-process there is no upstream to observe, so a pinned action is refused**
         `upstream_unverified` on every call (§4.4). That is loud, correct, and exactly what the
-        pin says the operator asked for: a pin is a claim about a server CTRLRun connects to, and
+        pin says the operator asked for: a pin is a claim about a server ctrlrun connects to, and
         in-process the executor is the operator's own code holding its own connection.
         """
         from . import upstream as _upstream
@@ -5304,7 +5304,7 @@ def _reject_variadic(signature: inspect.Signature, name: str) -> None:
 
 
 def _reject_reserved_parameters(signature: inspect.Signature, name: str) -> None:
-    """Refuse a protected function whose parameter is a name CTRLRun resolves itself.
+    """Refuse a protected function whose parameter is a name ctrlrun resolves itself.
 
     SPEC-v0.6 §7.4's table, first row: *"May an **argument** be called this? No."* An
     independent review found the set inert for `data_scope` -- `RESERVED_ARGUMENTS` was
@@ -5330,7 +5330,7 @@ def _reject_reserved_parameters(signature: inspect.Signature, name: str) -> None
     if offending:
         raise InvalidArgument(
             f"protect({name!r}): {', '.join(repr(item) for item in offending)} is derived by "
-            "CTRLRun and may not be a parameter of a protected function. SPEC-v0.6 §7.4 "
+            "ctrlrun and may not be a parameter of a protected function. SPEC-v0.6 §7.4 "
             "resolves it at evaluation from the arguments actually supplied, so an argument of "
             "the same name would mean two things in one rule"
         )

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Policy versioning and the control registry. Item 7; SPEC-v0.6 §7, §8 T171-T177d.
 
@@ -1328,7 +1328,7 @@ def test_T173b_an_observed_action_spends_no_grant(tmp_path) -> None:
 
     The reservation is still taken, and the asymmetry is the point: in observe mode the action
     genuinely executes, so the effect record has to exist or `v0.1 §5.4`'s duplicate refusal has
-    nothing to refuse with. Observe mode suppresses CTRLRun's **decisions**, not the record of an
+    nothing to refuse with. Observe mode suppresses ctrlrun's **decisions**, not the record of an
     effect that really happened.
     """
     from ctrlrun import Control

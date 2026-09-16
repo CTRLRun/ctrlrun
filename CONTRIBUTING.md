@@ -1,6 +1,6 @@
 # Contributing
 
-CTRLRun sits in the execution path of actions that move money, delete infrastructure and
+ctrlrun sits in the execution path of actions that move money, delete infrastructure and
 grant permissions. The rules below exist so that a change to it is evidence rather than
 intention. They are short to state and long to live with.
 

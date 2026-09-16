@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 # Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
 # docs/cookbook/manager-and-worker.mdx — edit the page, never this file.

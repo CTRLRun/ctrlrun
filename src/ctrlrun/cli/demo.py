@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The five-scenario demo with an in-process fake Stripe. SPEC-v0.1 §7 T11, SPEC-v0.3 §1.2.
 
 Five ways an agent action goes wrong at the boundary between intention and effect, and what
-CTRLRun does about each. Everything runs in this process: no network, no clock skew, no
+ctrlrun does about each. Everything runs in this process: no network, no clock skew, no
 sleeping. The fake remote is the only thing pretending — and it pretends in the one way that
 matters, by committing before its response goes missing.
 
@@ -167,7 +167,7 @@ def run_demo(root: Path) -> None:
     def refund(payment_id: str, amount: int, currency: str = "EUR") -> dict[str, Any]:
         return remote.refund(payment_id, amount)
 
-    click.echo("CTRLRun demo — five ways an agent action goes wrong, and what stops it.")
+    click.echo("ctrlrun demo — five ways an agent action goes wrong, and what stops it.")
     click.echo(
         "Policy: refunds up to €1,000 are autonomous, up to €10,000 need a human, "
         "above that are denied."

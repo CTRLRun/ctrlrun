@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Precondition fingerprints. Build-list item 5; SPEC-v0.7 §6, §7, §8.5 T253-T269.
 

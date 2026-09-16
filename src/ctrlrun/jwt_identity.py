@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """JWT verification as an `IdentityProvider`. Build-list item 5; SPEC-v0.3 §3.4.
 
@@ -7,7 +7,7 @@ Ships in `ctrlrun[identity]` and is imported by naming it: `import ctrlrun` must
 installed the extra gets `MissingDependency` naming the install command rather than a
 `ModuleNotFoundError` from halfway down an import chain.
 
-**CTRLRun consumes identities; it issues none.** This is not an OAuth client. It performs no
+**ctrlrun consumes identities; it issues none.** This is not an OAuth client. It performs no
 authorization-code flow, no refresh, no token exchange, no introspection and no dynamic client
 registration. It verifies a token somebody else obtained and maps the verified claims onto a
 `Principal`. Everything beyond verification belongs to the deployment.

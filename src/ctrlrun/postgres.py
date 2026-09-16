@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`PostgresStateStore`. Build-list item 3; SPEC-v0.6 §4.
 
@@ -560,7 +560,7 @@ class PostgresStateStore:
             schema, user = (str(row[0]) if row and row[0] else None), str(row[1]) if row else "?"
             if schema is None:
                 raise InvalidArgument(
-                    f"schema {self._schema!r} does not exist, or {user} cannot see it. CTRLRun "
+                    f"schema {self._schema!r} does not exist, or {user} cannot see it. ctrlrun "
                     "creates no schema for an operator: create it, or point --store-url at one "
                     "that exists (SPEC-v0.6 §4.1)"
                 )
@@ -569,7 +569,7 @@ class PostgresStateStore:
         if not (allowed and allowed[0]):
             raise InvalidArgument(
                 f"the database user {user!r} has no CREATE privilege on schema {schema!r}, so "
-                "CTRLRun cannot apply its migrations. A store is opened un-migrated by nothing "
+                "ctrlrun cannot apply its migrations. A store is opened un-migrated by nothing "
                 "(SPEC-v0.6 §3.6), so this is refused at open rather than discovered at the "
                 f'first write. Grant it with: GRANT CREATE ON SCHEMA "{schema}" TO "{user}"'
             )
@@ -603,7 +603,7 @@ class PostgresStateStore:
                 # keys and both execute. That is a double execution reached through the storage
                 # layer's character set, so it is refused at open rather than discovered.
                 raise InvalidArgument(
-                    f"this database's server_encoding is {encoding}, not UTF8. CTRLRun hashes "
+                    f"this database's server_encoding is {encoding}, not UTF8. ctrlrun hashes "
                     "the exact code points it is given (v0.1 §2.3), so a lossy encoding makes "
                     "one logical effect into two identities and both would execute"
                 )

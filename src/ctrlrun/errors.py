@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Exception hierarchy for the public API. SPEC-v0.1 §8."""
 
 
 class CTRLRunError(Exception):
-    """Base class for every error raised by CTRLRun."""
+    """Base class for every error raised by ctrlrun."""
 
 
 class InvalidArgument(CTRLRunError):
@@ -172,7 +172,7 @@ class Suspended(CTRLRunError):
     outcome to record: the effect record stays `EXECUTING`, its lease is extended, the
     continuation is held, and the caller gets this back to relay.
 
-    `continuation` is whatever the remote said to present again. It is opaque here — CTRLRun
+    `continuation` is whatever the remote said to present again. It is opaque here — ctrlrun
     never parses it, and only ever compares it with `hmac.compare_digest`.
     """
 

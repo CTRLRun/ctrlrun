@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The upgrade path, and the one irreversible thing a v0.11 release does.
 
@@ -13,7 +13,7 @@ Measured during the 0.11.0 release pass, `pip install ctrlrun==0.10.0` into a cl
     this build:  opened it: 4 receipts, chain ok=True, HEAD 0008_anchor_checkpoint_hold
                  anchors readable, checkpoint None, holds empty
     0.10.0 again: REFUSED the migrated store -- SchemaMismatch: This database was written by a
-                 newer build of CTRLRun and records a migration this one does not know.
+                 newer build of ctrlrun and records a migration this one does not know.
 
 **The refusal is the point.** Migration `0008_anchor_checkpoint_hold` is additive -- three new
 tables and nothing altered -- so 0.10.0 could in principle read every row it wrote. It refuses

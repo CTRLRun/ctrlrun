@@ -1,5 +1,5 @@
 name: Feature request
-description: Something CTRLRun should do that it does not.
+description: Something ctrlrun should do that it does not.
 labels: [enhancement]
 body:
   - type: markdown
@@ -25,7 +25,7 @@ body:
     id: situation
     attributes:
       label: The situation
-      description: What the agent does, what can go wrong, and what CTRLRun would need to refuse or record. Real domains help — money, infrastructure, permissions, records, communications.
+      description: What the agent does, what can go wrong, and what ctrlrun would need to refuse or record. Real domains help — money, infrastructure, permissions, records, communications.
     validations:
       required: true
   - type: textarea

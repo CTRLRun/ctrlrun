@@ -1,4 +1,4 @@
-# CTRLRun — the operator MCP server
+# ctrlrun — the operator MCP server
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md), [`SPEC-v0.2.md`](SPEC-v0.2.md),
 [`SPEC-v0.3.md`](SPEC-v0.3.md), [`SPEC-v0.4.md`](SPEC-v0.4.md), [`SPEC-v0.5.md`](SPEC-v0.5.md)
@@ -151,7 +151,7 @@ Reaching EOF on stdin is the client going away, and the process exits 0.
 expires; over stdio the client process holds `approve`, `deny` and `resolve` under the human's
 name for as long as it runs, `-41007`, `-41013` (bar root, §3.1) and `-41014` are unreachable,
 and the only human step left is the confirmation the client shows before a write — which
-CTRLRun does not control and which a user can switch off. That is the auto-approve §1.1
+ctrlrun does not control and which a user can switch off. That is the auto-approve §1.1
 refuses, reachable by client configuration, and this document does not pretend otherwise. It is
 said in three places so that each party sees it: here; in the `initialize` `instructions`, which
 the model reads; and in the §6 block, which the person reads. A lifetime after which writes
@@ -349,7 +349,7 @@ the cited control names an `approver_role`, an answer from a credential that doe
 role is refused here, with the control named, and the roles the answer satisfied are recorded on
 the approval row. That is not an authority evaluation and it is not separation of duties: it is
 one string from the operator's own control registry compared against one claim on a verified
-credential, and CTRLRun interprets neither.
+credential, and ctrlrun interprets neither.
 
 **The unconfigured cases are two, they are not the same, and the earlier wording here stated
 one of them backwards.** `SPEC-v0.8.md` §3.5's rule is that omission is not entitlement and it is
@@ -567,7 +567,7 @@ enforcing, and answering one changes nothing in the world.
 | *Over stdio:* `handle` raises outside `_call` | `-32603` with the message's id, logged |
 | *Over stdio:* a write under uid 0 | `-41013`; root is an account, not a person (§3.1) |
 
-A CTRLRun refusal is a JSON-RPC **error**, never a `result` with `isError: true`, for `v0.2
+A ctrlrun refusal is a JSON-RPC **error**, never a `result` with `isError: true`, for `v0.2
 §6.10`'s reason: `isError` reaches the model as text, and a refusal to let a human's assistant do
 something is not a tool result.
 

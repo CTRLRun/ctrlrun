@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Receipt integrity. Build-list item 6; SPEC-v0.6 §6, §8 T164-T170.
 
@@ -293,7 +293,7 @@ def test_T164_an_altered_receipt_is_content_altered_at_its_seq(
     merely that something was invalid.
 
     The tampering is done in SQL, underneath the store, because that is the threat model: an
-    `UPDATE` by somebody with write access who has no interest in going through CTRLRun.
+    `UPDATE` by somebody with write access who has no interest in going through ctrlrun.
     """
     import sqlite3
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Attempt numbers never repeat, on Postgres. Item 3a; SPEC-v0.7 §5.6, §8.3a (T246, T246b).
 

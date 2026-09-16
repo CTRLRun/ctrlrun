@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """SPEC-v0.10 §6, item 5: the operator surfaces for a hop.
 
@@ -283,7 +283,7 @@ def test_T505c_a_broken_chain_suggests_the_presented_hop_and_names_the_unreadabl
 def test_T507_scan_names_the_principals_holding_a_root_grant(tmp_path):
     """**§6.4, and the operator's half of §2.3.2's residual.**
 
-    CTRLRun cannot make a receiving agent present the hop it was given: one holding a grant of its
+    ctrlrun cannot make a receiving agent present the hop it was given: one holding a grant of its
     own can decline and act on that instead. The deployment rule that collapses it is *an agent
     that only ever acts on handed-over work holds no root grant of its own*, and §2.3.2 leans on
     §6's surfaces to make it checkable. Without this line the rule is advice.

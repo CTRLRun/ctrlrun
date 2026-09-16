@@ -1,4 +1,4 @@
-# CTRLRun v0.6 Specification — Durable runtime
+# ctrlrun v0.6 Specification — Durable runtime
 
 A **delta** over `SPEC-v0.1.md`, `SPEC-v0.2.md`, `SPEC-v0.3.md`, `SPEC-v0.4.md` and
 `SPEC-v0.5.md`. All five remain binding in full; nothing here relaxes one. Tests are derived
@@ -588,7 +588,7 @@ against *the previous release's own code*, and the singular is what hid the defe
 its fixtures from v0.1, v0.2, v0.3 and v0.5**, and the plural is the point.
 
 **A database with neither `schema_version` nor `effects` but with other tables present is
-refused**, naming what it found. It is somebody else's database, and creating CTRLRun's tables in
+refused**, naming what it found. It is somebody else's database, and creating ctrlrun's tables in
 it is not a recovery.
 
 ### 3.3 Refusal, in both directions
@@ -681,7 +681,7 @@ configuration nobody tested.
 
 Two consequences the operator must be told about, and `docs/postgres.md` (item 9) says both:
 
-- **The database user needs DDL rights** on the CTRLRun schema, at least on the first start after
+- **The database user needs DDL rights** on the ctrlrun schema, at least on the first start after
   an upgrade. Where it does not have them, the migration fails and the store refuses to open,
   naming the missing privilege rather than the SQL that failed.
 - **Concurrent starts are safe and are not clever.** The migration transaction takes the
@@ -753,15 +753,15 @@ which hashes `.ctrlrun/state.db` before and after and has no Postgres analogue.
 So the scratch store is defined rather than left to be discovered:
 
 - **Verify creates its own schema** — `ctrlrun_verify_<16 hex>` — for each guarantee, creates the
-  CTRLRun tables inside it at `head`, and **drops it** when the run ends, including when the run
+  ctrlrun tables inside it at `head`, and **drops it** when the run ends, including when the run
   ends by exception. That is what `PostgresStateStore(url, schema=…)` (§9.1) is for.
 - **It never touches any other schema.** It does not migrate `public`, does not read it, and does
   not create anything in it. A migration inside a schema verify created a moment ago is verify's
   own and is not the operator's database changing.
 - **It refuses a URL it cannot do that with**: no privilege to `CREATE SCHEMA`, or a
-  `search_path` that already names a CTRLRun schema. Exit **2**, naming the reason — `v0.4 §3.8`'s
+  `search_path` that already names a ctrlrun schema. Exit **2**, naming the reason — `v0.4 §3.8`'s
   treatment for a configuration verify will not run against, never a silent fallback to `public`.
-- **T154e asserts all three**, including that a CTRLRun database in `public` is byte-identical
+- **T154e asserts all three**, including that a ctrlrun database in `public` is byte-identical
   before and after a verify run — T103's guarantee, carried across to the backend that made it
   hard.
 
@@ -1160,7 +1160,7 @@ two authorities, both of which already exist:
 | A reconcile hook | `v0.2 §2`, and **only where its answer points** — `"unknown"` changes nothing | `resolved_by = "reconcile:<action name>"` |
 
 **`cli:local`, not `cli:<user>`, and the difference is a promise this milestone cannot keep.**
-An earlier draft of this table wrote `"cli:<user>"`. CTRLRun does not authenticate the person at
+An earlier draft of this table wrote `"cli:<user>"`. ctrlrun does not authenticate the person at
 the terminal — §11 puts *authenticating the approver* out of scope by name, and it is the same
 sentence for the same reason here — so a `<user>` in that column would be whatever the shell says
 `$USER` is, which is a claim about a person made from a value that person controls. `cli:local`
@@ -1400,7 +1400,7 @@ Stated before what it does, and repeated in the README, the changelog and `THREA
   attacker and no other. An anchor outside this database is what would close it, and §11 keeps
   signing and anchoring out of v0.6.
 
-- **Not evidence that a receipt was written by CTRLRun.** A well-formed row appended at the end,
+- **Not evidence that a receipt was written by ctrlrun.** A well-formed row appended at the end,
   with a correct `prev_hash` and a head updated to match, is indistinguishable from a real one.
   §6.1's *"altering, deleting or reordering"* did not list insertion because insertion is not in
   the set it closes.
@@ -1665,7 +1665,7 @@ is an expression, and there is no expression parser. The distinction matters mor
 
 Three rules, and they are what keeps this from becoming a compliance feature:
 
-- **CTRLRun does not interpret a control.** `source:` is a string the operator wrote. The kernel
+- **ctrlrun does not interpret a control.** `source:` is a string the operator wrote. The kernel
   does not know what PCI DSS is, does not check the clause exists, and makes **no compliance,
   conformance or alignment claim** on the strength of one. A control is an identifier and a
   citation.
@@ -1939,10 +1939,10 @@ A database created with `ENCODING SQL_ASCII` is refused at open, naming the enco
 
 #### T154e — Verify's Postgres scratch store touches nothing it did not create
 `ctrlrun verify --store-url postgresql://…` creates a `ctrlrun_verify_<hex>` schema per guarantee
-and drops it, including when the run ends by exception. A CTRLRun database in `public` is
+and drops it, including when the run ends by exception. A ctrlrun database in `public` is
 **byte-identical before and after** — `v0.4`'s T103 carried across to the backend that made it
 hard — and it is not migrated. A URL the store cannot `CREATE SCHEMA` on, or one whose
-`search_path` already names a CTRLRun schema, exits **2** naming the reason and never falls back
+`search_path` already names a ctrlrun schema, exits **2** naming the reason and never falls back
 to `public` (§4.1).
 
 #### T154f — DDL rights, collation and connection discipline
@@ -2173,11 +2173,11 @@ fails, and whoever adds it comes to the test and says which kind it is. Two furt
 the list itself load-bearing rather than decorative: every entry must still resolve to a line in
 its file and must still contain a forbidden word (an entry that stopped matching is an entry doing
 nothing), and a positive control asserts the pattern would fire on *"receipts are signed, which
-proves authorship"*, *"the chain is tamper-proof"* and *"CTRLRun gives you non-repudiation"* while
+proves authorship"*, *"the chain is tamper-proof"* and *"ctrlrun gives you non-repudiation"* while
 not firing on `design`, `assign` or `designated`.
 
 **What the check does not cover**, stated rather than assumed: a claim made in words the pattern
-does not contain. *"CTRLRun proves who wrote each receipt"* passes it. The scan is a guard against
+does not contain. *"ctrlrun proves who wrote each receipt"* passes it. The scan is a guard against
 the vocabulary drifting back in, not a reader of prose, and §6.4 remains the thing that has to be
 true.
 
@@ -2458,7 +2458,7 @@ and opens only a database already at HEAD. Three refusals, each naming its own r
 | What it finds | What it says |
 |---|---|
 | the schema does not exist | a read command does not create one |
-| no `schema_version` in it | that schema holds no CTRLRun database |
+| no `schema_version` in it | that schema holds no ctrlrun database |
 | anything but `UP_TO_DATE` | which migration is missing, and that a **writer** applies it at open |
 
 **Still no new command.** `--verify-chain`, `--control` and `--store-url` are flags on commands that already open the
@@ -2639,7 +2639,7 @@ deliver, and specifically:
   §4.4 and §5.2 each say why.
 - **A process-identity field on any record**, and any reclaimer built on one (§5.1).
 - **Data scope beyond §7.4's labels and redaction.** No row-level filtering, no purpose limitation,
-  no field-level authorization, no query rewriting. CTRLRun is not a database proxy and it is not
+  no field-level authorization, no query rewriting. ctrlrun is not a database proxy and it is not
   DLP.
 - **Matching a grant on a data label.** Authority addresses `agent` and `user` (`v0.3 §4.2`) and
   that is unchanged; `data_scope` is a policy condition and nothing more.

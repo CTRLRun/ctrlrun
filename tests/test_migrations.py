@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Schema version and forward-only migrations. Build-list item 2; SPEC-v0.6 §3, §8 T147-T152b.
 
@@ -538,7 +538,7 @@ def test_T149d_concurrent_opens_all_succeed(tmp_path, shape):
 
     database = tmp_path / shape
     if shape == "existing.db":
-        # A pre-v0.6 CTRLRun database: the baseline tables, in WAL, and no `schema_version`.
+        # A pre-v0.6 ctrlrun database: the baseline tables, in WAL, and no `schema_version`.
         seed = sqlite3.connect(database)
         seed.execute("PRAGMA journal_mode=WAL")
         for statement in migrations.MIGRATIONS[0].statements:
@@ -668,7 +668,7 @@ def test_T152_a_foreign_database_with_an_effects_table_is_refused(tmp_path):
     """§3.2, and the hole a review opened in it.
 
     The refusal was keyed on the table *name*, and `effects` is a plausible name in somebody
-    else's schema -- a `$CTRLRUN_STATE` typo is a plausible way to arrive at one. CTRLRun
+    else's schema -- a `$CTRLRUN_STATE` typo is a plausible way to arrive at one. ctrlrun
     adopted it, created seven of its own tables **inside the operator's database**, recorded
     both migrations, opened cleanly, and failed at first use with `no such column: effect_key`
     -- which is after `Control` was constructed, and §3.3 says every refusal is at open.
@@ -685,15 +685,15 @@ def test_T152_a_foreign_database_with_an_effects_table_is_refused(tmp_path):
     message = str(raised.value)
     assert "effects" in message and "effect_key" in message, message
 
-    # And nothing of CTRLRun's was created on the way to the refusal.
+    # And nothing of ctrlrun's was created on the way to the refusal.
     after = _tables(database)
-    assert after == {"effects", "reverb"}, f"CTRLRun wrote into somebody else's database: {after}"
+    assert after == {"effects", "reverb"}, f"ctrlrun wrote into somebody else's database: {after}"
 
 
 def test_T152_a_foreign_database_is_refused_naming_what_it_found(tmp_path):
     """§3.2: neither `schema_version` nor `effects`, but other tables present.
 
-    It is somebody else's database, and creating CTRLRun's tables in it is not a recovery.
+    It is somebody else's database, and creating ctrlrun's tables in it is not a recovery.
     """
     database = tmp_path / "someone-elses.db"
     connection = sqlite3.connect(database)

@@ -62,7 +62,7 @@ asserts the rendered table never claims a duration it did not measure.
 One measured run, and the numbers are the numbers:
 
 ```
-CTRLRun soak — postgres (schema soak_968eae6651)
+ctrlrun soak — postgres (schema soak_968eae6651)
   ran            20m 0s (2026-09-05T19:05:37Z → 2026-09-05T19:25:37Z)
   actions        889735
   ambiguous      133393  (133393 explained, 0 unexplained)

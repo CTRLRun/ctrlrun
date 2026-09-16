@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """What the gateway needs from the StateStore. Build-list item 6a; SPEC-v0.2 §6.9.4, §6.10.
 

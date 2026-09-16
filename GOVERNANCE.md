@@ -6,7 +6,7 @@ rules for a security report are in [SECURITY.md](SECURITY.md).
 
 ## Decisions
 
-CTRLRun is maintainer-led. The maintainer has the final say on scope, on what a
+ctrlrun is maintainer-led. The maintainer has the final say on scope, on what a
 specification says, and on whether a change merges or a release ships. A decision that
 changes a shipped guarantee is written into the specification and the changelog with its
 reason, never settled in a review comment. Disagreement is argued in public, in the issue or
@@ -17,7 +17,7 @@ fork under Apache-2.0; that is the check on the maintainer.
 
 | Role | Who | Responsibilities |
 |---|---|---|
-| Maintainer | Arpan Ghoshal ([@arpanghoshal](https://github.com/arpanghoshal)) | Owns the specifications and the roadmap. Final say on merges and releases. Answers security reports per SECURITY.md. Administers the `CTRLRun` GitHub organization, the `ctrlrun` project on PyPI, and ctrlrun.dev. |
+| Maintainer | Arpan Ghoshal ([@arpanghoshal](https://github.com/arpanghoshal)) | Owns the specifications and the roadmap. Final say on merges and releases. Answers security reports per SECURITY.md. Administers the `ctrlrun` GitHub organization, the `ctrlrun` project on PyPI, and ctrlrun.dev. |
 | Committer | Rohan Kamath ([@rohanrkamath](https://github.com/rohanrkamath)) | Reviews and merges pull requests, the maintainer's included. Can cut a release by pushing a tag. Triages issues. Holds write access to every repository in the organization. |
 | Contributor | anyone | Opens issues and pull requests under the rules in CONTRIBUTING.md, with every commit signed off under the DCO. |
 
@@ -34,7 +34,7 @@ makes that true:
   access. A release is a tag: `publish.yml` publishes to PyPI through trusted publishing and
   `release.yml` signs the provenance against the workflow's own identity, so no release
   depends on a key or a password that one person holds alone.
-- **Two people own the organization.** Both are owners of the `CTRLRun` GitHub organization,
+- **Two people own the organization.** Both are owners of the `ctrlrun` GitHub organization,
   so either can grant access, change a workflow, or answer a private vulnerability report.
 - **Two people own the package.** Both are owners of `ctrlrun` on PyPI, so the trusted
   publisher can be repaired by either.

@@ -67,7 +67,7 @@ provenance and cannot be checked this way.
 
 ## Supported versions
 
-CTRLRun is pre-1.0. Only the latest release receives fixes.
+ctrlrun is pre-1.0. Only the latest release receives fixes.
 
 | Version | Supported |
 |---|---|
@@ -81,7 +81,7 @@ migration that cannot be reversed says so in its entry.
 
 ## What counts as a vulnerability
 
-CTRLRun sits in the execution path of consequential actions. Treat anything that breaks one of
+ctrlrun sits in the execution path of consequential actions. Treat anything that breaks one of
 these as a security issue, not a bug:
 
 - An action executes that policy should have denied.

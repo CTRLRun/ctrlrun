@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Route a CTRLRun `APPROVE` through LangGraph's own `interrupt()`. SPEC-v0.5 §2, §3.
+"""Route a ctrlrun `APPROVE` through LangGraph's own `interrupt()`. SPEC-v0.5 §2, §3.
 
 **An adapter exists for exactly one reason**, and this is the whole of it: when a policy says a
 refund needs a human, the human answers *where LangGraph users already answer* — through

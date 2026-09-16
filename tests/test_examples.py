@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`examples/` and the sector policy templates. Build-list item 2; SPEC-v0.2 §1.1, T31.
 
@@ -49,7 +49,7 @@ NOT_A_SCENARIO = (
     "authority",
     "cookbook",
     "without-an-agent",
-    # SPEC-v0.11 §3 — not a refusal at all. Every §1.1 scenario ends in CTRLRun declining to
+    # SPEC-v0.11 §3 — not a refusal at all. Every §1.1 scenario ends in ctrlrun declining to
     # act; this one is about reading the record **afterwards**, and nothing in it is refused.
     # It has its own test below, because what it must print is the bounded claim rather than a
     # refusal string.

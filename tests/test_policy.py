@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Policy loading and rule evaluation. SPEC-v0.1 §3; acceptance test T6 (policy half)."""
 
@@ -70,7 +70,7 @@ def test_decision_renders_by_value() -> None:
 
     This is the guard on `Decision` being a `StrEnum` (SPEC §3.3): under `(str, Enum)`
     both renderings below are `Decision.ALLOW`, and a receipt is read by tools that
-    never imported CTRLRun.
+    never imported ctrlrun.
     """
     for member in Decision:
         assert str(member) == member.value

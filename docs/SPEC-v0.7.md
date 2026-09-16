@@ -1,4 +1,4 @@
-# CTRLRun v0.7 Specification: Execution boundary
+# ctrlrun v0.7 Specification: Execution boundary
 
 A **delta** over `SPEC-v0.1.md`, `SPEC-v0.2.md`, `SPEC-v0.3.md`, `SPEC-v0.4.md`, `SPEC-v0.5.md` and
 `SPEC-v0.6.md`. All six remain binding in full; nothing here relaxes one. Tests are derived from
@@ -12,7 +12,7 @@ Words: MUST / MUST NOT / SHOULD are used in the RFC 2119 sense.
 v0.6 asked *does it still hold when the process dies, the host goes away, and the database is
 somewhere else?* v0.7 asks: **does it hold at the edges the kernel does not control?**
 
-Every guarantee shipped so far is a guarantee about what happens inside CTRLRun. There are three
+Every guarantee shipped so far is a guarantee about what happens inside ctrlrun. There are three
 places where that stops being enough:
 
 - **The kernel does not decide whether the remote acted.** An executor does, by raising
@@ -77,7 +77,7 @@ matters more than the features do.
   `v0.5 §3.8` and `v0.6 §1.1` forbid a flag that makes the thing being checked differ from the
   thing that ships, and every item here is under the same rule.
 - **Not a fence.** A fencing token works only where the resource validates it, and Stripe, an
-  SMTP server and the Kubernetes API validate no CTRLRun token. §11 has the whole argument.
+  SMTP server and the Kubernetes API validate no ctrlrun token. §11 has the whole argument.
 - **Not a budget.** A ceiling counts attempts on one effect key; it does not meter authority across
   keys. Budgets are v0.9, and v0.9 uses this milestone's attempt number rather than building one.
 - **Not a scope provider.** §6's hook is general precisely so that v0.9 can configure one through
@@ -1295,7 +1295,7 @@ and if that holds here §12 says so and T246 and T246b are the only tests of the
   `max_elicitation_rounds` on the gateway (`v0.2 §6.9.2`); **a direct `Control.resume` caller has no such
   bound, and v0.7 does not add one.**
 - **Observe mode records and runs.** The fast path and the check record `attempt_ceiling` in
-  `would_have.blocked_reason` and the action executes, because observe mode suppresses CTRLRun's
+  `would_have.blocked_reason` and the action executes, because observe mode suppresses ctrlrun's
   decisions and not the record of an effect that happened (`v0.3 §6.2`, `v0.6 §7.2.3`).
 
 ### 5.8 The amendment, as it lands in `SPEC-v0.1.md`
@@ -1519,7 +1519,7 @@ world that moved, which a human looks at; the other is a provider that is down o
 operator fixes. The provider's exception is recorded in the event's `error` **by its type name
 only**: a provider that put the balance it read into its exception message would otherwise carry raw
 state into the evidence through the one field nobody thought to check. What the provider logs for
-itself is the operator's; nothing CTRLRun writes carries the message or the return value.
+itself is the operator's; nothing ctrlrun writes carries the message or the return value.
 
 **A provider that hangs** holds the call and nothing else. There is no timeout parameter: a timeout
 that fired would have to decide something, the only decision available is refusal, and a provider can
@@ -1581,7 +1581,7 @@ kernel's to honour.
 **What lies beyond the kernel's reach.** A resource that accepts a conditional write, an `If-Match` on a
 version or a compare-and-swap on a balance, can refuse a stale request itself, at the one point where the
 state and the write meet. Whether an executor sends one is the executor's choice and the provider's
-feature. CTRLRun does not do it and does not claim it, and nothing in this section's recheck substitutes
+feature. ctrlrun does not do it and does not claim it, and nothing in this section's recheck substitutes
 for it.
 
 ### 6.8 Where this binds, and where it does not
@@ -1815,7 +1815,7 @@ deliberately as the "yes" ones, and two of them are where this milestone's revie
 |---|---|---|
 | `@protect` → `Control.execute` | **yes**, both defences: the fast path before the approval gate, and the check on the assigned attempt number before the executor | the only path that reserves and then dispatches (§5.5) |
 | `Control.execute` called directly | **yes**, the same two | the same method |
-| `Control.execute` in observe mode | **records, does not enforce**: both defences write `would_have.blocked_reason = "attempt_ceiling"` and the action runs | `v0.3 §6.2`: observe mode suppresses CTRLRun's decisions, not the record of an effect that happened |
+| `Control.execute` in observe mode | **records, does not enforce**: both defences write `would_have.blocked_reason = "attempt_ceiling"` and the action runs | `v0.3 §6.2`: observe mode suppresses ctrlrun's decisions, not the record of an effect that happened |
 | `Control.evaluate` | **no** | it takes an `Action` and not an effect key, and it writes nothing, so it can resolve no record to count on. A caller can therefore be told `approve` for an attempt `execute` will refuse (§5.5). Its docstring says so |
 | `Control.resume` | **no** | it reserves nothing, so there is no new number to compare. One attempt can invoke the executor many times through it, which §5.7 states |
 | `Control.delegate` / `Control.revoke` | **no** | they reserve no effect |
@@ -2756,7 +2756,7 @@ Everything in `v0.1 §9`, `v0.2 §12`, `v0.3 §13`, `v0.4 §11`, `v0.5 §11` and
 deliver, and specifically the milestone's *Do not build* list, each with its reason:
 
 - **Generic fencing tokens.** Fencing works only where the resource validates the token, and the resources here,
-  Stripe, the Kubernetes API, an SMTP server, accept no CTRLRun fence. The only enforceable point is the gateway,
+  Stripe, the Kubernetes API, an SMTP server, accept no ctrlrun fence. The only enforceable point is the gateway,
   and for `@protect` a fence degrades to "refuse to start under a stale lease", which `plan_reservation` already
   does. A fence would be an elaborate mechanism whose guarantee is the one already held.
 - **Consequence budgets.** The metric, scope and window shape is right and the hard part is unwritten: consume on
@@ -3159,7 +3159,7 @@ makes it the operator's claim, made by the person who knows the tool, and this o
 overrides it in one direction only: the operator asserted that *this tool* reports errors before
 acting, which is true of the call it answers, and on a continuation the call it answers is not the
 one that carries the effect. The upstream's own response is still relayed unchanged, the tool's
-error included, so a client sees exactly what the tool said and CTRLRun records that the outcome is
+error included, so a client sees exactly what the tool said and ctrlrun records that the outcome is
 unknown. The price is a `ctrlrun resolve` where 0.6.1 permitted a retry, and the alternative is a
 retry of an effect the remote may be part-way through.
 

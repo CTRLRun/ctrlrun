@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """What both servers in this package speak, and neither owns.
 
@@ -38,7 +38,7 @@ class _Response:
 def json_rpc_error(rpc_id: Any, code: int, token: str, message: str, **data: Any) -> dict[str, Any]:
     """One JSON-RPC error object in `v0.2 §6.10`'s shape.
 
-    A refusal by CTRLRun is not an outcome of the tool; it is the statement that the tool did
+    A refusal by ctrlrun is not an outcome of the tool; it is the statement that the tool did
     not run. `isError: true` would be indistinguishable from the tool's own failure, and it
     reaches the model as text — which is not where a policy denial belongs.
     """

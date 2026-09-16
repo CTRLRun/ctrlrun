@@ -1,9 +1,9 @@
 cff-version: 1.2.0
-message: If you use CTRLRun in research, cite it as below.
+message: If you use ctrlrun in research, cite it as below.
 type: software
 title: "The last check before an AI agent does something it can't undo."
 abstract: >-
-  CTRLRun is the execution safety layer for AI agents: a Python library that binds a human's
+  ctrlrun is the execution safety layer for AI agents: a Python library that binds a human's
   approval to the exact action they saw, executes one logical effect at most once across
   processes and hosts, treats an unknown outcome as unknown rather than failed, fails closed,
   and leaves a portable receipt for every action.

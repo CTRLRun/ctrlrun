@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Adapters broken in one named way each, and one that is not. SPEC-v0.5 §5.4.
 
@@ -157,7 +157,7 @@ class DenialIsAnError(Reference):
     The mistake is an authentic one, and it is the opposite of `SwallowsDenial`'s: not a no
     reported as a yes, but a no reported as a *fault*. An author whose framework raises when a
     human declines -- most do -- lets that exception stand as the outcome, reasoning that the
-    call did not happen and the framework already said why. It did not happen, and CTRLRun's
+    call did not happen and the framework already said why. It did not happen, and ctrlrun's
     evidence log is where that has to be visible: `APPROVAL_DENIED` then `ACTION_DENIED`
     (`v0.1 §6.2`, SPEC-v0.5 §2.4). Under this adapter a human's answer is indistinguishable
     from the primitive having crashed -- §10's row for that says the request stays `pending`
@@ -204,7 +204,7 @@ class DeniesForItself(Reference):
     execution, the primitive reached once. Every check but one is satisfied.
 
     The one is the evidence. `deny_approval` was never called, so the request is still `pending`
-    and the log has no `APPROVAL_DENIED` -- a human said no and CTRLRun cannot show it. That is
+    and the log has no `APPROVAL_DENIED` -- a human said no and ctrlrun cannot show it. That is
     B3's second check, and this fixture is the only thing that reaches it: `DenialIsAnError`
     fails the first and `expect` returns there.
     """
@@ -249,7 +249,7 @@ class FalselyRefusesAfterAsking(DenialIsAnError):  # noqa: N818 - a fixture, not
 
     That is the escape a second independent review found in the first attempt at checking the
     declaration, which asked whether the executor had run -- something this adapter can satisfy
-    while being asked the whole way through. The check that catches it is whether CTRLRun was
+    while being asked the whole way through. The check that catches it is whether ctrlrun was
     asked **at all**: this leaves `ACTION_PROPOSED` and `APPROVAL_REQUESTED` behind, and a
     framework that truly refuses before invoking leaves neither.
 

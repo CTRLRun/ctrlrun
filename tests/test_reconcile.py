@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The reconciliation hook. Build-list item 1; SPEC-v0.2 §2.
 
@@ -125,7 +125,7 @@ def test_T13_the_reconciliation_is_recorded_as_events(control, state_store):
     assert len(effect_resolved) == 1
     assert effect_resolved[0].data["resolved_by"] == "reconcile"
 
-    # The order is the argument: CTRLRun asked, learned an answer, and only then moved the
+    # The order is the argument: ctrlrun asked, learned an answer, and only then moved the
     # record — and the retry won its reservation after that (SPEC-v0.2 §2.5).
     reserved = _events(state_store, EventType.EFFECT_RESERVED)
     assert (
@@ -476,7 +476,7 @@ def test_T15_a_resolution_the_store_refuses_is_logged_and_dropped(control, state
 
     assert state_store.get_effect("refund:txn_1").state is EffectState.COMMITTED
     assert remote.calls == 1
-    # CTRLRun asked and got an answer, so the asking is recorded; applying it is what was
+    # ctrlrun asked and got an answer, so the asking is recorded; applying it is what was
     # dropped, so there is no second EFFECT_RESOLVED claiming a different authority.
     resolved = _events(state_store, EventType.RECONCILIATION_RESOLVED)
     assert len(resolved) == 1

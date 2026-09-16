@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The ACS control hook. SPEC-v0.2 §9 (amended), acceptance tests T51-T55.
 
 ACS is an *advisory* interface: a Guardian returns a decision and the platform executes. That
-is the opposite way round from `@protect`, where CTRLRun runs the executor — so the adapter
+is the opposite way round from `@protect`, where ctrlrun runs the executor — so the adapter
 splits one action across two hooks. `steps/toolCallRequest` decides and takes the
 reservation; `steps/toolCallResult` closes it with what actually happened.
 
@@ -223,7 +223,7 @@ def test_T52_a_denied_call_returns_deny_with_reasoning(hook, store):
 
 
 def test_T52_an_action_needing_a_human_returns_ask_with_ask_details(hook, store):
-    """ACS's `ask` is CTRLRun's APPROVE. ask-details.json requires approver, question and
+    """ACS's `ask` is ctrlrun's APPROVE. ask-details.json requires approver, question and
     timeout_seconds, so all three are present or the response is not conformant."""
     response = hook.handle(_call(amount=200000))
 
@@ -352,7 +352,7 @@ def test_T54_failure_is_FAILED_only_where_the_operator_asserted_it(hook, store):
 
 
 def test_T54_the_result_hook_returns_allow_because_it_redacts_nothing(hook, store):
-    """ACS describes toolCallResult as an output redaction checkpoint. CTRLRun records the
+    """ACS describes toolCallResult as an output redaction checkpoint. ctrlrun records the
     outcome and changes no output, so the conformant answer is `allow`."""
     _, response = _both(hook)
 
@@ -798,7 +798,7 @@ def test_an_unmeasurable_budget_is_denied_and_not_called_a_malformed_envelope(st
     disagreeing.
 
     An error envelope tells the platform the Guardian could not answer, which it may act on
-    however it likes. A `deny` tells it what CTRLRun means, which is that the tool must not run.
+    however it likes. A `deny` tells it what ctrlrun means, which is that the tool must not run.
     The `IdentityError` clause immediately below states this rule for its own case.
     """
     from ctrlrun import HeaderIdentityProvider

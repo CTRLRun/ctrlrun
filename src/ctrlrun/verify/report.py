@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The report and its three renderings. SPEC-v0.4 §4.
 
@@ -7,7 +7,7 @@ more than once. `exit_code` lives here rather than in the CLI so §4.4 has one i
 and so a caller embedding verify in their own tool reaches the same answer the command does.
 
 Every enum renders **by value** (§4, T117), which is `v0.1 §6.1`'s rule applied to a new
-document: evidence has to be readable by something that never imported CTRLRun.
+document: evidence has to be readable by something that never imported ctrlrun.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ CLASS_NAME: Final = "ctrlrun.guarantees"
 #: failures, and the N/A count lives in the report the badge links to.
 BADGE_PASS_COLOR: Final = "brightgreen"
 BADGE_FAIL_COLOR: Final = "red"
-BADGE_LABEL: Final = "CTRLRun"
+BADGE_LABEL: Final = "ctrlrun"
 
 _TITLE_WIDTH: Final = 32
 
@@ -229,7 +229,7 @@ class Report:
     def to_text(self) -> str:
         """The human report of §4.1. The summary is the last line, so `tail -1` means something."""
         lines = [
-            f"CTRLRun verify — ctrlrun {self.ctrlrun_version}, catalogue {CATALOGUE}",
+            f"ctrlrun verify — ctrlrun {self.ctrlrun_version}, catalogue {CATALOGUE}",
             f"policy     {self.policy['path']} ({self.policy['schema']}, "
             f"mode: {self.policy['mode']})",
         ]
@@ -422,7 +422,7 @@ def summary_from_document(document: Mapping[str, Any]) -> str:
     """
     policy = document["policy"]
     lines = [
-        f"### CTRLRun verify - `{policy['path']}`",
+        f"### ctrlrun verify - `{policy['path']}`",
         "",
         f"{policy['schema']}, mode `{policy['mode']}`, {policy['actions']} actions, "
         f"catalogue `{document['catalogue']}`, ctrlrun {document['ctrlrun_version']}",

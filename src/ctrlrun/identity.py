@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Where a `Principal` comes from. Build-list item 1; SPEC-v0.3 §3.
 
-CTRLRun **consumes** identities. It verifies what it is handed and maps the result onto a
+ctrlrun **consumes** identities. It verifies what it is handed and maps the result onto a
 `Principal`; it issues nothing, mints nothing, and defines no identity format. That is the whole
 of this module's remit, and it is why the two providers here are so small: one asserts a fixed
 identity for development, the other reads a header a proxy was supposed to have set.

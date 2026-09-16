@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The suites, and what an adapter hands the kit. SPEC-v0.5 §5.2, §5.3.
 
@@ -145,7 +145,7 @@ class ConformanceAdapter(Protocol):
     constructs a `Control` and a kit that let it would be testing a shape that does not ship.
 
     `invoke` runs **one** protected call end to end through the framework and returns the
-    executor's value. Every CTRLRun exception propagates: the kit asserts on them by type and by
+    executor's value. Every ctrlrun exception propagates: the kit asserts on them by type and by
     `reason`, so an adapter that swallowed one fails rather than passing quietly.
 
     The adapter is a **courier** for `request.answer`: it carries the kit's answer to its
@@ -160,7 +160,7 @@ class ConformanceAdapter(Protocol):
     #: `False`, because that is the shape most frameworks have and a declaration nobody needs
     #: to make is one nobody gets wrong. `True` makes the `denial` suite `not_applicable` with
     #: the adapter's reason -- never a pass -- and it is not free: it says in the report, and in
-    #: the adapter's README, that a refusal leaves no CTRLRun evidence.
+    #: the adapter's README, that a refusal leaves no ctrlrun evidence.
     refuses_before_invoking: bool
 
     def invoke(self, request: CallRequest) -> Any: ...
@@ -662,7 +662,7 @@ def binding_mutated_answer(adapter: ConformanceAdapter) -> CaseResult:
             binding_mutated_answer.title,
             f"{adapter.framework} declares carries_approved_arguments=False: its resumption "
             "carries nothing the adapter can inspect, so the binding across the interrupt is "
-            "the framework's checkpoint and not CTRLRun's hash. Attribution, not prevention",
+            "the framework's checkpoint and not ctrlrun's hash. Attribution, not prevention",
         )
     world = World(adapter, APPROVE)
     executor = Executor()
@@ -756,12 +756,12 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
 
     An unchecked `not_applicable` is a pass an adapter awards itself. The first version of this
     checked the wrong things: it drove the refusal and asserted the executor was not reached,
-    which a framework that refuses *inside* CTRLRun satisfies just as well. A second independent
+    which a framework that refuses *inside* ctrlrun satisfies just as well. A second independent
     review broke it with one class attribute — `refuses_before_invoking = True` on
     `fixtures.DenialIsAnError`, the fixture §5.4 requires to **fail** this suite — and got
     `denial: not_applicable` and `report.ok is True`.
 
-    The discriminator is not what the adapter did with the answer; it is **whether CTRLRun was
+    The discriminator is not what the adapter did with the answer; it is **whether ctrlrun was
     asked at all**. A framework that genuinely refuses before invoking proposes no action: no
     `ACTION_PROPOSED`, no `APPROVAL_REQUESTED`, and the framework's own primitive is never
     reached, because `@protect` never got far enough to raise `ApprovalRequired`. An adapter that
@@ -772,7 +772,7 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
 
     * **The executor ran** — `falsely-refuses-before-invoking`, which bypasses `Control` and
       calls the executor directly, so it leaves no events to catch it by.
-    * **CTRLRun was asked** — `falsely-refuses-after-asking`, which goes through `Control`,
+    * **ctrlrun was asked** — `falsely-refuses-after-asking`, which goes through `Control`,
       reaches the primitive, and only then produces its framework's refusal.
     """
     world = World(adapter, APPROVE)
@@ -807,7 +807,7 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
         return failed(
             "B3",
             binding_denial.title,
-            f"{adapter.framework} declares refuses_before_invoking, but CTRLRun was asked: "
+            f"{adapter.framework} declares refuses_before_invoking, but ctrlrun was asked: "
             f"{asked or 'the framework primitive was reached'}. A framework that refuses before "
             "it invokes proposes no action at all, so the denial suite applies to this adapter "
             "and B3 must run",
@@ -817,9 +817,9 @@ def _denial_not_applicable(adapter: ConformanceAdapter) -> CaseResult:
         "B3",
         binding_denial.title,
         f"{adapter.framework} refuses before it invokes: a tool whose approval was declined "
-        "is never called, so no CTRLRun action is proposed and there is nothing to deny. "
-        "The refusal is real and it is in the framework's own output; it is not in CTRLRun's "
-        "evidence log, because CTRLRun was never asked. Checked, not taken on trust: no action "
+        "is never called, so no ctrlrun action is proposed and there is nothing to deny. "
+        "The refusal is real and it is in the framework's own output; it is not in ctrlrun's "
+        "evidence log, because ctrlrun was never asked. Checked, not taken on trust: no action "
         "was proposed, the primitive was not reached and the executor did not run. "
         "The adapter's README says so",
     )

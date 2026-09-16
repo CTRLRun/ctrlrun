@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Reporting: the human report, `--json`, `--junit`, the exit codes. SPEC-v0.4 §4; T113-T117.
 
@@ -402,7 +402,7 @@ def test_T116_exit_1_when_a_guarantee_fails(tmp_path, monkeypatch):
         (MALFORMED, (), "unknown policy schema"),
         (EMPTY, (), "nothing was checked"),
         (ALL_APPLICABLE, ("--only", "G99"), "G99"),
-        # A backend CTRLRun really does not have. `postgres://` is accepted from v0.6 (§9.6
+        # A backend ctrlrun really does not have. `postgres://` is accepted from v0.6 (§9.6
         # amendment 2), so using it here tested the driver's absence rather than the flag's
         # refusal -- which passed wherever psycopg happened to be installed.
         (ALL_APPLICABLE, ("--store-url", "mysql://x/y"), "postgresql://"),

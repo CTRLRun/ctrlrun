@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The throwaway sector configuration. Item 7; SPEC-v0.6 §7.5, §8 T177b.
 
@@ -43,7 +43,7 @@ LEASE = timedelta(minutes=5)
 
 #: One sector's configuration, written against §7.3 and §7.4 and nothing else. It is not an
 #: example, not a template and not a recommendation: no clinical or regulatory claim is made by
-#: it, and `source:` strings are cited exactly as an operator would write them -- CTRLRun does not
+#: it, and `source:` strings are cited exactly as an operator would write them -- ctrlrun does not
 #: know what any of them mean (§7.3).
 HOSPITAL = """
 schema: ctrlrun.policy/v4
@@ -173,7 +173,7 @@ def test_the_finding_that_redaction_was_not_needed() -> None:
       That is the primitive a pack cannot be written without, and it is not on probation.
     - It does **not** need the value hidden from the evidence. A trust that may not have a
       diagnosis in its receipt store may not have it in the record system either; redaction in
-      CTRLRun's evidence would be a second, weaker copy of a control that has to live upstream,
+      ctrlrun's evidence would be a second, weaker copy of a control that has to live upstream,
       and shipping it invites an operator to believe the weaker one is the control.
     - The one place a value must be visible is the **approval payload**, which §7.4 already
       exempts -- and once a human has to see the real diagnosis to approve the change, redacting

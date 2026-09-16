@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The anchor: the chain's head, recorded where the store's writer cannot reach it.
 
@@ -31,7 +31,7 @@ of interval. That is the number an operator tunes, and it is the number to quote
 sentence about tamper-evidence.
 
 **Rule 1 (§1.1): the anchor consumes a timestamp and issues nothing.** No key generation, no
-rotation, no revocation, no signing. `SPEC-v0.3.md` §1.1's rule that CTRLRun consumes identity and
+rotation, no revocation, no signing. `SPEC-v0.3.md` §1.1's rule that ctrlrun consumes identity and
 issues none, applied to time. Nothing in this module mints anything.
 """
 
@@ -104,7 +104,7 @@ class Anchor:
     to be exactly what it was.
 
     `at` is the **provider's** time and never this process's clock. Rule 1 is that the anchor
-    consumes a timestamp and issues none, so a time CTRLRun generated would be CTRLRun vouching
+    consumes a timestamp and issues none, so a time ctrlrun generated would be ctrlrun vouching
     for itself, which is the thing an external anchor exists to stop.
     """
 
@@ -139,7 +139,7 @@ class AnchorProvider(Protocol):
 
     **Four calls, not two, and the last two are why.** An earlier draft had `make` and `check`
     alone, and a review broke it in one extra statement: with only those, the record of *which*
-    anchors exist lives in CTRLRun's own table, so deleting the newest row there leaves the older
+    anchors exist lives in ctrlrun's own table, so deleting the newest row there leaves the older
     anchor reproducing and the truncation invisible. Three SQL statements instead of two, which is
     the number this design claimed to avoid. `latest()` and `since()` move that history to the
     side that cannot be rewritten.
@@ -150,9 +150,9 @@ class AnchorProvider(Protocol):
 
         **The return is a pair rather than §3.2's bare token, and this is a deviation the PR
         records rather than one made quietly.** §3.2's table says *"returns an opaque token"*
-        while §3.3 says CTRLRun caches *"the pair, the token, and the time"*, and §10 refuses
+        while §3.3 says ctrlrun caches *"the pair, the token, and the time"*, and §10 refuses
         *"an anchor whose time runs backwards against the one before it"*. A time the provider
-        does not supply is one CTRLRun would have to read from its own clock, which rule 1
+        does not supply is one ctrlrun would have to read from its own clock, which rule 1
         forbids: the anchor consumes a timestamp and issues none.
         """
         ...
@@ -394,7 +394,7 @@ def _require_time_moves_forward(existing: Iterable[Anchor], anchor: Anchor) -> N
         raise InvalidArgument(
             f"this {anchor.kind} anchor's time {anchor.at.isoformat()} is before the last one's "
             f"{latest.isoformat()}; a timestamp sequence that runs backwards is a "
-            "misconfiguration or the attack, and CTRLRun cannot tell which"
+            "misconfiguration or the attack, and ctrlrun cannot tell which"
         )
 
 
@@ -402,7 +402,7 @@ def verify_anchors(store: AnchorSource, provider: AnchorProvider) -> AnchorRepor
     """Check every anchor the provider holds against the chain in this store (§3.4).
 
     **The provider is asked what it holds before the local table is consulted**, and that ordering
-    is the section's load-bearing decision (§3.3). CTRLRun's table is a *cache*, not a record: a
+    is the section's load-bearing decision (§3.3). ctrlrun's table is a *cache*, not a record: a
     row deleted from it is checked anyway, because the question came from outside; a table that
     was emptied verifies exactly as a store with no anchors does, which is `anchor_missing`.
 

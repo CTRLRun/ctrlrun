@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Schema version and the forward-only migration runner. Build-list item 2; SPEC-v0.6 §3.
 
@@ -531,7 +531,7 @@ _SCHEMA_VERSION_TABLE: Final = """CREATE TABLE IF NOT EXISTS schema_version(
   ctrlrun_version TEXT NOT NULL
 )"""
 
-#: A table that means "this is a CTRLRun database from before v0.6". `effects` is the one table
+#: A table that means "this is a ctrlrun database from before v0.6". `effects` is the one table
 #: every release since v0.1 has had.
 _MARKER_TABLE: Final = "effects"
 
@@ -550,7 +550,7 @@ _COLUMN_QUERY: Final = {
 }
 _PLACEHOLDER: Final = {"sqlite": "?", "postgres": "%s"}
 
-#: The advisory-lock key every CTRLRun migration serialises on. Constant, so two processes
+#: The advisory-lock key every ctrlrun migration serialises on. Constant, so two processes
 #: migrating one database wait for each other; an advisory lock is scoped to the database it is
 #: taken in, so processes migrating different databases do not.
 _MIGRATION_LOCK: Final = 0x43545252554E
@@ -592,17 +592,17 @@ def classify(applied: tuple[str, ...]) -> Classification:
     return Classification.GAPPED
 
 
-#: What an `effects` table must have for a database to be CTRLRun's. Not the whole schema: a
+#: What an `effects` table must have for a database to be ctrlrun's. Not the whole schema: a
 #: v0.1 database has fewer tables than a v0.5 one, and the point is to tell *ours* from
 #: *somebody else's*, not to re-derive the version from the columns (§3.1).
 _EFFECTS_COLUMNS: Final = frozenset({"effect_key", "state", "action_id", "attempt"})
 
 
 def _refuse_unless_ours(connection: Any, tables: set[str], dialect: str) -> None:
-    """Adopt a pre-v0.6 database only if its `effects` table is actually CTRLRun's (§3.2).
+    """Adopt a pre-v0.6 database only if its `effects` table is actually ctrlrun's (§3.2).
 
     `effects` is a plausible name in somebody else's schema, and a `$CTRLRUN_STATE` typo is a
-    plausible way to arrive at one. Keying adoption on the name alone meant CTRLRun created
+    plausible way to arrive at one. Keying adoption on the name alone meant ctrlrun created
     `schema_version`, `approvals`, `receipts`, `events`, `delegations`, `continuations` and
     `receipt_chain` **inside the operator's other database**, recorded both migrations, opened
     cleanly, and failed at first use with `no such column: effect_key` -- which is after
@@ -612,9 +612,9 @@ def _refuse_unless_ours(connection: Any, tables: set[str], dialect: str) -> None
     missing = _EFFECTS_COLUMNS - columns
     if missing:
         raise _refuse(
-            f"this database has a table named {_MARKER_TABLE!r} that is not CTRLRun's: it is "
+            f"this database has a table named {_MARKER_TABLE!r} that is not ctrlrun's: it is "
             f"missing {', '.join(sorted(missing))}. It holds {', '.join(sorted(tables))}. "
-            "Creating CTRLRun's tables in somebody else's database is not a recovery.",
+            "Creating ctrlrun's tables in somebody else's database is not a recovery.",
             (),
         )
 
@@ -768,8 +768,8 @@ def _migrate_locked(connection: Any, stamp: datetime, dialect: str) -> Classific
             found = Classification.BASELINE
         elif tables:
             raise _refuse(
-                f"This database has no CTRLRun schema and is not empty: it holds "
-                f"{', '.join(sorted(tables))}. Creating CTRLRun's tables in somebody else's "
+                f"This database has no ctrlrun schema and is not empty: it holds "
+                f"{', '.join(sorted(tables))}. Creating ctrlrun's tables in somebody else's "
                 "database is not a recovery.",
                 (),
             )
@@ -789,7 +789,7 @@ def _migrate_locked(connection: Any, stamp: datetime, dialect: str) -> Classific
         missing = tuple(item for item in known if item not in applied)
         reasons = {
             Classification.BACKWARD: (
-                "This database was written by a newer build of CTRLRun and records a migration "
+                "This database was written by a newer build of ctrlrun and records a migration "
                 "this one does not know."
             ),
             Classification.DIVERGENT: (

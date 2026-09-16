@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Request parsing and header-body validation. Build-list item 6b; SPEC-v0.2 §6.2, §6.4, §6.6.
 
@@ -328,7 +328,7 @@ def test_an_Mcp_Param_naming_a_non_primitive_argument_is_refused(value):
     """§6.4 — the revision defines an encoding for exactly three types: string, integer and
     boolean. It permits `x-mcp-header` on nothing else, and a `null` parameter omits the header
     entirely. So no header value can agree with any of these, and comparing against a rendering
-    CTRLRun invented would certify an agreement under nobody's rules but its own.
+    ctrlrun invented would certify an agreement under nobody's rules but its own.
 
     The header carries the compact rendering the old code compared against, so each case fails
     on the rule rather than on a stray space. A float is not here: §6.6 refuses one in the body

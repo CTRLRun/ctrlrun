@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Gate a LangChain agent's tool calls with a CTRLRun policy, through `wrap_tool_call`.
+"""Gate a LangChain agent's tool calls with a ctrlrun policy, through `wrap_tool_call`.
 
 **This is not the LangGraph adapter, and it is not an adapter at all in SPEC-v0.5 §2's sense.**
 `ctrlrun-langgraph` exists to route an `APPROVE` through `interrupt()`; it reuses a framework's
@@ -52,10 +52,10 @@ from ctrlrun.effect import resolve_resource
 
 __all__ = ["CTRLRunMiddleware"]
 
-#: What the model is told when CTRLRun refuses. A refusal is the statement that the tool did
+#: What the model is told when ctrlrun refuses. A refusal is the statement that the tool did
 #: not run, which is not the same as the tool failing, so it names the rule rather than
 #: reporting an error the tool never produced.
-_REFUSED: Final = "CTRLRun refused this call: {reason}. The tool did not run."
+_REFUSED: Final = "ctrlrun refused this call: {reason}. The tool did not run."
 
 
 def _tool_message(request: Any, content: str) -> Any:
@@ -129,19 +129,19 @@ class CTRLRunMiddleware(AgentMiddleware):
         except ApprovalRequired as pending:
             return _tool_message(
                 request,
-                f"CTRLRun is holding this call for a human. Approve it with "
+                f"ctrlrun is holding this call for a human. Approve it with "
                 f"'ctrlrun approve {pending.request_id}', then ask again. The tool did not run.",
             )
         except DuplicateEffect as duplicate:
             return _tool_message(
                 request,
-                f"CTRLRun refused this call: this effect is already {duplicate.state} "
+                f"ctrlrun refused this call: this effect is already {duplicate.state} "
                 f"({duplicate.effect_key}). The tool did not run.",
             )
         except AmbiguousEffect as ambiguous:
             return _tool_message(
                 request,
-                f"CTRLRun refused this call: the outcome of {ambiguous.effect_key} was never "
+                f"ctrlrun refused this call: the outcome of {ambiguous.effect_key} was never "
                 f"established, so a retry is unsafe. Resolve it with "
                 f"'ctrlrun resolve {ambiguous.effect_key}'. The tool did not run.",
             )

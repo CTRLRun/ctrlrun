@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The MCP gateway. Build-list item 6; SPEC-v0.2 §6. Ships in `ctrlrun[gateway]`.
 

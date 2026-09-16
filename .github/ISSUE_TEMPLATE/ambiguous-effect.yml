@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        `AMBIGUOUS` means nobody knows whether the remote acted, and CTRLRun refuses to guess. Most of the time that is the library doing its job: a timeout, a lost reply, a worker that died mid-call, or a lost connection during a store `COMMIT` all land here on purpose. This template is for the case where the events do not explain why, or where you believe the outcome was knowable.
+        `AMBIGUOUS` means nobody knows whether the remote acted, and ctrlrun refuses to guess. Most of the time that is the library doing its job: a timeout, a lost reply, a worker that died mid-call, or a lost connection during a store `COMMIT` all land here on purpose. This template is for the case where the events do not explain why, or where you believe the outcome was knowable.
 
         To move the record on: ask the remote what happened, then `ctrlrun resolve <effect_key> --committed` or `--failed`. A `reconcile` hook does the same automatically. Nothing else does.
   - type: input
@@ -41,4 +41,4 @@ body:
     id: expected
     attributes:
       label: What you expected, and why
-      description: If you believe the outcome was knowable at the time, say what CTRLRun could have observed that it did not.
+      description: If you believe the outcome was knowable at the time, say what ctrlrun could have observed that it did not.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """Approval binding: request, grant, consume. SPEC-v0.1 §4; acceptance tests T2, T4, T5."""
 

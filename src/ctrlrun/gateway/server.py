@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The gateway's HTTP server. Build-list item 6c; SPEC-v0.2 §6.1, §6.3, §6.5-§6.8, §6.10.
 
@@ -133,7 +133,7 @@ UNAUTHORIZED: Final = (-41012, "ctrlrun.unauthorized", 403)
 UPSTREAM_UNPINNED: Final = (-41016, "ctrlrun.upstream_unpinned", 403)
 
 #: §6.8 — the `_meta` key every intercepted response carries, so a client is not left
-#: guessing what CTRLRun recorded. `com.ctrlrun/` is a legal prefix under the revision's
+#: guessing what ctrlrun recorded. `com.ctrlrun/` is a legal prefix under the revision's
 #: key-naming rules, and `_meta` on a result is not validated against a tool's outputSchema.
 RECEIPT_META_KEY: Final = "com.ctrlrun/receipt"
 
@@ -410,7 +410,7 @@ class Gateway:
             _LOG.warning("refused a request: %s", parsed.message)
             return self._refusal(parsed, _request_id(body))
         if not parsed.intercept:
-            # §6.3 — every other method is relayed, and has no CTRLRun outcome at all. No
+            # §6.3 — every other method is relayed, and has no ctrlrun outcome at all. No
             # Action, no policy, no reservation, no receipt. `tools/list` is not an action.
             return self._relay(parsed, headers)
         return self._intercept(parsed, headers)
@@ -653,7 +653,7 @@ class Gateway:
                 # pre-dispatch JSON-RPC code, or the `401` rule are then answers about *this*
                 # leg's request and say nothing about what the upstream did with the original,
                 # so the effect's state is unknown. The upstream's own response is still relayed
-                # unchanged (§6.8); only what CTRLRun records changes.
+                # unchanged (§6.8); only what ctrlrun records changes.
                 outcome = replace(
                     outcome,
                     effect=EffectState.AMBIGUOUS,

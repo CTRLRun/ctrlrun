@@ -1,4 +1,4 @@
-# CTRLRun — `ctrlrun scan`
+# ctrlrun — `ctrlrun scan`
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md), [`SPEC-v0.2.md`](SPEC-v0.2.md),
 [`SPEC-v0.3.md`](SPEC-v0.3.md), [`SPEC-v0.4.md`](SPEC-v0.4.md), [`SPEC-v0.5.md`](SPEC-v0.5.md)
@@ -25,7 +25,7 @@ rather than worked around in the code.
 ## 1. Scope
 
 One sentence: **`ctrlrun scan` reports the consequential call sites and policy entries in a
-project that CTRLRun is not covering, so that an operator can see the gap between *installed*
+project that ctrlrun is not covering, so that an operator can see the gap between *installed*
 and *in the path*.**
 
 It answers one question — *what is not protected here?* — and it answers it by reading text.
@@ -56,7 +56,7 @@ it. The gateway (`v0.2 §6`) is a choke point and covers what reaches it; the de
 what somebody decorated. The thing an operator cannot see today is **the call nobody decorated**,
 and there is no command that will tell them.
 
-This is also the smallest possible first contact with the project. Adopting CTRLRun is a
+This is also the smallest possible first contact with the project. Adopting ctrlrun is a
 decision; running a read-only command that lists what a stack already risks is not.
 
 ## 2. What it reads

@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Route a CTRLRun `APPROVE` through the OpenAI Agents SDK's own tool-approval interruption.
+"""Route a ctrlrun `APPROVE` through the OpenAI Agents SDK's own tool-approval interruption.
 SPEC-v0.5 §2, §3.5.
 
 **An adapter exists for exactly one reason**, and this is the whole of it: when a policy says a
@@ -146,7 +146,7 @@ def _answer_for_this_call(context: ToolContext) -> bool | None:
     exact-call lookup comes first, and `if approval_entry.approved is True: return True` is what
     runs when that misses.
 
-    A human who ticked *always approve refunds* has not approved this refund. CTRLRun's whole
+    A human who ticked *always approve refunds* has not approved this refund. ctrlrun's whole
     claim is that a grant binds to one action -- `v0.1 §4.2` consumes it against an
     `action_hash` -- and a blanket yes for a tool name is precisely what that exists to refuse.
     With `carries_approved_arguments = False` there is no binding check in core to catch it
@@ -182,10 +182,10 @@ class AgentsInterrupt:
     back what it was given, which SPEC-v0.5 §3.4 names as manufacturing the check.
 
     So the binding across this interrupt is **attribution**, and `README.md` says so in that
-    word. What closes the gap in practice is the SDK's own binding rather than CTRLRun's: the
+    word. What closes the gap in practice is the SDK's own binding rather than ctrlrun's: the
     approval item and the invocation are the *same tool call*, bound by `call_id`, and the SDK
     invokes with exactly that call's arguments. That is a real property of the framework and it
-    is not one CTRLRun can verify, which is the whole distinction §3.4 draws.
+    is not one ctrlrun can verify, which is the whole distinction §3.4 draws.
     """
 
     framework = "openai-agents"
@@ -228,7 +228,7 @@ class AgentsInterrupt:
 
         A **rejection** normally never reaches here: the SDK does not invoke a tool whose
         approval was refused, so the run ends with the rejection in its own output and no
-        CTRLRun action is proposed. §7 of `README.md` records that, because it is the one place
+        ctrlrun action is proposed. §7 of `README.md` records that, because it is the one place
         this adapter's evidence differs from `@protect`'s. `False` is still returned as a
         denial rather than assumed unreachable — a human's *no* is an answer, and §2.4 says it
         is recorded by the provider like any other.
@@ -290,12 +290,12 @@ def protected_tool(
 
     **`needs_approval=approval_gate(...)`**, so the SDK asks before it invokes.
 
-    **`failure_error_function=None`**, so a CTRLRun refusal propagates out of `Runner.run`
+    **`failure_error_function=None`**, so a ctrlrun refusal propagates out of `Runner.run`
     instead of being turned into text. This SDK's default is `default_tool_error_function`,
     which catches a tool's exception and returns *"An error occurred while running the tool.
     Please try again."* to the **model**. Under that default an `ActionDenied`, a
     `DuplicateEffect` or an `AmbiguousEffect` reaches an agent as a suggestion to retry — which
-    is the exact failure `v0.2 §6.10` argues about in the gateway: a refusal by CTRLRun is not
+    is the exact failure `v0.2 §6.10` argues about in the gateway: a refusal by ctrlrun is not
     an outcome of the tool, it is the statement that the tool did not run, and putting it in a
     channel whose contents reach the model as text invites the retry the refusal exists to
     prevent.
@@ -415,7 +415,7 @@ def unwrap(error: BaseException) -> BaseException:
     one interface this library has for saying *the tool did not run* is lost in transit.
 
     `v0.1 §8` prefers explicit exceptions over return codes for exactly this reason, and
-    `v0.2 §6.10` argues the same point about the gateway: a refusal by CTRLRun is not an outcome
+    `v0.2 §6.10` argues the same point about the gateway: a refusal by ctrlrun is not an outcome
     of the tool, it is the statement that the tool did not run, and it must be distinguishable.
     So this walks the chain and gives it back.
 
@@ -494,7 +494,7 @@ def _reraise(recovered: BaseException, raised: BaseException) -> None:
 
 
 async def run(agent: Any, input: Any, **options: Any) -> Any:
-    """`Runner.run`, with CTRLRun's exceptions arriving as themselves (see `unwrap`).
+    """`Runner.run`, with ctrlrun's exceptions arriving as themselves (see `unwrap`).
 
     Use it wherever you would use `Runner.run` and want `except DuplicateEffect` to work. It is
     a thin pass-through: it decides nothing, holds nothing and adds no behaviour of its own.

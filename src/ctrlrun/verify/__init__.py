@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """`ctrlrun verify` — the operator's own configuration, against the kernel's own refusals.
 
@@ -173,7 +173,7 @@ def run(
     chosen = (store_url or SQLITE_STORE_URL).strip() or SQLITE_STORE_URL
     if chosen != SQLITE_STORE_URL and not chosen.startswith(("postgresql://", "postgres://")):
         raise VerifyRefused(
-            f"--store-url {store_url!r} names a backend CTRLRun does not have. The values are "
+            f"--store-url {store_url!r} names a backend ctrlrun does not have. The values are "
             f"{SQLITE_STORE_URL!r} and a postgresql:// URL (SPEC-v0.6 §4.1)"
         )
     if chosen != SQLITE_STORE_URL:

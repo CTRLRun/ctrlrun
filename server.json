@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.CTRLRun/ctrlrun-mcp-operator",
-  "title": "CTRLRun Operator",
-  "description": "Answer CTRLRun approvals from an MCP client: list what is held, inspect it, grant or deny.",
+  "title": "ctrlrun Operator",
+  "description": "Answer ctrlrun approvals from an MCP client: list what is held, inspect it, grant or deny.",
   "websiteUrl": "https://docs.ctrlrun.dev/mcp/overview",
   "repository": {
     "url": "https://github.com/CTRLRun/ctrlrun",

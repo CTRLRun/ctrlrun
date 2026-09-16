@@ -14,7 +14,7 @@
 # five findings they produced were triaged individually and dismissed with a reason recorded in
 # the code-scanning tab.
 
-name: "CTRLRun Python"
+name: "ctrlrun Python"
 
 query-filters:
   # 79 findings, every one of them `...`. The Ellipsis literal is a statement with no effect, and

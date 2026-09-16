@@ -1,4 +1,4 @@
-# CTRLRun v0.4 Specification
+# ctrlrun v0.4 Specification
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md), [`SPEC-v0.2.md`](SPEC-v0.2.md) and
 [`SPEC-v0.3.md`](SPEC-v0.3.md)**. Everything in all three still holds; this document states
@@ -13,7 +13,7 @@ document or in v0.1/v0.2/v0.3 is out of scope for v0.4.
 Words: MUST / MUST NOT / SHOULD are used in the RFC 2119 sense.
 
 v0.4 answers a question the first three releases could not: **does it hold in *my* setup?**
-Everything CTRLRun guarantees is proven today by this repository's own tests against this
+Everything ctrlrun guarantees is proven today by this repository's own tests against this
 repository's own configurations. That is the right place to start and the wrong place to
 stop, because the thing an operator deploys is *their* policy, *their* grants and *their*
 store — and a guarantee that has never been exercised against those is a guarantee nobody
@@ -89,7 +89,7 @@ The list matters more than the feature does. Verify sees **the configuration, no
   was written before this document and is **wrong**; it is amended in item 7 (§9.4).
 - **Not the operator's `reconcile` hooks**, for the same reason: a hook is a Python callable
   passed to `@protect`, and it does not appear in any file verify reads.
-- **Not where the decorator was placed.** Code that calls the raw function bypasses CTRLRun
+- **Not where the decorator was placed.** Code that calls the raw function bypasses ctrlrun
   entirely (`THREAT_MODEL.md`, "Out of scope"), and no amount of configuration-reading finds
   that.
 - **Not the deployment.** Whether the proxy in front of `HeaderIdentityProvider` overwrites
@@ -299,7 +299,7 @@ raises `AmbiguousEffect`; the fake remote's call count is 1; the retry's receipt
 **Control.** The same scenario with a fake that raises `NotExecuted` instead: the record
 reaches `FAILED`, the retry **is** admitted, and it executes — call count 2. This control
 carries more weight than any other in the catalogue, because it is the only thing separating
-"CTRLRun blocks blind retries" from "CTRLRun blocks retries", and the second sentence
+"ctrlrun blocks blind retries" from "ctrlrun blocks retries", and the second sentence
 describes a library nobody can deploy.
 
 ---
@@ -441,7 +441,7 @@ directions are asserted or neither is.
 every report (§4.2) and on nothing else.
 
 - **Ids are permanent.** A guarantee that is removed leaves its number retired; a guarantee
-  that is added takes the next one. `G4` means the same sentence in every version of CTRLRun
+  that is added takes the next one. `G4` means the same sentence in every version of ctrlrun
   that ever emitted it.
 - **Adding a guarantee is a specification amendment**, and it moves the denominator. A badge
   reading `8/8` from one release and `8/10` from the next is not a regression, and the report
@@ -696,7 +696,7 @@ Written to stdout. One line per guarantee, in catalogue order, and the summary i
 line so that a `tail -1` is meaningful.
 
 ```
-CTRLRun verify — ctrlrun 0.4.0, catalogue ctrlrun.guarantees/v1
+ctrlrun verify — ctrlrun 0.4.0, catalogue ctrlrun.guarantees/v1
 policy     examples/authority/payments.yaml (ctrlrun.policy/v3, mode: enforce)
 authority  same document, 3 grants
 store      sqlite, scratch (created and destroyed for this run)
@@ -938,10 +938,10 @@ where the reader can see the cost.
 The document is Shields' endpoint schema:
 
 ```json
-{"schemaVersion": 1, "label": "CTRLRun", "message": "verified 10/10", "color": "brightgreen"}
+{"schemaVersion": 1, "label": "ctrlrun", "message": "verified 10/10", "color": "brightgreen"}
 ```
 
-- **Rendered text is exactly `CTRLRun verified N/M`** — label, a space, message. T119 asserts
+- **Rendered text is exactly `ctrlrun verified N/M`** — label, a space, message. T119 asserts
   the concatenation and asserts `message` against `^verified \d+/\d+$`, a regex rather than a
   word list, so no adjective can be appended to it later.
 - `N` is passes, `M` is **applicable** guarantees. Never the catalogue size.
@@ -962,7 +962,7 @@ for the run. T119 asserts the exact phrase `declared guarantees pass` is present
 target.
 
 The words **secure**, **safe**, **compliant**, **certified** and **audited** do not appear as
-claims about CTRLRun or about the operator's system anywhere in the badge, its JSON, the job
+claims about ctrlrun or about the operator's system anywhere in the badge, its JSON, the job
 summary or `docs/verify.md`.
 
 ### 5.4 The job summary
@@ -979,10 +979,10 @@ full. A summary that listed only failures would make an all-N/A run look like a 
 
 Its first line, before any table:
 
-> This is a **reading** of somebody else's taxonomy against the guarantees CTRLRun tests. It
-> is not a compliance claim, a conformance claim, a certification, or a statement that CTRLRun
+> This is a **reading** of somebody else's taxonomy against the guarantees ctrlrun tests. It
+> is not a compliance claim, a conformance claim, a certification, or a statement that ctrlrun
 > covers the OWASP Top 10 for Agentic Applications. Three of the ten entries are not
-> addressed by CTRLRun at all, and they are listed by name below.
+> addressed by ctrlrun at all, and they are listed by name below.
 
 `ROADMAP.md`'s standards rule is the reason this document can exist at all: *integrate first,
 map second, never claim compliance.* Every row maps a `G` to an entry, and every `G` is
@@ -998,7 +998,7 @@ a row whose test disappears is a row that comes out.
    the codes and titles below come from secondary summaries and are **provisional**.
 3. **Table: guarantee → entries mitigated.** Columns: `G`, invariant, ASI entries, one
    sentence on *how* — the mechanism, not a restatement of the entry.
-4. **Table: entries with no guarantee**, under the heading `Not covered by CTRLRun`, each with
+4. **Table: entries with no guarantee**, under the heading `Not covered by ctrlrun`, each with
    one honest sentence: out of scope, or a milestone it waits on. An entry that is partly
    addressed goes in **both** tables, with the partial half stated in the second — the honest
    place for a hedge is next to the thing it qualifies.
@@ -1012,7 +1012,7 @@ Poisoning · `ASI07` Insecure Inter-Agent Communication · `ASI08` Cascading Age
 `ASI09` Human-Agent Trust Exploitation · `ASI10` Rogue Agents.
 
 The expected shape of the second table, which is the half that makes the first one credible:
-supply chain, code execution and memory/context poisoning are **not** CTRLRun's subject —
+supply chain, code execution and memory/context poisoning are **not** ctrlrun's subject —
 nothing in this library reads a model's memory, inspects a package, or sandboxes an
 interpreter — and inter-agent communication waits on v0.7. Item 5 states each in one sentence
 and adds nothing aspirational.
@@ -1283,10 +1283,10 @@ first is the N/A dogfood — five applicable, five N/A — and the assertion is 
 change that made verify silently count N/As is caught in CI rather than in a badge.
 
 #### T119 — The badge says what it is allowed to say
-`label + " " + message == "CTRLRun verified N/M"` exactly; `message` matches
+`label + " " + message == "ctrlrun verified N/M"` exactly; `message` matches
 `^verified \d+/\d+$`; `M` equals the report's `applicable` and never the catalogue size; the
 link target contains the exact phrase `declared guarantees pass`; and the badge JSON, the job
-summary and `docs/verify.md` make no claim about CTRLRun using the words `secure`, `safe`,
+summary and `docs/verify.md` make no claim about ctrlrun using the words `secure`, `safe`,
 `compliant`, `certified` or `audited`.
 
 #### T120 — The job fails on FAIL and succeeds on N/A
@@ -1300,7 +1300,7 @@ configuration fails the job and writes no badge.
 #### T121 — The mapping is complete in both directions
 Every `G` in the registry appears in `docs/OWASP-AGENTIC-TOP10.md`; every ASI code in the
 document is one of the ten in the cited edition and matches `^ASI\d{2}:\d{4}$`; every ASI code
-in the cited edition appears either in the mapping table or in `Not covered by CTRLRun`, and
+in the cited edition appears either in the mapping table or in `Not covered by ctrlrun`, and
 none appears only in neither. The document contains no compliance claim, asserted against the
 word list of `v0.2 §10` T31.
 

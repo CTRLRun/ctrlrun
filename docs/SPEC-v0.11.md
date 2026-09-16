@@ -41,7 +41,7 @@ split renumbers nothing.
 Every item is measured against these.
 
 1. **The anchor consumes a timestamp and issues nothing.** No key generation, no rotation, no
-   revocation, no signing. `SPEC-v0.3.md` §1.1's rule, that CTRLRun consumes identity and issues
+   revocation, no signing. `SPEC-v0.3.md` §1.1's rule, that ctrlrun consumes identity and issues
    none, applied to time. It is the line between this milestone and the one `ROADMAP.md` keeps off
    the roadmap, and an anchor that minted anything would have crossed it.
 2. **A prune introduces no break the chain did not already have, or it is refused.** A prune that
@@ -208,7 +208,7 @@ matching.
 
 **It has three calls, not two, and the third is why.** An earlier draft had `make` and `check`, and
 a review broke it in one extra statement: with only those two, the record of *which* anchors exist
-lives in CTRLRun's table, so deleting the newest row there leaves the older anchor reproducing and
+lives in ctrlrun's table, so deleting the newest row there leaves the older anchor reproducing and
 the truncation invisible. Three SQL statements instead of two, which is the number §3.3 claimed the
 design avoided.
 
@@ -233,11 +233,11 @@ its checkpoint anchor far *below* its newest interval anchor, so the rule refuse
 was refused, **forever**. §4.6 was written because an anchoring deployment should not have to choose
 between pruning and a permanent tamper signal, and as drafted it landed on the first horn.
 
-`latest()` is the one that closes the gap, because it is answered **outside**. CTRLRun's table is
+`latest()` is the one that closes the gap, because it is answered **outside**. ctrlrun's table is
 then a cache and not a record: if it names fewer anchors than the provider holds, the provider wins
 and the missing one is checked anyway.
 
-**What CTRLRun refuses to accept as one**, and this is the fail-closed half:
+**What ctrlrun refuses to accept as one**, and this is the fail-closed half:
 
 - **A provider that raises is `anchor_unavailable` and never a pass.** `SPEC-v0.9.md` §5.6's rule for
   a scope provider, unchanged: a provider that cannot answer has not answered yes.
@@ -264,7 +264,7 @@ An anchor inside the store is an anchor the writer under suspicion can rewrite, 
 exactly one level up: the head was in the database, and that is why two statements were enough. An
 anchor in the same database would make it three.
 
-So the anchor **record** is the operator's, held wherever their provider holds it, and CTRLRun keeps
+So the anchor **record** is the operator's, held wherever their provider holds it, and ctrlrun keeps
 a local copy of what it needs to ask the question: the pair, the token, and the time. Those live in
 a table §9 names.
 
@@ -1126,7 +1126,7 @@ names one is not done when its tests pass.
   implementable, and §4.5 requires the lock without naming a surface for it.
 - **`AnchorProvider.make` returns `(token, time)` and §3.2's table says "an opaque token."** §3.3
   caches the time and §10 refuses an anchor whose time runs backwards; a time the provider does
-  not supply is one CTRLRun would read from its own clock, which rule 1 forbids. The three cannot
+  not supply is one ctrlrun would read from its own clock, which rule 1 forbids. The three cannot
   all hold with a bare token.
 - **`StateStore.checkpoint`'s read shipped in item 2, and §9 assigns it to item 3.** §4.6's
   supersession rule is part of what `anchor_broken` means, so an anchor without it would report

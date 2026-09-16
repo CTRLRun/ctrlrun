@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """What a backend hands the suite, and the two that already exist. SPEC-v0.6 §2.2.
 
@@ -28,7 +28,7 @@ SQLITE_SCHEME = "sqlite://"
 #: rules about whose database it may touch (§4.1).
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
-#: How a conformance URL carries the schema its store must live in. CTRLRun's, not libpq's.
+#: How a conformance URL carries the schema its store must live in. ctrlrun's, not libpq's.
 SCHEMA_PARAM = "ctrlrun_schema"
 
 
@@ -179,7 +179,7 @@ def store_from_url(url: str) -> StateStore:
 
         bare, schema = _split_schema(url)
         if schema != "public":
-            # A conformance URL names a schema CTRLRun owns, so the worker may create it. This
+            # A conformance URL names a schema ctrlrun owns, so the worker may create it. This
             # path is never reached by an operator's store: `PostgresStateStore` itself creates
             # nothing, and verify's scratch schema is made and dropped by the caller (§4.1).
             PostgresStateStore.create_schema(bare, schema)
@@ -188,7 +188,7 @@ def store_from_url(url: str) -> StateStore:
 
 
 def _split_schema(url: str) -> tuple[str, str]:
-    """Peel CTRLRun's own schema parameter off a conformance URL."""
+    """Peel ctrlrun's own schema parameter off a conformance URL."""
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
     parts = urlsplit(url)
@@ -242,7 +242,7 @@ class PostgresBackend:
         return store
 
     def url(self) -> str | None:
-        # The schema travels as CTRLRun's own parameter, stripped by `store_from_url` before the
+        # The schema travels as ctrlrun's own parameter, stripped by `store_from_url` before the
         # URL reaches the driver. Encoding it as libpq `options=-csearch_path=` would not work:
         # `PostgresStateStore` sets `search_path` itself on every connection, so a schema smuggled
         # through the driver would be silently overridden and eight contenders would race in

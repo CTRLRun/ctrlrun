@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctrlrun-langchain"
 version = "1.0.0"
-description = "Gate a LangChain agent's tool calls with a CTRLRun policy, through wrap_tool_call."
+description = "Gate a LangChain agent's tool calls with a ctrlrun policy, through wrap_tool_call."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Arpan Ghoshal", email = "contact@arpanghoshal.com"}]

@@ -1,6 +1,6 @@
 # ctrlrun-langgraph
 
-Route a CTRLRun `APPROVE` through **LangGraph's own `interrupt()`**, so the human answers where
+Route a ctrlrun `APPROVE` through **LangGraph's own `interrupt()`**, so the human answers where
 your LangGraph users already answer.
 
 - **Supported kernel range:** `ctrlrun>=0.5,<0.13`
@@ -110,15 +110,15 @@ a token: nothing is minted, nothing is stored, and there is no id here this adap
 `carries_approved_arguments` has **no default**, because the default somebody assumes is the one
 that does not check.
 
-**`True` — prevention.** Your resume value must carry `arguments`, and CTRLRun rebuilds the
+**`True` — prevention.** Your resume value must carry `arguments`, and ctrlrun rebuilds the
 proposal with them and compares the action hash. An answer given against €5 that arrives for a
 €5,000 action is refused with `ApprovalMismatch`, the approval is left grantable, and nothing
 runs. This is the setting the conformance results above were produced with, and it is right for
 almost every deployment: your console already knows what it showed the human.
 
-**`False` — attribution.** You send back only a verdict. CTRLRun still binds the approval to the
+**`False` — attribution.** You send back only a verdict. ctrlrun still binds the approval to the
 action that executes — that is `v0.1 §4.2 A1` and it holds unconditionally — but **the binding
-across the interrupt is LangGraph's checkpoint, not CTRLRun's hash**. If the checkpoint replayed a
+across the interrupt is LangGraph's checkpoint, not ctrlrun's hash**. If the checkpoint replayed a
 different call than the one a human read, evidence will show it afterwards; nothing refuses it
 beforehand. That is *attribution*, in that word, and the conformance kit reports
 `binding: not_applicable` with the reason rather than a pass. Choose it only if your console
@@ -177,12 +177,12 @@ it returns is recorded by `InterruptApprovalProvider`, in core, through the same
 `ctrlrun approve` makes. It **constructs no `Control`** and **supplies no principal** — an
 adapter sees one and never supplies one.
 
-And it is **not a compliance claim**. "Conformance" here names a suite of the CTRLRun
+And it is **not a compliance claim**. "Conformance" here names a suite of the ctrlrun
 repository's own acceptance tests, run against this adapter. It certifies nothing.
 
 ## Versioning
 
 `adapters-langgraph-MAJOR.MINOR`, never a kernel version. This adapter answers to two upstreams
-and neither is the CTRLRun roadmap: it breaks when LangGraph makes a breaking release, on that
+and neither is the ctrlrun roadmap: it breaks when LangGraph makes a breaking release, on that
 project's schedule. Its major version tracks whichever of the two forced the break, and the two
 ranges at the top are what its CI actually ran against.

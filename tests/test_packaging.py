@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The CTRLRun contributors
+# SPDX-FileCopyrightText: 2026 The ctrlrun contributors
 # SPDX-License-Identifier: Apache-2.0
 """The dependency rule. Build-list item 6a; SPEC-v0.2 §1.1, and the first half of T30.
 
@@ -428,7 +428,7 @@ def test_the_manifest_check_would_notice_a_file_it_does_not_ship():
 
 
 def test_the_package_never_encodes_a_token():
-    """The claims table — "CTRLRun issues no credential and defines no identity format"
+    """The claims table — "ctrlrun issues no credential and defines no identity format"
     (https://ctrlrun.dev/docs/CLAIMS).
 
     A claim in the README needs a test, and this one is structural: the package verifies
@@ -720,7 +720,7 @@ def test_T139_the_readme_makes_no_conformance_claim():
 def test_T139_the_claim_check_can_see_a_claim():
     """The precondition, without which the test above passes on any document at all: a sentence
     that *does* make the claim must be caught."""
-    assert _claims("CTRLRun is fully compliant with the standard.") != []
+    assert _claims("ctrlrun is fully compliant with the standard.") != []
     assert _claims("This adapter is conformant.") != []
     # And the shapes that must stay allowed.
     assert _claims("It does not mean secure, safe, compliant, certified or audited.") == []

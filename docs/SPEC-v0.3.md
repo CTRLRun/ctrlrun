@@ -1,4 +1,4 @@
-# CTRLRun v0.3 Specification
+# ctrlrun v0.3 Specification
 
 This is a **delta over [`SPEC-v0.1.md`](SPEC-v0.1.md) and [`SPEC-v0.2.md`](SPEC-v0.2.md)**.
 Everything in both still holds; this document states only what v0.3 adds or changes. A
@@ -28,7 +28,7 @@ a grant and every action must pass *both* authority and policy. There is no half
 its parent — at the moment it is created *and* again every time it is evaluated. Omitting a
 dimension the parent constrains is not "unconstrained"; it is a rejected delegation (§5.4).
 
-**Identity is consumed, never invented.** Principals come from an `IdentityProvider`. CTRLRun
+**Identity is consumed, never invented.** Principals come from an `IdentityProvider`. ctrlrun
 verifies tokens it is handed and maps verified claims onto a `Principal`. It defines no
 identity format, issues no credential, and runs no authorization server.
 
@@ -62,7 +62,7 @@ the install command when absent. `import ctrlrun` MUST NOT import `jwt`, `httpx`
 v0.3 consumes identities that other systems issue. It is worth being exact about which, because
 "aligns with" is the kind of sentence that ages into a lie.
 
-**What CTRLRun consumes.**
+**What ctrlrun consumes.**
 
 - A **JSON Web Token** (RFC 7519) presented in an HTTP header, verified against a **JWKS**
   (RFC 7517) or a static public key, with `exp`, `nbf`, `aud` and `iss` checked, and with
@@ -71,12 +71,12 @@ v0.3 consumes identities that other systems issue. It is worth being exact about
 - Anything that has already been verified by something else and handed over in a trusted
   header, via `HeaderIdentityProvider` — with the threat that implies stated in full (§3.3).
 
-**What CTRLRun does not do.** It issues no token, mints no identity, runs no authorization
+**What ctrlrun does not do.** It issues no token, mints no identity, runs no authorization
 server, performs no OAuth flow, and defines no new identity format or claim name. There is no
-`ctrlrun` claim, no CTRLRun identity document, and no registry of agent identifiers. A
+`ctrlrun` claim, no ctrlrun identity document, and no registry of agent identifiers. A
 `Principal` is a *reading* of somebody else's credential.
 
-**What CTRLRun does not claim.** No conformance, compliance, certification or alignment with
+**What ctrlrun does not claim.** No conformance, compliance, certification or alignment with
 any standard, in this document, in the README, in a docstring, or in CLI output. `ROADMAP.md`'s
 standards rule holds: *integrate first, map second, never claim compliance* — a standard
 appears in a mapping doc only after code touches it and a test proves the guarantee. §1.3
@@ -126,7 +126,7 @@ delegation. **NIST IR 8587**, *Protecting Tokens and Assertions from Forgery, Th
 is an Initial Public Draft (published 2025-12-22,
 [https://csrc.nist.gov/pubs/ir/8587/ipd](https://csrc.nist.gov/pubs/ir/8587/ipd)), and its verifier obligations informed §3.4 without
 being citable as a requirement. Its §4.2.1.2 is the one NIST sentence that addresses a
-component in CTRLRun's position — *"Policy enforcement points (e.g., at the application level)
+component in ctrlrun's position — *"Policy enforcement points (e.g., at the application level)
 that rely on access tokens and identity assertions MUST confirm the validity, scope, source,
 and integrity of access tokens before granting access to resources"* — and it is draft
 guidance, aimed at agencies and cloud service providers, that mentions neither AI agents nor
@@ -170,7 +170,7 @@ challenged scopes and `scopes_supported`, and the step-up flow computes the **un
 and challenged scopes — the opposite of attenuation.
 
 **What v0.3 takes from this:** nothing it can map an authority model onto. MCP supplies
-audience-bound bearer tokens and a transport. Per-action authority is CTRLRun's own ground, which
+audience-bound bearer tokens and a transport. Per-action authority is ctrlrun's own ground, which
 is exactly why the gateway carries a policy and an `authority:` file rather than deriving
 entitlements from the protocol.
 
@@ -189,8 +189,8 @@ February 2020) — all three are things an issuer or a client does, and v0.3 is 
 RFC 8693 is worth one more sentence, because it is the RFC someone will expect §5 to be built
 on. Its §4.1 requires a consumer to *"only consider the token's top-level claims and the party
 identified as the current actor by the `act` claim"*, with nested prior actors informational.
-CTRLRun's delegation chain is therefore **not** carried in a token and not read from one: it
-lives in CTRLRun's own store (§5.2), and every link is re-checked there (§5.6). A library that
+ctrlrun's delegation chain is therefore **not** carried in a token and not read from one: it
+lives in ctrlrun's own store (§5.2), and every link is re-checked there (§5.6). A library that
 claimed to verify a delegation chain out of an `act` claim would be non-conformant to the one
 Final RFC it would be citing.
 
@@ -215,7 +215,7 @@ a version.
 **What v0.3 takes from this:** JWT verification, and nothing else. A library that put a
 six-month-old individual draft in its wire format would be shipping somebody's unreviewed idea to
 production. `JWTIdentityProvider` verifies RFC 7519 tokens against RFC 7517 keys; the `authority:`
-section is CTRLRun's own YAML, deliberately, and does not pretend to be a token profile.
+section is ctrlrun's own YAML, deliberately, and does not pretend to be a token profile.
 
 #### SPIFFE — identity, and explicitly not authorization
 
@@ -250,7 +250,7 @@ creation review 2025-02-05); UCAN 1.0.0 ([https://github.com/ucan-wg/spec](https
 no dated release); ZCAP-LD (W3C CCG **Community Group draft** v0.4.0-draft, not Recommendation
 track); SPKI/SDSI, **RFC 2693**, September 1999, **Experimental**; and
 `draft-niyikiza-oauth-attenuating-agent-tokens-01`, an individual submission with no IETF
-standing. None is a standard CTRLRun could implement; every one is a source of design pressure.
+standing. None is a standard ctrlrun could implement; every one is a source of design pressure.
 
 They split on one question — *does anything ever compare a child grant to its parent?*
 
@@ -266,7 +266,7 @@ They split on one question — *does anything ever compare a child grant to its 
 §5's rule — provably contained at creation **and** re-checked at evaluation — sits with
 ZCAP-LD, SPKI and that draft. It is a **different** guarantee from the one macaroons and UCAN
 give, not a strictly stronger one: they make widening unrepresentable, which is stronger, by
-requiring a token that can only ever have restrictions appended; CTRLRun compares two grants
+requiring a token that can only ever have restrictions appended; ctrlrun compares two grants
 instead, which is weaker against a forged record and stronger against a *changing parent*. That
 is the trade this codebase is forced into. A grant here is a YAML document an operator edits and
 a delegation is a row in a store, so there is no signature chain to make widening
@@ -278,7 +278,7 @@ inheriting them comes from.
 Two of §5's dimensions have essentially no prior art: **environment containment** — macaroons
 defer to application-defined caveats, UCAN policy sees only invocation arguments, ZCAP-LD has no
 environment field — and **numeric containment**, whose nearest standards-adjacent expression is
-RFC 2693's `(* range …)`, Experimental and from 1999. Those two are stated here as CTRLRun's own
+RFC 2693's `(* range …)`, Experimental and from 1999. Those two are stated here as ctrlrun's own
 invention, not as an implementation of anything.
 
 
@@ -431,7 +431,7 @@ its own.
   the *names*, sorted, not the values. Values reach `--json`.
 - **The OTel sink.** Claim values are withheld exactly as argument values are (`v0.2 §8`):
   span attributes carry `ctrlrun.principal.issuer` and the sorted claim names, and nothing
-  else, unless the operator asked for arguments. They stay in CTRLRun's own `ctrlrun.*`
+  else, unless the operator asked for arguments. They stay in ctrlrun's own `ctrlrun.*`
   namespace rather than adopting OpenTelemetry's `user.*` registry, and the reason is better
   than preference: every attribute in that registry (`user.id`, `user.name`, `user.email`,
   `user.roles`, …) is marked **Development** stability, so adopting it would tie a receipt-
@@ -556,7 +556,7 @@ the provider never runs.
 
 That is a real limit and it is stated rather than papered over: it is the same limit as calling
 the wrapped function directly, which `docs/THREAT_MODEL.md` already records as out of scope
-("Bypassing the decorator entirely"). Code inside the CTRLRun process is inside the trust
+("Bypassing the decorator entirely"). Code inside the ctrlrun process is inside the trust
 boundary. Code *outside* it — every gateway client, which is where an untrusted caller actually
 is — has no such path, because the gateway builds the Action and the client never touches
 `Control`. v0.3 does **not** add a re-resolution or a principal-disagreement check to
@@ -1290,7 +1290,7 @@ in favour of some other grant that happens to match — it is `authority_unreada
 precedence order of §4.3. The permissive reading is the one an implementer reaches for naturally:
 iterate the grants, collect the matches, ignore the row that raised. That is how a principal
 holding both a broad root grant and a narrow delegation ends up authorized by the broad one
-because the narrow one was corrupted. CTRLRun cannot tell a corrupted record from a tampered one,
+because the narrow one was corrupted. ctrlrun cannot tell a corrupted record from a tampered one,
 and the safe reading of "I cannot read this" is not "then it does not apply".
 
 **Where several grants match** and all are readable, the action passes; a grant is a permission,
@@ -1969,7 +1969,7 @@ recorded, which is `v0.2 §6.9.3`'s no-effect-key path reached for a different r
 that *did* reserve suspends exactly as in enforce mode.
 
 **What observe mode does not suspend.** It suspends *decisions about an action* and *effect-state
-refusals*. It does not suspend the refusals that mean CTRLRun cannot construct or identify the
+refusals*. It does not suspend the refusals that mean ctrlrun cannot construct or identify the
 action at all, and it does not suspend the creation of durable authority:
 
 | Still refuses in observe mode | Why |
@@ -1983,7 +1983,7 @@ action at all, and it does not suspend the creation of durable authority:
 
 The line is drawn where it is because everything above is either a wiring bug in the deployment or
 an act of authority, not a decision about an action. Observing a wiring bug means running an
-action CTRLRun could not describe, and a receipt that cannot say what ran is not evidence.
+action ctrlrun could not describe, and a receipt that cannot say what ran is not evidence.
 
 T82b asserts the first four rows and the delegation row by name. The last row is **unfalsifiable
 and carries no test**: an implementation cannot know the mode without loading the configuration,
@@ -2041,7 +2041,7 @@ This is a command that reads receipts out of the SQLite file the process it is d
 writing.
 
 ```
-CTRLRun — 2026-09-01T00:00:00Z .. 2026-09-04T09:11:00Z   (observe mode)
+ctrlrun — 2026-09-01T00:00:00Z .. 2026-09-04T09:11:00Z   (observe mode)
 
 actions                       1284
 would have been denied          37   (2.9%)
@@ -2156,7 +2156,7 @@ DELEGATION_REJECTED
 | `DELEGATION_REJECTED` | `reason` and `parent_id`; `dimension` **only** for a §5.3 rule-6 containment refusal |
 
 `AUTHORITY_RESOLVED` is appended for **every** action that passes authority, not only for
-delegated ones. Evidence has to record that CTRLRun checked and found a grant, or a deployment
+delegated ones. Evidence has to record that ctrlrun checked and found a grant, or a deployment
 with a permissive grant is indistinguishable from one with no authority section at all — the same
 argument `v0.2 §2.5` makes for appending `RECONCILIATION_RESOLVED` on `"unknown"`.
 
@@ -3098,7 +3098,7 @@ unknown `result` values needs no change" is true and nearly useless, because the
 reader does not tolerate them: `Receipt.from_dict` parses `result` into a closed `StrEnum`, and
 `SQLiteStateStore` reads every stored receipt through it. So:
 
-- A CTRLRun **≤ 0.2** process running `ctrlrun receipts` or `ctrlrun inspect` against a store or
+- A ctrlrun **≤ 0.2** process running `ctrlrun receipts` or `ctrlrun inspect` against a store or
   JSONL file that a 0.3 **observe-mode** process wrote raises on the unknown `result` value. Two
   processes sharing one store is the intended deployment (`v0.2 §6.1`), so this is not a corner
   case: **upgrade every reader before switching any writer to `mode: observe`.** An enforce-mode
