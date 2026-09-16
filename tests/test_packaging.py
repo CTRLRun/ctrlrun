@@ -806,7 +806,45 @@ def test_the_throwaway_sector_configuration_ships_nowhere():
     )
 
 
-ADAPTER_DIRECTORIES = ("langgraph", "openai-agents")
+def _adapter_directories() -> tuple[str, ...]:
+    """Every adapter in the tree, derived rather than listed.
+
+    It was a literal, and `ctrlrun-langchain` landed without any of the three tests below
+    noticing: the tag rule, the widened-range guard and the published record all took their
+    subjects from a tuple nobody updated. A count or a set a test can derive is one a test
+    derives. The same rule the guarantee ids follow, for the same reason: a hand-maintained
+    list of subjects is a list that silently stops covering things.
+    """
+    adapters = REPO_ROOT / "adapters"
+    if not adapters.is_dir():  # pragma: no cover - the sdist prunes adapters/
+        return ()
+    return tuple(
+        sorted(path.name for path in adapters.iterdir() if (path / "pyproject.toml").is_file())
+    )
+
+
+ADAPTER_DIRECTORIES = _adapter_directories()
+
+
+def test_every_adapter_in_the_tree_is_one_publish_yml_can_release():
+    """An adapter `publish.yml` does not name is one no tag can ship.
+
+    `ctrlrun-langchain` merged with its directory, its distribution and its tests, and no tag
+    could have published it: the workflow's trigger list and its `case` statement are both
+    explicit, and neither had a row. Nothing failed, because the tag test above transcribes the
+    *version* rule and never asks whether the workflow knows the adapter exists.
+    """
+    source = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+    if not source.is_file():  # pragma: no cover - the sdist carries neither .github/ nor adapters/
+        pytest.skip("publish.yml is not in this distribution; the sdist prunes .github/")
+    workflow = source.read_text(encoding="utf-8")
+    for adapter in ADAPTER_DIRECTORIES:
+        assert f'"adapters-{adapter}-*"' in workflow, (
+            f"adapters/{adapter} has no tag trigger in publish.yml, so no tag can release it"
+        )
+        assert f"adapters-{adapter}-*)" in workflow, (
+            f"adapters/{adapter} has no case row in publish.yml, so a tag naming it would exit 1"
+        )
 
 
 @pytest.mark.parametrize("adapter", ADAPTER_DIRECTORIES)
@@ -878,7 +916,14 @@ def test_a_widened_kernel_range_is_not_shipped_without_a_new_version(adapter):
         pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
 
     with published_file.open("rb") as handle:
-        published = _tomllib.load(handle)[adapter]
+        record = _tomllib.load(handle)
+    if adapter in record.get("unreleased", []):
+        pytest.skip(f"adapters/{adapter} is recorded as never uploaded; there is no published side")
+    assert adapter in record, (
+        f"adapters/{adapter} is in neither a version table nor `unreleased` in PUBLISHED.toml. "
+        "A row that is simply missing reads as 'not published yet', which is how this guard dies."
+    )
+    published = record[adapter]
     with manifest.open("rb") as handle:
         project = _tomllib.load(handle)["project"]
 
@@ -946,7 +991,14 @@ def test_the_published_record_is_a_record_and_not_a_plan(adapter):
         pytest.skip("adapters/ is not in this distribution, which SPEC-v0.5 §6.1 requires")
 
     with published_file.open("rb") as handle:
-        published = _tomllib.load(handle)[adapter]
+        record = _tomllib.load(handle)
+    if adapter in record.get("unreleased", []):
+        pytest.skip(f"adapters/{adapter} is recorded as never uploaded; there is no published side")
+    assert adapter in record, (
+        f"adapters/{adapter} is in neither a version table nor `unreleased` in PUBLISHED.toml. "
+        "A row that is simply missing reads as 'not published yet', which is how this guard dies."
+    )
+    published = record[adapter]
 
     version, kernel = published["version"], published["kernel"]
     known = RECORDED[adapter]

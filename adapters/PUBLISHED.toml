@@ -57,6 +57,12 @@
 # network, and `SPEC-v0.4 §3.9`'s discipline applies: a check that cannot run offline is a check
 # that gets skipped in the run that mattered.
 
+# Adapters that exist in the tree and have never been uploaded. An adapter belongs here or in a
+# version table below, never in neither: absence alone would let a deleted row read as "not
+# published yet", which is this file's guard dying in the one way it has not yet died. A release
+# pass moves a name out of here and adds its table **after** the upload succeeds.
+unreleased = ["langchain"]
+
 [langgraph]
 version = "1.3.0"
 kernel = ">=0.5,<0.13"
