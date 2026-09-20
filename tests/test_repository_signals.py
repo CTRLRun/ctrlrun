@@ -131,6 +131,25 @@ def test_dependabot_keeps_the_pins_current_and_nothing_else():
     assert "groups" in locks, "ungrouped updates are one pull request per package"
 
 
+def test_the_atheris_ignore_matches_the_bound_it_exists_to_defend():
+    """Dependabot relaxes a source bound that blocks an update: given `atheris<3.1` it raised
+    the bound to `<3.2` and locked 3.1.0, which publishes no CPython 3.11 wheel and no sdist,
+    so `fuzz.yml` could not install it. The ignore in `dependabot.yml` is what keeps that pull
+    request from reopening weekly, and it is worth nothing if it drifts from the bound: this
+    asserts the two carry the same number, so lifting one without the other is red here rather
+    than an unbuildable lock somebody has to diagnose again."""
+    config = yaml.safe_load((REPO_ROOT / ".github" / "dependabot.yml").read_text())
+    locks = next(
+        entry
+        for entry in config["updates"]
+        if (entry["package-ecosystem"], entry["directory"]) == ("pip", "/requirements")
+    )
+    ignored = {entry["dependency-name"]: entry["versions"] for entry in locks.get("ignore", [])}
+    assert ignored.get("atheris") == [">=3.1"], "the atheris ignore is gone or has moved"
+    source = (REPO_ROOT / "requirements" / "in" / "atheris.in").read_text()
+    assert "atheris<3.1" in source, "the bound moved and the ignore did not"
+
+
 # --- the third party's reading -------------------------------------------------------------
 
 

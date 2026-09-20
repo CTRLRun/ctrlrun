@@ -25,3 +25,10 @@ updates:
     groups:
       locks:
         patterns: ["*"]
+    # atheris >=3.1 publishes wheels for CPython 3.12 to 3.14 only and no sdist, and fuzz.yml
+    # runs 3.11: the bound in `requirements/in/atheris.in` says so. Dependabot relaxes a source
+    # bound that blocks an update, so without this it reopens the same unbuildable pull request
+    # every week. Lift both together when the fuzz job's Python version moves.
+    ignore:
+      - dependency-name: atheris
+        versions: [">=3.1"]
