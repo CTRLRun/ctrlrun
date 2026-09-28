@@ -7,6 +7,7 @@ Gate a LangChain agent's tool calls with a ctrlrun policy, through **LangChain's
 - **Supported framework range:** `langchain>=1.0,<2.0`
 - **Primitive reused:** [`AgentMiddleware.wrap_tool_call`](https://docs.langchain.com/oss/langchain/middleware/custom), whose contract is *"Intercept execution and control when the handler is called. You decide if the handler is called zero times (short-circuit), once (normal flow), or multiple times."* Read 2026-09-16.
 - **Framework shape:** the framework hands over the call itself.
+- **Listed in:** LangChain's official [middleware integrations](https://docs.langchain.com/oss/python/integrations/middleware), as `CTRLRunMiddleware`. Read 2026-09-26.
 
 ## This is not the LangGraph adapter
 

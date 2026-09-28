@@ -309,6 +309,14 @@ gives **attribution**, because that SDK records *that* a call was approved and n
 arguments were. None of the three is only for agents: a worker, a webhook handler and a
 scheduled job cannot tell a first attempt from a retry either.
 
+**It is an official LangChain middleware integration.**
+[`ctrlrun-langchain`](https://github.com/CTRLRun/ctrlrun/blob/main/adapters/langchain/README.md)
+is listed in LangChain's [middleware integrations](https://docs.langchain.com/oss/python/integrations/middleware).
+Its `CTRLRunMiddleware` goes in `create_agent(middleware=[...])` and gates every tool call
+through LangChain's own `wrap_tool_call`, tools you did not write included: a refused call never
+reaches the tool, and the model is told which rule refused it.
+[Use the LangChain middleware](https://docs.ctrlrun.dev/guides/langchain-middleware) has the setup.
+
 ## How it works
 
 Every protected call, whichever way it arrives, goes through the same seven steps. Only then
