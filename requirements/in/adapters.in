@@ -1,6 +1,6 @@
 # CI's `adapters` job: the two frameworks the reference adapters are tested against, at the
 # ranges `adapters/*/pyproject.toml` declare. The kernel's own extras come from pyproject.toml.
-langgraph>=1.0,<2.0
+langgraph>=1.2.12,<2.0
 langchain
 langchain-openai
-openai-agents>=0.20,<1.0
+openai-agents>=0.22.3,<1.0
