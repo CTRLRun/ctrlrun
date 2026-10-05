@@ -266,6 +266,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "ANN", "SIM", "RUF"]
 "research/soak/*.py" = ["ANN401", "N818", "PLC0415"]
 "fuzz/*.py" = ["ANN401", "N818", "PLC0415"]
 "research/soak/**/*.py" = ["ANN401", "N818", "PLC0415"]
+"research/github-merge-head-race/*.py" = ["ANN401"]
 # Type hints are a src/ constraint; tests stay cheap to write. N802 lets acceptance
 # tests carry the SPEC §7 identifier verbatim (test_T7_...).
 "tests/*" = ["ANN", "N802"]
