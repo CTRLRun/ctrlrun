@@ -1,0 +1,13 @@
+# Extracted by CTRLRun/ctrlrun-docs tools/docs_audit/render_cookbook.py from
+# docs/cookbook/github-merge-agent.mdx — edit the page, never this file.
+schema: ctrlrun.policy/v2
+
+actions:
+  mcp.github.pull_request_read:
+    decision: allow
+  mcp.github.merge_pull_request:
+    effect: "merge:{owner}/{repo}:{pullNumber}"
+    rules:
+      - when: { expectedHeadSha_neq: "" }
+        decision: approve
+      - decision: deny
