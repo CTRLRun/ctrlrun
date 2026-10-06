@@ -408,12 +408,15 @@ def versions(binary: Path) -> dict[str, str]:
 def markdown(document: dict[str, Any]) -> str:
     lines = [f"# github-merge-head-race, {document['date']}", ""]
     lines += [f"- **{key}**: `{value}`" for key, value in document["versions"].items()]
-    lines += [
-        "",
-        "| Path | Scenario | Provider calls | Mutations | Effect record "
-        "| Tool calls / proposed / receipts |",
-        "| --- | --- | ---: | ---: | --- | --- |",
+    columns = [
+        "Path",
+        "Scenario",
+        "Provider calls",
+        "Mutations",
+        "Effect record",
+        "Tool calls / proposed / receipts",
     ]
+    lines += ["", "| " + " | ".join(columns) + " |", "| --- | --- | ---: | ---: | --- | --- |"]
     for row in document["rows"]:
         merged = str(row["mutations"])
         if row["merged_at"]:
