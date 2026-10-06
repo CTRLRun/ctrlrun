@@ -24,7 +24,9 @@ PULL = {"owner": "acme", "repo": "checkout", "pullNumber": 4471, "merge_method":
 pull_request = {"head": REVIEWED, "merged_at": None}
 upstream_calls: list[dict] = []
 
-STALE = "failed to merge pull request: 409 Head branch was modified. Review and try the merge again."
+STALE = (
+    "failed to merge pull request: 409 Head branch was modified. Review and try the merge again."
+)
 
 
 def github_mcp_server(
