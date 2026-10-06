@@ -57,7 +57,7 @@ actions: ["k8s.scale"]
 resources: ["cluster:prod-eu"]
 constraints: { replicas_gte: 0, replicas_lte: 10 }
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """),
     by=MANAGER,
 )
@@ -88,7 +88,7 @@ subject: { agent: "scale-worker" }
 actions: ["k8s.scale"]
 resources: ["cluster:prod-eu"]
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """),
         by=MANAGER,
     )

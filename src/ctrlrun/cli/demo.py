@@ -296,7 +296,7 @@ authority:
       actions: ["stripe.refund"]
       constraints: {{ amount_lte: {HEAD_OF_SUPPORT_CEILING} }}
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
 actions:
   stripe.refund:
     rules:
@@ -321,7 +321,7 @@ subject: {{ agent: "{agent}", user: "{user}" }}
 actions: ["stripe.refund"]
 constraints: {{ amount_lte: {ceiling} }}
 delegable: true
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """
     )
 

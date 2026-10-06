@@ -62,7 +62,7 @@ authority:
       subject: { agent: "support-lead", user: "alice@example.com" }
       actions: ["stripe.**"]
       constraints: { amount_lte: 5000 }
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 actions:
   stripe.refund:
@@ -600,7 +600,7 @@ def test_a_delegation_event_becomes_a_standalone_span(store, exporter):
             subject=Subject(agent="refund-agent", user="alice@example.com"),
             actions=("stripe.refund",),
             constraints=parse_conditions({"amount_lte": 500}, where="<test>"),
-            expires_at=datetime(2026, 12, 1, tzinfo=UTC),
+            expires_at=datetime(2099, 12, 1, tzinfo=UTC),
         ),
         by=Principal(agent="support-lead", user="alice@example.com"),
     )
