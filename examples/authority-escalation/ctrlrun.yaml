@@ -32,7 +32,7 @@ authority:
       constraints: { amount_lte: 10000000 }   # €100,000.00 in integer minor units
       environments: ["production"]
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
 
 actions:
   # The autonomy policy is a **separate axis** and cannot see the principal. It says how much

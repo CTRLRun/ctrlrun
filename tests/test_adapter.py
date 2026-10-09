@@ -1218,7 +1218,7 @@ authority:
       resources: ["payment:*"]
       environments: [production]
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
 actions:
   stripe.refund:
     resource: "payment:{payment_id}"
@@ -1258,7 +1258,7 @@ subject: {agent: finance-agent}
 actions: ["stripe.refund"]
 resources: ["payment:US-*"]
 environments: [production]
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """,
         source="<test>",
     )

@@ -60,7 +60,7 @@ resources: ["account:ops-*"]
 constraints: { amount_gte: 0, amount_lte: 2500000 }
 environments: ["production"]
 delegable: true
-expires_at: "2026-12-31T00:00:00Z"
+expires_at: "2099-12-31T00:00:00Z"
 """)
 delegation = control.delegate("treasury-lead", slice_, by=LEAD)
 print("delegated to the payout agent:", delegation.delegation_id)
@@ -115,7 +115,7 @@ actions: ["bank.payout"]
 resources: ["account:*"]
 constraints: { amount_gte: 0, amount_lte: 9000000 }
 environments: ["production"]
-expires_at: "2026-12-31T00:00:00Z"
+expires_at: "2099-12-31T00:00:00Z"
 """),
         by=AGENT,
     )

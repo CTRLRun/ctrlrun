@@ -98,7 +98,7 @@ FINANCE = """
       resources: ["payment:EU-*"]
       constraints: { amount_gte: 0, amount_lte: 10000000 }
       environments: ["production", "staging"]
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 """
 
@@ -115,7 +115,7 @@ OPS = """
         region_neq: "us-east-1"
         cluster_in: ["eu-1", "eu-2", "eu-3"]
       environments: ["production", "staging"]
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 """
 
@@ -132,8 +132,8 @@ OPS_LEAD = Principal(agent="human-ops", user="ops@example.com")
 FINANCE_AGENT = Principal(agent="finance-agent", user="cfo@example.com")
 SUPPORT_AGENT = Principal(agent="support-agent", user="cfo@example.com")
 
-EXPIRES = datetime(2026, 12, 1, tzinfo=UTC)
-PARENT_EXPIRES = datetime(2027, 1, 1, tzinfo=UTC)
+EXPIRES = datetime(2099, 12, 1, tzinfo=UTC)
+PARENT_EXPIRES = datetime(2100, 1, 1, tzinfo=UTC)
 
 
 class _Clock:
@@ -386,7 +386,7 @@ def test_t75b_only_the_parents_subject_may_delegate(store, clock, by):
         ("actions", {"actions": ("**",)}),
         ("resources", {"resources": ("payment:*",)}),
         ("environments", {"environments": ("production", "dev")}),
-        ("expires_at", {"expires_at": datetime(2027, 6, 1, tzinfo=UTC)}),
+        ("expires_at", {"expires_at": datetime(2100, 6, 1, tzinfo=UTC)}),
         ("subject", {"subject": Subject(agent="*", user="cfo@example.com")}),
         ("subject", {"subject": Subject(user="cfo@example.com")}),
         ("subject", {"subject": Subject(agent="finance-agent")}),
@@ -590,7 +590,7 @@ def test_t76b_rule_3_an_ancestor_whose_expiry_was_brought_forward(store, clock):
     control = _control(_document(), store, clock)
     first = control.delegate("head-of-finance", _child(), by=CFO)
 
-    brought_forward = FINANCE.replace("2027-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+    brought_forward = FINANCE.replace("2100-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
     edited = _control(_document(brought_forward), store, clock)
     clock.advance(timedelta(days=45))  # past the root grant, before `dlg_1`
 
@@ -739,7 +739,7 @@ def test_t77b_a_narrowed_parent_narrows_its_children(store, clock):
       subject: { agent: "*", user: "alice@example.com" }
       actions: ["stripe.**"]
       constraints: { amount_lte: 100000 }
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 """
     alice = Principal(agent="orchestrator", user="alice@example.com")
@@ -1203,7 +1203,7 @@ actions: ["stripe.refund"]
 resources: ["payment:EU-4*"]
 constraints: { amount_gte: 0, amount_lte: 2500000 }
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00+00:00"
+expires_at: "2099-12-01T00:00:00+00:00"
 delegable: true
 """
 
@@ -1324,7 +1324,7 @@ OMISSION = """
       resources: ["payment:EU-*"]
       constraints: { amount_lte: 25000 }
       environments: ["production"]
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 """
 
