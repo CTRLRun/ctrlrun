@@ -115,7 +115,7 @@ def _with_claims(control):
             agent="refund-agent",
             claims={"employee_no": 4471, "case": "CASE-9"},
             issuer="https://issuer.example/",
-            expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+            expires_at=datetime(2100, 1, 1, tzinfo=UTC),
         ),
     )
     control.execute(action, lambda: "re_1", "refund:txn_c")
@@ -137,7 +137,7 @@ def test_inspect_shows_the_issuer_the_expiry_and_the_claim_names(control):
     readable = _re.sub(r"\b(?:act|apr|dlg|ctr)_[0-9a-f]+", "", output)
 
     assert "issuer      https://issuer.example/" in output
-    assert "expires     2027-01-01T00:00:00.000Z" in output
+    assert "expires     2100-01-01T00:00:00.000Z" in output
     assert "claims      case, employee_no" in output
     assert "4471" not in readable
     assert "CASE-9" not in readable

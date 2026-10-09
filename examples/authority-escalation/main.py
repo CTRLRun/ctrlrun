@@ -84,7 +84,7 @@ resources: ["payment:*"]
 constraints: {{ amount_lte: {ceiling} }}
 environments: ["production"]
 delegable: true
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """
     )
 

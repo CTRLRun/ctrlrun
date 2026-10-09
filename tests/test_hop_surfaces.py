@@ -40,7 +40,7 @@ authority:
       resources: ["payment:*"]
       environments: ["production", "staging"]
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
 """
 
 MIDDLE = """
@@ -49,7 +49,7 @@ actions: ["stripe.refund"]
 resources: ["payment:EU-*"]
 environments: ["production"]
 delegable: true
-expires_at: "2026-12-01T00:00:00Z"
+expires_at: "2099-12-01T00:00:00Z"
 """
 
 LEAF = """
@@ -57,7 +57,7 @@ subject: { agent: "worker" }
 actions: ["stripe.refund"]
 resources: ["payment:EU-1"]
 environments: ["production"]
-expires_at: "2026-10-01T00:00:00Z"
+expires_at: "2099-10-01T00:00:00Z"
 """
 
 

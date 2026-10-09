@@ -44,7 +44,7 @@ authority:
       environments: ["production"]
       constraints: {{ amount_lte: 100000 }}
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
       tasks: ["refund-run:*"]
       budgets:
         - {{ metric: amount, limit: 100000, window: PT24H }}
@@ -63,7 +63,7 @@ actions: ["stripe.refund"]
 resources: ["payment:EU-1"]
 environments: ["production"]
 constraints: { amount_lte: 5000 }
-expires_at: "2026-10-01T00:00:00Z"
+expires_at: "2099-10-01T00:00:00Z"
 tasks: ["refund-run:7"]
 budgets:
   - { metric: amount, limit: 20000, window: P30D }
@@ -521,7 +521,7 @@ authority:
       resources: ["payment:*"]
       environments: ["production"]
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
       budgets:
         - {{ metric: amount, limit: {limit}, window: PT24H }}
 """
@@ -531,7 +531,7 @@ subject: {{ agent: "worker-{index}" }}
 actions: ["stripe.refund"]
 resources: ["payment:EU-{index}"]
 environments: ["production"]
-expires_at: "2026-10-01T00:00:00Z"
+expires_at: "2099-10-01T00:00:00Z"
 budgets:
   # Contained on both axes (§2.6): the same limit over the same window. A child whose limit
   # exceeded its parent's is refused at creation, which is what an earlier draft of this

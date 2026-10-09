@@ -45,7 +45,7 @@ authority:
       resources: ["payment:*"]
       environments: ["production"]
       delegable: true
-      expires_at: "2027-01-01T00:00:00Z"
+      expires_at: "2100-01-01T00:00:00Z"
     - id: unrelated
       subject: { agent: "other" }
       actions: ["stripe.refund"]
@@ -58,7 +58,7 @@ subject: { agent: "worker" }
 actions: ["stripe.refund"]
 resources: ["payment:EU-1"]
 environments: ["production"]
-expires_at: "2026-10-01T00:00:00Z"
+expires_at: "2099-10-01T00:00:00Z"
 """
 
 

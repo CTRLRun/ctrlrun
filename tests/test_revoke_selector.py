@@ -42,7 +42,7 @@ authority:
       resources: ["payment:EU-*"]
       constraints: { amount_gte: 0, amount_lte: 10000000 }
       environments: ["production"]
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
     - id: ops-lead
       subject: { agent: "human-ops" }
@@ -50,7 +50,7 @@ authority:
       resources: ["service:EU-*"]
       constraints: { replicas_gte: 0, replicas_lte: 100 }
       environments: ["production"]
-      expires_at: "2027-01-01T00:00:00+00:00"
+      expires_at: "2100-01-01T00:00:00+00:00"
       delegable: true
 actions:
   stripe.refund:
@@ -64,7 +64,7 @@ actions: ["stripe.refund"]
 resources: ["payment:EU-4*"]
 constraints: { amount_gte: 0, amount_lte: 2500000 }
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00+00:00"
+expires_at: "2099-12-01T00:00:00+00:00"
 delegable: true
 """
 
@@ -73,7 +73,7 @@ actions: ["stripe.refund"]
 resources: ["payment:EU-42"]
 constraints: { amount_gte: 0, amount_lte: 1000 }
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00+00:00"
+expires_at: "2099-12-01T00:00:00+00:00"
 delegable: true
 """
 
@@ -82,7 +82,7 @@ actions: ["deploy.rollout"]
 resources: ["service:EU-4*"]
 constraints: { replicas_gte: 0, replicas_lte: 10 }
 environments: ["production"]
-expires_at: "2026-12-01T00:00:00+00:00"
+expires_at: "2099-12-01T00:00:00+00:00"
 delegable: true
 """
 
