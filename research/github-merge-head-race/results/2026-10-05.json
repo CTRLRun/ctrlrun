@@ -1,0 +1,230 @@
+{
+  "date": "2026-10-05",
+  "versions": {
+    "ctrlrun": "0.12.2",
+    "github-mcp-server": "1.14.0",
+    "github-mcp-server commit": "f10e4e1f923d46b86f2e80e849aa74084c847184",
+    "python": "3.14.7",
+    "platform": "Darwin 27.0.0 arm64",
+    "mcp revision (client)": "2025-06-18"
+  },
+  "rows": [
+    {
+      "name": "direct-head-moves",
+      "title": "no expectedHeadSha; head moves first",
+      "path": "direct",
+      "provider_calls": 1,
+      "mutations": 1,
+      "merged_at": [
+        "bbbbbbb"
+      ],
+      "tool_calls": 1,
+      "effect_record": null,
+      "actions_proposed": null,
+      "receipts": null,
+      "steps": [
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "merge, no expectedHeadSha \u2192 merged"
+      ]
+    },
+    {
+      "name": "direct-sha-head-moves",
+      "title": "expectedHeadSha @a; head moves first",
+      "path": "direct",
+      "provider_calls": 1,
+      "mutations": 0,
+      "merged_at": [],
+      "tool_calls": 1,
+      "effect_record": null,
+      "actions_proposed": null,
+      "receipts": null,
+      "steps": [
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "merge @a \u2192 isError: 409 Head branch was modified. Review and try the merge again."
+      ]
+    },
+    {
+      "name": "direct-lost-response",
+      "title": "merge lands, reply lost; agent retries",
+      "path": "direct",
+      "provider_calls": 2,
+      "mutations": 1,
+      "merged_at": [
+        "aaaaaaa"
+      ],
+      "tool_calls": 2,
+      "effect_record": null,
+      "actions_proposed": null,
+      "receipts": null,
+      "steps": [
+        "GitHub will merge, then drop the connection",
+        "merge @a \u2192 isError: EOF",
+        "retry \u2192 isError: 405 Pull Request is not mergeable"
+      ]
+    },
+    {
+      "name": "head-unchanged",
+      "title": "no expectedHeadSha; head unchanged",
+      "path": "gateway",
+      "provider_calls": 1,
+      "mutations": 1,
+      "merged_at": [
+        "aaaaaaa"
+      ],
+      "tool_calls": 2,
+      "effect_record": "committed",
+      "actions_proposed": 2,
+      "receipts": 1,
+      "steps": [
+        "merge, no expectedHeadSha \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the identical call \u2192 merged"
+      ]
+    },
+    {
+      "name": "head-moves",
+      "title": "no expectedHeadSha; head moves after approval",
+      "path": "gateway",
+      "provider_calls": 1,
+      "mutations": 1,
+      "merged_at": [
+        "bbbbbbb"
+      ],
+      "tool_calls": 2,
+      "effect_record": "committed",
+      "actions_proposed": 2,
+      "receipts": 1,
+      "steps": [
+        "merge, no expectedHeadSha \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "the identical call \u2192 merged"
+      ]
+    },
+    {
+      "name": "sha-head-moves",
+      "title": "expectedHeadSha @a; head moves after approval",
+      "path": "gateway",
+      "provider_calls": 1,
+      "mutations": 0,
+      "merged_at": [],
+      "tool_calls": 4,
+      "effect_record": "ambiguous",
+      "actions_proposed": 2,
+      "receipts": 1,
+      "steps": [
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "the identical call \u2192 isError: 409 Head branch was modified. Review and try the merge again.",
+        "the identical call again \u2192 -41005 ctrlrun.ambiguous_effect",
+        "retarget to @b \u2192 -41005 ctrlrun.ambiguous_effect"
+      ]
+    },
+    {
+      "name": "after-409",
+      "title": "after the 409: resolve, approve the new head, merge",
+      "path": "gateway",
+      "provider_calls": 2,
+      "mutations": 1,
+      "merged_at": [
+        "bbbbbbb"
+      ],
+      "tool_calls": 4,
+      "effect_record": "committed",
+      "actions_proposed": 4,
+      "receipts": 2,
+      "steps": [
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "the identical call \u2192 isError: 409 Head branch was modified. Review and try the merge again.",
+        "a human reads the 409 and runs `ctrlrun resolve merge:acme/checkout:4471 --failed`",
+        "merge @b \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the identical call \u2192 merged"
+      ]
+    },
+    {
+      "name": "sha-changed",
+      "title": "agent changes expectedHeadSha after approval",
+      "path": "gateway",
+      "provider_calls": 0,
+      "mutations": 0,
+      "merged_at": [],
+      "tool_calls": 2,
+      "effect_record": "none",
+      "actions_proposed": 2,
+      "receipts": 0,
+      "steps": [
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "merge @b, which nobody approved \u2192 -41002 ctrlrun.approval_required"
+      ]
+    },
+    {
+      "name": "lost-response",
+      "title": "merge lands, reply lost; agent retries",
+      "path": "gateway",
+      "provider_calls": 1,
+      "mutations": 1,
+      "merged_at": [
+        "aaaaaaa"
+      ],
+      "tool_calls": 3,
+      "effect_record": "ambiguous",
+      "actions_proposed": 2,
+      "receipts": 1,
+      "steps": [
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "GitHub will merge, then drop the connection",
+        "the identical call \u2192 isError: EOF",
+        "retry \u2192 -41005 ctrlrun.ambiguous_effect"
+      ]
+    },
+    {
+      "name": "lost-response-claimed",
+      "title": "as above, with `mcp: {not_executed_on_error: true}`",
+      "path": "gateway",
+      "provider_calls": 2,
+      "mutations": 1,
+      "merged_at": [
+        "aaaaaaa"
+      ],
+      "tool_calls": 4,
+      "effect_record": "failed",
+      "actions_proposed": 4,
+      "receipts": 2,
+      "steps": [
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "GitHub will merge, then drop the connection",
+        "the identical call \u2192 isError: EOF",
+        "retry \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "retry, approved again \u2192 isError: 405 Pull Request is not mergeable"
+      ]
+    },
+    {
+      "name": "require-sha",
+      "title": "policy requires expectedHeadSha",
+      "path": "gateway",
+      "provider_calls": 1,
+      "mutations": 0,
+      "merged_at": [],
+      "tool_calls": 3,
+      "effect_record": "ambiguous",
+      "actions_proposed": 3,
+      "receipts": 2,
+      "steps": [
+        "merge, no expectedHeadSha \u2192 -41001 ctrlrun.denied",
+        "merge @a \u2192 -41002 ctrlrun.approval_required",
+        "a human runs `ctrlrun approve`",
+        "the head moves aaaaaaa \u2192 bbbbbbb",
+        "the identical call \u2192 isError: 409 Head branch was modified. Review and try the merge again."
+      ]
+    }
+  ]
+}
