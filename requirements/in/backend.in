@@ -3,4 +3,4 @@
 # fetches setuptools from PyPI unpinned. So every editable install passes `--no-build-isolation`
 # and every `python -m build` passes `--no-isolation`, and the backend they then find is this
 # one. The floor is pyproject.toml's.
-setuptools>=77
+setuptools>=84.1.0
