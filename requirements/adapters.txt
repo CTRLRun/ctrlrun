@@ -876,9 +876,9 @@ langgraph-prebuilt==1.1.0 \
     --hash=sha256:3c579cf6eed2d17f9c157c2d0fcaddcd8688524e7022d3b22b37a3bf4589d528 \
     --hash=sha256:51e311747d755b751d5c6b39b0c1446124d3a7643d2515017e6714b323508fc9
     # via langgraph
-langgraph-sdk==0.4.4 \
-    --hash=sha256:39afe416c91742925e6f8a93715f566d499b36e1b636b804a4ffe3190e4f4e64 \
-    --hash=sha256:4e651ffa09de695681579396375377bdde23bedbc8e35b070e615cbd5af7da8b
+langgraph-sdk==0.4.6 \
+    --hash=sha256:57122b02bda41d37a97a5e09eb018aa8c9b3dc85c433880073779bd9324b7eea \
+    --hash=sha256:ea5b1749d70987d741c9b9fe2b7e1c5f7da7e4d102f64e390333c1890c9bbd5b
     # via langgraph
 langsmith==0.12.4 \
     --hash=sha256:b2edaa49baeec0c7347a84ca0f755039dcff9e9e52f0b9dc26423ec2a98a4dab \
